@@ -81,7 +81,7 @@ jobs:
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
           export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260112
+          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260113
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -146,6 +146,9 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
         TRANSFORMERS_OFFLINE: 1
+        TRITON_DEBUG: 1
+        TRITON_KERNEL_DUMP: 1
+        TRITON_DUMP_DIR: /root/.cache/cmh/triton_dump
     steps:
       - name: Check npu and CANN info
         run: |
@@ -208,7 +211,7 @@ jobs:
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
           export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
           which bishengir-compile
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260112
+          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260113
 
       - name: Run vllm-project/vllm-ascend test (light)
         env:
@@ -261,6 +264,9 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         TRANSFORMERS_OFFLINE: 1
+        TRITON_DEBUG: 1
+        TRITON_KERNEL_DUMP: 1
+        TRITON_DUMP_DIR: /root/.cache/cmh/triton_dump
     steps:
       - name: Check npu and CANN info
         run: |
@@ -315,7 +321,7 @@ jobs:
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
           export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260112
+          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260113
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         working-directory: ./vllm-ascend
