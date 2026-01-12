@@ -93,13 +93,13 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a2
-      runner: linux-aarch64-a2-0
+      runner: linux-amd64-cpu-8-hk
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
     secrets:
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A2_B64 }}
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
 
   single-node-accuracy-tests:
     if: >-
