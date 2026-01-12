@@ -167,6 +167,14 @@ packed_modules_model_mapping: Dict[str, Dict[str, List[str]]] = {
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
+    "minimax_m2": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"]
+    }
 }
 
 
@@ -341,6 +349,18 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_config.model_type
+
+        if model_type in ["minimax", "minimax_m2"]:
+            # Adapt to Minimax architecture: update layer names to MoE convention
+            prefix = prefix.replace("mlp", "block_sparse_moe")
+            # Normalize the prefix by stripping specific expert indices (e.g., 'experts.0' -> 'experts')
+            parts = prefix.split('.')
+            if "experts" in parts and len(parts) > 2:
+                exp_idx = parts.index("experts")
+                if exp_idx + 1 < len(parts) and parts[exp_idx + 1].isdigit():
+                    parts = parts[:exp_idx + 1]
+                    prefix = ".".join(parts)
+
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
