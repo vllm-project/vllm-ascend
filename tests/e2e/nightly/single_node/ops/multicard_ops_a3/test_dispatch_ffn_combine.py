@@ -1,14 +1,19 @@
 import random
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch_npu
 from torch.distributed.distributed_c10d import _get_default_group
 
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
+                               get_ascend_device_type)
 
 enable_custom_op()
+
+# Number of NPU cards required for this test
+REQUIRED_NPU_COUNT = 2
 
 
 class TestDisptachFFNCombine:
@@ -213,8 +218,12 @@ def worker(rank: int, world_size: int, port: int, q: mp.SimpleQueue):
 
 
 @torch.inference_mode()
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3
+    or torch.npu.device_count() < REQUIRED_NPU_COUNT,
+    reason=f"Test requires at least {REQUIRED_NPU_COUNT} A3 NPU cards")
 def test_dispatch_ffn_combine_kernel():
-    world_size = 2
+    world_size = REQUIRED_NPU_COUNT
     mp.set_start_method("fork", force=True)
 
     q = mp.SimpleQueue()

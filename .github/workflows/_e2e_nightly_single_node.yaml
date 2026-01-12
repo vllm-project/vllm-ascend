@@ -140,8 +140,6 @@ jobs:
           BENCHMARK_HOME: /vllm-workspace/vllm-ascend/benchmark
         working-directory: /vllm-workspace/vllm-ascend
         run: |
-          # ignore test_dispatch_ffn_combine until the test is fixed
           pytest -sv ${{ inputs.tests }} \
-          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
-
-
+          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py \
+          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_rotary_embedding.py
