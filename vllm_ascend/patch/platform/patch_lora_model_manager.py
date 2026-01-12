@@ -65,9 +65,11 @@ class  AscendLoRAModelManager:
         self.lora_config = lora_config
         self.device = device
         self.max_num_seqs = max_num_seqs
+        #isort: off
         assert self.capacity >= self.lora_slots
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.lora_index_to_id: list[int | None] = [None] * self.lora_slots
+        #isort: on
         self.vocab_size = vocab_size
         self.punica_wrapper = get_punica_wrapper(
             max_num_batched_tokens,
