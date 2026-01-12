@@ -232,7 +232,6 @@ class AscendCompilationConfig:
 
 
 class NpugraphExConfig:
-
     """
     Configuration for controlling the behavior of npugraph_ex backend.
 

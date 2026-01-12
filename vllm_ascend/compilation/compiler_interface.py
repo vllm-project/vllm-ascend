@@ -141,7 +141,6 @@ class AscendCompiler(CompilerInterface):
             self.vllm_config = vllm_config
         return vllm_config.compute_hash()
 
-
     def compile(
         self,
         graph: fx.GraphModule,

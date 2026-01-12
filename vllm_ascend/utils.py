@@ -1191,12 +1191,14 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     return is_prefill_instance
 
 def check_and_adjust_hidden_states_type(
-        hidden_states: Union[torch.Tensor, list[torch.Tensor]]
-) -> torch.Tensor:
+        hidden_states: Union[torch.Tensor,
+                             list[torch.Tensor]]) -> torch.Tensor:
     """
     Sometimes, after the model is compiled through the AOT backend,
     the model output may become a list containing only one Tensor object.
     """
-    if isinstance(hidden_states, list) and len(hidden_states) == 1 and isinstance(hidden_states[0], torch.Tensor):
+    if isinstance(hidden_states,
+                  list) and len(hidden_states) == 1 and isinstance(
+                      hidden_states[0], torch.Tensor):
         return hidden_states[0]
     return hidden_states
