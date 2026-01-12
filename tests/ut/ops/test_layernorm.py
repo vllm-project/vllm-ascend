@@ -17,15 +17,16 @@ def mock_npu_rms_norm(x, weight, eps):
 
 
 def mock_add_rmsnorm_bias(input, residual, norm_weight, norm_bias, eps):
-    return 2 * input, 2 * residual
+    output_residual = 2 * residual if residual is not None else None
+    return 2 * input, output_residual
 
 
 @pytest.mark.parametrize("is_310p", [True, False])
 @pytest.mark.parametrize(
     "residual",
     [None, torch.randn(4, 8, dtype=torch.float32, device="cpu")])
-@patch("torch.ops.vllm.add_rmsnorm_bias", side_effect=mock_add_rmsnorm_bias)
 @patch("torch_npu.npu_rms_norm", side_effect=mock_npu_rms_norm)
+@patch("torch.ops.vllm.add_rmsnorm_bias", side_effect=mock_add_rmsnorm_bias)
 def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
                          dummy_tensor):
 
@@ -42,8 +43,7 @@ def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
                 expected_arg_x = dummy_tensor + residual.to(dummy_tensor.dtype)
                 expected_out_x = expected_arg_x + 1
                 expected_out_residual = expected_arg_x.to(residual.dtype)
-
-                mock_add_rmsnorm.assert_called_once()
+                mock_rmsnorm.assert_called_once()
                 assert torch.allclose(out_x, expected_out_x, atol=1e-5)
                 assert torch.allclose(out_residual,
                                       expected_out_residual,
@@ -51,7 +51,7 @@ def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
             else:
                 expected_out_x = 2 * dummy_tensor
                 expected_out_residual = 2 * residual
-                mock_rmsnorm.assert_called_once()
+                mock_add_rmsnorm.assert_called_once()
                 assert torch.allclose(out_x, expected_out_x, atol=1e-5)
                 assert torch.allclose(out_residual,
                                       expected_out_residual,
@@ -59,6 +59,6 @@ def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
         else:
             out_x = output
             expected_out_x = 2 * dummy_tensor
-            mock_rmsnorm.assert_called_once()
+            mock_add_rmsnorm.assert_called_once()
 
             assert torch.allclose(out_x, expected_out_x, atol=1e-5)
