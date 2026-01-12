@@ -297,11 +297,10 @@ def add_rmsnorm_bias_impl(input: torch.Tensor, residual: torch.Tensor,
                                        eps)
     else:
         if residual is not None:
-            x, _, residual = torch_npu.npu_add_rms_norm(input, residual,
-                                                        norm_weight, eps)
+            x, _, residual = torch_npu.npu_add_rms_norm(
+                input, residual, norm_weight, eps)
         else:
-            x, residual = torch_npu.npu_rms_norm(input,residual,
-                                                 eps)
+            x, residual = torch_npu.npu_rms_norm(input, residual, eps)
     return x, residual
 
 
