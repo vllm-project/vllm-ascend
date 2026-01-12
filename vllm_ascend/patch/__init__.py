@@ -263,3 +263,15 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
+# ** 12. File: platform/patch_lor_model_manager.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.lora.model_manager.LoRAModelManager.__init__`
+#    Why:
+#       Adapted for vLLM v0.13.0, added lora_config parameter to the 'get_punica_wrapper' function.
+#    How：
+#       Add a conditional check: use a custom operator when rank < 128, otherwise use the vllm operator.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/31408
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#
