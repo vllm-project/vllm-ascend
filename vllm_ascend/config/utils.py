@@ -1,16 +1,25 @@
 import os
+from typing import Any
 
 from vllm.logger import logger
 
 from vllm_ascend import envs as envs_ascend
-from vllm_ascend.utils import VllmConfig, _is_contain_expert
 
 _IS_MOE_MODEL = None
 _IS_VL_MODEL = None
 _ENABLE_SP = None
 
 
-def is_moe_model(vllm_config: VllmConfig):
+def _is_contain_expert(config: Any):
+    if isinstance(config, dict):
+        for k, v in config.items():
+            if "expert" in str(k):
+                return True
+            if _is_contain_expert(v):
+                return True
+    return False
+
+def is_moe_model(vllm_config: Any):
     """Checks if the model is a MoE model by config"""
     global _IS_MOE_MODEL
     if _IS_MOE_MODEL is None:
@@ -19,7 +28,7 @@ def is_moe_model(vllm_config: VllmConfig):
     return _IS_MOE_MODEL
 
 
-def is_vl_model(vllm_config: VllmConfig):
+def is_vl_model(vllm_config: Any):
     """Checks if the model is a VL model by config"""
     global _IS_VL_MODEL
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:

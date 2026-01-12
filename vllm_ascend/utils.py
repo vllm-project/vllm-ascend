@@ -816,16 +816,6 @@ def speculative_enable_dispatch_gmm_combine_decode(
     return False
 
 
-def _is_contain_expert(config: Any):
-    if isinstance(config, dict):
-        for k, v in config.items():
-            if "expert" in str(k):
-                return True
-            if _is_contain_expert(v):
-                return True
-    return False
-
-
 def has_rope(vllm_config: VllmConfig):
     """Checks if the model uses rope."""
     global _HAS_ROPE
