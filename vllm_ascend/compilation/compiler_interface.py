@@ -152,6 +152,7 @@ class AscendCompiler(CompilerInterface):
 
         npugraph_ex_config = get_ascend_config().npugraph_ex_config
         if npugraph_ex_config.enable:
+            assert hasattr(self, "vllm_config")
             return npugraph_ex_compile(graph, example_inputs, compiler_config,
                                        self.vllm_config, npugraph_ex_config,
                                        compile_range, key)

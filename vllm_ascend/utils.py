@@ -1190,6 +1190,7 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
     return is_prefill_instance
 
+
 def check_and_adjust_hidden_states_type(
         hidden_states: Union[torch.Tensor,
                              list[torch.Tensor]]) -> torch.Tensor:
