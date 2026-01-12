@@ -19,7 +19,7 @@ vLLM Ascend currently supports two types of connectors for handling KV cache man
 - **MooncakeLayerwiseConnector**: P nodes push KV cache to D nodes in a layered manner.  
 
 For step-by-step deployment and configuration, refer to the following guide:  
-[https://vllm-ascend.readthedocs.io/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html](https://vllm-ascend.readthedocs.io/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html)
+[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html)
 
 ---
 
