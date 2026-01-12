@@ -20,16 +20,18 @@
 import torch
 import math
 
-from vllm.lora.model_manager import LoRAModelManager
-from vllm.model_executor.models import SupportsLoRA, supports_multimodal
-from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.config.lora import LoRAConfig
+from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.model_manager import LoRAModelManager
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (
     get_supported_lora_modules,
     is_moe_model,
     process_packed_modules_mapping,
 )
+from vllm.model_executor.models import SupportsLoRA, supports_multimodal
+from vllm.model_executor.models.interfaces import is_pooling_model
 
 
 class  AscendLoRAModelManager:
@@ -95,5 +97,6 @@ class  AscendLoRAModelManager:
         self._create_lora_modules()
 
         self.model.lora_manager = self
+
 
 LoRAModelManager.__init__ = AscendLoRAModelManager.__init__
