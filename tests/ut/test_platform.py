@@ -7,7 +7,6 @@ from vllm.attention.selector import AttentionSelectorConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
 
-import vllm_ascend.config.utils
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
@@ -25,7 +24,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.speculative_config = None
-        vllm_ascend.config.utils.enable_sp = False
+        mock_vllm_config.compilation_config.pass_config.enable_sp = False
         mock_vllm_config.compilation_config.cudagraph_mode = None
         return mock_vllm_config
 
