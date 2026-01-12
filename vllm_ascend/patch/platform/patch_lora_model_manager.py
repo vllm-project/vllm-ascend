@@ -1,15 +1,37 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# Adapted from vllm/model_executor/models/qwen2_vl.py
+# This file is a part of the vllm-ascend project.
+
+import torch
+import math
+
 from vllm.lora.model_manager import LoRAModelManager
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.config.lora import LoRAConfig
 from vllm.lora.punica_wrapper import get_punica_wrapper
-import torch
-import math
 from vllm.lora.utils import (
     get_supported_lora_modules,
     is_moe_model,
     process_packed_modules_mapping,
 )
+
+
 class  AscendLoRAModelManager:
     """A manager that manages multiple LoRA-fine-tuned models."""
 
