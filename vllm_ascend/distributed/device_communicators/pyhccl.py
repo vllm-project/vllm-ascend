@@ -55,9 +55,7 @@ class PyHcclCommunicator:
 
         if not isinstance(group, StatelessProcessGroup):
             assert dist.is_initialized()
-            assert dist.get_backend(group) != dist.Backend.HCCL, (
-                "PyHcclCommunicator should be attached to a non-HCCL group."
-            )
+            assert dist.get_backend(group) != dist.Backend.HCCL, "PyHcclCommunicator should be attached to a non-HCCL group."
             # note: this rank is the rank in the group
             self.rank = dist.get_rank(group)
             self.world_size = dist.get_world_size(group)
@@ -133,9 +131,7 @@ class PyHcclCommunicator:
         # hccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
-        assert in_tensor.device == self.device, (
-            f"this hccl communicator is created to work on {self.device}, but the input tensor is on {in_tensor.device}"
-        )
+        assert in_tensor.device == self.device, f"this hccl communicator is created to work on {self.device}, but the input tensor is on {in_tensor.device}"
 
         out_tensor = torch.empty_like(in_tensor)
 
@@ -155,9 +151,7 @@ class PyHcclCommunicator:
     def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
         if self.disabled:
             return
-        assert tensor.device == self.device, (
-            f"this hccl communicator is created to work on {self.device}, but the input tensor is on {tensor.device}"
-        )
+        assert tensor.device == self.device, f"this hccl communicator is created to work on {self.device}, but the input tensor is on {tensor.device}"
         if stream is None:
             stream = current_stream()
         if src == self.rank:

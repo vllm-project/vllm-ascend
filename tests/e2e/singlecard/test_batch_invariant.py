@@ -196,15 +196,10 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
         passes = num_trials - mismatches
         # Dump how many passed vs failed
-        print(
-            f"[determinism] total={num_trials}, passed={passes}, failed={mismatches}, max_batch_size={max_batch_size}"
-        )
+        print(f"[determinism] total={num_trials}, passed={passes}, failed={mismatches}, max_batch_size={max_batch_size}")
 
         if mismatches > 0:
-            pytest.fail(
-                f"Nondeterministic outputs detected: {mismatches} failed out "
-                f"of {num_trials} trials (max_batch_size={max_batch_size})."
-            )
+            pytest.fail(f"Nondeterministic outputs detected: {mismatches} failed out of {num_trials} trials (max_batch_size={max_batch_size}).")
 
     finally:
         del llm
@@ -395,9 +390,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
         print(f"{'=' * 80}\n")
 
         # Fail the test with summary
-        msg = (
-            f"Batch invariance violated in {len(failed_prompts)}/{len(prompts)} prompts. See output above for details."
-        )
+        msg = f"Batch invariance violated in {len(failed_prompts)}/{len(prompts)} prompts. See output above for details."
         pytest.fail(msg)
 
 
@@ -616,11 +609,7 @@ def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.Monke
     # Print summary
     print(f"\n{'=' * 80}")
     if differences_found:
-        success_msg = (
-            f"✓ SUCCESS: Batch invariance is doing something! "
-            f"Found {len(differences_found)}/{len(prompts)} prompts "
-            f"with differences when batch invariance was DISABLED."
-        )
+        success_msg = f"✓ SUCCESS: Batch invariance is doing something! Found {len(differences_found)}/{len(prompts)} prompts with differences when batch invariance was DISABLED."
         print(success_msg)
         print(f"{'=' * 80}")
         for diff in differences_found:

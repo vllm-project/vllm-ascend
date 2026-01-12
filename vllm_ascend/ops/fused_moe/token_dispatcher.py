@@ -221,11 +221,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             mc2_mask,
             global_redundant_expert_num,
         )
-        output = (
-            torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
-            if self.enable_dispatch_v2
-            else torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
-        )
+        output = torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2) if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
         # comm_stream.wait_stream(torch.npu.current_stream())
         (
             expand_x,
@@ -312,11 +308,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
 
         kwargs_mc2 = self.get_combine_mc_kwargs(hidden_states, context_metadata)
-        combined_output = (
-            torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2)
-            if self.enable_dispatch_v2
-            else torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
-        )
+        combined_output = torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2) if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
         return TokenCombineResult(routed_out=combined_output)
 
@@ -327,9 +319,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
         self.apply_router_weight_on_input = False
         self.max_num_tokens = kwargs.get("max_num_tokens")
         num_experts_local = kwargs.get("num_local_experts", 0)
-        self.num_experts_local = (
-            num_experts_local.item() if torch.is_tensor(num_experts_local) else int(num_experts_local)
-        )
+        self.num_experts_local = num_experts_local.item() if torch.is_tensor(num_experts_local) else int(num_experts_local)
         self.original_shape = None
         self.with_quant = False
 
@@ -371,18 +361,16 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
 
-        sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = (
-            torch.ops._C_ascend.npu_moe_init_routing_custom(
-                hidden_states,
-                topk_ids,
-                scale=pertoken_scale,
-                active_num=num_tokens * self.top_k,
-                expert_num=global_num_experts,
-                expert_tokens_num_type=1,
-                expert_tokens_num_flag=True,
-                active_expert_range=[first_expert_idx, last_expert_idx],
-                quant_mode=1 if self.with_quant and pertoken_scale is None else -1,
-            )
+        sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = torch.ops._C_ascend.npu_moe_init_routing_custom(
+            hidden_states,
+            topk_ids,
+            scale=pertoken_scale,
+            active_num=num_tokens * self.top_k,
+            expert_num=global_num_experts,
+            expert_tokens_num_type=1,
+            expert_tokens_num_flag=True,
+            active_expert_range=[first_expert_idx, last_expert_idx],
+            quant_mode=1 if self.with_quant and pertoken_scale is None else -1,
         )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
@@ -441,9 +429,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         self.local_expert_indices = [local_expert_indices_offset + i for i in range(self.num_local_experts)]
         assert len(self.local_expert_indices) == self.num_local_experts, "Invalid local expert indices"
         for i in range(len(self.local_expert_indices) - 1):
-            assert self.local_expert_indices[i] == self.local_expert_indices[i + 1] - 1, (
-                "local_expert_indices must be continuous"
-            )
+            assert self.local_expert_indices[i] == self.local_expert_indices[i + 1] - 1, "local_expert_indices must be continuous"
 
         # TODO: Try local_rank = ep_group.rank_in_group
         local_rank = torch.distributed.get_rank(group=self.ep_group)
@@ -486,15 +472,11 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         dynamic_scale_after_all2all = None
         if self.with_quant:
             permutated_local_input_tokens, dynamic_scale = torch_npu.npu_dynamic_quant(permutated_local_input_tokens)
-            _, dynamic_scale_after_all2all, permute2_ep_all_to_all_handle = async_all_to_all(
-                dynamic_scale, output_splits, input_splits, self.ep_group
-            )
+            _, dynamic_scale_after_all2all, permute2_ep_all_to_all_handle = async_all_to_all(dynamic_scale, output_splits, input_splits, self.ep_group)
             permute2_ep_all_to_all_handle.wait()
             dynamic_scale.untyped_storage().resize_(0)
 
-        _, global_input_tokens, permute1_ep_all_to_all_handle = async_all_to_all(
-            permutated_local_input_tokens, output_splits, input_splits, self.ep_group
-        )
+        _, global_input_tokens, permute1_ep_all_to_all_handle = async_all_to_all(permutated_local_input_tokens, output_splits, input_splits, self.ep_group)
         permute1_ep_all_to_all_handle.wait()
         permutated_local_input_tokens.untyped_storage().resize_(0)
 
@@ -581,34 +563,21 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         ep_size = self.ep_size
         self.num_out_tokens = topk_ids.numel()
 
-        input_splits = (
-            num_local_tokens_per_expert.reshape(ep_size, self.num_local_experts)
-            .sum(axis=1)
-            .to(torch.device("cpu"), non_blocking=True)
-            .numpy()
-        )
+        input_splits = num_local_tokens_per_expert.reshape(ep_size, self.num_local_experts).sum(axis=1).to(torch.device("cpu"), non_blocking=True).numpy()
 
-        num_global_tokens_per_expert = gather_from_sequence_parallel_region(
-            num_local_tokens_per_expert, group=self.ep_group
-        ).reshape(ep_size, self.num_experts)
-        num_global_tokens_per_local_expert = num_global_tokens_per_expert[
-            :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
-        ]
+        num_global_tokens_per_expert = gather_from_sequence_parallel_region(num_local_tokens_per_expert, group=self.ep_group).reshape(ep_size, self.num_experts)
+        num_global_tokens_per_local_expert = num_global_tokens_per_expert[:, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1]
         if num_global_tokens_per_local_expert is None:
             raise ValueError("num_global_tokens_per_local_expert must be set before sum.")
 
-        output_splits = (
-            num_global_tokens_per_local_expert.sum(axis=-1).to(torch.device("cpu"), non_blocking=True).numpy()
-        )
+        output_splits = num_global_tokens_per_local_expert.sum(axis=-1).to(torch.device("cpu"), non_blocking=True).numpy()
         num_tokens_per_local_expert = num_global_tokens_per_local_expert.sum(axis=0)
 
         global_input_tokens_local_experts_indices = None
         if self.num_local_experts > 1:
             if num_global_tokens_per_local_expert is None:
                 raise ValueError("num_global_tokens_per_local_expert must be set before operations.")
-            global_input_tokens_local_experts_indices = torch.repeat_interleave(
-                self.expert_ids_per_ep_rank, num_global_tokens_per_local_expert.ravel()
-            )
+            global_input_tokens_local_experts_indices = torch.repeat_interleave(self.expert_ids_per_ep_rank, num_global_tokens_per_local_expert.ravel())
         else:
             torch.npu.synchronize()
 
@@ -632,9 +601,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
 
         # Handle quantized case
         if self.with_quant:
-            assert global_input_tokens_local_experts_indices is not None, (
-                "global_input_tokens_local_experts_indices must be provided"
-            )
+            assert global_input_tokens_local_experts_indices is not None, "global_input_tokens_local_experts_indices must be provided"
             dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
                 dynamic_scale_after_all2all.unsqueeze(-1),
                 global_input_tokens_local_experts_indices,
@@ -642,9 +609,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             dynamic_scale_after_all2all = dynamic_scale_after_all2all.squeeze(-1)
 
         # Non-quantized case
-        global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
-            global_input_tokens, global_input_tokens_local_experts_indices
-        )
+        global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(global_input_tokens, global_input_tokens_local_experts_indices)
         return (
             global_input_tokens,
             dynamic_scale_after_all2all,

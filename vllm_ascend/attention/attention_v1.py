@@ -262,9 +262,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
 
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=self.decode_threshold
-        )
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
 
         block_table = common_attn_metadata.block_table_tensor
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
@@ -281,9 +279,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         swa_mask = None
         is_swa = hasattr(self.model_config.hf_text_config, "sliding_window")
         if self.model_config is not None and is_swa:
-            swa_mask = self.attn_mask_builder.get_swa_mask(
-                self.model_config.dtype, self.model_config.hf_text_config.sliding_window
-            )
+            swa_mask = self.attn_mask_builder.get_swa_mask(self.model_config.dtype, self.model_config.hf_text_config.sliding_window)
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -322,9 +318,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 common_attn_metadata=common_attn_metadata,
             )
         else:
-            raise NotImplementedError(
-                "Currently we only support building dummy metadata for DecodeOnly and ChunkedPrefill state"
-            )
+            raise NotImplementedError("Currently we only support building dummy metadata for DecodeOnly and ChunkedPrefill state")
 
         attn_metadata.attn_state = attn_state
         return attn_metadata
@@ -362,9 +356,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
-        self.is_kv_producer = (
-            self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
-        )
+        self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
 
     def full_graph_fia(
         self,
@@ -608,11 +600,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
-        if (
-            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and self.sliding_window is not None
-            and attn_metadata.seq_lens.shape[0] == query.size(0)
-        ):
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly and self.sliding_window is not None and attn_metadata.seq_lens.shape[0] == query.size(0):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
@@ -747,11 +735,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
-        if (
-            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and using_paged_attention(num_tokens, self.vllm_config)
-            and self.sliding_window is None
-        ):
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly and using_paged_attention(num_tokens, self.vllm_config) and self.sliding_window is None:
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output)
@@ -789,9 +773,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         attn_type = self.attn_type
         if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_ONLY]:
-            raise NotImplementedError(
-                "Encoder/Decoder cross-attention is not implemented for PallasAttentionBackendImpl"
-            )
+            raise NotImplementedError("Encoder/Decoder cross-attention is not implemented for PallasAttentionBackendImpl")
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)

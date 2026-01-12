@@ -152,11 +152,7 @@ class AscendQuantConfig(QuantizationConfig):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 return AscendUnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix, self.packed_modules_mapping, layer)
-        elif (
-            isinstance(layer, Attention)
-            and "fa_quant_type" in self.quant_description.keys()
-            and self.quant_description["fa_quant_type"] is not None
-        ):
+        elif isinstance(layer, Attention) and "fa_quant_type" in self.quant_description.keys() and self.quant_description["fa_quant_type"] is not None:
             return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
@@ -172,9 +168,7 @@ class AscendQuantConfig(QuantizationConfig):
         # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
         proj_name = prefix.split(".")[-1]
         if proj_name in fused_mapping:
-            shard_prefixes = [
-                prefix.replace(proj_name, shard_proj_name) for shard_proj_name in fused_mapping[proj_name]
-            ]
+            shard_prefixes = [prefix.replace(proj_name, shard_proj_name) for shard_proj_name in fused_mapping[proj_name]]
 
             is_skipped = None
             for shard_prefix in shard_prefixes:
@@ -183,11 +177,7 @@ class AscendQuantConfig(QuantizationConfig):
                 if is_skipped is None:
                     is_skipped = is_shard_skipped
                 elif is_shard_skipped != is_skipped:
-                    raise ValueError(
-                        f"Detected some but not all shards of {prefix} "
-                        "are quantized. All shards of fused layers "
-                        "to have the same precision."
-                    )
+                    raise ValueError(f"Detected some but not all shards of {prefix} are quantized. All shards of fused layers to have the same precision.")
         else:
             is_skipped = self.quant_description[prefix + ".weight"] == "FLOAT"
 
@@ -500,9 +490,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        weight_param = self.quant_method.get_weight(
-            num_experts, intermediate_size_per_partition, hidden_size, params_dtype
-        )
+        weight_param = self.quant_method.get_weight(num_experts, intermediate_size_per_partition, hidden_size, params_dtype)
         for param_key, param_value in weight_param.items():
             param = torch.nn.Parameter(param_value, requires_grad=False)
             layer.register_parameter(param_key, param)
@@ -514,9 +502,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             if hasattr(self.quant_method, "group_size") and self.quant_method.group_size > 0
             else []
         )
-        dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
-            num_experts, intermediate_size_per_partition, hidden_size, params_dtype
-        )
+        dynamic_quant_param = self.quant_method.get_dynamic_quant_param(num_experts, intermediate_size_per_partition, hidden_size, params_dtype)
         for param_key, param_value in dynamic_quant_param.items():
             param = torch.nn.Parameter(param_value, requires_grad=False)
             layer.register_parameter(param_key, param)

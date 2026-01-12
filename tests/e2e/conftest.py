@@ -213,11 +213,7 @@ class RemoteOpenAIServer:
         def url_health(ip: str, port: int) -> str:
             return f"http://{ip}:{port}/health"
 
-        targets = [
-            (node_info.ip, url_health(node_info.ip, self.port))
-            for node_info in self.nodes_info
-            if not node_info.headless
-        ]
+        targets = [(node_info.ip, url_health(node_info.ip, self.port)) for node_info in self.nodes_info if not node_info.headless]
 
         # Wait for proxy ready
         master_node = self.nodes_info[0]
@@ -274,9 +270,7 @@ class RemoteOpenAIServer:
             if now - start > timeout:
                 not_ready_nodes = [n for n, ok in ready.items() if not ok]
                 self._terminate_server()
-                raise RuntimeError(
-                    f"Timeout: these nodes did not become ready: {not_ready_nodes} in time: {timeout}s"
-                ) from None
+                raise RuntimeError(f"Timeout: these nodes did not become ready: {not_ready_nodes} in time: {timeout}s") from None
 
             time.sleep(5)
 
@@ -443,11 +437,7 @@ class VllmRunner:
 
         toks_str_logsprobs_prompt_logprobs = self._final_steps_generate_w_logprobs(req_outputs)
         # Omit prompt logprobs if not required by sampling params
-        return (
-            [x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
-            if sampling_params.prompt_logprobs is None
-            else toks_str_logsprobs_prompt_logprobs
-        )
+        return [x[0:-1] for x in toks_str_logsprobs_prompt_logprobs] if sampling_params.prompt_logprobs is None else toks_str_logsprobs_prompt_logprobs
 
     def generate_greedy(
         self,
@@ -622,15 +612,10 @@ class HfRunner:
             )
 
             # in case some unquantized custom models are not in same dtype
-            if getattr(model, "quantization_method", None) is None and any(
-                p.dtype != self.dtype for p in model.parameters()
-            ):
+            if getattr(model, "quantization_method", None) is None and any(p.dtype != self.dtype for p in model.parameters()):
                 model = model.to(dtype=self.dtype)
 
-            if (
-                getattr(model, "quantization_method", None) != "bitsandbytes"
-                and len({p.device for p in model.parameters()}) < 2
-            ):
+            if getattr(model, "quantization_method", None) != "bitsandbytes" and len({p.device for p in model.parameters()}) < 2:
                 model = model.to(device=self.device)
 
             self.model = model
@@ -738,11 +723,7 @@ def ilama_lora_files():
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
     return [
-        (
-            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
-            f"{q}<|im_end|>\n<|im_start|>assistant\n"
-        )
+        (f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>{q}<|im_end|>\n<|im_start|>assistant\n")
         for q in questions
     ]
 

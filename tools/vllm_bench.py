@@ -54,9 +54,7 @@ class VllmbenchRunner:
         ]
         self._concat_config_args(vllm_bench_cmd)
         print(f"running vllm_bench cmd: {' '.join(vllm_bench_cmd)}")
-        self.proc: subprocess.Popen = subprocess.Popen(
-            vllm_bench_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
+        self.proc: subprocess.Popen = subprocess.Popen(vllm_bench_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def __init__(
         self,
@@ -137,7 +135,8 @@ class VllmbenchRunner:
         self._get_result()
         output_throughput = self.result["output_throughput"]
         assert float(output_throughput) >= self.baseline * self.threshold, (
-            f"Performance verification failed. The current Output Token Throughput is {output_throughput} token/s, which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
+            f"Performance verification failed. The current Output Token Throughput is {output_throughput} token/s, \
+                which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
         )
 
 
@@ -165,5 +164,5 @@ def run_vllm_bench_case(
         print(e)
         error_msg = f"vllm_bench run failed, reason is {e}"
         logging.error(error_msg)
-        assert False, f"vllm_bench run failed, reason is {e}"
+        raise AssertionError("vllm_bench run failed") from e
     return vllm_bench_result

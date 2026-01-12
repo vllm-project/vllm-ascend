@@ -123,9 +123,7 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("os.environ", {})
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_basic_config_update(
-        self, mock_init_recompute, mock_soc_version, mock_update_acl, mock_init_ascend
-    ):
+    def test_check_and_update_config_basic_config_update(self, mock_init_recompute, mock_soc_version, mock_update_acl, mock_init_ascend):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.enable_expert_parallel = False
@@ -151,9 +149,7 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_no_model_config_warning(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version
-    ):
+    def test_check_and_update_config_no_model_config_warning(self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config = None
@@ -267,9 +263,7 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_cache_config_block_size(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version
-    ):
+    def test_check_and_update_config_cache_config_block_size(self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.cache_config.block_size = None
@@ -291,9 +285,7 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_v1_worker_class_selection(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version
-    ):
+    def test_check_and_update_config_v1_worker_class_selection(self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.worker_cls = "auto"

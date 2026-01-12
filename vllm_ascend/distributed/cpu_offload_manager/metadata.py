@@ -45,7 +45,9 @@ class MetadataServer:
     DEFAULT_CPU_SWAP_SPACE_GB = 800
 
     class ZMQRPCClient:
-        def __init__(self, identity=f"worker-{os.getpid()}"):
+        def __init__(self, identity: str | None = None):
+            if not identity:
+                identity = f"worker-{os.getpid()}"
             logger.info(f"metadata client for worker {identity} started")
             self.ctx = zmq.Context()  # type: ignore
             self.socket = make_zmq_socket(
@@ -92,9 +94,7 @@ class MetadataServer:
         self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
         kv_transfer_config = get_cpu_offload_connector(vllm_config)
         assert kv_transfer_config is not None
-        available_memory_gb = kv_transfer_config.get_from_extra_config(
-            "cpu_swap_space_gb", MetadataServer.DEFAULT_CPU_SWAP_SPACE_GB
-        )
+        available_memory_gb = kv_transfer_config.get_from_extra_config("cpu_swap_space_gb", MetadataServer.DEFAULT_CPU_SWAP_SPACE_GB)
         self.available_memory = available_memory_gb * 1024 * 1024 * 1024
         logger.info(f"cpu swap space: {self.available_memory} bytes")
         self.ctx = zmq.Context()  # type: ignore
@@ -169,9 +169,7 @@ class MetadataServer:
         nbytes = math.prod(layer_size) * get_dtype_size(layer.dtype)
         for layer_name in kv_cache_specs:
             # only this format can share during ZeroMQ+pickle
-            shared_memory_dict[layer_name] = MetadataServer._safe_create_shared_memory(
-                f"cpu_kv_cache_{pp_rank}_{tp_rank}_{layer_name}", nbytes
-            )
+            shared_memory_dict[layer_name] = MetadataServer._safe_create_shared_memory(f"cpu_kv_cache_{pp_rank}_{tp_rank}_{layer_name}", nbytes)
         if use_mla:
             assert mla_config is not None
             assert layer.head_size == mla_config.rope_dim + mla_config.nope_dim

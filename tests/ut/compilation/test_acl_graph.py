@@ -633,9 +633,7 @@ class TestACLGraphWrapper(TestBase):
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
     @patch("vllm_ascend.compilation.acl_graph.envs")
     @patch("vllm_ascend.compilation.acl_graph.logger")
-    def test_call_capture_graph_with_debug_log(
-        self, mock_logger, mock_envs, mock_current_platform, mock_get_forward_context
-    ):
+    def test_call_capture_graph_with_debug_log(self, mock_logger, mock_envs, mock_current_platform, mock_get_forward_context):
         """Test __call__ method captures graph with debug logging enabled"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool

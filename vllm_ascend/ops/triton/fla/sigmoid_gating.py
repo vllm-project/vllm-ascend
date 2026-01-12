@@ -107,9 +107,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
             else:
                 i_t = 0
-            p_h0 = (
-                h0 + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_init_state_token
-            )
+            p_h0 = h0 + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_init_state_token
         else:
             p_h0 = h0 + bos * HV * K * V
         p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
@@ -164,9 +162,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
-            p_ht = (
-                ht + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_final_state_token
-            )
+            p_ht = ht + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_final_state_token
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]

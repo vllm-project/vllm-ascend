@@ -73,9 +73,7 @@ class EplbUpdator:
 
     def update_iteration(self):
         self.cur_iterations += 1
-        if self.cur_iterations == (
-            self.num_iterations_eplb_update + self.num_wait_worker_iterations + self.num_moe_layers
-        ):
+        if self.cur_iterations == (self.num_iterations_eplb_update + self.num_wait_worker_iterations + self.num_moe_layers):
             logger.info("Finish expert parallel load balancing.")
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(self.shared_dict["expert_maps"], self.expert_map_record_path)
@@ -91,17 +89,13 @@ class EplbUpdator:
         return self.cur_iterations == (self.num_iterations_eplb_update - 1)
 
     def update_expert_weight_flag(self):
-        weight_update_counter = self.cur_iterations - (
-            self.num_iterations_eplb_update + self.num_wait_worker_iterations
-        )
+        weight_update_counter = self.cur_iterations - (self.num_iterations_eplb_update + self.num_wait_worker_iterations)
         return weight_update_counter >= 0 and weight_update_counter < self.num_moe_layers
 
     def get_init_expert_map(self):
         try:
             if not self.expert_map_initialized:
-                self.shared_dict["expert_maps"] = self.adaptor.get_init_expert_map_from_file(
-                    self.num_moe_layers, self.expert_map_path
-                )
+                self.shared_dict["expert_maps"] = self.adaptor.get_init_expert_map_from_file(self.num_moe_layers, self.expert_map_path)
                 self.expert_map_initialized = True
         except Exception as e:
             logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
@@ -201,10 +195,7 @@ class EplbUpdator:
         max_imbalance = max(values)
         min_imbalance = min(values)
 
-        logger.info(
-            f"[ModelRunner][MOE_load_stats] Peak-to-Average-Ratio: "
-            f"Mean={avg_imbalance:.4f}, Max={max_imbalance:.4f}, Min={min_imbalance:.4f}"
-        )
+        logger.info(f"[ModelRunner][MOE_load_stats] Peak-to-Average-Ratio: Mean={avg_imbalance:.4f}, Max={max_imbalance:.4f}, Min={min_imbalance:.4f}")
 
     def warm_up_eplb(self):
         self.get_init_expert_map()

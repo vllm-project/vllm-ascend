@@ -182,9 +182,7 @@ class NPUPlatform(Platform):
         ascend_compilation_config = ascend_config.ascend_compilation_config
         if ascend_compilation_config:
             vllm_config.additional_config.setdefault("ascend_compilation_config", {}).update(
-                vars(ascend_compilation_config)
-                if not isinstance(ascend_compilation_config, dict)
-                else ascend_compilation_config
+                vars(ascend_compilation_config) if not isinstance(ascend_compilation_config, dict) else ascend_compilation_config
             )
 
         elif model_config and hasattr(model_config.hf_text_config, "index_topk"):
@@ -223,17 +221,11 @@ class NPUPlatform(Platform):
         update_default_aclgraph_sizes(vllm_config)
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
-        if (
-            vllm_config.parallel_config.tensor_parallel_size > 1
-            and not vllm_config.model_config.enforce_eager
-            and enable_sp(vllm_config)
-        ):
+        if vllm_config.parallel_config.tensor_parallel_size > 1 and not vllm_config.model_config.enforce_eager and enable_sp(vllm_config):
             original_sizes = compilation_config.cudagraph_capture_sizes
             sp_aclgraph_sizes = vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
             assert sp_aclgraph_sizes, (
-                f"cudagraph_capture_sizes {original_sizes} does not contain"
-                f"values that are multiples of tp_size "
-                f"{vllm_config.parallel_config.tensor_parallel_size}"
+                f"cudagraph_capture_sizes {original_sizes} does not containvalues that are multiples of tp_size {vllm_config.parallel_config.tensor_parallel_size}"
             )
             if len(sp_aclgraph_sizes) != len(original_sizes):
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
@@ -276,13 +268,8 @@ class NPUPlatform(Platform):
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
             ascend_config.enable_npugraph_ex = False
-        elif (
-            compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-            or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-        ):
-            logger.info(
-                "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
-            )
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
+            logger.info("FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode")
             compilation_config.use_inductor = False
             compilation_config.splitting_ops = []
             warning_message = """\033[91m
@@ -309,10 +296,7 @@ class NPUPlatform(Platform):
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience
-        if (
-            compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and os.environ.get("ASCEND_LAUNCH_BLOCKING", "0") == "1"
-        ):
+        if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and os.environ.get("ASCEND_LAUNCH_BLOCKING", "0") == "1":
             raise ValueError(
                 "ACL graph is incompatible with ASCEND_LAUNCH_BLOCKING=1. "
                 "Please unset ASCEND_LAUNCH_BLOCKING or set it to 0. If you "
@@ -344,9 +328,7 @@ class NPUPlatform(Platform):
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
-            vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
-            )
+            vllm_config.scheduler_config.scheduler_cls = "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
             vllm_config.scheduler_config.enable_chunked_prefill = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
@@ -362,14 +344,8 @@ class NPUPlatform(Platform):
             )
 
         if is_vl_model(vllm_config):
-            if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0"))) or bool(
-                int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))
-            ):
-                raise ValueError(
-                    "Currently, VL models doesn't support "
-                    "FLASHCOMM in vllm-ascend. We will fix this in the future. "
-                    "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0."
-                )
+            if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0"))) or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))):
+                raise ValueError("Currently, VL models doesn't support FLASHCOMM in vllm-ascend. We will fix this in the future. Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
 
     @classmethod
     def import_kernels(cls) -> None:

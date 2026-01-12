@@ -196,9 +196,7 @@ class MultiNodeConfig:
 
         self.disagg_cfg = DisaggregatedPrefillCfg(disaggregated_prefill, len(nodes)) if disaggregated_prefill else None
 
-        master_ip = (
-            self.disagg_cfg.master_ip_for_node(self.cur_index, self.nodes) if self.disagg_cfg else self.nodes[0].ip
-        )
+        master_ip = self.disagg_cfg.master_ip_for_node(self.cur_index, self.nodes) if self.disagg_cfg else self.nodes[0].ip
         self.proxy_port = get_avaliable_port()
 
         self.envs = DistEnvBuilder(
@@ -340,9 +338,7 @@ class MultiNodeConfigLoader:
     @staticmethod
     def _resolve_cluster_ips(cfg: dict, num_nodes: int) -> list[str]:
         if "cluster_hosts" in cfg and cfg["cluster_hosts"]:
-            logger.info(
-                "Using cluster_hosts from config. This typically indicates that your current environment is a non-Kubernetes environment."
-            )
+            logger.info("Using cluster_hosts from config. This typically indicates that your current environment is a non-Kubernetes environment.")
             ips = cfg["cluster_hosts"]
             if len(ips) != num_nodes:
                 raise AssertionError("cluster_hosts size mismatch")

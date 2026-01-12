@@ -82,10 +82,7 @@ class EagleProposer(VllmEagleProposer):
 
         self.use_aclgraph = self.runner._use_aclgraph()
 
-        self.full_indices = range(
-            self.runner.max_num_tokens * self.pcp_size * self.dcp_size
-            + self.pcp_size * self.dcp_size * self.runner.max_num_reqs
-        )
+        self.full_indices = range(self.runner.max_num_tokens * self.pcp_size * self.dcp_size + self.pcp_size * self.dcp_size * self.runner.max_num_reqs)
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
 
@@ -120,18 +117,12 @@ class EagleProposer(VllmEagleProposer):
                     logger.info("The MTP head shares the same vocab embedding with the target model.")
                     self.model.model.embed_tokens = model.model.embed_tokens
                 else:
-                    logger.info(
-                        " The MTP head loaded its own vocab embedding"
-                        " weights instead of sharing them with the target model."
-                    )
+                    logger.info(" The MTP head loaded its own vocab embedding weights instead of sharing them with the target model.")
             else:
                 logger.info("The EAGLE head shares the same vocab embedding with the target model.")
                 self.model.model.embed_tokens = model.model.embed_tokens
         else:
-            logger.info(
-                "Since PP > 1 or other reasons the model head loaded its own vocab embedding"
-                " weights instead of sharing them with the target model."
-            )
+            logger.info("Since PP > 1 or other reasons the model head loaded its own vocab embedding weights instead of sharing them with the target model.")
 
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
@@ -205,9 +196,7 @@ class EagleProposer(VllmEagleProposer):
             )
 
             builder = self.runner.attn_groups[0][0].get_metadata_builder()
-            attn_metadata_eagle = builder.build_for_graph_capture(
-                common_attn_metadata, AscendAttentionState.ChunkedPrefill
-            )
+            attn_metadata_eagle = builder.build_for_graph_capture(common_attn_metadata, AscendAttentionState.ChunkedPrefill)
             attn_metadata = {}
             for layer_name in self.attn_layer_name:
                 attn_metadata[layer_name] = attn_metadata_eagle
@@ -246,9 +235,7 @@ class EagleProposer(VllmEagleProposer):
                     )
 
                 if self.enable_shared_expert_dp:
-                    model_previous_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                        model_previous_hidden_states, True
-                    )
+                    model_previous_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(model_previous_hidden_states, True)
 
                 dummy_compute_logits(self.hidden_states)
 
@@ -298,9 +285,7 @@ class EagleProposer(VllmEagleProposer):
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         if self.use_cuda_graph:
-            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_input_tokens, uniform_decode=True, has_lora=has_lora
-            )
+            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=True, has_lora=has_lora)
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
@@ -355,9 +340,7 @@ class EagleProposer(VllmEagleProposer):
 
             if self.enable_shared_expert_dp:
                 # merge hidden states along sequence dimension
-                last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                    last_hidden_states.contiguous(), True
-                )
+                last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(last_hidden_states.contiguous(), True)
                 hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), True)
 
         sample_hidden_states = last_hidden_states[last_token_indices]
@@ -401,9 +384,7 @@ class EagleProposer(VllmEagleProposer):
         attn_metadata.seq_lens_list = attn_metadata.seq_lens.tolist()
         attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         if self.use_cuda_graph:
-            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=input_batch_size, uniform_decode=True, has_lora=has_lora
-            )
+            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(num_tokens=input_batch_size, uniform_decode=True, has_lora=has_lora)
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
@@ -503,9 +484,7 @@ class EagleProposer(VllmEagleProposer):
 
                 if self.enable_shared_expert_dp:
                     # merge hidden states along sequence dimension
-                    last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                        last_hidden_states.contiguous(), True
-                    )
+                    last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(last_hidden_states.contiguous(), True)
                     hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), True)
 
             hidden_states = hidden_states[:batch_size]
@@ -542,10 +521,7 @@ class EagleProposer(VllmEagleProposer):
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
         self.backup_next_token_ids.np[:num_reqs] = np.array(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(common_attn_metadata.seq_lens_cpu[i].item())
-                for i in range(num_reqs)
-            ]
+            [requests[gpu_input_batch.req_ids[i]].get_token_id(common_attn_metadata.seq_lens_cpu[i].item()) for i in range(num_reqs)]
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
 
@@ -608,9 +584,7 @@ class EagleProposer(VllmEagleProposer):
         #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
 
         num_actual_reqs = len(num_draft_tokens)
-        num_rejected_tokens = [
-            n + 1 - len(sampled_token_ids[i]) if n > 0 else 0 for i, n in enumerate(num_draft_tokens)
-        ]
+        num_rejected_tokens = [n + 1 - len(sampled_token_ids[i]) if n > 0 else 0 for i, n in enumerate(num_draft_tokens)]
         num_rejected_tokens = torch.tensor(num_rejected_tokens, dtype=torch.int32)
 
         device = common_attn_metadata.query_start_loc.device
@@ -658,9 +632,7 @@ class EagleProposer(VllmEagleProposer):
         token_indices_np = token_offests + old_query_start_locs_expanded
         token_indices = torch.from_numpy(token_indices_np).to(device, non_blocking=True)
 
-        common_attn_metadata.slot_mapping[: token_indices.shape[0]].copy_(
-            common_attn_metadata.slot_mapping[token_indices]
-        )
+        common_attn_metadata.slot_mapping[: token_indices.shape[0]].copy_(common_attn_metadata.slot_mapping[token_indices])
         common_attn_metadata.slot_mapping[token_indices.shape[0] :].fill_(-1)
 
         # NOTE: Currently positions and seq_lens are not used in attn forward
@@ -795,10 +767,7 @@ class EagleProposer(VllmEagleProposer):
             req_position_cp: list[int] = []
             req_position_cp.extend(self.full_indices[self.pcp_rank * chunk_size : (self.pcp_rank + 1) * chunk_size])
             req_position_cp.extend(
-                self.full_indices[
-                    num_pcp_padded_scheduled_tokens - (self.pcp_rank + 1) * chunk_size : num_pcp_padded_scheduled_tokens
-                    - self.pcp_rank * chunk_size
-                ]
+                self.full_indices[num_pcp_padded_scheduled_tokens - (self.pcp_rank + 1) * chunk_size : num_pcp_padded_scheduled_tokens - self.pcp_rank * chunk_size]
             )
 
             return req_position_cp, num_pcp_padded_scheduled_tokens, pcp_pad

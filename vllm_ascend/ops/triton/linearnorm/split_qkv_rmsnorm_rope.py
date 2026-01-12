@@ -60,11 +60,7 @@ def split_qkv_rmsnorm_rope_kernel(
     for row_idx in tl.range(row_pid, batch_size, row_step):
         col_indices = col_pid * Q_BLOCK_SIZE + tl.arange(0, Q_BLOCK_SIZE)
         valid_mask = col_indices < q_hidden_size
-        input_values = (
-            tl.load(input_ptr + input_offset + col_indices, mask=valid_mask, other=0.0)
-            .to(tl.float32)
-            .reshape(Q_BLOCK_SIZE // HEAD_DIM, HEAD_DIM)
-        )
+        input_values = tl.load(input_ptr + input_offset + col_indices, mask=valid_mask, other=0.0).to(tl.float32).reshape(Q_BLOCK_SIZE // HEAD_DIM, HEAD_DIM)
         squares = input_values * input_values
         variances = tl.sum(squares, axis=1) / HEAD_DIM
         reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(Q_BLOCK_SIZE // HEAD_DIM, 1)
@@ -122,11 +118,7 @@ def split_qkv_rmsnorm_rope_kernel(
     for row_idx in tl.range(row_pid, batch_size, row_step):
         col_indices = col_pid * KV_BLOCK_SIZE + tl.arange(0, KV_BLOCK_SIZE)
         valid_mask = col_indices < kv_hidden_size
-        input_values = (
-            tl.load(input_ptr + input_offset + col_indices, mask=valid_mask, other=0.0)
-            .to(tl.float32)
-            .reshape(KV_BLOCK_SIZE // HEAD_DIM, HEAD_DIM)
-        )
+        input_values = tl.load(input_ptr + input_offset + col_indices, mask=valid_mask, other=0.0).to(tl.float32).reshape(KV_BLOCK_SIZE // HEAD_DIM, HEAD_DIM)
         squares = input_values * input_values
         variances = tl.sum(squares, axis=1) / HEAD_DIM
         reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(KV_BLOCK_SIZE // HEAD_DIM, 1)

@@ -184,9 +184,7 @@ class ACLGraphWrapper:
             # check if the input addresses are the same
             new_input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             assert new_input_addresses == entry.input_addresses, (
-                f"Input addresses for aclgraphs are different "
-                f"during replay. Expected {entry.input_addresses}, "
-                f"got {new_input_addresses}"
+                f"Input addresses for aclgraphs are different during replay. Expected {entry.input_addresses}, got {new_input_addresses}"
             )
 
         logger.info_once("Replaying aclgraph")
@@ -446,9 +444,7 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
 
             actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decode_tokens]
             if runtime_shape - len(actual_seq_lengths_q):
-                actual_seq_lengths_q = actual_seq_lengths_q + [actual_seq_lengths_q[-1]] * (
-                    runtime_shape - len(actual_seq_lengths_q)
-                )
+                actual_seq_lengths_q = actual_seq_lengths_q + [actual_seq_lengths_q[-1]] * (runtime_shape - len(actual_seq_lengths_q))
             if dcp_size > 1:
                 num_heads = num_heads * dcp_size
 

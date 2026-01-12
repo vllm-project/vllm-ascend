@@ -277,11 +277,7 @@ class AscendRowParallelLinear(RowParallelLinear):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=(
-                self.weight_loader_v2
-                if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
-                else self.weight_loader
-            ),
+            weight_loader=(self.weight_loader_v2 if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader),
         )
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the results can lead to incorrect results")
@@ -368,11 +364,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=(
-                self.weight_loader_v2
-                if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
-                else self.weight_loader
-            ),
+            weight_loader=(self.weight_loader_v2 if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader),
         )
         if bias:
             self.bias = Parameter(torch.empty(self.output_size_per_partition, dtype=params_dtype))

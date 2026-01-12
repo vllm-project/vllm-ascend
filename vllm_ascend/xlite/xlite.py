@@ -62,11 +62,7 @@ class LlamaXliteModel(XliteModel):
         xlite_model.mlp_norm = [layer.post_attention_layernorm.weight for layer in layers]
         xlite_model.mlp_up_gate = [layer.mlp.gate_up_proj.weight for layer in layers]
         xlite_model.mlp_down = [layer.mlp.down_proj.weight for layer in layers]
-        mha_qkv_bias = [
-            layer.self_attn.qkv_proj.bias
-            for layer in layers
-            if hasattr(layer.self_attn.qkv_proj, "bias") and layer.self_attn.qkv_proj.bias is not None
-        ]
+        mha_qkv_bias = [layer.self_attn.qkv_proj.bias for layer in layers if hasattr(layer.self_attn.qkv_proj, "bias") and layer.self_attn.qkv_proj.bias is not None]
         q_norm = [layer.self_attn.q_norm.weight for layer in layers if hasattr(layer.self_attn, "q_norm")]
         k_norm = [layer.self_attn.k_norm.weight for layer in layers if hasattr(layer.self_attn, "k_norm")]
 

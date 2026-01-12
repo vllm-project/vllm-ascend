@@ -50,8 +50,7 @@ def _extra_stream_scope_check_for_test(match) -> bool:
                 if len(non_default_streams) > 1:
                     return False
 
-    if has_default and len(non_default_streams) > 0:
-        return False
+    return has_default and len(non_default_streams) > 0
 
     return True
 

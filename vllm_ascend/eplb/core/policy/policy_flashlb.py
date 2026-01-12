@@ -381,9 +381,7 @@ class FlashLB(EplbPolicy):
         self.par_history: dict[int, float] = {}
         self.hotness_window: dict[int, deque[float]] = {}
         self.max_stage_window = config.max_stage_window if hasattr(config, "max_stage_window") else 1
-        self.buffer_expert_layer_num = (
-            config.buffer_expert_layer_num if hasattr(config, "buffer_expert_layer_num") else 58
-        )
+        self.buffer_expert_layer_num = config.buffer_expert_layer_num if hasattr(config, "buffer_expert_layer_num") else 58
         self.threshold_ratio = config.threshold_ratio if hasattr(config, "threshold_ratio") else 0
 
     def compute_expert_hotness(self, num_of_expert: int, deployment: np.ndarray, rank_load: np.ndarray):
@@ -559,9 +557,7 @@ def generate_layered_experts(num_layers=58, layer_shape=(32, 9), expert_min=0, e
     extra_slots = layer_total - expert_num  # Number of random positions to fill per layer: 288-256=32
 
     # 2. Verify feasibility (total elements must be ≥ number of experts to cover all experts)
-    assert layer_total >= expert_num, (
-        f"Number of elements in a single layer {layer_total} < number of experts {expert_num}, cannot cover all experts"
-    )
+    assert layer_total >= expert_num, f"Number of elements in a single layer {layer_total} < number of experts {expert_num}, cannot cover all experts"
 
     # 3. Generate layers one by one
     layers = []

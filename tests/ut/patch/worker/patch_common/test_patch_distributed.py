@@ -99,9 +99,7 @@ class TestPatchDistributed(TestBase):
             gather_sizes=gather_sizes,
         )
 
-        mock_communicator.all_to_all.assert_called_once_with(
-            input_tensor, scatter_dim, gather_dim, scatter_sizes, gather_sizes
-        )
+        mock_communicator.all_to_all.assert_called_once_with(input_tensor, scatter_dim, gather_dim, scatter_sizes, gather_sizes)
 
     def test_all_to_all_calls_device_communicator_without_sizes(self):
         mock_communicator = MagicMock()

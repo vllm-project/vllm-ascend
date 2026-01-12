@@ -303,17 +303,13 @@ class DynamicEplb(EplbPolicy):
         expert_num = layer_workloads.shape[1]
         # Validate that the number of experts, number of cards, and number of redundant experts do not exceed the number of cards
         if num_original_expert != expert_num:
-            raise ValueError(
-                f"the number of original experts {num_original_expert} must be equal to expert_num {expert_num}"
-            )
+            raise ValueError(f"the number of original experts {num_original_expert} must be equal to expert_num {expert_num}")
 
         if num_npus <= 0:
             raise ValueError("the number of NPUs must be greater than 0")
 
         if num_npus < num_redundancy_expert:
-            raise ValueError(
-                f"the number of NPUs {num_npus} must be greater than or equal to the number of redundant experts {num_redundancy_expert}"
-            )
+            raise ValueError(f"the number of NPUs {num_npus} must be greater than or equal to the number of redundant experts {num_redundancy_expert}")
 
         # Number of experts deployed on each card includes one redundant expert
         global_deployment: list[list[list[int]]] = [[[] for _ in range(num_npus)] for _ in range(layer_num)]
@@ -327,9 +323,7 @@ class DynamicEplb(EplbPolicy):
                 weights[expert_id] = (expert_id, workload_weight)
 
             # Obtain the globally balanced placement strategy for each layer
-            result, layer_deployment = self.original_compute_balanced_pack_redundancy(
-                weights, num_npus, num_redundancy_expert
-            )
+            result, layer_deployment = self.original_compute_balanced_pack_redundancy(weights, num_npus, num_redundancy_expert)
 
             global_deployment[layer] = layer_deployment
             max_heat_per_layer_after[layer] = max(result, key=lambda x: x["total_weight"])["total_weight"]

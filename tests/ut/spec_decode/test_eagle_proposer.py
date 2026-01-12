@@ -32,9 +32,7 @@ class TestEagleProposerInitialization(TestBase):
 
         self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
-        )
+        self.mock_supports_multimodal_inputs = patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs")
         self.mock_supports_multimodal_inputs.start()
 
     def tearDown(self):
@@ -110,9 +108,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
-        )
+        self.mock_supports_multimodal_inputs = patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs")
         self.mock_supports_multimodal_inputs.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
@@ -228,9 +224,7 @@ class TestEagleProposerDummyRun(TestBase):
 
         self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
-        )
+        self.mock_supports_multimodal_inputs = patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs")
         self.mock_supports_multimodal_inputs.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
         self.proposer.model = MagicMock()
@@ -330,9 +324,7 @@ class TestEagleProposerHelperMethods(TestBase):
 
         self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
-        )
+        self.mock_supports_multimodal_inputs = patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs")
         self.mock_supports_multimodal_inputs.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 

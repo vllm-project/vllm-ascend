@@ -85,9 +85,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
         cache_config.mamba_page_size_padded = attn_page_size
         mamba_padding_pct = 100 * (attn_page_size - mamba_page_size) / mamba_page_size
         logger.info(
-            "Padding mamba page size by %.2f%% to ensure "
-            "that mamba page size and attention page size are "
-            "exactly equal.",
+            "Padding mamba page size by %.2f%% to ensure that mamba page size and attention page size are exactly equal.",
             mamba_padding_pct,
         )
 

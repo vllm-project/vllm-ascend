@@ -68,10 +68,7 @@ def cumsum_group_list(
                 cumsum_group_list[start:end] = tokens[i]
 
         return cumsum_group_list
-    raise NotImplementedError(
-        f"Conversion from src_list_type={src_list_type} to dst_list_type={dst_list_type} is not implemented yet. "
-        "This feature is under development."
-    )
+    raise NotImplementedError(f"Conversion from src_list_type={src_list_type} to dst_list_type={dst_list_type} is not implemented yet. This feature is under development.")
 
 
 def quant_apply_mlp(

@@ -62,9 +62,7 @@ class SeriesMetadata:
         self.layers.sort(key=lambda x: x.layer_idx)
         self.num_layers = len(self.layers)
         assert self.num_layers > 0, "No layers in the series"
-        assert self.prefetch_step >= 0 and self.prefetch_step <= max(0, self.num_layers - 2), (
-            "prefetch_step must be in [0, num_layers - 2]"
-        )
+        assert self.prefetch_step >= 0 and self.prefetch_step <= max(0, self.num_layers - 2), "prefetch_step must be in [0, num_layers - 2]"
         self.start_layer = self.layers[0].layer_idx
         self.end_layer = self.layers[-1].layer_idx + 1
 

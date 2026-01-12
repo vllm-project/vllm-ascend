@@ -104,9 +104,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.distributed.parallel_state._DP", MagicMock(world_size=1))
     @patch("vllm.distributed.parallel_state._TP", MagicMock(world_size=1))
-    def test_rope_forward_oot_custom_kernel(
-        self, mock_rotary_embedding, mock_custom_enabled, mock_soc_version, mock__c
-    ):
+    def test_rope_forward_oot_custom_kernel(self, mock_rotary_embedding, mock_custom_enabled, mock_soc_version, mock__c):
         mock__c.rotary_embedding.return_value = self.query, self.key
         vllm_config = VllmConfig()
         model_config = ModelConfig(MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND)
@@ -303,9 +301,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
         result = self.layer._yarn_find_correction_dim(num_rotations, dim, base, max_position_embeddings)
 
         # Calculate expected value manually
-        expected = (dim * torch.log(torch.tensor(max_position_embeddings) / (num_rotations * 2 * torch.pi))) / (
-            2 * torch.log(torch.tensor(base))
-        )
+        expected = (dim * torch.log(torch.tensor(max_position_embeddings) / (num_rotations * 2 * torch.pi))) / (2 * torch.log(torch.tensor(base)))
 
         self.assertTrue(torch.allclose(result, expected))
 

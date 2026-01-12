@@ -287,9 +287,7 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     max_tokens = req_data.get("max_tokens", 16)
     ignore_eos = req_data.get("ignore_eos", False)
     priority_score = proxy_state.calculate_request_score(request_length, max_tokens=max_tokens, ignore_eos=ignore_eos)
-    logger.debug(
-        f"Request length: {request_length}, max tokens: {max_tokens}, ignore_eos: {ignore_eos}, Priority score: {priority_score}"
-    )
+    logger.debug(f"Request length: {request_length}, max tokens: {max_tokens}, ignore_eos: {ignore_eos}, Priority score: {priority_score}")
     request_id = await proxy_state.next_req_id()
     # Select dp server based on priority score
     server_idx = proxy_state.select_server(priority_score)
@@ -332,9 +330,7 @@ async def _handle_completions(api: str, request: Request):
                 ):
                     yield chunk
             except Exception as e:
-                logger.error(
-                    f"Error during streaming from server {instance_info.server_state.url}: {str(e)}, the aborted request is: {instance_info.request_id}."
-                )
+                logger.error(f"Error during streaming from server {instance_info.server_state.url}: {str(e)}, the aborted request is: {instance_info.request_id}.")
 
             # After streaming done, release tokens
             proxy_state.release_server(instance_info.server_idx, instance_info.priority_score)

@@ -49,9 +49,7 @@ def get_linear_quant_type(
     proj_name = prefix.split(".")[-1]
     if proj_name in packed_modules_mapping:
         quant_type = None
-        shard_prefixes = [
-            prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]
-        ]
+        shard_prefixes = [prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]]
         for shard_prefix in shard_prefixes:
             shard_quant_type = quant_description[shard_prefix + ".weight"]
 
@@ -110,6 +108,4 @@ def get_quant_method_modelslim(
             return method_cls()
         else:
             raise NotImplementedError(f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}.")
-    raise NotImplementedError(
-        f"Currently, vLLM Ascend only supports following quant types:{list(ASCEND_QUANTIZATION_METHOD_MAP.keys())}"
-    )
+    raise NotImplementedError(f"Currently, vLLM Ascend only supports following quant types:{list(ASCEND_QUANTIZATION_METHOD_MAP.keys())}")

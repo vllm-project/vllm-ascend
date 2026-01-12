@@ -303,7 +303,9 @@ def test_client_handler_mismatch(server_config):
         # Verify response
         expected_ack = {
             "label": "JOIN_NACK",
-            "content": f"Received data {(mismatch_data['content']['device_id'], mismatch_data['content']['model_path'], mismatch_data['content']['tp'], mismatch_data['content']['pp'])} does not consist with this server {(server_config['device_id'], server_config['model_path'], server_config['tp'], server_config['pp'])}",
+            "content": f"Received data {
+                (mismatch_data['content']['device_id'], mismatch_data['content']['model_path'], mismatch_data['content']['tp'], mismatch_data['content']['pp'])
+            } does not consist with this server {(server_config['device_id'], server_config['model_path'], server_config['tp'], server_config['pp'])}",
         }
         mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
         mock_conn.close.assert_called_once()

@@ -62,9 +62,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to enable the model execute time observe profile. Disable it when
     # running vllm ascend in production environment.
-    "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", "0"))
-    ),
+    "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE": lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", "0"))),
     # Some models are optimized by vllm ascend. While in some case, e.g. rlhf
     # training, the optimized model may not be suitable. In this case, set this
     # value to False to disable the optimized model.
@@ -83,13 +81,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Whether to enable MLP weight prefetch, only used in small concurrency.
     "VLLM_ASCEND_ENABLE_PREFETCH_MLP": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0"))),
     # buffer size for gate up prefetch
-    "VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE": lambda: int(
-        os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", 18 * 1024 * 1024)
-    ),
+    "VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE": lambda: int(os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", 18 * 1024 * 1024)),
     # buffer size for down proj prefetch
-    "VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE": lambda: int(
-        os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", 18 * 1024 * 1024)
-    ),
+    "VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE": lambda: int(os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", 18 * 1024 * 1024)),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
     "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "0"))),

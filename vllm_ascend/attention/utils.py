@@ -151,13 +151,7 @@ def filter_chunked_req_indices(
     """
     assert mask_for_non_zero_chunk is not None and len(seq_len) == len(mask_for_non_zero_chunk)
     offsets = torch.cumsum(torch.cat([torch.tensor([0]), seq_len[:-1]]), dim=0)
-    filtered_indices = torch.cat(
-        [
-            torch.arange(offsets[i], offsets[i] + seq_len[i])
-            for i in range(len(mask_for_non_zero_chunk))
-            if mask_for_non_zero_chunk[i]
-        ]
-    )
+    filtered_indices = torch.cat([torch.arange(offsets[i], offsets[i] + seq_len[i]) for i in range(len(mask_for_non_zero_chunk)) if mask_for_non_zero_chunk[i]])
     return filtered_indices
 
 

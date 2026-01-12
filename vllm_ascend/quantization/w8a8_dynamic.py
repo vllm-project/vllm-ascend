@@ -105,10 +105,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        self.use_aclgraph = (
-            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-            and not vllm_config.model_config.enforce_eager
-        )
+        self.use_aclgraph = vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE and not vllm_config.model_config.enforce_eager
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
 
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
@@ -138,9 +135,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             hidden_sizes,
             dtype=torch.int8,
         )
-        param_dict["w2_weight"] = torch.empty(
-            num_experts, hidden_sizes, intermediate_size_per_partition, dtype=torch.int8
-        )
+        param_dict["w2_weight"] = torch.empty(num_experts, hidden_sizes, intermediate_size_per_partition, dtype=torch.int8)
         return param_dict
 
     @staticmethod
@@ -151,12 +146,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         params_dtype: torch.dtype,
     ) -> dict[str, Any]:
         param_dict = {}
-        param_dict["w13_weight_scale"] = torch.empty(
-            num_experts, 2 * intermediate_size_per_partition, 1, dtype=params_dtype
-        )
-        param_dict["w13_weight_offset"] = torch.empty(
-            num_experts, 2 * intermediate_size_per_partition, 1, dtype=params_dtype
-        )
+        param_dict["w13_weight_scale"] = torch.empty(num_experts, 2 * intermediate_size_per_partition, 1, dtype=params_dtype)
+        param_dict["w13_weight_offset"] = torch.empty(num_experts, 2 * intermediate_size_per_partition, 1, dtype=params_dtype)
         param_dict["w2_weight_scale"] = torch.empty(num_experts, hidden_sizes, 1, dtype=params_dtype)
         param_dict["w2_weight_offset"] = torch.empty(num_experts, hidden_sizes, 1, dtype=params_dtype)
         return param_dict
@@ -190,9 +181,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         if zero_expert_num == 0 or zero_expert_type is None:
-            assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, (
-                "Number of global experts mismatch (excluding redundancy)"
-            )
+            assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
         if self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
@@ -240,10 +229,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         moe_comm_method = get_forward_context().moe_comm_method
         # When VLLM_ASCEND_ENABLE_FUSED_MC2 == 2, use dispatch_gmm_combine_decode, need fp32 scale
-        w2_weight_scale_fp32_flag = (
-            get_forward_context().moe_comm_type == MoECommType.FUSED_MC2
-            and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2
-        )
+        w2_weight_scale_fp32_flag = get_forward_context().moe_comm_type == MoECommType.FUSED_MC2 and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2
         if self.dynamic_eplb:
             w1 = layer.w13_weight_list
             w1_scale = layer.w13_weight_scale_fp32_list
@@ -255,10 +241,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             w2 = [layer.w2_weight]
             w2_scale = [layer.w2_weight_scale_fp32 if w2_weight_scale_fp32_flag else layer.w2_weight_scale]
 
-        fused_scale_flag = (
-            get_forward_context().moe_comm_type == MoECommType.FUSED_MC2
-            and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1
-        )
+        fused_scale_flag = get_forward_context().moe_comm_type == MoECommType.FUSED_MC2 and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
@@ -301,13 +284,9 @@ class AscendW8A8DynamicFusedMoEMethod:
         if self.dynamic_eplb:
             layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
             layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-            layer.w13_weight_scale_fp32_list = [
-                weight.clone() for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
-            ]
+            layer.w13_weight_scale_fp32_list = [weight.clone() for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)]
             layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
-            layer.w2_weight_scale_fp32_list = [
-                weight.clone() for weight in layer.w2_weight_scale_fp32.data.unbind(dim=0)
-            ]
+            layer.w2_weight_scale_fp32_list = [weight.clone() for weight in layer.w2_weight_scale_fp32.data.unbind(dim=0)]
             del layer.w13_weight
             del layer.w2_weight
             del layer.w13_weight_scale
@@ -320,7 +299,5 @@ class AscendW8A8DynamicFusedMoEMethod:
 def scale_from_float_to_int64(scale):
     import numpy as np
 
-    scale = torch.from_numpy(
-        np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(), dtype=np.int32).astype(np.int64)
-    ).to(scale.device)
+    scale = torch.from_numpy(np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(), dtype=np.int32).astype(np.int64)).to(scale.device)
     return scale

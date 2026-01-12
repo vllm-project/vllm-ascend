@@ -118,9 +118,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
                 np.testing.assert_array_equal(
                     actual_result,
                     expected_result,
-                    f"DCP={dcp_world_size}, PCP={pcp_world_size}, "
-                    f"interleave={cp_kv_cache_interleave_size}, "
-                    f"dcp_rank={dcp_rank}, pcp_rank={pcp_rank}",
+                    f"DCP={dcp_world_size}, PCP={pcp_world_size}, interleave={cp_kv_cache_interleave_size}, dcp_rank={dcp_rank}, pcp_rank={pcp_rank}",
                 )
 
     def test_compute_slot_mapping_dcp1_pcp1_interleave1(self):

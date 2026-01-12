@@ -160,9 +160,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.enable_sfa_cp = enable_sp() and hasattr(self.model_config.hf_text_config, "index_topk")
 
-        assert not (
-            self.enable_sfa_cp and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-        ), (
+        assert not (self.enable_sfa_cp and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY), (
             "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
         )
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
@@ -381,9 +379,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if layer_name in kwargs:
                     self.layer_sharding_kwargs.append(kwargs[layer_name])
                 else:
-                    logger.warning_once(
-                        f"Layer '{layer_name}' not found in kwargs for layer sharding, skipping sharding configuration"
-                    )
+                    logger.warning_once(f"Layer '{layer_name}' not found in kwargs for layer sharding, skipping sharding configuration")
             register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
         # indexer param
@@ -404,13 +400,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.local_num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-        ), (
-            f"{kv_b_proj_weight.shape=}, "
-            f"{self.kv_lora_rank=}, "
-            f"{self.local_num_heads=}, "
-            f"{self.qk_nope_head_dim=}, "
-            f"{self.v_head_dim=}"
-        )
+        ), f"{kv_b_proj_weight.shape=}, {self.kv_lora_rank=}, {self.local_num_heads=}, {self.qk_nope_head_dim=}, {self.v_head_dim=}"
         kv_b_proj_weight = kv_b_proj_weight.view(
             self.kv_lora_rank,
             self.local_num_heads,
@@ -443,9 +433,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             reasons = []
             if self.fused_qkv_a_proj is None or not isinstance(quant_method, AscendW8A8LinearMethod):
                 reasons.append(
-                    "Currently mlapo only supports W8A8 quantization in SFA scenario."
-                    "Some layers in your model are not quantized with W8A8,"
-                    "thus mlapo is disabled for these layers."
+                    "Currently mlapo only supports W8A8 quantization in SFA scenario.Some layers in your model are not quantized with W8A8,thus mlapo is disabled for these layers."
                 )
             if self.enable_sfa_cp:
                 reasons.append("Currently mlapo does not support SFA with CP,thus mlapo is disabled for these layers.")
@@ -463,12 +451,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # TODO(zzzzwwjj): We should not judge by whether `has_prefill` or not.
         # The true criteria for judgment is tensorA's shape[0] <= 1024 (num_tokens <= 1024).
         # This is a bug in the previous code.
-        if (
-            x.dtype in [torch.float16, torch.bfloat16]
-            and hasattr(torch.ops._C_ascend, "batch_matmul_transpose")
-            and not self.enable_sfa_cp
-            and not has_prefill
-        ):
+        if x.dtype in [torch.float16, torch.bfloat16] and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") and not self.enable_sfa_cp and not has_prefill:
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
             b, _, _ = x.shape
             res = torch.empty((b, self.num_heads, self.v_head_dim), dtype=x.dtype, device=x.device)
@@ -485,11 +468,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
-        q_nope, q_pe = (
-            self.q_proj(x)[0]
-            .view(-1, self.local_num_heads, self.qk_head_dim)
-            .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        )
+        q_nope, q_pe = self.q_proj(x)[0].view(-1, self.local_num_heads, self.qk_head_dim).split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
@@ -633,11 +612,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
         # referenced, so drop them to save memory.
         ascend_config = get_ascend_config()
-        if (
-            self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.is_kv_consumer
-            and ascend_config.recompute_scheduler_enable
-        ):
+        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_consumer and ascend_config.recompute_scheduler_enable:
             self.fused_qkv_a_proj.weight = None
             self.fused_qkv_a_proj.deq_scale = None
             self.fused_qkv_a_proj.quant_bias = None
@@ -766,9 +741,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Process for Flash Comm V1
             if need_gather_q_kv:
                 q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c.contiguous(), need_gather_q_kv)
-                kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                    kv_no_split.contiguous(), need_gather_q_kv
-                )
+                kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv_no_split.contiguous(), need_gather_q_kv)
 
             q, k = self.indexer_select_pre_process(
                 x=hidden_states,

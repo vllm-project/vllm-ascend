@@ -51,9 +51,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         hccl_pg_options = create_hccl_pg_options(group_name)
 
         for ranks in group_ranks:
-            device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend, pg_options=hccl_pg_options
-            )
+            device_group = torch.distributed.new_group(ranks, backend=torch_distributed_backend, pg_options=hccl_pg_options)
 
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
@@ -101,12 +99,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
     ) -> torch.Tensor:
         if self.world_size == 1:
             return input_
-        assert -input_.dim() <= scatter_dim < input_.dim(), (
-            f"Invalid scatter dim ({scatter_dim}) for input tensor with shape {input_.size()}"
-        )
-        assert -input_.dim() <= gather_dim < input_.dim(), (
-            f"Invalid gather dim ({gather_dim}) for input tensor with shape {input_.size()}"
-        )
+        assert -input_.dim() <= scatter_dim < input_.dim(), f"Invalid scatter dim ({scatter_dim}) for input tensor with shape {input_.size()}"
+        assert -input_.dim() <= gather_dim < input_.dim(), f"Invalid gather dim ({gather_dim}) for input tensor with shape {input_.size()}"
         assert self.device_communicator is not None, "device_communicator should be initialized when world_size > 1"
         return self.device_communicator.all_to_all(input_, scatter_dim, gather_dim, scatter_sizes, gather_sizes)
 

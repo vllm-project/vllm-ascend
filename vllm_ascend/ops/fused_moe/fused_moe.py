@@ -193,26 +193,16 @@ class AscendFusedMoE(FusedMoE):
             AscendFusedMoE.gate_stream = torch.npu.Stream()
         if self.custom_routing_function is None and self.e_score_correction_bias is not None:
             vllm_config = get_current_vllm_config()
-            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                dtype=vllm_config.model_config.dtype
-            )
+            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(dtype=vllm_config.model_config.dtype)
 
         # init moe
-        self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
-            ascend_config, self.moe_instance_id, self.moe_config
-        )
+        self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(ascend_config, self.moe_instance_id, self.moe_config)
         self.global_num_experts = num_experts + self.global_redundant_expert_num
-        self.dynamic_eplb = (ascend_config.dynamic_eplb or ascend_config.expert_map_record_path) and (
-            self.log2phy is not None
-        )
-        self.local_num_experts = (
-            torch.sum(self._expert_map != -1).item() if self._expert_map is not None else self.global_num_experts
-        )
+        self.dynamic_eplb = (ascend_config.dynamic_eplb or ascend_config.expert_map_record_path) and (self.log2phy is not None)
+        self.local_num_experts = torch.sum(self._expert_map != -1).item() if self._expert_map is not None else self.global_num_experts
         if self._expert_map is not None:
             logger.info_once(
-                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
-                " number of experts: %s/%s. Experts local to global index map:"
-                " %s.",
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global number of experts: %s/%s. Experts local to global index map: %s.",
                 self.ep_rank,
                 self.ep_size,
                 self.local_num_experts,
@@ -304,10 +294,7 @@ class AscendFusedMoE(FusedMoE):
                 shared_out = fc3_context.shared_experts(hidden_states)
                 # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
                 moe_comm_type = forward_context.moe_comm_type
-                if (
-                    moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
-                    and not shared_expert_dp_enabled()
-                ):
+                if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} and not shared_expert_dp_enabled():
                     shared_out = tensor_model_parallel_all_reduce(shared_out)
                 set_flash_common3_context(shared_out=shared_out)
 
@@ -380,14 +367,8 @@ class AscendFusedMoE(FusedMoE):
         if self.dynamic_eplb:
             expert_tokens = fused_experts_results.expert_tokens
             group_list_type = fused_experts_results.group_list_type
-            assert expert_tokens is not None and group_list_type is not None, (
-                "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
-            )
-            self.moe_load += (
-                expert_tokens
-                if group_list_type == 1
-                else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-            )
+            assert expert_tokens is not None and group_list_type is not None, "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
+            self.moe_load += expert_tokens if group_list_type == 1 else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
         routed_out = forward_context.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
@@ -477,10 +458,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
             forward_context = get_forward_context()
             moe_comm_type = forward_context.moe_comm_type
-            if (
-                moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
-                and not shared_expert_dp_enabled()
-            ):
+            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} and not shared_expert_dp_enabled():
                 shared_out = tensor_model_parallel_all_reduce(shared_out)
         else:
             fc3_context = get_flash_common3_context()

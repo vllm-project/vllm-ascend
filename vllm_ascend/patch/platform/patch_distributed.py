@@ -78,9 +78,7 @@ def communication_adaptation_310p():
         return all_reduce
 
     torch.distributed.all_reduce = all_reduce_wrapper_310p(torch.distributed.all_reduce)
-    torch.distributed.distributed_c10d.all_reduce = all_reduce_wrapper_310p(
-        torch.distributed.distributed_c10d.all_reduce
-    )
+    torch.distributed.distributed_c10d.all_reduce = all_reduce_wrapper_310p(torch.distributed.distributed_c10d.all_reduce)
 
 
 if get_ascend_device_type() == AscendDeviceType._310P:

@@ -142,9 +142,7 @@ if __name__ == "__main__":
     if not serving_results.empty:
         serving_results = serving_results[list(serving_column_mapping.keys())].rename(columns=serving_column_mapping)
     if not throughput_results.empty:
-        throughput_results = throughput_results[list(throughput_results_column_mapping.keys())].rename(
-            columns=throughput_results_column_mapping
-        )
+        throughput_results = throughput_results[list(throughput_results_column_mapping.keys())].rename(columns=throughput_results_column_mapping)
 
     processed_results_json = results_to_json(latency_results, throughput_results, serving_results)
 

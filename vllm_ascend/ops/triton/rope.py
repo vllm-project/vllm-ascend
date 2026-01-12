@@ -102,12 +102,8 @@ def _triton_rope(
             first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + (2 * tl.arange(0, pad_rope_dim // 2)[None, :])
             first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + (2 * tl.arange(0, pad_rope_dim // 2)[None, :])
 
-        first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (
-            tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2)
-        )
-        first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (
-            tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2)
-        )
+        first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+        first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
         q_tile_1 = tl.load(q_start_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(sin_row.dtype)
         k_tile_1 = tl.load(k_start_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(sin_row.dtype)
 

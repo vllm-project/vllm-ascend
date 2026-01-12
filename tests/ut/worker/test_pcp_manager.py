@@ -151,14 +151,10 @@ def test_update_tokens_for_pcp_basic(
     arange_np = np.arange(10000)
     pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(np.array(tokens), arange_np, num_reqs, 1)
 
-    assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), (
-        f"Expected pcp_tokens: {expected_pcp_tokens}, got: {pcp_tokens_result}"
-    )
+    assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), f"Expected pcp_tokens: {expected_pcp_tokens}, got: {pcp_tokens_result}"
 
     total_pcp_tokens: int = np.sum(pcp_tokens_result)
-    assert positions_result.shape == (total_pcp_tokens,), (
-        f"Positions shape mismatch. Expected length {total_pcp_tokens}, got {positions_result.shape}"
-    )
+    assert positions_result.shape == (total_pcp_tokens,), f"Positions shape mismatch. Expected length {total_pcp_tokens}, got {positions_result.shape}"
 
 
 # yapf: disable

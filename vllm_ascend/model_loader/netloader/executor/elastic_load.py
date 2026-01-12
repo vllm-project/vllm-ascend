@@ -71,9 +71,7 @@ class P2PLoad:
                 world_size=2,
                 backend="hccl",
             )
-            logger.info(
-                f"Finish init_process_group, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}"
-            )
+            logger.info(f"Finish init_process_group, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}")
 
             logger.info(f"Start recv, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}")
             logger.info(f"Model device: {model_device}")

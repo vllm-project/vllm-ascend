@@ -90,9 +90,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
     ) -> AscendMLAMetadata:
         metadata_cls = super().build(common_prefix_len, common_attn_metadata)
         if self.num_prefills == 0 and self.pcp_size > 1:
-            self.slot_mapping[: self.num_decode_tokens] = self.slot_mapping[
-                : self.num_decode_tokens * self.pcp_size : self.pcp_size
-            ]
+            self.slot_mapping[: self.num_decode_tokens] = self.slot_mapping[: self.num_decode_tokens * self.pcp_size : self.pcp_size]
             self.slot_mapping[self.num_decode_tokens : self.num_decode_tokens * self.pcp_size].fill_(-1)
         metadata_cls.slot_mapping = self.slot_mapping
         return metadata_cls
@@ -156,9 +154,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         assert long_seq_metadata is not None
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
-        local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[self.num_decodes_flatten :]).reshape(
-            -1, self.dcp_size * self.pcp_size
-        )
+        local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[self.num_decodes_flatten :]).reshape(-1, self.dcp_size * self.pcp_size)
         # Note(qcs): The max local context lengths
         # padded to `cp_local_block_size`.
         padded_local_context_lens_cpu = (
@@ -175,18 +171,13 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             )
             * self.cp_local_block_size
         )
-        local_chunk_starts = (
-            torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, self.num_prefills)
-            * padded_local_max_context_chunk_across_ranks
-        )
+        local_chunk_starts = torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, self.num_prefills) * padded_local_max_context_chunk_across_ranks
         local_chunk_ends = torch.min(
             padded_local_context_lens_cpu.unsqueeze(0),
             local_chunk_starts + padded_local_max_context_chunk_across_ranks,
         )
         padded_local_chunk_seq_lens = (local_chunk_ends - local_chunk_starts).clamp(min=0)
-        padded_local_cu_chunk_seq_lens_cpu = torch.zeros(
-            self.num_chunks, self.num_prefills + 1, dtype=torch.int32, pin_memory=True
-        )
+        padded_local_cu_chunk_seq_lens_cpu = torch.zeros(self.num_chunks, self.num_prefills + 1, dtype=torch.int32, pin_memory=True)
         torch.cumsum(
             padded_local_chunk_seq_lens,
             dim=1,
@@ -319,9 +310,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         if not self.pcp_size > 1:
             return super().mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
         num_decode_tokens = attn_metadata.num_decode_tokens
-        num_actual_tokens = (
-            attn_metadata.num_actual_tokens_pcp_padded - self.pcp_size * num_decode_tokens
-        ) // self.pcp_size + num_decode_tokens
+        num_actual_tokens = (attn_metadata.num_actual_tokens_pcp_padded - self.pcp_size * num_decode_tokens) // self.pcp_size + num_decode_tokens
         prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
         prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
@@ -336,9 +325,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         kv_c_normed = kv_c_normed.view([num_actual_tokens, self.num_kv_heads, -1])
         k_pe = k_pe.unsqueeze(1)
         prefill_k_pe = k_pe
-        prefill_k_pe[num_decode_tokens:num_actual_tokens] = self.rope_single(
-            prefill_k_pe[num_decode_tokens:num_actual_tokens], cos, sin
-        )
+        prefill_k_pe[num_decode_tokens:num_actual_tokens] = self.rope_single(prefill_k_pe[num_decode_tokens:num_actual_tokens], cos, sin)
         prefill_k_c_normed = kv_c_normed[:num_actual_tokens]
         prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe], dim=-1)
         prefill_kv_c_k_pe = get_pcp_group().all_gather(prefill_kv_c_k_pe, 0)
@@ -360,9 +347,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             slot_indices=slot_mapping,
         )
         prefill_k_nope, prefill_value = (
-            self.kv_b_proj(prefill_k_c_normed)[0]
-            .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            self.kv_b_proj(prefill_k_c_normed)[0].view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim).split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         )
         prefill_k_pe = prefill_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
         return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
@@ -709,17 +694,13 @@ class AscendMlaCPImpl(AscendMLAImpl):
         if self.pcp_size > 1:
             cache_kv_c_k_pe = get_pcp_group().all_gather(cache_kv_c_k_pe, 0)
 
-        allgatered_kv_c_normed, allgatered_k_pe = cache_kv_c_k_pe.split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-        )
+        allgatered_kv_c_normed, allgatered_k_pe = cache_kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         kv_c_segments = []
         k_pe_segments = []
         src_token_idx = 0
         max_seq_len_check = 0
-        for padded_local_chunk_seq_len, local_context_lens in zip(
-            padded_local_chunk_seq_lens_lst, local_context_lens_allranks
-        ):
+        for padded_local_chunk_seq_len, local_context_lens in zip(padded_local_chunk_seq_lens_lst, local_context_lens_allranks):
             cur_seq_len = 0
             for rank, local_context_len in enumerate(local_context_lens):
                 # Note(qcs): We split the context into multiple chunks,
@@ -734,12 +715,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     padded_local_chunk_seq_len,
                 )
                 if local_chunk_len != 0:
-                    kv_c_segment = allgatered_kv_c_normed[
-                        rank * toks + src_token_idx : rank * toks + src_token_idx + local_chunk_len
-                    ]
-                    k_pe_segment = allgatered_k_pe[
-                        rank * toks + src_token_idx : rank * toks + src_token_idx + local_chunk_len
-                    ]
+                    kv_c_segment = allgatered_kv_c_normed[rank * toks + src_token_idx : rank * toks + src_token_idx + local_chunk_len]
+                    k_pe_segment = allgatered_k_pe[rank * toks + src_token_idx : rank * toks + src_token_idx + local_chunk_len]
                     kv_c_segments.append(kv_c_segment)
                     k_pe_segments.append(k_pe_segment)
                     cur_seq_len += local_chunk_len

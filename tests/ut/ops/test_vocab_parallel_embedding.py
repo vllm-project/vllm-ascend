@@ -112,9 +112,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
             layer.shard_indices.added_vocab_end_index = 40
 
             # Mock the quantization method
-            layer.quant_method.embedding = MagicMock(
-                side_effect=lambda _, x: torch.randn(x.shape[0], self.embedding_dim)
-            )
+            layer.quant_method.embedding = MagicMock(side_effect=lambda _, x: torch.randn(x.shape[0], self.embedding_dim))
             return layer
 
     def test_get_masked_input_and_mask(self):

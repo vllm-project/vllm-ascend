@@ -101,7 +101,7 @@ def generate_log2phy_map(global_expert_map, ep_rank):
             if val != -1:
                 log2phy_map[idx].append(val + rankid * valid_count)
 
-    for key in log2phy_map.keys():
+    for key in log2phy_map:
         num_of_duplications = len(log2phy_map[key])
         log2phy_map[key] = log2phy_map[key][ep_rank % num_of_duplications]
 
@@ -152,9 +152,7 @@ class EPLBParamUtils:
             with open(expert_map, "w", encoding="utf-8") as f:
                 f.read()
         except Exception as e:
-            raise OSError(
-                f"Fail read expert info from {expert_map}, please check the reading permission of {expert_map} : {e}"
-            )
+            raise OSError(f"Fail read expert info from {expert_map}, please check the reading permission of {expert_map} : {e}")
 
     @staticmethod
     def check_expert_map_record_path(expert_map_record_path):
@@ -173,6 +171,4 @@ class EPLBParamUtils:
             with open(expert_map_record_path, "w", encoding="utf-8") as f:
                 f.write("")
         except Exception as e:
-            raise OSError(
-                f"Fail write expert info to {expert_map_record_path}, please check the writing permission of {expert_map_record_path} : {e}"
-            )
+            raise OSError(f"Fail write expert info to {expert_map_record_path}, please check the writing permission of {expert_map_record_path} : {e}")

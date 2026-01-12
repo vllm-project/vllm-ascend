@@ -140,12 +140,8 @@ def test_llama_qwen3_eagle_correctness(
         "The future of AI is",
     ]
 
-    if (method, model_name, model_name_main) not in VALID_COMBINATIONS or (
-        async_scheduling and disable_padded_drafter_batch
-    ):
-        pytest.skip(
-            f"Invalid combination: method={method}, model_name={model_name}, model_name_main={model_name_main}, or case not support yet"
-        )
+    if (method, model_name, model_name_main) not in VALID_COMBINATIONS or (async_scheduling and disable_padded_drafter_batch):
+        pytest.skip(f"Invalid combination: method={method}, model_name={model_name}, model_name_main={model_name_main}, or case not support yet")
 
     sampling_params = SamplingParams(
         max_tokens=300,

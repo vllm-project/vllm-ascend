@@ -336,9 +336,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default, consistent with the
             # triton op
-            buffer = tuple(
-                torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device) for _ in range(len(output_slices))
-            )
+            buffer = tuple(torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device) for _ in range(len(output_slices)))
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(y, buffer, lora_b_stacked, None, output_slices, add_inputs=True, **kwargs)
 

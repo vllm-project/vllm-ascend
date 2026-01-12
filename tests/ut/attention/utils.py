@@ -33,18 +33,14 @@ def patch_distributed_groups(dcp_size=1, dcp_rank=0, pcp_size=1, pcp_rank=0, nee
             mock_dcp.device_group = MagicMock()
 
             mock_dcp.all_gather = MagicMock()
-            mock_dcp.all_gather.side_effect = lambda input_, dim: all_gather_fake(
-                input_, dim, mock_dcp.world_size, "mock_dcp_group"
-            )
+            mock_dcp.all_gather.side_effect = lambda input_, dim: all_gather_fake(input_, dim, mock_dcp.world_size, "mock_dcp_group")
 
             mock_pcp.rank_in_group = pcp_rank
             mock_pcp.world_size = pcp_size
             mock_pcp.device_group = MagicMock()
 
             mock_pcp.all_gather = MagicMock()
-            mock_pcp.all_gather.side_effect = lambda input_, dim: all_gather_fake(
-                input_, dim, mock_pcp.world_size, "mock_pcp_group"
-            )
+            mock_pcp.all_gather.side_effect = lambda input_, dim: all_gather_fake(input_, dim, mock_pcp.world_size, "mock_pcp_group")
 
             mock_all_to_all_single.side_effect = lambda output, input, *a, **kw: output.copy_(input)
 

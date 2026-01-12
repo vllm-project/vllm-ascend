@@ -105,9 +105,7 @@ def gmm_swiglu_quant_golden_a8_w4(
             temp = temp * gate
             max_value = torch.max(torch.abs(temp), dim=-1).values
             quant_scale_output_temp = 127 / max_value
-            quant_output[start_idx // 2 : (start_idx + temp_v) // 2] = torch.round(
-                temp * quant_scale_output_temp.reshape(temp_v // 2, 1)
-            ).to(torch.int8)
+            quant_output[start_idx // 2 : (start_idx + temp_v) // 2] = torch.round(temp * quant_scale_output_temp.reshape(temp_v // 2, 1)).to(torch.int8)
             quant_scale_output[start_idx // 2 : (start_idx + temp_v) // 2] = 1 / quant_scale_output_temp
         start_idx += temp_v
     return quant_output, quant_scale_output

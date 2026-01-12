@@ -101,9 +101,7 @@ def deepseek_deploy(
     for layer_idx in range(layer_num):
         layer_deployment = []
         for gpu_idx in range(num_gpus):
-            local_deployment = hy2log[layer_idx][
-                gpu_idx * num_physical_experts_local : (gpu_idx + 1) * num_physical_experts_local
-            ]
+            local_deployment = hy2log[layer_idx][gpu_idx * num_physical_experts_local : (gpu_idx + 1) * num_physical_experts_local]
             local_deployment = local_deployment.flatten()
             layer_deployment.append(local_deployment.tolist())
         global_deployment.append(layer_deployment)

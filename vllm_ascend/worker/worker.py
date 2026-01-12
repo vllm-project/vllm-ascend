@@ -185,10 +185,7 @@ class NPUWorker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
-            raise ValueError(
-                "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0."
-            )
+            raise ValueError("FRACTAL_NZ mode is enabled. This may cause model parameter precision issues in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0.")
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
@@ -238,9 +235,7 @@ class NPUWorker(WorkerBase):
         ):
             visible_device_count = torch.npu.device_count() if torch.npu.is_available() else 0
             assert self.parallel_config.local_world_size <= visible_device_count, (
-                f"local_world_size ({self.parallel_config.local_world_size}) must "
-                f"be less than or equal to the number of visible devices "
-                f"({visible_device_count})."
+                f"local_world_size ({self.parallel_config.local_world_size}) must be less than or equal to the number of visible devices ({visible_device_count})."
             )
 
         self.init_npu_memory = torch.npu.mem_get_info()[0]
@@ -327,9 +322,7 @@ class NPUWorker(WorkerBase):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
-            intermediate_tensors = IntermediateTensors(
-                get_pp_group().recv_tensor_dict(all_gather_group=all_gather_group)
-            )
+            intermediate_tensors = IntermediateTensors(get_pp_group().recv_tensor_dict(all_gather_group=all_gather_group))
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
@@ -493,9 +486,7 @@ class NPUWorker(WorkerBase):
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs_vllm.VLLM_TORCH_PROFILER_DIR:
             if envs_ascend.MSMONITOR_USE_DAEMON:
-                raise RuntimeError(
-                    "MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time."
-                )
+                raise RuntimeError("MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time.")
             torch_profiler_trace_dir = envs_vllm.VLLM_TORCH_PROFILER_DIR
             logger.info(
                 "Profiling enabled. Traces will be saved to: %s",

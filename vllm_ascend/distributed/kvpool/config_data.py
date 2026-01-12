@@ -317,7 +317,7 @@ class ReqMeta:
         block_size: int,
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
-        block_hashes: list[BlockHash] = [],
+        block_hashes: list[BlockHash] | None = None,
         is_last_chunk: bool | None = None,
         discard_partial_chunks: bool = True,
     ) -> Optional["ReqMeta"]:
@@ -369,7 +369,7 @@ class ReqMeta:
             block_ids=tracker.allocated_block_ids,
             can_save=not skip_save,
             load_spec=load_spec,
-            block_hashes=block_hashes,
+            block_hashes=block_hashes if block_hashes is not None else [],
             is_last_chunk=is_last_chunk,
         )
 

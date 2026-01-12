@@ -57,18 +57,9 @@ def prepare_inputs(audio_count: int, audio_path1: str, audio_path2: str):
 
     audio_in_prompt = "".join([f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)])
     question = question_per_audio_count[audio_count]
-    prompt = (
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        "<|im_start|>user\n"
-        f"{audio_in_prompt}{question}<|im_end|>\n"
-        "<|im_start|>assistant\n"
-    )
+    prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{audio_in_prompt}{question}<|im_end|>\n<|im_start|>assistant\n"
 
-    mm_data = {
-        "audio": audio_assets
-        if not use_vllm_audio_assert
-        else [asset.audio_and_sample_rate for asset in audio_assets[:audio_count]]
-    }
+    mm_data = {"audio": audio_assets if not use_vllm_audio_assert else [asset.audio_and_sample_rate for asset in audio_assets[:audio_count]]}
 
     # Merge text prompt and audio data into inputs
     inputs = {"prompt": prompt, "multi_modal_data": mm_data}

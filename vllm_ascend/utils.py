@@ -394,10 +394,7 @@ def get_max_hidden_layers(hf_config) -> int:
 # Update cudagraph capture sizes for vllm config
 def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_sizes: list[int]):
     valid_max_size = cudagraph_capture_sizes[-1] if cudagraph_capture_sizes else 0
-    if (
-        vllm_config.compilation_config.max_cudagraph_capture_size is not None
-        and vllm_config.compilation_config.max_cudagraph_capture_size != valid_max_size
-    ):
+    if vllm_config.compilation_config.max_cudagraph_capture_size is not None and vllm_config.compilation_config.max_cudagraph_capture_size != valid_max_size:
         if vllm_config.compilation_config.cudagraph_capture_sizes is not None:
             raise ValueError(
                 "customized max_cudagraph_capture_size"
@@ -412,9 +409,7 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
 
     vllm_config.compilation_config.max_cudagraph_capture_size = valid_max_size
 
-    if vllm_config.compilation_config.cudagraph_capture_sizes is not None and len(cudagraph_capture_sizes) < len(
-        vllm_config.compilation_config.cudagraph_capture_sizes
-    ):
+    if vllm_config.compilation_config.cudagraph_capture_sizes is not None and len(cudagraph_capture_sizes) < len(vllm_config.compilation_config.cudagraph_capture_sizes):
         logger.warning(
             ("cudagraph_capture_sizes specified in compilation_config %s is overridden by config %s"),
             vllm_config.compilation_config.cudagraph_capture_sizes,
@@ -451,11 +446,7 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     are more friendly to ascend ops && hardware.
     """
 
-    if (
-        vllm_config.model_config is None
-        or vllm_config.model_config.enforce_eager
-        or not _is_default_capture_sizes(vllm_config)
-    ):
+    if vllm_config.model_config is None or vllm_config.model_config.enforce_eager or not _is_default_capture_sizes(vllm_config):
         return
 
     # modify the default capture_sizes for Qwen3-MoE models on dp settings.
@@ -497,8 +488,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
         logger.warning(
-            "Got empty model config. This typically occurs when an empty vllm_config is "
-            "initialized (e.g., in unit tests), where config updates are intentionally skipped."
+            "Got empty model config. This typically occurs when an empty vllm_config is initialized (e.g., in unit tests), where config updates are intentionally skipped."
         )
 
         return
@@ -526,12 +516,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     if os.getenv("HCCL_OP_EXPANSION_MODE") == "AIV":
         # TODO: Find out whether we need to take into account the pp_size
-        parallel_factor = (
-            1
-            + num_comm_groups
-            + int(parallel_config.enable_expert_parallel)
-            + int(vllm_config.additional_config.get("multistream_overlap_shared_expert", False))
-        )
+        parallel_factor = 1 + num_comm_groups + int(parallel_config.enable_expert_parallel) + int(vllm_config.additional_config.get("multistream_overlap_shared_expert", False))
         if is_moe_model(vllm_config):
             parallel_factor += parallel_config.data_parallel_size > 1
         else:
@@ -565,9 +550,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
-        max_num_batch_sizes = math.floor(
-            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph / (1 + num_comm_groups * 2)
-        )
+        max_num_batch_sizes = math.floor((MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph / (1 + num_comm_groups * 2))
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes,
@@ -819,9 +802,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
         if not _ENABLE_SP:
             return _ENABLE_SP
 
-        assert vllm_config.parallel_config.tensor_parallel_size > 1, (
-            "Flash Comm v1 (Sequence Parallelism) is only supported when tp_size > 1."
-        )
+        assert vllm_config.parallel_config.tensor_parallel_size > 1, "Flash Comm v1 (Sequence Parallelism) is only supported when tp_size > 1."
 
         assert not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel, (
             "Flash Comm v1 (Sequence Parallelism) requires enable_expert_parallel=True for MoE models."
@@ -1033,30 +1014,17 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
         if layer_sharding == ["o_proj"]:
             logger.info_once("Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption.")
         else:
-            raise ValueError(
-                "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
-                f"Found invalid layer_sharding: {layer_sharding}"
-            )
+            raise ValueError(f"FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! Found invalid layer_sharding: {layer_sharding}")
     if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
-        logger.warning_once(
-            "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
-        )
+        logger.warning_once("It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance.")
     if ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 0:
-        raise AssertionError(
-            "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
-        )
+        raise AssertionError("flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size")
     if global_tp_size <= flashcomm2_oproj_tp_size:
-        raise AssertionError(
-            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size}) cannot exceed global tensor parallel size ({global_tp_size})"
-        )
+        raise AssertionError(f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size}) cannot exceed global tensor parallel size ({global_tp_size})")
     if global_tp_size % flashcomm2_oproj_tp_size != 0:
-        raise AssertionError(
-            f"Global tensor parallel size ({global_tp_size}) must be divisible by flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size})"
-        )
+        raise AssertionError(f"Global tensor parallel size ({global_tp_size}) must be divisible by flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size})")
     if vllm_config.kv_transfer_config is None:
-        logger.warning_once(
-            "It is recommended to enable FLASHCOMM2 in P-scenario deployments, enable it in hybrid deployment may lead to decode performance degradation."
-        )
+        logger.warning_once("It is recommended to enable FLASHCOMM2 in P-scenario deployments, enable it in hybrid deployment may lead to decode performance degradation.")
     if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
         raise AssertionError(
             "FLASHCOMM2 primarily targets P-scenario deployments, with additional support for hybrid deployment scenarios. It is not applicable in D-scenario environments."
@@ -1122,18 +1090,12 @@ def check_kv_extra_config(vllm_config):
             config_tp = config[tp_key]
             vllm_tp = vllm_config.parallel_config.tensor_parallel_size
             if config_tp != vllm_tp:
-                raise ValueError(
-                    f"KV transfer '{name}' config has a conflicting tensor parallel size. "
-                    f"Expected {vllm_tp}, but got {config_tp}."
-                )
+                raise ValueError(f"KV transfer '{name}' config has a conflicting tensor parallel size. Expected {vllm_tp}, but got {config_tp}.")
         if dp_key in config:
             config_dp = config[dp_key]
             vllm_dp = vllm_config.parallel_config.data_parallel_size
             if config_dp != vllm_dp:
-                raise ValueError(
-                    f"KV transfer '{name}' config has a conflicting data parallel size. "
-                    f"Expected {vllm_dp}, but got {config_dp}."
-                )
+                raise ValueError(f"KV transfer '{name}' config has a conflicting data parallel size. Expected {vllm_dp}, but got {config_dp}.")
 
     if vllm_config.kv_transfer_config.is_kv_producer:
         _check(

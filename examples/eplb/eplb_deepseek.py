@@ -120,8 +120,7 @@ def rebalance_experts_hierarchical(
     tokens_per_group = weight.unflatten(-1, (num_groups, group_size)).sum(-1)
     group_pack_index, group_rank_in_pack = balanced_packing(tokens_per_group, num_nodes)
     log2mlog = (
-        ((group_pack_index * groups_per_node + group_rank_in_pack) * group_size).unsqueeze(-1)
-        + torch.arange(group_size, dtype=torch.int64, device=group_pack_index.device)
+        ((group_pack_index * groups_per_node + group_rank_in_pack) * group_size).unsqueeze(-1) + torch.arange(group_size, dtype=torch.int64, device=group_pack_index.device)
     ).flatten(-2)
     mlog2log = inverse(log2mlog)
 

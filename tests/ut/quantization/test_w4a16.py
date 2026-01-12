@@ -137,9 +137,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         self.assertEqual(param_dict["w2_weight_packed"].shape, expected_w2_shape)
 
     def test_get_dynamic_quant_param(self):
-        param_dict = self.quant_method.get_dynamic_quant_param(
-            self.experts, self.input_size, self.output_size, torch.bfloat16
-        )
+        param_dict = self.quant_method.get_dynamic_quant_param(self.experts, self.input_size, self.output_size, torch.bfloat16)
 
         self.assertEqual(param_dict["w13_weight_scale"].dtype, torch.bfloat16)
         expected_w13_scale_shape = (
@@ -184,12 +182,8 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
             self.input_size // self.quant_method.pack_factor,
         )
 
-        layer.w13_weight_packed = torch.nn.Parameter(
-            torch.randint(-100, 100, w13_shape, dtype=torch.int32), requires_grad=False
-        )
-        layer.w2_weight_packed = torch.nn.Parameter(
-            torch.randint(-100, 100, w2_shape, dtype=torch.int32), requires_grad=False
-        )
+        layer.w13_weight_packed = torch.nn.Parameter(torch.randint(-100, 100, w13_shape, dtype=torch.int32), requires_grad=False)
+        layer.w2_weight_packed = torch.nn.Parameter(torch.randint(-100, 100, w2_shape, dtype=torch.int32), requires_grad=False)
 
         w13_scale_shape = (
             self.experts,
@@ -202,19 +196,11 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
             self.input_size // self.group_size,
         )
 
-        layer.w13_weight_scale = torch.nn.Parameter(
-            torch.ones(w13_scale_shape, dtype=torch.bfloat16), requires_grad=False
-        )
-        layer.w2_weight_scale = torch.nn.Parameter(
-            torch.ones(w2_scale_shape, dtype=torch.bfloat16), requires_grad=False
-        )
+        layer.w13_weight_scale = torch.nn.Parameter(torch.ones(w13_scale_shape, dtype=torch.bfloat16), requires_grad=False)
+        layer.w2_weight_scale = torch.nn.Parameter(torch.ones(w2_scale_shape, dtype=torch.bfloat16), requires_grad=False)
 
-        layer.w13_weight_offset = torch.nn.Parameter(
-            torch.zeros(w13_scale_shape, dtype=torch.bfloat16), requires_grad=False
-        )
-        layer.w2_weight_offset = torch.nn.Parameter(
-            torch.zeros(w2_scale_shape, dtype=torch.bfloat16), requires_grad=False
-        )
+        layer.w13_weight_offset = torch.nn.Parameter(torch.zeros(w13_scale_shape, dtype=torch.bfloat16), requires_grad=False)
+        layer.w2_weight_offset = torch.nn.Parameter(torch.zeros(w2_scale_shape, dtype=torch.bfloat16), requires_grad=False)
 
         layer.w13_weight_shape = torch.nn.Parameter(
             torch.tensor(

@@ -712,11 +712,7 @@ async def _handle_completions(api: str, request: Request):
 
                         stop_reason = choice.get("stop_reason")
                         usage = chunk_json.get("usage", {})
-                        completion_tokens = (
-                            (completion_tokens + 1)
-                            if stream_flag
-                            else (completion_tokens + usage.get("completion_tokens"))
-                        )
+                        completion_tokens = (completion_tokens + 1) if stream_flag else (completion_tokens + usage.get("completion_tokens"))
                         if stop_reason == "recomputed":
                             retry = True
                             retry_count += 1
@@ -737,7 +733,8 @@ async def _handle_completions(api: str, request: Request):
                         yield chunk
             except Exception as e:
                 logger.error(
-                    f"Error during streaming from decoder {instance_info.decoder.url}: {str(e)} the aborted request {instance_info.request_id} will be routing to the target prefiller when new request is ready to dispatch to it"
+                    f"Error during streaming from decoder {instance_info.decoder.url}: {str(e)} the aborted request {instance_info.request_id} \
+                        will be routing to the target prefiller when new request is ready to dispatch to it"
                 )
                 proxy_state.abort_prefiller_request(instance_info.prefiller_idx, instance_info.request_id)
                 proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
@@ -767,18 +764,12 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
         all_msg = f"{adjust_mode} {instance_type} instances: {[str(server) for server in instances]}."
 
         if instance_type not in [InstanceType.PREFILL, InstanceType.DECODE]:
-            return {
-                "error": f"Instance type {instance_type} is not supported. "
-                f"Only support '{InstanceType.PREFILL}' and '{InstanceType.DECODE}'."
-            }
+            return {"error": f"Instance type {instance_type} is not supported. Only support '{InstanceType.PREFILL}' and '{InstanceType.DECODE}'."}
 
         if adjust_mode == "add":
             added_nodes, waiting_nodes = await proxy_state.add_instances(instance_type, instances)
             if waiting_nodes:
-                all_msg = (
-                    f"{adjust_mode} {instance_type} instances: {added_nodes}. "
-                    f"Instances {waiting_nodes} are waiting to be added."
-                )
+                all_msg = f"{adjust_mode} {instance_type} instances: {added_nodes}. Instances {waiting_nodes} are waiting to be added."
         elif adjust_mode == "remove":
             if instance_type == InstanceType.PREFILL:
                 proxy_state.remove_prefillers(instances)

@@ -195,9 +195,7 @@ class CPUOffloadingConnectorScheduler:
         for idx, req_id in enumerate(cached_reqs.req_ids):
             num_tokens[req_id] = cached_reqs.num_computed_tokens[idx] + scheduler_output.num_scheduled_tokens[req_id]
 
-        unallocated_req_ids = set(
-            self.num_gpu_computed_tokens.keys() - self.allocated_req_ids - scheduler_output.num_scheduled_tokens.keys()
-        )
+        unallocated_req_ids = set(self.num_gpu_computed_tokens.keys() - self.allocated_req_ids - scheduler_output.num_scheduled_tokens.keys())
         new_cpu_block_ids = self.zmq_rpc_client.call("allocate_slots", num_tokens, unallocated_req_ids)
         metadata = CPUOffloadingConnectorMetadata(
             requests={},
@@ -483,9 +481,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
     mamba_layers = get_layers_from_vllm_config(vllm_config, MambaBase)
     if len(mamba_layers) > 0:
-        if vllm_config.speculative_config is not None and vllm_config.model_config.hf_config.model_type not in [
-            "qwen3_next"
-        ]:
+        if vllm_config.speculative_config is not None and vllm_config.model_config.hf_config.model_type not in ["qwen3_next"]:
             raise NotImplementedError("Mamba with speculative decoding is not supported yet.")
         if vllm_config.cache_config.enable_prefix_caching:
             raise NotImplementedError("Prefix caching is not supported for Mamba yet.")
@@ -502,9 +498,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 block_size=max_model_len,
                 page_size_padded=page_size_padded,
                 mamba_type=mamba_module.mamba_type,
-                num_speculative_blocks=(
-                    vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-                ),
+                num_speculative_blocks=(vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0),
             )
 
     return kv_cache_spec

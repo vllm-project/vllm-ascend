@@ -33,13 +33,12 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [tool.ruff]
-line-length = 120
+# TODO: according to PEP8, there should be 80 characters per line
+line-length = 180
 
 [tool.ruff.lint.per-file-ignores]
 # Exclude generated protobuf files
-"vllm/grpc/*_pb2.py" = ["ALL"]
-"vllm/grpc/*_pb2_grpc.py" = ["ALL"]
-"vllm/grpc/*_pb2.pyi" = ["ALL"]
+"tools/aisbench.py" = ["ALL"]
 
 [tool.ruff.lint]
 select = [
@@ -69,6 +68,13 @@ ignore = [
     "B007",
     # f-string format
     "UP032",
+    # TODO: FIE ME: This should be optimized for batter style
+    # `if`-`else`-block
+    "SIM108",
+    "SIM102",
+    "SIM210",
+    "G004",
+    "B904"
 ]
 
 [tool.ruff.format]

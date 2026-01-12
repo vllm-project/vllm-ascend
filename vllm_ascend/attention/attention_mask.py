@@ -53,9 +53,7 @@ class AttentionMaskBuilder:
 
     def get_splitfuse_attn_mask(self) -> torch.Tensor:
         if self.chunked_prefill_attn_mask is None:
-            self.chunked_prefill_attn_mask = (
-                torch.triu(torch.ones(2048, 2048), diagonal=1).to(torch.int8).to(self.device)
-            )
+            self.chunked_prefill_attn_mask = torch.triu(torch.ones(2048, 2048), diagonal=1).to(torch.int8).to(self.device)
         return self.chunked_prefill_attn_mask
 
     def get_mla_mask(self, dtype: torch.dtype) -> torch.Tensor:

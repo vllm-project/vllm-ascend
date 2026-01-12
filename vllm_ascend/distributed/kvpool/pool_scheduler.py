@@ -24,12 +24,8 @@ class KVPoolScheduler:
     def __init__(self, vllm_config: "VllmConfig", use_layerwise):
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "consumer_is_to_load", False
-        )
-        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "consumer_is_to_put", False
-        )
+        self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get("consumer_is_to_load", False)
+        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get("consumer_is_to_put", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         self.client = LookupKeyClient(vllm_config)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
@@ -45,9 +41,7 @@ class KVPoolScheduler:
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         # Whether to discard partial chunks
-        self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
-            "discard_partial_chunks", True
-        )
+        self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config("discard_partial_chunks", True)
         self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
         self._unfinished_request_ids: set[str] = set()
 
@@ -125,10 +119,7 @@ class KVPoolScheduler:
             return
 
         assert (
-            num_external_tokens > 0
-            and num_external_tokens
-            == self.load_specs[request.request_id].kvpool_cached_tokens
-            - self.load_specs[request.request_id].vllm_cached_tokens
+            num_external_tokens > 0 and num_external_tokens == self.load_specs[request.request_id].kvpool_cached_tokens - self.load_specs[request.request_id].vllm_cached_tokens
         ), (
             f"Mismatch in number of tokens: {num_external_tokens} vs "
             f"{self.load_specs[request.request_id].kvpool_cached_tokens} - "
@@ -164,11 +155,7 @@ class KVPoolScheduler:
             num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
             request_tracker = RequestTracker.from_new_request(request, num_tokens_to_compute)
             self._request_trackers[request.req_id] = request_tracker
-            last_chunk_tokens_num = (
-                (len(request.prompt_token_ids) // self._block_size * self._block_size)
-                if self._discard_partial_chunks
-                else len(request.prompt_token_ids)
-            )
+            last_chunk_tokens_num = (len(request.prompt_token_ids) // self._block_size * self._block_size) if self._discard_partial_chunks else len(request.prompt_token_ids)
             request_tuple = self._unfinished_requests.get(request.req_id)
             request_real = request_tuple[0]  # type: ignore[index]
             req_meta = ReqMeta.from_request_tracker(
@@ -195,19 +182,13 @@ class KVPoolScheduler:
                     new_token_ids = request.all_token_ids[num_current_tokens : num_current_tokens + num_new_tokens]
                     request_tracker.token_len += len(new_token_ids)
                 else:
-                    raise ValueError(
-                        f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached"
-                    )
+                    raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if not new_block_ids:
                     continue
                 request_tracker.update(new_block_ids)
 
-                last_chunk_tokens_num = (
-                    (len(request.prompt_token_ids) // self._block_size * self._block_size)
-                    if self._discard_partial_chunks
-                    else len(request.prompt_token_ids)
-                )
+                last_chunk_tokens_num = (len(request.prompt_token_ids) // self._block_size * self._block_size) if self._discard_partial_chunks else len(request.prompt_token_ids)
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
@@ -227,9 +208,7 @@ class KVPoolScheduler:
                 if not load_spec:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
-                if (num_tokens_to_compute % self._block_size != 0) and (
-                    num_tokens_to_compute == len(request.prompt_token_ids) - 1
-                ):
+                if (num_tokens_to_compute % self._block_size != 0) and (num_tokens_to_compute == len(request.prompt_token_ids) - 1):
                     num_tokens_to_compute = num_tokens_to_compute + 1
                 request_tracker = RequestTracker(
                     req_id=request_id,
@@ -313,8 +292,6 @@ def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
             rpc_port = extra_config["lookup_rpc_port"]
         elif "mooncake_rpc_port" in extra_config:
             rpc_port = extra_config["mooncake_rpc_port"]
-            logger.warning(
-                "It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future."
-            )
+            logger.warning("It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future.")
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
     return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_rank}"

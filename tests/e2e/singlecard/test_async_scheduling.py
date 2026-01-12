@@ -135,9 +135,7 @@ def run_tests(
 
                 if base_acceptance_rate is not None and test_acceptance_rate is not None:
                     if "spec_mml=None" in test_config:
-                        assert test_acceptance_rate > base_acceptance_rate or test_acceptance_rate == pytest.approx(
-                            base_acceptance_rate, rel=5e-2
-                        )
+                        assert test_acceptance_rate > base_acceptance_rate or test_acceptance_rate == pytest.approx(base_acceptance_rate, rel=5e-2)
                     else:
                         # Currently the reported acceptance rate is expected to be
                         # lower when we sometimes skip drafting altogether.

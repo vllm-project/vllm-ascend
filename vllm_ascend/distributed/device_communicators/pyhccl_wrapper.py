@@ -221,9 +221,7 @@ class HCCLLibrary:
 
     def hcclCommInitRank(self, world_size: int, unique_id: hcclUniqueId, rank: int) -> hcclComm_t:
         comm = hcclComm_t()
-        self.HCCL_CHECK(
-            self._funcs["HcclCommInitRootInfo"](world_size, ctypes.byref(unique_id), rank, ctypes.byref(comm))
-        )
+        self.HCCL_CHECK(self._funcs["HcclCommInitRootInfo"](world_size, ctypes.byref(unique_id), rank, ctypes.byref(comm)))
         return comm
 
     def hcclAllReduce(

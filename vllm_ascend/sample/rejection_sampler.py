@@ -512,9 +512,7 @@ def rejection_random_sample_pytorch(
     zero_threshold_cpu = torch.tensor([0.0], pin_memory=True, dtype=torch.float32)
     zero_threshold = zero_threshold_cpu.to(device, non_blocking=True)
 
-    acceptance_condition = (draft_token_probs > zero_threshold) & (
-        target_token_probs / draft_token_probs >= uniform_token_probs
-    )
+    acceptance_condition = (draft_token_probs > zero_threshold) & (target_token_probs / draft_token_probs >= uniform_token_probs)
 
     first_rejection = (~acceptance_condition) & valid_mask
 
@@ -541,9 +539,7 @@ def rejection_random_sample_pytorch(
         torch.where(final_acceptance, draft_tokens, output_token_ids[:, :max_draft_len]),
     )
 
-    output_token_ids[:, :max_draft_len] = torch.where(
-        final_update_mask, final_tokens, output_token_ids[:, :max_draft_len]
-    )
+    output_token_ids[:, :max_draft_len] = torch.where(final_update_mask, final_tokens, output_token_ids[:, :max_draft_len])
 
     no_rejection = first_reject_pos.squeeze(1) >= num_draft_per_batch
     should_add_bonus = non_greedy_mask & no_rejection

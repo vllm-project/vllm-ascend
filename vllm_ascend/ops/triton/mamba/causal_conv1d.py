@@ -273,9 +273,7 @@ def _causal_conv1d_update_kernel_npu_tiled(
         # -------------------------
         # STEP 1: read initial history cols BEFORE state update (out==x safe)
         # -------------------------
-        conv_states_base = (
-            conv_state_ptr + conv_states_input_coord * stride_conv_state_seq + idx_feats * stride_conv_state_dim
-        )
+        conv_states_base = conv_state_ptr + conv_states_input_coord * stride_conv_state_seq + idx_feats * stride_conv_state_dim
         prior_tokens = conv_states_base + conv_state_token_offset * stride_conv_state_tok
 
         # define history vectors as zeros then load conditionally
@@ -337,12 +335,7 @@ def _causal_conv1d_update_kernel_npu_tiled(
         tail_start = tl.where(use_tail, (seqlen_run - state_len_run), zero_i32).to(tl.int32)
 
         # base pointers
-        state_src_base = (
-            conv_state_ptr
-            + conv_states_input_coord * stride_conv_state_seq
-            + conv_state_token_offset * stride_conv_state_tok
-            + idx_feats * stride_conv_state_dim
-        )
+        state_src_base = conv_state_ptr + conv_states_input_coord * stride_conv_state_seq + conv_state_token_offset * stride_conv_state_tok + idx_feats * stride_conv_state_dim
         state_dst_base = conv_state_ptr + conv_states_offset * stride_conv_state_seq + idx_feats * stride_conv_state_dim
 
         x_base = x_ptr + x_offset + idx_feats * stride_x_dim
@@ -352,12 +345,7 @@ def _causal_conv1d_update_kernel_npu_tiled(
             dst_tok = (t0 + tok_vec).to(tl.int32)  # [T_CHUNK]
             src_tok = (dst_tok + shift).to(tl.int32)  # [T_CHUNK]
             m_tok = use_shift & (dst_tok < keep_shift) & (src_tok < state_len_run) & (dst_tok < state_len_run)
-            m = (
-                (lane_active & m_tok)[:, None]
-                & mask_w[None, :]
-                & (conv_states_input_coord < num_cache_lines)
-                & (conv_states_offset < num_cache_lines)
-            )
+            m = (lane_active & m_tok)[:, None] & mask_w[None, :] & (conv_states_input_coord < num_cache_lines) & (conv_states_offset < num_cache_lines)
 
             src_ptrs = state_src_base[None, :] + src_tok[:, None] * stride_conv_state_tok
             dst_ptrs = state_dst_base[None, :] + dst_tok[:, None] * stride_conv_state_tok

@@ -121,9 +121,7 @@ def matmul_persistent(x, y, bias=None):
     # Validate bias shape (if not None)
     if bias is not None:
         assert bias.dim() == 1, "bias must be a 1D tensor"
-        assert y.shape[1] == bias.shape[0], (
-            f"Bias dimension mismatch: y.shape[1]={y.shape[1]}, bias.shape[0]={bias.shape[0]}"
-        )
+        assert y.shape[1] == bias.shape[0], f"Bias dimension mismatch: y.shape[1]={y.shape[1]}, bias.shape[0]={bias.shape[0]}"
 
     # Allocate output tensor (same data type as x)
     output = torch.empty((M, N), dtype=x.dtype, device=x.device)
@@ -375,11 +373,7 @@ def matmul_batch_invariant(a, b, *, out=None):
             return out
         return result
     else:
-        raise ValueError(
-            f"matmul_batch_invariant currently only supports 2D x 2D, 3D x 3D, "
-            f"3D x 2D, 2D x 3D, and 4D x 4D, "
-            f"got shapes {a.shape} and {b.shape}"
-        )
+        raise ValueError(f"matmul_batch_invariant currently only supports 2D x 2D, 3D x 3D, 3D x 2D, 2D x 3D, and 4D x 4D, got shapes {a.shape} and {b.shape}")
 
 
 def linear_batch_invariant(input_, weight, bias=None):

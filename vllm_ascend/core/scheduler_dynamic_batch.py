@@ -40,11 +40,7 @@ class BudgetRefiner:
         self.enabled = slo_limit > 0
         if not self.enabled:
             return
-        logger.info(
-            "Dynamic batch is enabled with SLO limit: {}, and chunked prefill is forced to be activated because dynamic batch relies on it".format(
-                str(slo_limit)
-            )
-        )
+        logger.info("Dynamic batch is enabled with SLO limit: {}, and chunked prefill is forced to be activated because dynamic batch relies on it".format(str(slo_limit)))
         self.lookup: dict[tuple[int, int], int] = {}
         self.context_keys: set[int] = set()
         self.dnum_keys: set[int] = set()
@@ -58,9 +54,7 @@ class BudgetRefiner:
         if not os.path.exists(table_file_path):
             # proceed without dynamic batch
             logger.error(
-                "The dynamic batching feature requires the lookup table "
-                "'profile_table.csv', but it was not found at '%s'. "
-                "Please download the corresponding table file.",
+                "The dynamic batching feature requires the lookup table 'profile_table.csv', but it was not found at '%s'. Please download the corresponding table file.",
                 table_file_path,
             )
             self.enabled = False
@@ -106,9 +100,7 @@ class BudgetRefiner:
         if not self.enabled:
             return budget
         # assume all running request will be scheduled.
-        num_decode_token_lst = [
-            req.num_tokens_with_spec for req in running_request if req.num_computed_tokens >= req.num_prompt_tokens
-        ]
+        num_decode_token_lst = [req.num_tokens_with_spec for req in running_request if req.num_computed_tokens >= req.num_prompt_tokens]
         num_decode = len(num_decode_token_lst)
         if num_decode <= 0:
             return budget
@@ -189,9 +181,7 @@ class SchedulerDynamicBatch(Scheduler):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
-            num_new_tokens = (
-                request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
-            )
+            num_new_tokens = request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
@@ -297,11 +287,7 @@ class SchedulerDynamicBatch(Scheduler):
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
         if self.lora_config:
-            scheduled_loras = set(
-                req.lora_request.lora_int_id
-                for req in scheduled_running_reqs
-                if req.lora_request and req.lora_request.lora_int_id > 0
-            )
+            scheduled_loras = set(req.lora_request.lora_int_id for req in scheduled_running_reqs if req.lora_request and req.lora_request.lora_int_id > 0)
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Use a temporary RequestQueue to collect requests that need to be
@@ -343,14 +329,7 @@ class SchedulerDynamicBatch(Scheduler):
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
-                if (
-                    self.lora_config
-                    and request.lora_request
-                    and (
-                        len(scheduled_loras) == self.lora_config.max_loras
-                        and request.lora_request.lora_int_id not in scheduled_loras
-                    )
-                ):
+                if self.lora_config and request.lora_request and (len(scheduled_loras) == self.lora_config.max_loras and request.lora_request.lora_int_id not in scheduled_loras):
                     # Scheduling would exceed max_loras, skip.
                     self.waiting.pop_request()
                     skipped_waiting_requests.prepend_request(request)
@@ -362,15 +341,11 @@ class SchedulerDynamicBatch(Scheduler):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                        request
-                    )
+                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        num_external_computed_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
-                            request, num_new_local_computed_tokens
-                        )
+                        num_external_computed_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(request, num_new_local_computed_tokens)
 
                         if num_external_computed_tokens is None:
                             # The request cannot be scheduled because
@@ -534,10 +509,7 @@ class SchedulerDynamicBatch(Scheduler):
             any_request = self.running[0]
             num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request.request_id)
         # Construct the scheduler output.
-        new_reqs_data = [
-            NewRequestData.from_request(req, req_to_new_blocks[req.request_id].get_block_ids())
-            for req in scheduled_new_reqs
-        ]
+        new_reqs_data = [NewRequestData.from_request(req, req_to_new_blocks[req.request_id].get_block_ids()) for req in scheduled_new_reqs]
         cached_reqs_data = self._make_cached_request_data(
             scheduled_running_reqs,
             scheduled_resumed_reqs,

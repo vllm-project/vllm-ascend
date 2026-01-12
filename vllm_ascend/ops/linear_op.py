@@ -551,10 +551,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             if bias_ is not None:
                 output.add_(bias_)
         # For w8a8 quant
-        elif mmrs_fusion and (
-            isinstance(self.layer.quant_method, AscendLinearMethod)
-            and isinstance(self.layer.quant_method.quant_method, AscendW8A8LinearMethod)
-        ):
+        elif mmrs_fusion and (isinstance(self.layer.quant_method, AscendLinearMethod) and isinstance(self.layer.quant_method.quant_method, AscendW8A8LinearMethod)):
             if x.dtype != torch.int8:
                 x_quant = torch.ops.vllm.quantize(
                     x,
@@ -616,16 +613,7 @@ def _get_column_parallel_op(prefix, layer) -> MLPColumnParallelOp | SequenceColu
     return None
 
 
-def _get_row_parallel_op(
-    prefix, layer
-) -> (
-    MLPRowParallelOp
-    | OProjRowParallelOp
-    | Flashcomm2OProjRowParallelOp
-    | MatmulAllreduceRowParallelOp
-    | SequenceRowParallelOp
-    | None
-):
+def _get_row_parallel_op(prefix, layer) -> MLPRowParallelOp | OProjRowParallelOp | Flashcomm2OProjRowParallelOp | MatmulAllreduceRowParallelOp | SequenceRowParallelOp | None:
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():

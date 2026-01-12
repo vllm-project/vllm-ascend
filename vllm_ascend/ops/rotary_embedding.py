@@ -132,12 +132,8 @@ def update_cos_sin(positions):
         return
 
     num_tokens = positions.size(0)
-    _cos[:, :num_tokens] = (
-        _cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[0]
-    )
-    _sin[:, :num_tokens] = (
-        _cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[1]
-    )
+    _cos[:, :num_tokens] = _cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[0]
+    _sin[:, :num_tokens] = _cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[1]
     _cos_slice = _cos[:, :num_tokens]
     _sin_slice = _sin[:, :num_tokens]
 
@@ -164,10 +160,7 @@ def _rope_forward_oot(
     if self.cos_sin_cache.dtype != query.dtype:
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
     # adopt custom kernel path for rotary_embedding
-    if (
-        _custom_rotary_embedding_enabled(query, is_neox_style, self.head_size)
-        and get_ascend_device_type() != AscendDeviceType._310P
-    ):
+    if _custom_rotary_embedding_enabled(query, is_neox_style, self.head_size) and get_ascend_device_type() != AscendDeviceType._310P:
         query, key = torch.ops._C_ascend.rotary_embedding(
             positions,
             query,
@@ -181,13 +174,7 @@ def _rope_forward_oot(
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
     else:
         cos, sin = get_cos_and_sin_slice()
-        if (
-            is_neox_style
-            and self.head_size == 128
-            and self.cos_sin_cache.shape[-1] == 128
-            and cos is not None
-            and sin is not None
-        ):
+        if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[-1] == 128 and cos is not None and sin is not None:
             # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
             # This method requires head_size and rotary_dim equal 128 and neox_style is True
             query = query.contiguous().view(1, query.shape[0], -1, self.head_size)
@@ -333,14 +320,8 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         # Get n-d magnitude scaling corrected for interpolation.
-        self.mscale = float(
-            self._yarn_get_mscale(self.scaling_factor, float(mscale))
-            / self._yarn_get_mscale(self.scaling_factor, float(mscale_all_dim))
-            * attn_factor
-        )
-        super(DeepseekScalingRotaryEmbedding, self).__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
-        )
+        self.mscale = float(self._yarn_get_mscale(self.scaling_factor, float(mscale)) / self._yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) * attn_factor)
+        super(DeepseekScalingRotaryEmbedding, self).__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
 
         # NOTE: For ascend friendly computing, reorder sin and cos cache
         self.max_seq_len = math.ceil(max_position_embeddings * scaling_factor)
@@ -368,9 +349,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
     # Inverse dim formula to find dim based on number of rotations
     def _yarn_find_correction_dim(self, num_rotations, dim, base=10000, max_position_embeddings=2048):
         # Note: use torch instead of math to solve MTP compilation error.
-        return (dim * torch.log(torch.tensor(max_position_embeddings) / (num_rotations * 2 * torch.pi))) / (
-            2 * torch.log(torch.tensor(base))
-        )
+        return (dim * torch.log(torch.tensor(max_position_embeddings) / (num_rotations * 2 * torch.pi))) / (2 * torch.log(torch.tensor(base)))
 
     # Find dim range bounds based on rotations
     def _yarn_find_correction_range(self, low_rot, high_rot, dim, base=10000, max_position_embeddings=2048):
@@ -431,9 +410,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         dim = self.rotary_dim
 
         freq_extra = 1.0 / (self.base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
-        freq_inter = 1.0 / (
-            self.scaling_factor * self.base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
-        )
+        freq_inter = 1.0 / (self.scaling_factor * self.base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
 
         low, high = self._yarn_find_correction_range(
             self.beta_fast,

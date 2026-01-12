@@ -68,9 +68,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         layer.weight_scale = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.float32), requires_grad=False)
         layer.weight_offset = torch.nn.Parameter(torch.empty_like(layer.weight_scale.data), requires_grad=False)
         layer.weight_scale_second = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.float32), requires_grad=False)
-        layer.weight_offset_second = torch.nn.Parameter(
-            torch.empty_like(layer.weight_scale_second.data), requires_grad=False
-        )
+        layer.weight_offset_second = torch.nn.Parameter(torch.empty_like(layer.weight_scale_second.data), requires_grad=False)
         mock_format_cast.return_value = layer.weight.data.transpose(0, 1).contiguous()
         self.method.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "weight_scale_bias"))
@@ -82,12 +80,8 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         new_layer.weight = torch.nn.Parameter(torch.zeros((16, 8), dtype=torch.int8), requires_grad=False)
         new_layer.weight_scale = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.float32), requires_grad=False)
         new_layer.weight_offset = torch.nn.Parameter(torch.empty_like(new_layer.weight_scale.data), requires_grad=False)
-        new_layer.weight_scale_second = torch.nn.Parameter(
-            torch.ones((32, 1), dtype=torch.float32), requires_grad=False
-        )
-        new_layer.weight_offset_second = torch.nn.Parameter(
-            torch.empty_like(new_layer.weight_scale_second.data), requires_grad=False
-        )
+        new_layer.weight_scale_second = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.float32), requires_grad=False)
+        new_layer.weight_offset_second = torch.nn.Parameter(torch.empty_like(new_layer.weight_scale_second.data), requires_grad=False)
         new_layer.scale_bias = torch.nn.Parameter(torch.zeros((32, 1), dtype=torch.float32), requires_grad=False)
         mock_format_cast.return_value = new_layer.weight.data.transpose(0, 1).contiguous()
         self.method.process_weights_after_loading(new_layer)
@@ -150,9 +144,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
 
     def test_get_dynamic_quant_param(self):
         # old quant version weight
-        param_dict = self.quant_method.get_dynamic_quant_param(
-            self.experts, self.input_size, self.output_size, torch.bfloat16
-        )
+        param_dict = self.quant_method.get_dynamic_quant_param(self.experts, self.input_size, self.output_size, torch.bfloat16)
         self.assertEqual(param_dict["w13_weight_scale"].dtype, torch.float32)
         self.assertEqual(param_dict["w13_weight_scale"].shape, (self.experts, 2 * self.input_size, 1))
         self.assertEqual(param_dict["w13_weight_scale_second"].dtype, torch.float32)
@@ -169,9 +161,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         )
         # new quant version weight
         self.quant_method.new_quant_version = True
-        param_dict = self.quant_method.get_dynamic_quant_param(
-            self.experts, self.input_size, self.output_size, torch.bfloat16
-        )
+        param_dict = self.quant_method.get_dynamic_quant_param(self.experts, self.input_size, self.output_size, torch.bfloat16)
         self.assertEqual(param_dict["w2_scale_bias"].dtype, torch.float32)
         self.assertEqual(
             param_dict["w2_scale_bias"].shape,
@@ -179,9 +169,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         )
         # per-channel weight
         self.quant_method.is_per_channel_weight = True
-        param_dict = self.quant_method.get_dynamic_quant_param(
-            self.experts, self.input_size, self.output_size, torch.bfloat16
-        )
+        param_dict = self.quant_method.get_dynamic_quant_param(self.experts, self.input_size, self.output_size, torch.bfloat16)
         pergroup_param = [
             "w13_weight_scale_second",
             "w13_weight_offset_second",
@@ -259,9 +247,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
                 ),
                 requires_grad=False,
             )
-            layer.w2_weight_offset_second = torch.nn.Parameter(
-                torch.empty_like(layer.w2_weight_scale_second.data), requires_grad=False
-            )
+            layer.w2_weight_offset_second = torch.nn.Parameter(torch.empty_like(layer.w2_weight_scale_second.data), requires_grad=False)
         return layer
 
     @patch("torch_npu.npu_format_cast")

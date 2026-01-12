@@ -93,11 +93,6 @@ def check_embeddings_close(
 
         sim = F.cosine_similarity(torch.tensor(embeddings_0), torch.tensor(embeddings_1), dim=0)
 
-        fail_msg = (
-            f"Test{prompt_idx}:"
-            f"\nCosine similarity: \t{sim:.4f}"
-            f"\n{name_0}:\t{embeddings_0[:16]!r}"
-            f"\n{name_1}:\t{embeddings_1[:16]!r}"
-        )
+        fail_msg = f"Test{prompt_idx}:\nCosine similarity: \t{sim:.4f}\n{name_0}:\t{embeddings_0[:16]!r}\n{name_1}:\t{embeddings_1[:16]!r}"
 
         assert sim >= 1 - tol, fail_msg

@@ -83,9 +83,7 @@ def pack_to_int32(weight: torch.Tensor) -> torch.Tensor:
     :return: Packed tensor with int32 dtype optimized for storage
     """
     assert weight.dim() == 3, f"Expecting `weight.dim()` is 3 ([e, n, k] or [e, k, n]) but got {weight.dim()}."
-    assert weight.dtype in [torch.int8, torch.int32], (
-        f"Expecting `weight.dtype` is torch.int8 or torch.int32 bug got {weight.dtype}."
-    )
+    assert weight.dtype in [torch.int8, torch.int32], f"Expecting `weight.dtype` is torch.int8 or torch.int32 bug got {weight.dtype}."
 
     if weight.dtype == torch.int32:
         assert weight.shape[-1] % 8 == 0, "the last dim of weight needs to be divided by 8."
@@ -121,9 +119,7 @@ class AscendW4A16FusedMoEMethod:
         assert intermediate_size_per_partition % self.pack_factor == 0, (
             f"Expecting `intermediate_size_per_partition` {intermediate_size_per_partition} can be divided by `pack_factor` {self.pack_factor}"
         )
-        assert hidden_sizes % self.pack_factor == 0, (
-            f"Expecting `hidden_sizes` {hidden_sizes} can be divided by `pack_factor` {self.pack_factor}"
-        )
+        assert hidden_sizes % self.pack_factor == 0, f"Expecting `hidden_sizes` {hidden_sizes} can be divided by `pack_factor` {self.pack_factor}"
 
         param_dict = {}
 
@@ -152,9 +148,7 @@ class AscendW4A16FusedMoEMethod:
         assert intermediate_size_per_partition % self.group_size == 0, (
             f"Expecting `intermediate_size_per_partition` {intermediate_size_per_partition} can be divided by `group_size` {self.group_size}"
         )
-        assert hidden_sizes % self.group_size == 0, (
-            f"Expecting `hidden_sizes` {hidden_sizes} can be divided by `group_size` {self.group_size}"
-        )
+        assert hidden_sizes % self.group_size == 0, f"Expecting `hidden_sizes` {hidden_sizes} can be divided by `group_size` {self.group_size}"
 
         param_dict = {}
 
@@ -212,9 +206,7 @@ class AscendW4A16FusedMoEMethod:
         dynamic_scale_for_share: Any | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, (
-            "Number of global experts mismatch (excluding redundancy)"
-        )
+        assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,

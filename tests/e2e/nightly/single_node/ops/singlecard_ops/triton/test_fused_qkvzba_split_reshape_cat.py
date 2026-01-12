@@ -15,13 +15,7 @@ def validate_cmp(y_cal, y_ref, dtype, device="npu"):
         torch.testing.assert_close(y_ref, y_cal, rtol=5e-03, atol=5e-03, equal_nan=True)
     elif dtype == torch.float32:
         torch.testing.assert_close(y_ref, y_cal, rtol=1e-03, atol=1e-03, equal_nan=True)
-    elif (
-        dtype == torch.int32
-        or dtype == torch.int64
-        or dtype == torch.int16
-        or dtype == torch.int8
-        or dtype == torch.uint32
-    ) or dtype == torch.bool:
+    elif (dtype == torch.int32 or dtype == torch.int64 or dtype == torch.int16 or dtype == torch.int8 or dtype == torch.uint32) or dtype == torch.bool:
         assert torch.equal(y_cal, y_ref)
     else:
         raise ValueError('Invalid parameter "dtype" is found : {}'.format(dtype))
@@ -75,9 +69,7 @@ def test_fused_qkvzba_split_reshape_cat(
     gdn.head_v_dim = head_v_dim
     gdn.tp_size = 1
 
-    query, key, value, z_ref, b_ref, a_ref = gdn.fix_query_key_value_ordering(
-        mixed_qkvz=projected_states_qkvz, mixed_ba=projected_states_ba
-    )
+    query, key, value, z_ref, b_ref, a_ref = gdn.fix_query_key_value_ordering(mixed_qkvz=projected_states_qkvz, mixed_ba=projected_states_ba)
     query, key, value = map(lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value))
     mixed_qkv_ref = torch.cat((query, key, value), dim=-1)
 

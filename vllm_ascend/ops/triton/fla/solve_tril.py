@@ -65,13 +65,7 @@ def solve_tril_16x16_kernel(
             offs_cols_in_block = tl.arange(0, 16)
 
             # 2 Calculate the pointer of each element
-            ptr_A_subrec16 = (
-                A
-                + row_start_o * H * BT
-                + col_start_o
-                + offs_rows_in_block[:, None] * H * BT
-                + offs_cols_in_block[None, :]
-            )
+            ptr_A_subrec16 = A + row_start_o * H * BT + col_start_o + offs_rows_in_block[:, None] * H * BT + offs_cols_in_block[None, :]
 
             # 3 Create a mask to prevent out-of-bounds access
             global_rows = row_start_o + offs_rows_in_block[:, None]

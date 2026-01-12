@@ -45,9 +45,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             self.quant_method = AscendW8A8DynamicFusedMoEMethod()
 
     def test_get_weight(self):
-        param_dict = self.quant_method.get_weight(
-            self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16
-        )
+        param_dict = self.quant_method.get_weight(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
         self.assertEqual(param_dict["w13_weight"].dtype, torch.int8)
         self.assertEqual(
             param_dict["w13_weight"].shape,
@@ -55,9 +53,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         )
 
     def test_get_dynamic_quant_param(self):
-        param_dict = self.quant_method.get_dynamic_quant_param(
-            self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16
-        )
+        param_dict = self.quant_method.get_dynamic_quant_param(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
         self.assertEqual(param_dict["w13_weight_scale"].dtype, torch.bfloat16)
         self.assertEqual(
             param_dict["w13_weight_scale"].shape,

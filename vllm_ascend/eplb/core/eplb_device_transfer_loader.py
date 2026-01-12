@@ -56,14 +56,12 @@ class D2DExpertWeightLoader:
                 src_tensor = src_tensor.clone()
                 self.comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank))
 
-        buffer_tensor_id = 0
-        for recv_info in expert_recv_info:
+        for buffer_tensor_id, recv_info in enumerate(expert_recv_info):
             recv_rank, global_expert_id_to_recv = recv_info
             for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
                 self.comm_op_list.append(dist.P2POp(dist.irecv, buffer_tensor, recv_rank))
             local_expert_to_replace = self.updated_expert_map[global_expert_id_to_recv].item()
             self.recv_expert_list.append((local_expert_to_replace, buffer_tensor_id))
-            buffer_tensor_id += 1
 
         self.state = ExpertWeightUpdateState.READY
 

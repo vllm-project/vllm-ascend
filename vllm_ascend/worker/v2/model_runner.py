@@ -139,10 +139,7 @@ class NPUModelRunner(GPUModelRunner):
         num_valid_tokens = num_scheduled_tokens
         if scheduler_output.scheduled_spec_decode_tokens:
             num_valid_tokens = np.array(
-                [
-                    num_tokens - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-                    for num_tokens, i in zip(num_scheduled_tokens, req_ids)
-                ],
+                [num_tokens - len(scheduler_output.scheduled_spec_decode_tokens.get(i, [])) for num_tokens, i in zip(num_scheduled_tokens, req_ids)],
                 dtype=np.int32,
             )
         attn_state = build_attn_state(
@@ -238,9 +235,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
-        slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc_gpu, self.input_buffers.positions[:num_tokens]
-        )
+        slot_mappings = self.block_tables.compute_slot_mappings(query_start_loc_gpu, self.input_buffers.positions[:num_tokens])
 
         # Layer name -> attention metadata.
         # TODO(Ronald1995): try to add a new method `build_attn_metadata` in

@@ -457,7 +457,8 @@ async def _handle_completions(api: str, request: Request):
                     yield chunk
             except Exception as e:
                 logger.error(
-                    f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} will be routing to the target prefiller when new request is ready to dispatch to it"
+                    f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} will be routing to the target prefiller when new request \
+                    is ready to dispatch to it"
                 )
 
             # After streaming done, release tokens

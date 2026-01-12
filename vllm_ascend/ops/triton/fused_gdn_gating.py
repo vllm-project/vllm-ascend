@@ -83,9 +83,7 @@ def fused_gdn_gating_patch(
         progs = num_cores
         FACTOR = 8 * num_heads
         row_per_core = triton.cdiv(batch, num_cores)
-        BLK_BATCHES = (
-            triton.next_power_of_2(triton.cdiv(UNIFIED_BUFFER_SIZE, FACTOR * BLK_HEADS) // a.element_size()) // 2
-        )
+        BLK_BATCHES = triton.next_power_of_2(triton.cdiv(UNIFIED_BUFFER_SIZE, FACTOR * BLK_HEADS) // a.element_size()) // 2
         ROW_ITER = triton.cdiv(row_per_core, BLK_BATCHES)
 
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)

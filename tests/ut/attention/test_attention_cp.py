@@ -198,9 +198,7 @@ class TestAscendAttentionCPImpl(TestBase):
 
         attn_metadata = MagicMock()
 
-        key, value = self.impl._load_kv_for_chunk(
-            attn_metadata, kv_cache, local_chunked_kv_lens_rank, query, total_toks
-        )
+        key, value = self.impl._load_kv_for_chunk(attn_metadata, kv_cache, local_chunked_kv_lens_rank, query, total_toks)
 
         self.assertEqual(key.shape[0], total_toks)
         self.assertEqual(key.shape[1], num_heads)
@@ -432,9 +430,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
 
     @patch("torch.ops.npu.npu_fused_infer_attention_score")
     @patch("vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update")
-    def test_attention_with_nomask_and_mask_nochunk(
-        self, mock_npu_attn_out_lse_update, mock_npu_fused_infer_attention_score
-    ):
+    def test_attention_with_nomask_and_mask_nochunk(self, mock_npu_attn_out_lse_update, mock_npu_fused_infer_attention_score):
         # Mock input data
         q = torch.randn(self.q_total_tokens, self.impl.num_heads, self.impl.head_size)
         k_nomask = torch.randn(self.kv_total_nomask, self.impl.num_kv_heads, self.impl.head_size)
@@ -451,9 +447,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
             torch.randn(self.q_total_tokens, self.impl.num_heads, self.impl.head_size),
             torch.randn(self.q_total_tokens, self.impl.num_heads, 1),
         )
-        mock_npu_attn_out_lse_update.return_value = torch.randn(
-            self.q_total_tokens, self.impl.num_heads, self.impl.head_size
-        )
+        mock_npu_attn_out_lse_update.return_value = torch.randn(self.q_total_tokens, self.impl.num_heads, self.impl.head_size)
 
         # Call the method under test
         output, attn_lse = self.impl._attention_with_nomask_and_mask(

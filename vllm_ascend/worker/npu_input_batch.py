@@ -70,9 +70,7 @@ class NPUInputBatch(InputBatch):
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.is_token_ids_tensor = torch.zeros(
-            (max_num_reqs, max_model_len), device="cpu", dtype=bool, pin_memory=False
-        )
+        self.is_token_ids_tensor = torch.zeros((max_num_reqs, max_model_len), device="cpu", dtype=bool, pin_memory=False)
         self.is_token_ids = self.is_token_ids_tensor.numpy()
         # Store prompt embeddings per request to avoid OOM from large upfront
         # allocation if max_model_len is big.
@@ -104,9 +102,7 @@ class NPUInputBatch(InputBatch):
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
-        self.temperature_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory
-        )
+        self.temperature_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory)
         self.temperature_cpu = self.temperature_cpu_tensor.numpy()
         self.greedy_reqs: set[str] = set()
         self.random_reqs: set[str] = set()
@@ -126,32 +122,24 @@ class NPUInputBatch(InputBatch):
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs,), dtype=torch.float, device=device)
-        self.frequency_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
-        )
+        self.frequency_penalties_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory)
         self.frequency_penalties_cpu = self.frequency_penalties_cpu_tensor.numpy()
         self.frequency_penalties_reqs: set[str] = set()
 
         # Presence penalty related data structures
         self.presence_penalties = torch.empty((max_num_reqs,), dtype=torch.float, device=device)
-        self.presence_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
-        )
+        self.presence_penalties_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory)
         self.presence_penalties_cpu = self.presence_penalties_cpu_tensor.numpy()
         self.presence_penalties_reqs: set[str] = set()
 
         # Repetition penalty related data structures
         self.repetition_penalties = torch.empty((max_num_reqs,), dtype=torch.float, device=device)
-        self.repetition_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
-        )
+        self.repetition_penalties_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory)
         self.repetition_penalties_cpu = self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: set[str] = set()
 
         # Speculative decoding
-        self.num_accepted_tokens_cpu_tensor = torch.ones(
-            (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
-        )
+        self.num_accepted_tokens_cpu_tensor = torch.ones((max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory)
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
         # lora related

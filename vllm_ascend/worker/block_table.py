@@ -52,10 +52,7 @@ class BlockTable:
                     break
 
             if selected_kernel_size is None:
-                raise ValueError(
-                    f"None of the kernel sizes {kernel_sizes} can divide "
-                    f"physical block size {self.physical_block_size} evenly"
-                )
+                raise ValueError(f"None of the kernel sizes {kernel_sizes} can divide physical block size {self.physical_block_size} evenly")
 
             self.block_size = selected_kernel_size
             self.logical_block_size = selected_kernel_size
@@ -142,24 +139,17 @@ class BlockTable:
             # (always needed with unified tensor)
             # Each physical block is split into multiple logical blocks
             # The logical table has been expanded to accommodate this
-            block_table_indices = (
-                req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
-            )
+            block_table_indices = req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
 
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             # Use virtual_block_size for mask calculation, which marks local
             # tokens.
             virtual_block_offsets = positions % virtual_block_size
             self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
-            mask = (
-                virtual_block_offsets // self.cp_kv_cache_interleave_size % (self.dcp_world_size * self.pcp_world_size)
-                == self.current_rank
-            )
+            mask = virtual_block_offsets // self.cp_kv_cache_interleave_size % (self.dcp_world_size * self.pcp_world_size) == self.current_rank
             # Calculate local block_offsets
             block_offsets = (
-                virtual_block_offsets
-                // (self.dcp_world_size * self.pcp_world_size * self.cp_kv_cache_interleave_size)
-                * self.cp_kv_cache_interleave_size
+                virtual_block_offsets // (self.dcp_world_size * self.pcp_world_size * self.cp_kv_cache_interleave_size) * self.cp_kv_cache_interleave_size
                 + virtual_block_offsets % self.cp_kv_cache_interleave_size
             )
             # Calculate slot_mapping
@@ -177,9 +167,7 @@ class BlockTable:
                 # (always needed with unified tensor)
                 # Each physical block is split into multiple logical blocks
                 # The logical table has been expanded to accommodate this
-                block_table_indices = (
-                    req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
-                )
+                block_table_indices = req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
 
                 block_numbers = self.block_table.np.ravel()[block_table_indices]
                 block_offsets = positions % self.block_size
@@ -265,9 +253,7 @@ class MultiGroupBlockTable:
         elif len(kernel_sizes) == 1 and len(block_sizes) > 1:
             kernel_sizes = kernel_sizes * len(block_sizes)
         elif len(kernel_sizes) != len(block_sizes):
-            raise ValueError(
-                f"kernel_sizes length ({len(kernel_sizes)}) must match block_sizes length ({len(block_sizes)})"
-            )
+            raise ValueError(f"kernel_sizes length ({len(kernel_sizes)}) must match block_sizes length ({len(block_sizes)})")
 
         # Use zip to pair block_sizes with kernel_sizes one-to-one
         self.block_tables = [

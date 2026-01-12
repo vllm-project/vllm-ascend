@@ -104,9 +104,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
     )
     @patch("vllm_ascend.distributed.mooncake_layerwise_connector.torch.npu.synchronize")
     @patch("vllm_ascend.distributed.mooncake_layerwise_connector.group_concurrent_contiguous")
-    def test_transfer_pd_gt1_uses_buffers_and_calls_engine(
-        self, mock_group, _mock_sync, _mock_align, _mock_dataptr, mock_stream_switch
-    ):
+    def test_transfer_pd_gt1_uses_buffers_and_calls_engine(self, mock_group, _mock_sync, _mock_align, _mock_dataptr, mock_stream_switch):
         fake_resharding_stream = MagicMock()
 
         thread = KVCacheSendingLayerThread(
@@ -379,9 +377,7 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
     @patch("vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Decoder")
     @patch("vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Encoder")
     @patch("vllm_ascend.distributed.mooncake_layerwise_connector.zmq_ctx")
-    def test_run_loop_pd_head_ratio_gt1_requires_multiple_done(
-        self, mock_zmq_ctx, mock_Encoder, mock_Decoder, _mock_get_ip, _mock_logger
-    ):
+    def test_run_loop_pd_head_ratio_gt1_requires_multiple_done(self, mock_zmq_ctx, mock_Encoder, mock_Decoder, _mock_get_ip, _mock_logger):
         enc_inst = MagicMock()
         enc_inst.encode.return_value = b"ENC"
         mock_Encoder.return_value = enc_inst

@@ -74,12 +74,7 @@ def get_chip_type() -> str:
     try:
         npu_info_lines = subprocess.check_output(["npu-smi", "info", "-l"]).decode().strip().split("\n")
         npu_id = int(get_value_from_lines(npu_info_lines, "NPU ID"))
-        chip_info_lines = (
-            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
-            .decode()
-            .strip()
-            .split("\n")
-        )
+        chip_info_lines = subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"]).decode().strip().split("\n")
         chip_name = get_value_from_lines(chip_info_lines, "Chip Name")
         chip_type = get_value_from_lines(chip_info_lines, "Chip Type")
         npu_name = get_value_from_lines(chip_info_lines, "NPU Name")
@@ -103,9 +98,7 @@ def get_chip_type() -> str:
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Get chip info failed: {e}")
     except FileNotFoundError:
-        logging.warning(
-            "npu-smi command not found, if this is an npu envir, please check if npu driver is installed correctly."
-        )
+        logging.warning("npu-smi command not found, if this is an npu envir, please check if npu driver is installed correctly.")
         return ""
 
 
@@ -274,9 +267,7 @@ class cmake_build_ext(build_ext):
 
         try:
             # if pybind11 is installed via pip
-            pybind11_cmake_path = (
-                subprocess.check_output([python_executable, "-m", "pybind11", "--cmakedir"]).decode().strip()
-            )
+            pybind11_cmake_path = subprocess.check_output([python_executable, "-m", "pybind11", "--cmakedir"]).decode().strip()
         except subprocess.CalledProcessError as e:
             # else specify pybind11 path installed from source code on CI container
             raise RuntimeError(f"CMake configuration failed: {e}")

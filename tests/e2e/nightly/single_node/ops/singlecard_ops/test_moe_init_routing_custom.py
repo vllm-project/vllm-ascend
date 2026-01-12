@@ -211,22 +211,20 @@ def npu_pta(
     active_expert_range,
     row_idx_type,
 ):
-    expanded_x, expanded_row_idx, expert_token_cumsum_or_count, expanded_scale = (
-        torch.ops._C_ascend.npu_moe_init_routing_custom(
-            x,
-            expert_idx,
-            scale=scale,
-            offset=offset,
-            active_num=active_num,
-            expert_capacity=expert_capacity,
-            expert_num=expert_num,
-            drop_pad_mode=drop_pad_mode,
-            expert_tokens_num_type=expert_tokens_num_type,
-            expert_tokens_num_flag=expert_tokens_num_flag,
-            quant_mode=quant_mode,
-            active_expert_range=active_expert_range,
-            row_idx_type=row_idx_type,
-        )
+    expanded_x, expanded_row_idx, expert_token_cumsum_or_count, expanded_scale = torch.ops._C_ascend.npu_moe_init_routing_custom(
+        x,
+        expert_idx,
+        scale=scale,
+        offset=offset,
+        active_num=active_num,
+        expert_capacity=expert_capacity,
+        expert_num=expert_num,
+        drop_pad_mode=drop_pad_mode,
+        expert_tokens_num_type=expert_tokens_num_type,
+        expert_tokens_num_flag=expert_tokens_num_flag,
+        quant_mode=quant_mode,
+        active_expert_range=active_expert_range,
+        row_idx_type=row_idx_type,
     )
 
     return expanded_x, expanded_row_idx, expert_token_cumsum_or_count, expanded_scale
@@ -309,9 +307,7 @@ def test_moe_npu(
     expanded_row_idx_result = cmp_out_golden(expanded_row_idx_golden, expanded_row_idx, "int32")
 
     if expert_tokens_num_flag:
-        expert_tokens_result = cmp_out_golden(
-            expert_token_cumsum_or_count_golden, expert_token_cumsum_or_count, "int64"
-        )
+        expert_tokens_result = cmp_out_golden(expert_token_cumsum_or_count_golden, expert_token_cumsum_or_count, "int64")
     else:
         expert_tokens_result = True
 

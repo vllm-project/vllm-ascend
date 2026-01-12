@@ -187,13 +187,7 @@ class ElasticClient:
 
         logger.info(f"Receive ack: {ack}")
 
-        if (
-            "label" in ack
-            and ack["label"] == "JOIN_ACK"
-            and "content" in ack
-            and ack["content"] is not None
-            and "name" in ack["content"]
-        ):
+        if "label" in ack and ack["label"] == "JOIN_ACK" and "content" in ack and ack["content"] is not None and "name" in ack["content"]:
             return (ack["content"]["name"], free_port)
         elif "label" in ack and ack["label"] == "JOIN_NACK" and "content" in ack:
             raise RuntimeError(f"Receive nack from server, reason: {ack['content']}")
@@ -250,9 +244,7 @@ class ElasticServer:
         for name, param in self.model.named_parameters():
             if param.dtype == torch.int8:
                 if int8_cache == "hbm":
-                    if int8_cache_name is None or (
-                        int8_cache_name is not None and re.search(int8_pattern, name) is not None
-                    ):
+                    if int8_cache_name is None or (int8_cache_name is not None and re.search(int8_pattern, name) is not None):
                         try:
                             self.original_int8[name] = param.data.clone().detach()
                         except RuntimeError as e:
@@ -260,16 +252,12 @@ class ElasticServer:
                             self.original_int8[name] = param.data.cpu()
 
                 elif int8_cache == "dram":
-                    if int8_cache_name is None or (
-                        int8_cache_name is not None and re.search(int8_pattern, name) is not None
-                    ):
+                    if int8_cache_name is None or (int8_cache_name is not None and re.search(int8_pattern, name) is not None):
                         self.original_int8[name] = param.data.cpu()
                 elif int8_cache == "no":
                     pass
                 else:
-                    logger.warning(
-                        f"int8_cache should be selected in [HBM, DRAM], but got {int8_cache}, change to no cache"
-                    )
+                    logger.warning(f"int8_cache should be selected in [HBM, DRAM], but got {int8_cache}, change to no cache")
 
         logger.info(
             f"Server {self.addr}:{self.port} starts, device id: {self.device_id}, model path: {self.model_path}, tp: {self.tp}, pp: {self.pp}, int8 params {self.original_int8.keys()} are saved to {int8_cache}"
@@ -349,12 +337,7 @@ class ElasticServer:
             tp = int(data["content"]["tp"])
             pp = int(data["content"]["pp"])
 
-            if (
-                int(self.device_id) == device_id
-                and self.model_path == model_path
-                and int(self.tp) == tp
-                and int(self.pp) == pp
-            ):
+            if int(self.device_id) == device_id and self.model_path == model_path and int(self.tp) == tp and int(self.pp) == pp:
                 comm_name = str(addr[0]) + ":" + str(addr[1])
                 ack = {"label": "JOIN_ACK", "content": {"name": comm_name}}
             else:

@@ -235,9 +235,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         addr_list = []
         size_list = []
         key_list = []
-        for start, end, key in self.token_database.process_tokens(
-            req_meta.token_len_chunk, req_meta.block_hashes, mask_num
-        ):
+        for start, end, key in self.token_database.process_tokens(req_meta.token_len_chunk, req_meta.block_hashes, mask_num):
             addr, size, _ = self.token_database.prepare_value(start, end, req_meta.block_ids)
             key_list.append(key.to_string())
             addr_list.append(addr)
@@ -317,9 +315,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         addr_list = []
         size_list = []
         for index, key in enumerate(key_list):
-            addr, size = self.token_database.prepare_value_layer(
-                starts[index], ends[index], req_meta.block_ids, layer_id
-            )
+            addr, size = self.token_database.prepare_value_layer(starts[index], ends[index], req_meta.block_ids, layer_id)
             addr_list.append(addr)
             size_list.append(size)
 

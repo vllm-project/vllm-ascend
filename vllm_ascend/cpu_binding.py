@@ -282,10 +282,7 @@ def bind_cpus(rank_id, ratio=0.5):
     shard_devices.sort()
 
     all_cpus = cpu_idx_tbl.get(numa_id)
-    logger.info(
-        f"rank_id: {rank_id}, device_id: {cur_device}, "
-        f"numa_id: {numa_id}, shard_devices: {shard_devices}, cpus: {all_cpus}"
-    )
+    logger.info(f"rank_id: {rank_id}, device_id: {cur_device}, numa_id: {numa_id}, shard_devices: {shard_devices}, cpus: {all_cpus}")
 
     cpu_nums = len(all_cpus)
     if CPU_BINDING_NUM is None:
@@ -293,10 +290,7 @@ def bind_cpus(rank_id, ratio=0.5):
     else:
         cpu_num_per_device = int(CPU_BINDING_NUM)
         if len(shard_devices) * cpu_num_per_device > cpu_nums:
-            raise RuntimeError(
-                f"Cpu num in numa {numa_id} to assign {cpu_num_per_device} for every device is not enough, "
-                f"please decrease the value of CPU_BINDING_NUM!"
-            )
+            raise RuntimeError(f"Cpu num in numa {numa_id} to assign {cpu_num_per_device} for every device is not enough, please decrease the value of CPU_BINDING_NUM!")
         if cpu_num_per_device < 0:
             raise ValueError("CPU_BINDING_NUM should not be less than 0.")
 

@@ -190,9 +190,7 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     max_batch_sizes = math.floor((1800 - num_comm_groups * 40) / num_acl_graphs / (1 + num_comm_groups * 2))
 
     expected_capture = max_batch_sizes * num_acl_graphs * dp_size
-    assert actual_capture == expected_capture, (
-        f"Capture count mismatch. Expected: {expected_capture}, Got: {actual_capture}"
-    )
+    assert actual_capture == expected_capture, f"Capture count mismatch. Expected: {expected_capture}, Got: {actual_capture}"
 
     # Metric 2: Model Execution (NPUModelRunner.execute_model)
     # vLLM Step Breakdown:
@@ -202,9 +200,7 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     total_steps = max_tokens + 1  # this includes the 1 and 2 above
     expected_exec_model = (total_steps + 1) * dp_size
 
-    assert num_execute_model == expected_exec_model, (
-        f"Model execution count mismatch. Expected: {expected_exec_model}, Got: {num_execute_model}"
-    )
+    assert num_execute_model == expected_exec_model, f"Model execution count mismatch. Expected: {expected_exec_model}, Got: {num_execute_model}"
 
     # Metric 3: Dummy Runs (Warmup & Alignment)
     # vLLM synchronizes globally every 32 steps.
@@ -223,9 +219,7 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
 
     expected_dummy_run = (warmup_runs + padding_runs) * dp_size
 
-    assert num_dummy_run == expected_dummy_run, (
-        f"Dummy run count mismatch. Expected: {expected_dummy_run}, Got: {num_dummy_run}"
-    )
+    assert num_dummy_run == expected_dummy_run, f"Dummy run count mismatch. Expected: {expected_dummy_run}, Got: {num_dummy_run}"
 
     # Metric 4: Graph Replay (Inference Execution)
     # Replays happen for every aligned step across all graphs.

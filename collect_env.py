@@ -84,7 +84,7 @@ DEFAULT_PIP_PATTERNS = {
 
 def run(command):
     """Return (return-code, stdout, stderr)."""
-    shell = True if type(command) is str else False
+    shell = type(command) is str
     p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=shell)
     raw_output, raw_err = p.communicate()
     rc = p.returncode
@@ -132,9 +132,7 @@ def get_conda_packages(run_lambda, patterns=None):
     if out is None:
         return out
 
-    return "\n".join(
-        line for line in out.splitlines() if not line.startswith("#") and any(name in line for name in patterns)
-    )
+    return "\n".join(line for line in out.splitlines() if not line.startswith("#") and any(name in line for name in patterns))
 
 
 def get_gcc_version(run_lambda):
@@ -394,14 +392,14 @@ CANN:
 
 def pretty_str(envinfo):
     def replace_nones(dct, replacement="Could not collect"):
-        for key in dct.keys():
+        for key in dct:
             if dct[key] is not None:
                 continue
             dct[key] = replacement
         return dct
 
     def replace_bools(dct, true="Yes", false="No"):
-        for key in dct.keys():
+        for key in dct:
             if dct[key] is True:
                 dct[key] = true
             elif dct[key] is False:
@@ -464,10 +462,7 @@ def main():
             latest = max(dumps, key=os.path.getctime)
             ctime = os.path.getctime(latest)
             creation_time = datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S")
-            msg = (
-                "\n*** Detected a minidump at {} created on {}, ".format(latest, creation_time)
-                + "if this is related to your bug please include it when you file a report ***"
-            )
+            msg = "\n*** Detected a minidump at {} created on {}, ".format(latest, creation_time) + "if this is related to your bug please include it when you file a report ***"
             print(msg, file=sys.stderr)
 
 

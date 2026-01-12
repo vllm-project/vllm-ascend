@@ -22,9 +22,7 @@ class ModuleWeightPrefetchConfig:
     def __post_init__(self) -> None:
         self.prefetch_ratio = {prefix: ratio for prefix, ratio in self.prefetch_ratio.items() if 0 <= ratio <= 1}
 
-        assert self.module_name in SUPPORTED_MODULES, (
-            f"Invalid module name {self.module_name}, should be one of {SUPPORTED_MODULES}"
-        )
+        assert self.module_name in SUPPORTED_MODULES, f"Invalid module name {self.module_name}, should be one of {SUPPORTED_MODULES}"
 
         if self.module_name in SUPPORTED_MODULES:
             self.enable = self.enable and any(self.prefetch_ratio.values()) > 0
@@ -51,9 +49,7 @@ class WeightPrefetchMethod:
             prefetch_ratio=weight_prefetch_config.prefetch_ratio.get("moe", {}),
         )
 
-    def maybe_prefetch_attn_weight_preprocess(
-        self, layer_cls_name: str, weight: torch.Tensor, start_flag: torch.Tensor
-    ) -> None:
+    def maybe_prefetch_attn_weight_preprocess(self, layer_cls_name: str, weight: torch.Tensor, start_flag: torch.Tensor) -> None:
         if not self.attn.enable or layer_cls_name not in self.attn.linear_prefix_map:
             return
 
@@ -69,9 +65,7 @@ class WeightPrefetchMethod:
         torch.ops.vllm.prefetch_postprocess(stop_flag)
 
     def maybe_prefetch_moe_weight_preprocess(self, hidden_states, prefix):
-        self.moe.is_active_this_forward = (
-            hidden_states.shape[0] >= MOE_PREFETCH_TOKEN_THRESHOLD if self.moe.enable else False
-        )
+        self.moe.is_active_this_forward = hidden_states.shape[0] >= MOE_PREFETCH_TOKEN_THRESHOLD if self.moe.enable else False
         if not self.moe.is_active_this_forward:
             return
         forward_context = get_forward_context()

@@ -149,9 +149,7 @@ def test_token_dispatcher_with_all_gather(
         group_list_type=group_list_type,
     )
 
-    combined_output = dispatcher.token_combine(
-        hidden_states=expert_output, context_metadata=context_metadata, bias=None
-    )
+    combined_output = dispatcher.token_combine(hidden_states=expert_output, context_metadata=context_metadata, bias=None)
 
     torch_output = torch_moe(a, w1, w2, topk_weights, topk_ids, topk, expert_map)
 
@@ -233,9 +231,7 @@ def test_token_dispatcher_with_all_gather_quant(
             dynamic_scale=dynamic_scale,
             with_quant=True,
         )
-        combined_output = dispatcher.token_combine(
-            hidden_states=expert_output, context_metadata=context_metadata, bias=None
-        )
+        combined_output = dispatcher.token_combine(hidden_states=expert_output, context_metadata=context_metadata, bias=None)
         assert combined_output.routed_out.shape == (m, k)
         gc.collect()
         torch.npu.empty_cache()

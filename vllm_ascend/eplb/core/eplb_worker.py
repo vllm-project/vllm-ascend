@@ -96,9 +96,7 @@ class EplbWorker:
 
                 # check if same logical experts are placed on the same NPU
                 if new_placement_check.numel() != torch.unique(new_placement_check).numel():
-                    logger.error(
-                        f"Replicated experts are placed on the same NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid"
-                    )
+                    logger.error(f"Replicated experts are placed on the same NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid")
                     new_placement[layer_id] = old_placement[layer_id]
                     break
 
@@ -108,9 +106,7 @@ class EplbWorker:
                     new_placement_check[expert_not_move],
                     old_placement_check[expert_not_move],
                 ):
-                    logger.error(
-                        f"There exists expert movement inside NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid"
-                    )
+                    logger.error(f"There exists expert movement inside NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid")
                     new_placement[layer_id] = old_placement[layer_id]
                     break
 
@@ -143,9 +139,7 @@ class EplbWorker:
                 )
 
             # Parse expert_ids each rank needs to receive from other ranks
-            dst_rank_indices, experts_to_recv = np.where(
-                (current_expert_maps_this_layer == -1) & (updated_expert_maps_this_layer != -1)
-            )
+            dst_rank_indices, experts_to_recv = np.where((current_expert_maps_this_layer == -1) & (updated_expert_maps_this_layer != -1))
 
             # record src ranks for potential transfer
             src_ranks_set = dict()
@@ -237,14 +231,10 @@ class EplbWorker:
                 )
 
             # Parse expert_ids each rank needs to receive from other ranks
-            dst_rank_indices, experts_to_recv = torch.where(
-                (current_expert_maps_this_layer == -1) & (updated_expert_maps_this_layer != -1)
-            )
+            dst_rank_indices, experts_to_recv = torch.where((current_expert_maps_this_layer == -1) & (updated_expert_maps_this_layer != -1))
 
             # Parse expert_ids each rank needs to send to other ranks
-            src_rank_indices, experts_to_send = torch.where(
-                (current_expert_maps_this_layer != -1) & (updated_expert_maps_this_layer == -1)
-            )
+            src_rank_indices, experts_to_send = torch.where((current_expert_maps_this_layer != -1) & (updated_expert_maps_this_layer == -1))
 
             for idx in range(len(dst_rank_indices)):
                 dst_rank_id = dst_rank_indices[idx].item()
@@ -345,8 +335,8 @@ class EplbWorker:
         layer_ids = []
 
         for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
-            send_info_this_rank = send_info[self.rank_id] if self.rank_id in send_info else []
-            recv_info_this_rank = recv_info[self.rank_id] if self.rank_id in recv_info else []
+            send_info_this_rank = send_info.get(self.rank_id, [])
+            recv_info_this_rank = recv_info.get(self.rank_id, [])
             send_all.append(send_info_this_rank)
             recv_all.append(recv_info_this_rank)
 

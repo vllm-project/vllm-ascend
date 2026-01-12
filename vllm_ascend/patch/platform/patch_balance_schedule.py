@@ -47,10 +47,7 @@ class BalanceScheduler(Scheduler):
             log_stats,
         )
         # Balance scheduling.
-        self.balance_queue = [
-            torch.tensor([0], dtype=torch.int, device="cpu")
-            for _ in range(self.vllm_config.parallel_config.data_parallel_size)
-        ]
+        self.balance_queue = [torch.tensor([0], dtype=torch.int, device="cpu") for _ in range(self.vllm_config.parallel_config.data_parallel_size)]
 
     def balance_gather(self, dp_group):
         running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
@@ -96,8 +93,7 @@ class BalanceScheduler(Scheduler):
                 # count, we subtract (num_output_placeholders - 1) to remove any draft
                 # tokens, so that we can be sure no further steps are needed even if
                 # they are all rejected.
-                and request.num_computed_tokens + 2 - request.num_output_placeholders
-                >= request.num_prompt_tokens + request.max_tokens
+                and request.num_computed_tokens + 2 - request.num_output_placeholders >= request.num_prompt_tokens + request.max_tokens
             ):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
@@ -105,9 +101,7 @@ class BalanceScheduler(Scheduler):
                 req_index += 1
                 continue
 
-            num_new_tokens = (
-                request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
-            )
+            num_new_tokens = request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
@@ -181,9 +175,7 @@ class BalanceScheduler(Scheduler):
                             if preempted_encoder_inputs:
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
-                                )
+                                num_embeds_to_restore = sum(preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs)
                                 encoder_compute_budget += num_embeds_to_restore
                             req_index -= 1
                     else:
@@ -208,9 +200,7 @@ class BalanceScheduler(Scheduler):
 
             # Speculative decode related.
             if request.spec_token_ids:
-                num_scheduled_spec_tokens = (
-                    num_new_tokens + request.num_computed_tokens - request.num_tokens - request.num_output_placeholders
-                )
+                num_scheduled_spec_tokens = num_new_tokens + request.num_computed_tokens - request.num_tokens - request.num_output_placeholders
                 if num_scheduled_spec_tokens > 0:
                     # Trim spec_token_ids list to num_scheduled_spec_tokens.
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
@@ -235,11 +225,7 @@ class BalanceScheduler(Scheduler):
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
         if self.lora_config:
-            scheduled_loras = set(
-                req.lora_request.lora_int_id
-                for req in scheduled_running_reqs
-                if req.lora_request and req.lora_request.lora_int_id > 0
-            )
+            scheduled_loras = set(req.lora_request.lora_int_id for req in scheduled_running_reqs if req.lora_request and req.lora_request.lora_int_id > 0)
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Use a temporary RequestQueue to collect requests that need to be
@@ -285,14 +271,7 @@ class BalanceScheduler(Scheduler):
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
-                if (
-                    self.lora_config
-                    and request.lora_request
-                    and (
-                        len(scheduled_loras) == self.lora_config.max_loras
-                        and request.lora_request.lora_int_id not in scheduled_loras
-                    )
-                ):
+                if self.lora_config and request.lora_request and (len(scheduled_loras) == self.lora_config.max_loras and request.lora_request.lora_int_id not in scheduled_loras):
                     # Scheduling would exceed max_loras, skip.
                     self.waiting.pop_request()
                     skipped_waiting_requests.prepend_request(request)
@@ -304,15 +283,11 @@ class BalanceScheduler(Scheduler):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                        request
-                    )
+                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
-                            request, num_new_local_computed_tokens
-                        )
+                        ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(request, num_new_local_computed_tokens)
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
@@ -503,10 +478,7 @@ class BalanceScheduler(Scheduler):
                 for req in scheduled_new_reqs
             ]
         else:
-            new_reqs_data = [
-                NewRequestData.from_request(req, req_to_new_blocks[req.request_id].get_block_ids())
-                for req in scheduled_new_reqs
-            ]
+            new_reqs_data = [NewRequestData.from_request(req, req_to_new_blocks[req.request_id].get_block_ids()) for req in scheduled_new_reqs]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(

@@ -56,8 +56,6 @@ def is_valid_path_prefix(path_prefix):
             return False
     else:
         if not os.path.exists(os.path.dirname(os.path.abspath(path_prefix))):
-            logger.warning(
-                f"The directory for the path prefix {os.path.dirname(os.path.abspath(path_prefix))} does not exist."
-            )
+            logger.warning(f"The directory for the path prefix {os.path.dirname(os.path.abspath(path_prefix))} does not exist.")
             return False
     return True

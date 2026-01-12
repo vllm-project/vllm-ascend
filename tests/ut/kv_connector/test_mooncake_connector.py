@@ -207,9 +207,7 @@ class TestKVCacheSendingThread(unittest.TestCase):
             pcp_rank=0,
         )
         thread.start()
-        actual_port = base_port + (
-            thread.pp_rank * thread.tp_size + thread.tp_rank + thread.pcp_rank * thread.prefill_tp_size
-        )
+        actual_port = base_port + (thread.pp_rank * thread.tp_size + thread.tp_rank + thread.pcp_rank * thread.prefill_tp_size)
         self.assertTrue(ready_event.wait(timeout=3), "Server thread startup timeout")
 
         context = zmq.Context()  # type: ignore
@@ -1332,9 +1330,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             meta.num_prompt_blocks = pcp_size * dcp_size * len(local_block_ids)
             meta.remote_engine_id = remote_engine_id
 
-            remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = worker._get_kv_split_metadata(
-                "0", meta
-            )
+            remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = worker._get_kv_split_metadata("0", meta)
 
             return (
                 remote_handshake_port_list,

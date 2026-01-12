@@ -144,9 +144,7 @@ class TestSchedulerDynamicBatch(TestBase):
         model_config.hf_text_config = MagicMock()
         model_config.hf_text_config.is_encoder_decoder = False
         # Cache config, optionally force APC
-        kwargs_cache: dict[str, Any] = (
-            {} if ENABLE_PREFIX_CACHING is None else {"enable_prefix_caching": ENABLE_PREFIX_CACHING}
-        )
+        kwargs_cache: dict[str, Any] = {} if ENABLE_PREFIX_CACHING is None else {"enable_prefix_caching": ENABLE_PREFIX_CACHING}
         cache_config = CacheConfig(
             block_size=block_size,
             gpu_memory_utilization=0.9,
@@ -629,9 +627,7 @@ class TestSchedulerDynamicBatch(TestBase):
                 self.assertEqual(running_req.num_tokens_with_spec, 2 + len(spec_tokens[i]))
 
             # No draft or accepted tokens counted yet
-            self.assertTrue(
-                not engine_core_outputs or (engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None)
-            )
+            self.assertTrue(not engine_core_outputs or (engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None))
 
             # Schedule the speculated tokens for validation
             output = scheduler.schedule()

@@ -110,9 +110,7 @@ class AscendW8A8LinearMethod:
             except AttributeError:
                 quant_comm_config = {}
             comm_fn = quant_comm_config.get("communication_fn")
-            enable_flashcomm2_quant_comm = comm_fn is not None and (
-                "o_proj" in layer.prefix or "out_proj" in layer.prefix
-            )
+            enable_flashcomm2_quant_comm = comm_fn is not None and ("o_proj" in layer.prefix or "out_proj" in layer.prefix)
             if enable_flashcomm2_quant_comm:
                 quant_input_x = x.contiguous().view(-1, layer.aclnn_input_scale_reciprocal.size(0))
                 quant_x = torch.ops.vllm.quantize(
@@ -171,15 +169,9 @@ class AscendW8A8LinearMethod:
 
     def process_weights_after_loading(self, layer):
         expanding_factor = layer.weight.data.shape[1]
-        layer.aclnn_input_scale = torch.nn.Parameter(
-            layer.input_scale.data.repeat(expanding_factor), requires_grad=False
-        )
-        layer.aclnn_input_scale_reciprocal = 1 / torch.nn.Parameter(
-            layer.input_scale.data.repeat(expanding_factor), requires_grad=False
-        )
-        layer.aclnn_input_offset = torch.nn.Parameter(
-            layer.input_offset.data.repeat(expanding_factor), requires_grad=False
-        ).to(layer.aclnn_input_scale.dtype)
+        layer.aclnn_input_scale = torch.nn.Parameter(layer.input_scale.data.repeat(expanding_factor), requires_grad=False)
+        layer.aclnn_input_scale_reciprocal = 1 / torch.nn.Parameter(layer.input_scale.data.repeat(expanding_factor), requires_grad=False)
+        layer.aclnn_input_offset = torch.nn.Parameter(layer.input_offset.data.repeat(expanding_factor), requires_grad=False).to(layer.aclnn_input_scale.dtype)
         if get_ascend_device_type() != AscendDeviceType._310P:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         layer.weight.data = maybe_trans_nz(layer.weight.data)

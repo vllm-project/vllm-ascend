@@ -120,10 +120,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
             setattr(self, attr, v)
 
         logger.info(
-            "Initializing elastic Netloader with config: "
-            "MODEL=%s, LISTEN_PORT=%s,"
-            "SOURCE=%s, INT8_CACHE=%s, INT8_CACHE_NAME=%s,"
-            "OUTPUT_PREFIX=%s)",
+            "Initializing elastic Netloader with config: MODEL=%s, LISTEN_PORT=%s,SOURCE=%s, INT8_CACHE=%s, INT8_CACHE_NAME=%s,OUTPUT_PREFIX=%s)",
             self.model_path,
             self.listen_port,
             self.source,
@@ -158,12 +155,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
         if (
             self.source is None
             or not isinstance(self.source, list)
-            or device_id
-            not in [
-                one_device["device_id"]
-                for one_device in self.source
-                if isinstance(one_device, dict) and "device_id" in one_device
-            ]
+            or device_id not in [one_device["device_id"] for one_device in self.source if isinstance(one_device, dict) and "device_id" in one_device]
         ):
             logger.warning("Did not get valid source info, use DefaultModelLoader")
             model, need_process_weights_after_loading = self.revert_to_default(model_config, vllm_config, device_config)
@@ -206,15 +198,11 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         logger.info("Empty CUDA cache")
                         torch.cuda.empty_cache()
 
-                    model, need_process_weights_after_loading = self.revert_to_default(
-                        model_config, vllm_config, device_config
-                    )
+                    model, need_process_weights_after_loading = self.revert_to_default(model_config, vllm_config, device_config)
 
         start_elastic_server = time.perf_counter()
         # start elastic server
-        if model is not None and (
-            (self.listen_port and self.listen_port in range(1024, 65535)) or (self.listen_port is None)
-        ):
+        if model is not None and ((self.listen_port and self.listen_port in range(1024, 65535)) or (self.listen_port is None)):
             from vllm.utils.network_utils import get_ip
 
             driver_ip = get_ip()
@@ -227,9 +215,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 else:
                     self.listen_port += device_id
 
-                logger.info(
-                    f"Start elastic Netloader server, rank: {device_id}, listen port: {driver_ip}:{self.listen_port}"
-                )
+                logger.info(f"Start elastic Netloader server, rank: {device_id}, listen port: {driver_ip}:{self.listen_port}")
 
                 if self.output_prefix is not None:
                     try:
@@ -241,9 +227,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     except PermissionError:
                         logger.error(f"No permission to write to file {self.output_prefix + str(device_id)}.")
                     except OSError as e:
-                        logger.error(
-                            f"I/O error occurred while writing to file {self.output_prefix + str(device_id)}: {e}"
-                        )
+                        logger.error(f"I/O error occurred while writing to file {self.output_prefix + str(device_id)}: {e}")
                     except Exception as e:
                         logger.error(f"Unknown error: {e}")
 

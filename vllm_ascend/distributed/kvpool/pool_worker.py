@@ -65,9 +65,7 @@ class KVPoolWorker:
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
-        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "consumer_is_to_put", False
-        )
+        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get("consumer_is_to_put", False)
         self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.block_size = vllm_config.cache_config.block_size
 
@@ -101,9 +99,7 @@ class KVPoolWorker:
         partitions = None
         if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
             num_hidden_layers = model_config.hf_text_config.num_hidden_layers
-            partition_list_str = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "prefill_pp_layer_partition", None
-            )
+            partition_list_str = vllm_config.kv_transfer_config.kv_connector_extra_config.get("prefill_pp_layer_partition", None)
             prefill_pp_size = int(vllm_config.kv_transfer_config.kv_connector_extra_config.get("prefill_pp_size", 1))
 
             if partition_list_str is not None:
@@ -264,9 +260,7 @@ class KVPoolWorker:
             if load_spec is None or not load_spec.can_load:  # load =0
                 continue
             token_len = request.token_len_chunk
-            if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
-                load_spec.kvpool_cached_tokens == token_len - 1
-            ):
+            if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (load_spec.kvpool_cached_tokens == token_len - 1):
                 token_len = request.load_spec.kvpool_cached_tokens + 1
             else:
                 token_len = request.load_spec.kvpool_cached_tokens
@@ -285,20 +279,14 @@ class KVPoolWorker:
                     size_list = []
                     key_list = []
                     mask_num = request.load_spec.vllm_cached_tokens // self.block_size * self.block_size
-                    for start, end, key in self.token_database.process_tokens(
-                        token_len, request.block_hashes, mask_num
-                    ):
+                    for start, end, key in self.token_database.process_tokens(token_len, request.block_hashes, mask_num):
                         addr, size, _ = self.token_database.prepare_value(start, end, request.block_ids)
                         key_list.append(key.to_string())
                         addr_list.append(addr)
                         size_list.append(size)
                     key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-                    addr_list_c = (
-                        addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-                    )
-                    size_list_c = (
-                        size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-                    )
+                    addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+                    size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
                     self.m_store.get(key_list_c, addr_list_c, size_list_c)
 
     def wait_for_layer_load(self) -> None:

@@ -148,9 +148,7 @@ class CaMemAllocator:
     def __init__(self):
         conf = os.environ.get("PYTORCH_NPU_ALLOC_CONF", "")
         assert "expandable_segments:True" not in conf, (
-            "Expandable segments are not compatible with memory pool. "
-            "Please track https://github.com/pytorch/pytorch/issues/147851 "
-            "for the latest updates."
+            "Expandable segments are not compatible with memory pool. Please track https://github.com/pytorch/pytorch/issues/147851 for the latest updates."
         )
 
         self.pointer_to_data: dict[int, AllocationData] = {}

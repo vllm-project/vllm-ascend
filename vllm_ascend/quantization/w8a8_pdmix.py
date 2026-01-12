@@ -47,9 +47,7 @@ class AscendW8A8PDMixFusedMoeMethod(AscendW8A8DynamicFusedMoEMethod):
         hidden_sizes: int,
         params_dtype: torch.dtype,
     ) -> dict[str, Any]:
-        param_dict = AscendW8A8DynamicFusedMoEMethod.get_dynamic_quant_param(
-            num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype
-        )
+        param_dict = AscendW8A8DynamicFusedMoEMethod.get_dynamic_quant_param(num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype)
         param_dict["w2_deq_scale"] = torch.empty(num_experts, hidden_sizes, dtype=torch.float32)
         param_dict["w13_deq_scale"] = torch.empty(num_experts, 2 * intermediate_size_per_partition, dtype=torch.float32)
         param_dict["w2_input_offset"] = torch.empty(num_experts, 1, dtype=torch.int8)

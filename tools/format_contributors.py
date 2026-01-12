@@ -48,9 +48,7 @@ def parse_lines(lines):
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="Format and sort contributor lines by date (newest first). Outputs markdown table by default."
-    )
+    ap = argparse.ArgumentParser(description="Format and sort contributor lines by date (newest first). Outputs markdown table by default.")
     ap.add_argument(
         "file",
         nargs="?",
@@ -83,9 +81,7 @@ def main():
     for dt, user, sha, datestr in items:
         short = sha[:7]
         date_short = dt.strftime("%Y/%m/%d")
-        print(
-            f"| {n} | [@{user}](https://github.com/{user}) | {date_short} | [{short}](https://github.com/{args.repo}/commit/{sha}) |"
-        )
+        print(f"| {n} | [@{user}](https://github.com/{user}) | {date_short} | [{short}](https://github.com/{args.repo}/commit/{sha}) |")
         n -= 1
 
 

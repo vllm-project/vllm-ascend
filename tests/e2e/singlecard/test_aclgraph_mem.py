@@ -89,8 +89,6 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
     max_capture_mem_gib = baseline_capture_mem * capture_mem_tolerance
     max_mem_expected = max_capture_mem_gib * (1024**3)
     assert mem_used_by_capture < max_mem_expected, (
-        f"capture_model used more memory than expected. "
-        f"Used: {mem_used_by_capture / (1024**3):.2f} GiB, "
-        f"Expected: < {max_capture_mem_gib:.2f} GiB"
+        f"capture_model used more memory than expected. Used: {mem_used_by_capture / (1024**3):.2f} GiB, Expected: < {max_capture_mem_gib:.2f} GiB"
     )
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"

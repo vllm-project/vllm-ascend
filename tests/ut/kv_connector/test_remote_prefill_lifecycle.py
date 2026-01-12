@@ -166,9 +166,7 @@ def test_no_spurious_prefix_caching():
     scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
     assert len(scheduler.waiting) == 1
 
-    remote_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
-        request_remote.request_id
-    ]
+    remote_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_remote.request_id]
 
     # Remote blocks should not be cached.
     for block in remote_blocks:

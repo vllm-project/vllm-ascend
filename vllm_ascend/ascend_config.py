@@ -54,18 +54,13 @@ class AscendConfig:
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
-        self.expert_map_record_path = additional_config.get(
-            "expert_map_record_path", None
-        )  # Provide path to export expert map
+        self.expert_map_record_path = additional_config.get("expert_map_record_path", None)  # Provide path to export expert map
         self.init_redundancy_expert = additional_config.get("init_redundancy_expert", 0)
         self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
         self.num_iterations_eplb_update = additional_config.get("num_iterations_eplb_update", 400)
         self.gate_eplb = additional_config.get("gate_eplb", False)
         self.num_wait_worker_iterations = additional_config.get("num_wait_worker_iterations", 30)
-        self.enable_shared_expert_dp = (
-            additional_config.get("enable_shared_expert_dp", False)
-            and vllm_config.parallel_config.enable_expert_parallel
-        )
+        self.enable_shared_expert_dp = additional_config.get("enable_shared_expert_dp", False) and vllm_config.parallel_config.enable_expert_parallel
         if self.enable_shared_expert_dp:
             from vllm_ascend.utils import enable_sp
 
@@ -92,8 +87,8 @@ class AscendConfig:
                     prefill_tp_size = min(prefill_tp_size, num_kv_head)
                     decode_tp_size = min(decode_tp_size, num_kv_head)
                     self.pd_head_ratio = prefill_tp_size // decode_tp_size
-                except Exception:
-                    raise AssertionError("Can not get num_key_value_heads from model_config")
+                except Exception as e:
+                    raise AssertionError("Can not get num_key_value_heads from model_config") from e
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
@@ -116,9 +111,7 @@ class AscendConfig:
             if not vllm_config.model_config.is_deepseek_mla or use_sparse:
                 raise RuntimeError("enable_kv_nz is only supported for mla currently.")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
-                raise NotImplementedError(
-                    "enable_kv_nz is only supported in pd scenario and can only be used in D node."
-                )
+                raise NotImplementedError("enable_kv_nz is only supported in pd scenario and can only be used in D node.")
 
 
 class FinegrainedTPConfig:
@@ -139,9 +132,7 @@ class FinegrainedTPConfig:
             if vllm_config.model_config.enforce_eager is True:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
-                raise AssertionError(
-                    "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
-                )
+                raise AssertionError("oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node.")
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
         if self.embedding_tensor_parallel_size > 0:
@@ -196,17 +187,11 @@ class XliteGraphConfig:
         self.full_mode = xlite_graph_config.get("full_mode", False)
         if self.enabled:
             if bool(vllm_config.speculative_config):
-                raise RuntimeError(
-                    "Xlite graph mode is not compatible with speculative decoding. Please disable speculative decoding."
-                )
+                raise RuntimeError("Xlite graph mode is not compatible with speculative decoding. Please disable speculative decoding.")
             if vllm_config.parallel_config.pipeline_parallel_size > 1:
-                raise RuntimeError(
-                    "Xlite graph mode is not compatible with pipeline parallelism. Please set pipeline_parallel_size to 1."
-                )
+                raise RuntimeError("Xlite graph mode is not compatible with pipeline parallelism. Please set pipeline_parallel_size to 1.")
             if vllm_config.cache_config.block_size != 128:
-                raise RuntimeError(
-                    "Xlite graph mode is only compatible with block_size of 128. Please set block_size to 128."
-                )
+                raise RuntimeError("Xlite graph mode is only compatible with block_size of 128. Please set block_size to 128.")
 
 
 class WeightPrefetchConfig:

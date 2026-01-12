@@ -15,9 +15,7 @@ class GlobalTE:
         try:
             ip = ipaddress.ip_address(hostname)
             if isinstance(ip, ipaddress.IPv6Address):
-                raise RuntimeError(
-                    "The backend of mooncake's Ascend Direct Xfer Library currently does not support IPv6."
-                )
+                raise RuntimeError("The backend of mooncake's Ascend Direct Xfer Library currently does not support IPv6.")
         except ValueError:
             pass
         if self.transfer_engine is None:

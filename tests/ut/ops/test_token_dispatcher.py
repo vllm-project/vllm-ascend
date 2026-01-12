@@ -341,9 +341,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         patcher7 = patch("vllm_ascend.ops.fused_moe.token_dispatcher.gather_from_sequence_parallel_region")
         self.mock_gather_from_sequence_parallel_region = patcher7.start()
         self.addCleanup(patcher7.stop)
-        self.mock_gather_from_sequence_parallel_region.return_value = torch.tensor(
-            [[2, 2, 2, 2], [2, 2, 2, 2]], dtype=torch.int64
-        )
+        self.mock_gather_from_sequence_parallel_region.return_value = torch.tensor([[2, 2, 2, 2], [2, 2, 2, 2]], dtype=torch.int64)
 
         # Mock torch.histc
         patcher8 = patch("torch.histc")

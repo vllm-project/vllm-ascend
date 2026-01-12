@@ -123,16 +123,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 target_scheme_map[target]["format"] = quant_config.get("format")
                 format = target_scheme_map[target].get("format")
                 # If no per-config format defined, use global format in config
-                act_quant_format = (
-                    is_activation_quantization_format(format)
-                    if format is not None
-                    else is_activation_quantization_format(quant_format)
-                )
+                act_quant_format = is_activation_quantization_format(format) if format is not None else is_activation_quantization_format(quant_format)
                 input_activations = quant_config.get("input_activations")
                 if act_quant_format and input_activations is not None:
-                    target_scheme_map[target]["input_activations"] = QuantizationArgs.model_validate(
-                        quant_config.get("input_activations")
-                    )
+                    target_scheme_map[target]["input_activations"] = QuantizationArgs.model_validate(quant_config.get("input_activations"))
         return target_scheme_map
 
     def get_quant_method(
@@ -205,11 +199,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             input_quant = scheme_dict.get("input_activations")
 
         if weight_quant is None:
-            logger.warning_once(
-                "Acceleration for non-quantized schemes is "
-                "not supported by Compressed Tensors. "
-                "Falling back to UnquantizedLinearMethod"
-            )
+            logger.warning_once("Acceleration for non-quantized schemes is not supported by Compressed Tensors. Falling back to UnquantizedLinearMethod")
             return None
 
         else:
@@ -220,9 +210,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             )
         return scheme
 
-    def _get_scheme_from_parts(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
-    ) -> "CompressedTensorsScheme":
+    def _get_scheme_from_parts(self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs) -> "CompressedTensorsScheme":
         act_quant_format = is_activation_quantization_format(self.quant_format)
         if act_quant_format and input_quant is not None:
             if self._is_static_tensor_w8a8(weight_quant, input_quant):

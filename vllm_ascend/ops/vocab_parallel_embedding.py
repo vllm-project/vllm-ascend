@@ -78,9 +78,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         self.org_vocab_size = org_num_embeddings or num_embeddings
         num_added_embeddings = num_embeddings - self.org_vocab_size
         self.org_vocab_size_padded = pad_vocab_size(self.org_vocab_size, self.padding_size)
-        self.num_embeddings_padded = pad_vocab_size(
-            self.org_vocab_size_padded + num_added_embeddings, self.padding_size
-        )
+        self.num_embeddings_padded = pad_vocab_size(self.org_vocab_size_padded + num_added_embeddings, self.padding_size)
         assert self.org_vocab_size_padded <= self.num_embeddings_padded
 
         self.shard_indices = self._get_indices(
@@ -104,10 +102,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         is_embedding_layer = type(self) is VocabParallelEmbedding
         quant_method_implements_embedding = method_has_implemented_embedding(type(quant_method))
         if is_embedding_layer and not quant_method_implements_embedding:
-            raise NotImplementedError(
-                f"The class {type(quant_method).__name__} must implement "
-                "the 'embedding' method, see UnquantizedEmbeddingMethod."
-            )
+            raise NotImplementedError(f"The class {type(quant_method).__name__} must implement the 'embedding' method, see UnquantizedEmbeddingMethod.")
 
         self.quant_method: QuantizeMethodBase = quant_method
 
@@ -118,12 +113,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
         self.num_embeddings_per_partition = divide(self.num_embeddings_padded, self.tp_size)
         assert self.shard_indices.num_elements_padded == self.num_embeddings_per_partition
-        self.num_org_embeddings_per_partition = (
-            self.shard_indices.org_vocab_end_index - self.shard_indices.org_vocab_start_index
-        )
-        self.num_added_embeddings_per_partition = (
-            self.shard_indices.added_vocab_end_index - self.shard_indices.added_vocab_start_index
-        )
+        self.num_org_embeddings_per_partition = self.shard_indices.org_vocab_end_index - self.shard_indices.org_vocab_start_index
+        self.num_added_embeddings_per_partition = self.shard_indices.added_vocab_end_index - self.shard_indices.added_vocab_start_index
 
         self.quant_method.create_weights(
             self,
@@ -153,9 +144,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             vocab_mask = org_vocab_mask
         else:
             added_vocab_mask = (input_ >= added_vocab_start_index) & (input_ < added_vocab_end_index)
-            added_offset = (
-                added_vocab_start_index - (org_vocab_end_index - org_vocab_start_index) - num_org_vocab_padding
-            )
+            added_offset = added_vocab_start_index - (org_vocab_end_index - org_vocab_start_index) - num_org_vocab_padding
             valid_offset = (org_vocab_start_index * org_vocab_mask) + (added_offset * added_vocab_mask)
             vocab_mask = org_vocab_mask | added_vocab_mask
         # Adapt end.

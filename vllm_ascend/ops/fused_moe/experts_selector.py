@@ -119,11 +119,7 @@ def check_npu_moe_gating_top_k(
         return False
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
-    if not (
-        num_expert_group > 0
-        and hidden_states.shape[-1] % num_expert_group == 0
-        and hidden_states.shape[-1] // num_expert_group > 2
-    ):
+    if not (num_expert_group > 0 and hidden_states.shape[-1] % num_expert_group == 0 and hidden_states.shape[-1] // num_expert_group > 2):
         return False
     if topk_group < 1 or topk_group > num_expert_group:
         return False
@@ -147,11 +143,7 @@ def _native_grouped_topk(
     topk_group_indices = torch.topk(grouped_weights.to(torch.float32), k=topk_group, dim=-1, sorted=False)[1]
     topk_group_mask = torch.zeros_like(grouped_weights)
     topk_group_mask.scatter_(1, topk_group_indices, 1)
-    topk_weight_mask = (
-        topk_group_mask.unsqueeze(-1)
-        .expand(num_token, num_expert_group, topk_weights.shape[-1] // num_expert_group)
-        .reshape(num_token, -1)
-    )
+    topk_weight_mask = topk_group_mask.unsqueeze(-1).expand(num_token, num_expert_group, topk_weights.shape[-1] // num_expert_group).reshape(num_token, -1)
     topk_weights = topk_weights.masked_fill(~topk_weight_mask.bool(), 0.0)
 
     return topk_weights

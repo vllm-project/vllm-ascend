@@ -106,10 +106,7 @@ def load_calibration_text_dataset(calib_prompt_path, tokenizer):
 # Define a oneshot data collator for multimodal inputs.
 def data_collator(batch):
     assert len(batch) == 1
-    return {
-        key: torch.tensor(value, dtype=torch.bfloat16 if key == "pixel_values" else torch.long)
-        for key, value in batch[0].items()
-    }
+    return {key: torch.tensor(value, dtype=torch.bfloat16 if key == "pixel_values" else torch.long) for key, value in batch[0].items()}
 
 
 def quantize_model(model, env_vars, dataset_dict=None):

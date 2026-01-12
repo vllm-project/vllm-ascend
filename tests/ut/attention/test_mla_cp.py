@@ -100,9 +100,7 @@ def get_chunk_metadata(
 
     if dcp_size * pcp_size > 1:
         if num_computed_tokens_of_pcp_dcp is not None:
-            local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[reqs_start:num_reqs]).reshape(
-                -1, dcp_size * pcp_size
-            )
+            local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[reqs_start:num_reqs]).reshape(-1, dcp_size * pcp_size)
         # Note(qcs): The max local context lengths
         # padded to `cp_local_block_size`.
         padded_local_context_lens_cpu = (
@@ -119,10 +117,7 @@ def get_chunk_metadata(
             )
             * cp_local_block_size
         )
-        local_chunk_starts = (
-            torch.arange(num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, num_prefills)
-            * padded_local_max_context_chunk_across_ranks
-        )
+        local_chunk_starts = torch.arange(num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, num_prefills) * padded_local_max_context_chunk_across_ranks
         local_chunk_ends = torch.min(
             padded_local_context_lens_cpu.unsqueeze(0),
             local_chunk_starts + padded_local_max_context_chunk_across_ranks,
@@ -314,9 +309,7 @@ class TestAscendMLAImpl(TestBase):
         magic_npu_fetch.return_value = MagicMock()
         mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
 
-        decode_res, prefill_res = self.impl._mla_preprocess(
-            "mock_layer", hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False
-        )
+        decode_res, prefill_res = self.impl._mla_preprocess("mock_layer", hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False)
 
         self.assertIsNotNone(decode_res)
         self.assertIsNone(prefill_res)
@@ -436,9 +429,7 @@ class TestAscendMLAImpl(TestBase):
             ),
         ]
 
-        decode_res, prefill_res = self.impl._mla_preprocess(
-            "mock_layer", hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False
-        )
+        decode_res, prefill_res = self.impl._mla_preprocess("mock_layer", hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False)
         self.assertIsNone(decode_res)
         self.assertIsNotNone(prefill_res)
 
@@ -578,7 +569,8 @@ class TestAscendMLAImpl(TestBase):
         self.impl.kv_b_proj.side_effect = mock_kv_b_proj
         NUM_BLOCKS, BLOCK_SIZE = 10, 32  # fixed
         USED_BLOCKS = 3
-        # pcp_size, dcp_size, nums_tokens_per_rank, nums_all_rank_context, num_prefills, num_decodes, num_seqs, cp_local_block_size, num_computed_tokens, num_computed_tokens_of_pcp_dcp
+        # pcp_size, dcp_size, nums_tokens_per_rank, nums_all_rank_context, num_prefills, num_decodes, num_seqs, cp_local_block_size, num_computed_tokens,
+        # num_computed_tokens_of_pcp_dcp
         test_cases = [
             (2, 2, [4], [128], 1, 0, 1, 1, [[[32, 32], [32, 32]]]),
             (1, 2, [4], [128], 1, 0, 1, 1, [[[64, 64]]]),
@@ -1156,9 +1148,7 @@ class TestAscendMLAImpl(TestBase):
                 attn_metadata.prefill.pcp_metadata.kv_with_q_head_mask_idx = kv_with_q_head_mask_idx
                 attn_metadata.prefill.pcp_metadata.kv_with_q_tail_nomask_idx = kv_with_q_tail_nomask_idx
                 attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx = kv_with_q_tail_mask_idx
-                attn_metadata.prefill.pcp_metadata.attn_mask_seqlens = torch.tensor(
-                    [chunk_seqlens, chunk_seqlens], dtype=torch.int32
-                )
+                attn_metadata.prefill.pcp_metadata.attn_mask_seqlens = torch.tensor([chunk_seqlens, chunk_seqlens], dtype=torch.int32)
                 attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens = kv_with_q_head_nomask_seqlens
                 attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens = kv_with_q_tail_nomask_seqlens
 

@@ -68,9 +68,7 @@ class AisbenchRunner:
             if self.num_prompts:
                 aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
         print(f"running aisbench cmd: {' '.join(aisbench_cmd)}")
-        self.proc: subprocess.Popen = subprocess.Popen(
-            aisbench_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
+        self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def __init__(
         self,
@@ -87,9 +85,7 @@ class AisbenchRunner:
         self.model_path = aisbench_config.get("model_path")
         if not self.model_path:
             self.model_path = maybe_download_from_modelscope(model)
-        assert self.dataset_path is not None and self.model_path is not None, (
-            f"Failed to download dataset or model: dataset={self.dataset_path}, model={self.model_path}"
-        )
+        assert self.dataset_path is not None and self.model_path is not None, f"Failed to download dataset or model: dataset={self.dataset_path}, model={self.model_path}"
         self.port = port
         self.host_ip = host_ip
         self.task_type = aisbench_config["case_type"]

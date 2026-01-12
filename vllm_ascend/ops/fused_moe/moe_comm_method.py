@@ -178,9 +178,7 @@ class MoECommMethod(ABC):
             dynamic_eplb=dynamic_eplb,
         )
 
-        combine_results = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output, context_metadata=dispatch_results.context_metadata
-        )
+        combine_results = self.token_dispatcher.token_combine(hidden_states=mlp_output, context_metadata=dispatch_results.context_metadata)
 
         return FusedExpertsResult(
             routed_out=combine_results.routed_out,
@@ -314,9 +312,7 @@ class FusedMC2CommImpl(MoECommMethod):
     ):
         assert not (w1_scale is None or w2_scale is None), "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
 
-        assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
-            "token_dispatcher must be an instance of TokenDispatcherWithMC2."
-        )
+        assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         group_list_type = None
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:

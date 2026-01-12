@@ -35,9 +35,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
         self.world_size = self.parallel_config.world_size
         assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
-            f"global world_size ({self.parallel_config.world_size}) must be "
-            f"divisible by nnodes_within_dp "
-            f"({self.parallel_config.nnodes_within_dp}). "
+            f"global world_size ({self.parallel_config.world_size}) must be divisible by nnodes_within_dp ({self.parallel_config.nnodes_within_dp}). "
         )
         self.local_world_size = self.parallel_config.local_world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size

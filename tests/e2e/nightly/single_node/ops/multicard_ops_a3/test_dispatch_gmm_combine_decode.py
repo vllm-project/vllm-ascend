@@ -35,7 +35,7 @@ BASE_KWARGS = {
 def redirect_output(log_file_path):
     log_path = Path(LOG_NAME) / log_file_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(LOG_NAME + "/" + log_file_path, "w")
+    f = open(LOG_NAME + "/" + log_file_path, "w")  # noqa: SIM115
     os.dup2(f.fileno(), sys.stdout.fileno())
     os.dup2(f.fileno(), sys.stderr.fileno())
     return f
@@ -320,9 +320,7 @@ def generate_datas(
 ):
     is_shared_expert = global_rank_id < shared_expert_rank_num
     moe_expert_num_per_rank = moe_expert_num // (ep_world_size - shared_expert_rank_num)
-    actual_bs = int(
-        torch.randint(2 if with_mc2_mask else 1, batch_size, [1]).item() if enable_dynamic_bs else batch_size
-    )
+    actual_bs = int(torch.randint(2 if with_mc2_mask else 1, batch_size, [1]).item() if enable_dynamic_bs else batch_size)
     local_expert_num = 1 if is_shared_expert else moe_expert_num_per_rank
     gmm1_input_dim = token_hidden_size
     gmm1_output_dim = moe_intermediate_size * 2
@@ -412,9 +410,7 @@ def run_once(
         global_rank_id,
         shared_expert_rank_num,
     )
-    input_datas, weight_datas, actual_bs, valid_token_num = generate_datas(
-        *parameter, top_k, test_bfloat16, enable_dynamic_bs, with_mc2_mask
-    )
+    input_datas, weight_datas, actual_bs, valid_token_num = generate_datas(*parameter, top_k, test_bfloat16, enable_dynamic_bs, with_mc2_mask)
     input_datas = [data.npu() if data is not None else None for data in input_datas]
     weight_datas = [data.npu() if data is not None else None for data in weight_datas]
     small_ops = SmallOps(*weight_datas, ep_hcomm_info_small, *parameter, dynamic_eplb).npu()  # type: ignore

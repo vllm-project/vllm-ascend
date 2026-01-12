@@ -4,12 +4,15 @@ from vllm.config import ParallelConfig
 
 
 class Backend(ABC):
+    @abstractmethod
     def __init__(self, parallel_config: ParallelConfig):
         pass
 
+    @abstractmethod
     def set_device(self):
         pass
 
+    @abstractmethod
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
         pass
 

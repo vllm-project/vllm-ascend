@@ -256,9 +256,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
-    def test_ascend_mla_metadata_builder_build_full_graph(
-        self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla
-    ):
+    def test_ascend_mla_metadata_builder_build_full_graph(self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla):
         pcp_group = MagicMock()
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
@@ -372,9 +370,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         expect_output = [2, 4, 6, 8]
         num_reqs = 3
         num_reqs_pad_size = 1
-        output_seq_lens = builder.pad_actual_seq_len_q_mtp_enable_pad(
-            num_reqs_pad_size, num_reqs, input_seq_lens, common_metadata
-        )
+        output_seq_lens = builder.pad_actual_seq_len_q_mtp_enable_pad(num_reqs_pad_size, num_reqs, input_seq_lens, common_metadata)
         self.assertEqual(output_seq_lens, expect_output)
 
 
@@ -595,9 +591,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
-    def test_build_for_graph_capture_decode_only(
-        self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla
-    ):
+    def test_build_for_graph_capture_decode_only(self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         pcp_group = MagicMock()
         pcp_group.world_size = 1
@@ -963,9 +957,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.num_kv_heads = self.impl.num_heads
         self.impl.is_kv_producer = False
 
-        decode_res, prefill_res = self.impl._mla_preprocess(
-            "mock_layer", hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False
-        )
+        decode_res, prefill_res = self.impl._mla_preprocess("mock_layer", hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False)
 
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)

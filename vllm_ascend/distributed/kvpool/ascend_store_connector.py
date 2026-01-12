@@ -37,15 +37,11 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
-        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "consumer_is_to_put", False
-        )
+        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get("consumer_is_to_put", False)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
-            logger.warning(
-                "It is recommended to use the AscendStoreConnector, as the MoonCakeStoreConnector will be removed in the future."
-            )
+            logger.warning("It is recommended to use the AscendStoreConnector, as the MoonCakeStoreConnector will be removed in the future.")
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
