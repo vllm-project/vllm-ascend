@@ -58,9 +58,6 @@ def build_attn_metadata(
     decode_token_per_req: int,
     actual_seq_lengths_q: list[int],
     positions: torch.Tensor | None = None,
-    attn_mask: torch.Tensor
-    | None = None,
-    spec_attn_mask: torch.Tensor | None = None,
     attn_state: Any | None = None,
     graph_pad_size: int = -1,
     num_input_tokens: int = 0,
@@ -92,8 +89,6 @@ def build_attn_metadata(
             slot_mapping=slot_mapping,
             actual_seq_lengths_q=actual_seq_lengths_q,
             positions=positions,
-            attn_mask=attn_mask,
-            spec_attn_mask=spec_attn_mask,
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,

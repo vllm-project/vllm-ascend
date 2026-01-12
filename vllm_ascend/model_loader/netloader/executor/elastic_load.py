@@ -16,10 +16,10 @@
 
 import torch
 import torch_npu
-from vllm.distributed.utils import (
-    stateless_destroy_torch_distributed_process_group,
-    stateless_init_torch_distributed_process_group)
 from vllm.logger import logger
+
+from .netloader_pg import (destroy_stateless_process_group,
+                           stateless_init_process_group)
 
 
 class P2PLoad:
@@ -62,12 +62,12 @@ class P2PLoad:
         receiver_pg = None
         loaded_model = None
         try:
-            receiver_pg = stateless_init_torch_distributed_process_group(
+            receiver_pg = stateless_init_process_group(
                 host=self.world_name.split(":")[0],
                 port=self.source_port,
                 rank=0,
                 world_size=2,
-                backend='hccl',
+                group_name='netloader',
             )
             logger.info(
                 f"Finish init_process_group, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}"
@@ -97,7 +97,7 @@ class P2PLoad:
             logger.error("Failed to recv model: {}".format(e))
         finally:
             if receiver_pg:
-                stateless_destroy_torch_distributed_process_group(receiver_pg)
+                destroy_stateless_process_group(receiver_pg)
         return loaded_model
 
 
@@ -134,12 +134,12 @@ class P2PSend:
         )
         sender_pg = None
         try:
-            sender_pg = stateless_init_torch_distributed_process_group(
+            sender_pg = stateless_init_process_group(
                 host=self.comm_name.split(":")[0],
                 port=self.listen_port,
                 rank=1,
                 world_size=2,
-                backend='hccl',
+                group_name='netloader',
             )
             logger.info(
                 f"Finish init_process_group, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}"
@@ -167,4 +167,4 @@ class P2PSend:
             )
         finally:
             if sender_pg:
-                stateless_destroy_torch_distributed_process_group(sender_pg)
+                destroy_stateless_process_group(sender_pg)

@@ -53,6 +53,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.speculative_config = None
         self.mock_vllm_config.model_config.max_model_len = 640
+        self.mock_vllm_config.model_config.hf_text_config.sliding_window = None
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_vllm_config.compilation_config.cudagraph_mode = None
         self.mock_vllm_config.scheduler_config.max_num_seqs = 10
@@ -89,8 +90,6 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             slot_mapping=torch.tensor(range(20)),
             actual_seq_lengths_q=torch.tensor([0, 1, 2]),
             positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((15, 15)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.ChunkedPrefill,
             num_computed_tokens_cpu=None,
             seq_lens=None,
@@ -321,26 +320,3 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_fused_infer_attention_score.assert_called_once()
 
         assert output.shape == (10, 8, 64)
-
-    @patch('torch_npu._npu_reshape_and_cache')
-    def test_forward_raise_error(self, mock_paged_attention):
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
-        kv_cache = torch.empty(2, 5, 128, 8, 64)
-        output = torch.empty_like(query)
-
-        metadata = self.attn_metadata
-        metadata.attn_mask = torch.randn(1, 1, 10, 10)
-        metadata.query_lens = torch.tensor([10])
-        metadata.seq_lens = torch.tensor([10])
-        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
-        metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
-        metadata.num_decodes = 0
-        metadata.num_prefills = 10
-        layer = self.layer_no_quant
-
-        with self.assertRaises(NotImplementedError):
-            self.impl_error.forward(layer, query, key, value, kv_cache,
-                                    metadata, output)

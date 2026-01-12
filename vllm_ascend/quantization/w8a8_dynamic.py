@@ -254,7 +254,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             w1 = layer.w13_weight_list
             w1_scale = layer.w13_weight_scale_fp32_list
             w2 = layer.w2_weight_list
-            w2_scale = layer.w2_weight_scale_list
+            w2_scale = layer.w2_weight_scale_fp32_list \
+                if w2_weight_scale_fp32_flag else layer.w2_weight_scale_list
         else:
             w1 = [layer.w13_weight]
             w1_scale = [layer.w13_weight_scale_fp32]
@@ -333,11 +334,16 @@ class AscendW8A8DynamicFusedMoEMethod:
                 weight.clone()
                 for weight in layer.w2_weight_scale.data.unbind(dim=0)
             ]
+            layer.w2_weight_scale_fp32_list = [
+                weight.clone()
+                for weight in layer.w2_weight_scale_fp32.data.unbind(dim=0)
+            ]
             del layer.w13_weight
             del layer.w2_weight
             del layer.w13_weight_scale
             del layer.w13_weight_scale_fp32
             del layer.w2_weight_scale
+            del layer.w2_weight_scale_fp32
             torch.npu.empty_cache()
 
 

@@ -1,0 +1,42 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+name: Refresh codecov
+
+on:
+  schedule:
+    # UTC+8: 8am, 12pm, 16pm
+    - cron: '0 0,4,8 * * *'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  refresh-codecov:
+    name: refresh codecov
+    strategy:
+      matrix:
+        vllm_version: [2f4e6548efec402b913ffddc8726230d9311948d]
+    uses: ./.github/workflows/_unit_test.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      runner: linux-amd64-cpu-16-hk
+      image: quay.nju.edu.cn/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
+      type: schedule
