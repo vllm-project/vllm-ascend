@@ -107,7 +107,7 @@ jobs:
                 '- A PR should do only one thing, smaller PRs enable faster reviews.\n' +
                 '- Every PR should include unit tests and end-to-end tests ‌to ensure it works and is not broken by other future PRs.\n' +
                 '- Write the commit message by fulfilling the PR description to help reviewer and future developers understand.\n\n' +
-                'If CI fails, you can run linting and testing checks locally according [Contributing](https://vllm-ascend.readthedocs.io/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://vllm-ascend.readthedocs.io/zh-cn/latest/developer_guide/contribution/testing.html).'
+                'If CI fails, you can run linting and testing checks locally according [Contributing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/testing.html).'
             })
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
