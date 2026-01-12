@@ -654,16 +654,16 @@ class EagleProposer(VllmEagleProposer):
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
-            if hasattr(common_attn_metadata.block_table_tensor, '_base'):
+            if common_attn_metadata.block_table_tensor._base is not None:
                 common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor._base[:input_batch_size]
             else:
                 common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:input_batch_size]
             common_attn_metadata.num_reqs = input_batch_size
-            if hasattr(common_attn_metadata.seq_lens, '_base'):
+            if common_attn_metadata.seq_lens._base is not None:
                 common_attn_metadata.seq_lens = common_attn_metadata.seq_lens._base[:input_batch_size]
             else:
                 common_attn_metadata.seq_lens = common_attn_metadata.seq_lens[:input_batch_size]
-            if hasattr(common_attn_metadata.seq_lens_cpu, '_base'):
+            if common_attn_metadata.seq_lens_cpu._base is not None:
                 common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu._base[:input_batch_size]
             else:
                 common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:input_batch_size]
