@@ -389,18 +389,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.local_num_heads = self.num_heads
         self.vllm_config = get_current_vllm_config()
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
-        if self.enable_sfa_cp:
-            self.local_num_heads = self.num_heads * self.tp_size
-            self.layer_sharding_kwargs = []
-            for layer_name in (get_ascend_config().layer_sharding or []):
-                if layer_name in kwargs:
-                    self.layer_sharding_kwargs.append(kwargs[layer_name])
-                else:
-                    logger.warning_once(
-                        f"Layer '{layer_name}' not found in kwargs for layer sharding, skipping sharding configuration"
-                    )
-            register_all_layers_to_shard_weight_series(
-                self.layer_sharding_kwargs)
 
         # indexer param
         self.n_head: int = self.indexer.n_head  # 64
@@ -777,7 +765,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         output_padded = output
 
         # all-gather o_proj weight for prefill stage of PD mix node
-        o_proj_full_work = None
+        o_proj_full_handle = None
         # if is PD mix stage, using original TP o_proj weight, and also need to full gather for o_proj weight for prefill stage.
         should_shard_weight = self.enable_sfa_cp_prefill_only or attn_metadata.attn_state not in {
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
@@ -862,7 +850,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         if is_hidden_layer(layer):
                             reach_layer_for_shard_weight_series(layer)
                 elif should_shard_weight:
-                    _, o_proj_full_work = all_gather_async(
+                    _, o_proj_full_handle = all_gather_async(
                         self.o_proj_tp_weight,
                         get_tp_group(),
                         output=AscendSFAImpl.o_proj_full_pool)
@@ -929,17 +917,17 @@ class AscendSFAImpl(MLAAttentionImpl):
                            enabled=self.enable_prefetch)
 
         if self.enable_sfa_cp and not self.enable_sfa_cp_prefill_only:
-            # handle o_proj weight switch and forward
+            # When using SFA-CP with pd mixed, o_proj has two cases:
+            # 1. prefill: o_proj is a TP weight, we need to all-gather o_proj weight to switch TP=1.
+            # 2. decode: all-to-all the hidden_state before the o_proj forward.
             result = self._handle_o_proj_weight_switch_and_forward(
                 attn_output=attn_output,
                 output=output,
                 output_padded=output_padded,
-                o_proj_full_work=o_proj_full_work,
+                o_proj_full_handle=o_proj_full_handle,
                 should_shard_weight=should_shard_weight)
-            # If result is output_padded (Full-mode completed), return immediately
             if result is output_padded:
                 return result
-            # Otherwise, update attn_output with TP-mode all-to-all processed tensor
             attn_output = result
 
         output[...] = self.o_proj(attn_output)[0]
@@ -978,7 +966,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             k_pe, k_nope = torch.split(
                 k,
                 [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
-                dim=-1)  # [b,s,64+64]
+                dim=-1)
+
+            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
+            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
             k_pe = k_pe.unsqueeze(2)
             k_pe = torch_npu.npu_interleave_rope(k_pe, cos, sin)
@@ -1006,10 +997,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if q is None:
             q, _ = self.wq_b(qr)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
             q = q.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
-
             cos_q, sin_q = cos, sin
-            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
-            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
             q_pe, q_nope = torch.split(
                 q,
@@ -1051,7 +1039,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             sparse_mode=3)
         return topk_indices
 
-    def sh_init_o_proj_tp_full_params(self):
+    def _init_o_proj_tp_full_params(self):
         """
         Initialize TP-mode and Full-mode parameters for o_proj weight, 
         preparing for weight switching in PD mix stage.
@@ -1094,7 +1082,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _handle_o_proj_weight_switch_and_forward(
             self, attn_output: torch.Tensor, output: torch.Tensor,
             output_padded: torch.Tensor,
-            o_proj_full_work: Optional[torch.distributed.Work],
+            o_proj_full_handle: Optional[torch.distributed.Work],
             should_shard_weight: bool) -> Optional[torch.Tensor]:
         """
         Handle o_proj weight switching between TP-mode and Full-mode, and execute forward computation.
@@ -1102,8 +1090,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Gather o_proj weight from all TP ranks for Full-mode computation
         if should_shard_weight:
             # Wait for the completion of o_proj weight all-gather operation
-            if o_proj_full_work is not None:
-                o_proj_full_work.wait()
+            if o_proj_full_handle is not None:
+                o_proj_full_handle.wait()
 
             # Switch o_proj to Full-mode (gathered weight from all TP ranks)
             self.o_proj.weight.set_(AscendSFAImpl.o_proj_full_pool)
