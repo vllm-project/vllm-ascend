@@ -794,136 +794,136 @@ def vl_config(request):
     return PROMPT_CONFIGS[request.param]
 
 
-# @pytest.fixture(autouse=True)
-# def cleanup_triton_cache():
-#     """
-#     Automatically cleanup triton cache before each test case.
-#     This prevents cache-related issues between test runs.
-#     """
-#     import shutil
-#     import glob
-#     import os
-#     import subprocess
+@pytest.fixture(autouse=True)
+def cleanup_triton_cache():
+    """
+    Automatically cleanup triton cache before each test case.
+    This prevents cache-related issues between test runs.
+    """
+    import shutil
+    import glob
+    import os
+    import subprocess
 
-#     triton_cache_path = "/root/.triton/cache"
-#     tmp_path = "/tmp"
+    triton_cache_path = "/root/.triton/cache"
+    tmp_path = "/tmp"
 
-#     def get_cache_size(path: str) -> str:
-#         """Get cache directory size using du command."""
-#         try:
-#             result = subprocess.run(["du", "-sh", path],
-#                                     capture_output=True,
-#                                     text=True,
-#                                     timeout=10)
-#             if result.returncode == 0:
-#                 return result.stdout.strip().split('\t')[0]
-#         except (subprocess.TimeoutExpired, Exception):
-#             pass
-#         return "unknown"
+    def get_cache_size(path: str) -> str:
+        """Get cache directory size using du command."""
+        try:
+            result = subprocess.run(["du", "-sh", path],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10)
+            if result.returncode == 0:
+                return result.stdout.strip().split('\t')[0]
+        except (subprocess.TimeoutExpired, Exception):
+            pass
+        return "unknown"
 
-#     def check_disk_space(path: str, label: str = "Disk Space"):
-#         """Check and log disk space usage."""
-#         try:
-#             result = subprocess.run(["df", "-h", path],
-#                                     capture_output=True,
-#                                     text=True,
-#                                     timeout=10)
-#             if result.returncode == 0:
-#                 lines = result.stdout.strip().split('\n')
-#                 if len(lines) >= 2:
-#                     parts = lines[1].split()
-#                     if len(parts) >= 5:
-#                         _, _, _, avail, use_pct = parts[:5]
-#                         logger.info(
-#                             f"[{label}] {use_pct} used (Available: {avail})")
-#                         if int(use_pct.rstrip('%')) >= 90:
-#                             logger.warning(
-#                                 f"[{label}] WARNING: Disk is {use_pct}% full! "
-#                                 f"Only {avail} available.")
-#         except (subprocess.TimeoutExpired, Exception) as e:
-#             logger.warning(f"[{label}] Error checking disk: {e}")
+    def check_disk_space(path: str, label: str = "Disk Space"):
+        """Check and log disk space usage."""
+        try:
+            result = subprocess.run(["df", "-h", path],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if len(lines) >= 2:
+                    parts = lines[1].split()
+                    if len(parts) >= 5:
+                        _, _, _, avail, use_pct = parts[:5]
+                        logger.info(
+                            f"[{label}] {use_pct} used (Available: {avail})")
+                        if int(use_pct.rstrip('%')) >= 90:
+                            logger.warning(
+                                f"[{label}] WARNING: Disk is {use_pct}% full! "
+                                f"Only {avail} available.")
+        except (subprocess.TimeoutExpired, Exception) as e:
+            logger.warning(f"[{label}] Error checking disk: {e}")
 
-#     def check_tmp_files():
-#         """Check /tmp/tmp* files and directories."""
-#         try:
-#             tmp_pattern = "/tmp/tmp*"
-#             tmp_items = glob.glob(tmp_pattern)
+    def check_tmp_files():
+        """Check /tmp/tmp* files and directories."""
+        try:
+            tmp_pattern = "/tmp/tmp*"
+            tmp_items = glob.glob(tmp_pattern)
 
-#             if not tmp_items:
-#                 logger.info("[/tmp/tmp*] No tmp* files/directories found")
-#                 return
+            if not tmp_items:
+                logger.info("[/tmp/tmp*] No tmp* files/directories found")
+                return
 
-#             # Get detailed info for each tmp* item
-#             total_size = 0
-#             item_info = []
+            # Get detailed info for each tmp* item
+            total_size = 0
+            item_info = []
 
-#             for item in tmp_items:
-#                 try:
-#                     # Get size using du
-#                     result = subprocess.run(["du", "-sh", item],
-#                                             capture_output=True,
-#                                             text=True,
-#                                             timeout=10)
-#                     if result.returncode == 0:
-#                         size_str = result.stdout.strip().split('\t')[0]
-#                         item_type = "DIR" if os.path.isdir(item) else "FILE"
-#                         item_name = os.path.basename(item)
-#                         item_info.append(
-#                             f"{item_type} {item_name}: {size_str}")
+            for item in tmp_items:
+                try:
+                    # Get size using du
+                    result = subprocess.run(["du", "-sh", item],
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=10)
+                    if result.returncode == 0:
+                        size_str = result.stdout.strip().split('\t')[0]
+                        item_type = "DIR" if os.path.isdir(item) else "FILE"
+                        item_name = os.path.basename(item)
+                        item_info.append(
+                            f"{item_type} {item_name}: {size_str}")
 
-#                         # Try to parse size for total calculation
-#                         size_str = size_str.upper()
-#                         if 'K' in size_str:
-#                             total_size += float(size_str.rstrip('K')) / 1024
-#                         elif 'M' in size_str:
-#                             total_size += float(size_str.rstrip('M'))
-#                         elif 'G' in size_str:
-#                             total_size += float(size_str.rstrip('G')) * 1024
-#                         elif 'B' in size_str:
-#                             total_size += float(
-#                                 size_str.rstrip('B')) / 1024 / 1024
-#                 except (subprocess.TimeoutExpired, Exception):
-#                     item_info.append(
-#                         f"{os.path.basename(item)}: (error getting size)")
+                        # Try to parse size for total calculation
+                        size_str = size_str.upper()
+                        if 'K' in size_str:
+                            total_size += float(size_str.rstrip('K')) / 1024
+                        elif 'M' in size_str:
+                            total_size += float(size_str.rstrip('M'))
+                        elif 'G' in size_str:
+                            total_size += float(size_str.rstrip('G')) * 1024
+                        elif 'B' in size_str:
+                            total_size += float(
+                                size_str.rstrip('B')) / 1024 / 1024
+                except (subprocess.TimeoutExpired, Exception):
+                    item_info.append(
+                        f"{os.path.basename(item)}: (error getting size)")
 
-#             logger.info(f"[/tmp/tmp*] Found {len(tmp_items)} item(s):")
-#             for info in item_info:
-#                 logger.info(f"[/tmp/tmp*]   {info}")
+            logger.info(f"[/tmp/tmp*] Found {len(tmp_items)} item(s):")
+            for info in item_info:
+                logger.info(f"[/tmp/tmp*]   {info}")
 
-#             if total_size > 0:
-#                 if total_size < 1024:
-#                     size_str = f"{total_size:.1f}M"
-#                 else:
-#                     size_str = f"{total_size / 1024:.1f}G"
-#                 logger.info(f"[/tmp/tmp*] Total size: {size_str}")
+            if total_size > 0:
+                if total_size < 1024:
+                    size_str = f"{total_size:.1f}M"
+                else:
+                    size_str = f"{total_size / 1024:.1f}G"
+                logger.info(f"[/tmp/tmp*] Total size: {size_str}")
 
-#         except Exception as e:
-#             logger.warning(f"[/tmp/tmp*] Error checking tmp files: {e}")
+        except Exception as e:
+            logger.warning(f"[/tmp/tmp*] Error checking tmp files: {e}")
 
 
-#     if os.path.exists(triton_cache_path):
-#         size = get_cache_size(triton_cache_path)
-#         logger.info(f"[Triton Cache] Size before test: {size}")
+    if os.path.exists(triton_cache_path):
+        size = get_cache_size(triton_cache_path)
+        logger.info(f"[Triton Cache] Size before test: {size}")
 
-#     yield
-#     # Check disk space for both /root/.triton/cache and /tmp
-#     check_disk_space(triton_cache_path, "Disk Space (/root/.triton)")
-#     check_disk_space(tmp_path, "Disk Space (/tmp)")
+    yield
+    # Check disk space for both /root/.triton/cache and /tmp
+    check_disk_space(triton_cache_path, "Disk Space (/root/.triton)")
+    check_disk_space(tmp_path, "Disk Space (/tmp)")
 
-#     # Check /tmp/tmp* files
-#     check_tmp_files()
+    # Check /tmp/tmp* files
+    check_tmp_files()
 
-#     # Print cache size before cleanup
-#     if os.path.exists(triton_cache_path):
-#         size = get_cache_size(triton_cache_path)
-#         logger.info(f"[Triton Cache] Size before cleanup: {size}")
+    # Print cache size before cleanup
+    if os.path.exists(triton_cache_path):
+        size = get_cache_size(triton_cache_path)
+        logger.info(f"[Triton Cache] Size before cleanup: {size}")
 
-#     # Cleanup triton cache BEFORE each test
-#     # shutil.rmtree(triton_cache_path, ignore_errors=True)
+    # Cleanup triton cache BEFORE each test
+    # shutil.rmtree(triton_cache_path, ignore_errors=True)
 
-#     # Print cache size (should be empty or very small since we cleaned before)
-#     if os.path.exists(triton_cache_path):
-#         size = get_cache_size(triton_cache_path)
-#         logger.info(f"[Triton Cache] Size after test: {size}")
-#     else:
-#         logger.info("[Triton Cache] Directory does not exist after test")
+    # Print cache size (should be empty or very small since we cleaned before)
+    if os.path.exists(triton_cache_path):
+        size = get_cache_size(triton_cache_path)
+        logger.info(f"[Triton Cache] Size after test: {size}")
+    else:
+        logger.info("[Triton Cache] Directory does not exist after test")
