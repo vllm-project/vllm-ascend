@@ -123,15 +123,14 @@ jobs:
           pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-      - name: Install triton-ascend
-        if: ${{ inputs.name == 'test_custom_op' }}
+      - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
-          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20251225.run"
+          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-          source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
-          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
+          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
+          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -143,10 +142,6 @@ jobs:
         run: |
           # ignore test_dispatch_ffn_combine until the test is fixed
           pytest -sv ${{ inputs.tests }} \
-          --ignore=tests/e2e/nightly/ops/test_dispatch_ffn_combine.py \
-          --ignore=tests/e2e/nightly/ops/test_fused_moe.py \
-          --ignore=tests/e2e/nightly/ops/test_rotary_embedding.py \
-          --ignore=tests/e2e/nightly/ops/test_matmul_allreduce_add_rmsnorm.py
-
+          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
 
 

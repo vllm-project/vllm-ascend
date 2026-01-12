@@ -31,12 +31,13 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.eplb.core.eplb_utils import (init_eplb_config,
-                                              moe_load_async_stream)
+from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import (get_flash_common3_context,
                                                set_flash_common3_context)
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.experts_selector import (select_experts,
+                                                        zero_experts_compute)
 from vllm_ascend.ops.fused_moe.moe_comm_method import (AllGatherCommImpl,
+                                                       FusedExpertsResult,
                                                        setup_moe_comm_method)
 from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
 from vllm_ascend.quantization.w4a8_dynamic import \
@@ -91,7 +92,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               enable_force_load_balance: bool = False,
               shared_experts: Optional[Any] = None,
               **kwargs) -> torch.Tensor:
-
+        zero_expert_num = getattr(layer, "zero_expert_num", 0)
+        zero_expert_type = getattr(layer, "zero_expert_type", None)
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -106,6 +108,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts)
 
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
+                expert_indices=topk_ids,
+                expert_scales=topk_weights,
+                num_experts=global_num_experts,
+                zero_expert_type=zero_expert_type,
+                hidden_states=x,
+            )
+
         topk_weights = topk_weights.to(x.dtype)
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
@@ -118,7 +129,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 random_matrix, dim=1)[:, :topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
-        return moe_comm_method.fused_experts(
+        final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -130,6 +141,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             apply_router_weight_on_input=apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            final_hidden_states += zero_expert_result
+        return final_hidden_states
 
 
 class AscendFusedMoE(FusedMoE):
@@ -180,7 +194,7 @@ class AscendFusedMoE(FusedMoE):
                              or ascend_config.expert_map_record_path) and (
                                  self.log2phy is not None)
         self.local_num_experts = (torch.sum(
-            self._expert_map != -1) if self._expert_map is not None else
+            self._expert_map != -1).item() if self._expert_map is not None else
                                   self.global_num_experts)
         if self._expert_map is not None:
             logger.info_once(
@@ -195,7 +209,7 @@ class AscendFusedMoE(FusedMoE):
 
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
-        self.moe_config.original_num_experts = num_experts
+        self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
@@ -325,7 +339,7 @@ class AscendFusedMoE(FusedMoE):
             pertoken_scale = None
 
         # Matrix multiply.
-        final_hidden_states = self.quant_method.apply(
+        fused_experts_results: FusedExpertsResult = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -339,6 +353,7 @@ class AscendFusedMoE(FusedMoE):
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
+            routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
@@ -350,25 +365,20 @@ class AscendFusedMoE(FusedMoE):
             global_redundant_expert_num=self.global_redundant_expert_num,
             mc2_mask=mc2_mask)
 
-        if isinstance(final_hidden_states, tuple):
-            final_hidden_states, group_list_type, expert_tokens = final_hidden_states
-            if self.dynamic_eplb:
+        if self.dynamic_eplb:
+            expert_tokens = fused_experts_results.expert_tokens
+            group_list_type = fused_experts_results.group_list_type
+            assert expert_tokens is not None and group_list_type is not None, \
+                "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
+            self.moe_load += expert_tokens if group_list_type == 1 else \
+                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
-                moe_load_stream = moe_load_async_stream()
-                cur_stream = torch.npu.current_stream()
-
-                moe_load_stream.wait_stream(cur_stream)
-                with npu_stream_switch(moe_load_stream):
-                    self.moe_load += expert_tokens if group_list_type == 1 else \
-                        torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-                cur_stream.wait_stream(moe_load_stream)
-
-        final_hidden_states = forward_context.moe_comm_method.finalize(
-            hidden_states=final_hidden_states,
+        routed_out = forward_context.moe_comm_method.finalize(
+            hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata)
 
-        return final_hidden_states
+        return routed_out
 
 
 class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
@@ -439,7 +449,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         else:
             set_flash_common3_context(shared_experts=self._shared_experts)
 
-        fused_output = AscendFusedMoE.forward_impl(
+        routed_out = AscendFusedMoE.forward_impl(
             self,
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -462,4 +472,4 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             assert fc3_context is not None
             shared_out = fc3_context.shared_out
 
-        return shared_out, fused_output
+        return shared_out, routed_out

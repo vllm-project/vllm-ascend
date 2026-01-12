@@ -238,15 +238,18 @@ class TestNPUWorker(TestBase):
     @patch(
         "vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment"
     )
-    @patch("vllm_ascend.worker.worker.NPUPlatform")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
-    def test_init_device(self, mock_init_triton, mock_platform,
+    @patch("torch.npu.set_device")
+    @patch("torch.npu.empty_cache")
+    @patch("torch.npu.mem_get_info")
+    def test_init_device(self, mock_mem_get_info, mock_set_device,
+                         mock_empty_cache, mock_init_triton,
                          mock_init_dist_env):
         """Test _init_device method"""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Setup mock
-        mock_platform.mem_get_info.return_value = (1000, 2000)
+        mock_mem_get_info.return_value = (1000, 2000)
 
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
@@ -256,21 +259,13 @@ class TestNPUWorker(TestBase):
             worker.parallel_config = MagicMock()
             worker.parallel_config.local_world_size = 0
             worker.parallel_config.data_parallel_size = 1
-
             worker.model_config.seed = 42
 
             # Test _init_device
             result = worker._init_device()
 
-            # Verify NPUPlatform.set_device is called
-            mock_platform.set_device.assert_called_once()
             # Verify the parameter passed to set_device is a torch.device object
-            call_args = mock_platform.set_device.call_args[0][0]
-            self.assertEqual(str(call_args), "npu:1")
-
-            mock_platform.empty_cache.assert_called_once()
-            mock_platform.seed_everything.assert_called_once_with(42)
-            mock_platform.mem_get_info.assert_called_once(
+            mock_mem_get_info.assert_called_once(
             )  # Called once in _init_device method
             mock_init_dist_env.assert_called_once(
             )  # Verify distributed initialization is called
@@ -548,9 +543,8 @@ class TestNPUWorker(TestBase):
             # Verify returns None (empty string is considered false)
             self.assertIsNone(result)
 
-    @patch("vllm_ascend.worker.worker.NPUPlatform.clear_npu_memory")
-    @patch("vllm_ascend.worker.worker.NPUPlatform.empty_cache")
-    @patch("vllm_ascend.worker.worker.NPUPlatform.mem_get_info")
+    @patch("torch.npu.reset_peak_memory_stats")
+    @patch("torch.npu.empty_cache")
     @patch("torch_npu.npu.memory_stats")
     @patch("torch_npu.npu.mem_get_info")
     @patch("vllm_ascend.worker.worker.logger")
@@ -559,15 +553,14 @@ class TestNPUWorker(TestBase):
         mock_logger,
         mock_torch_mem_get_info,
         mock_torch_memory_stats,
-        mock_platform_mem_get_info,
-        mock_platform_empty_cache,
-        mock_platform_clear_npu_memory,
+        mock_torch_empty_cache,
+        mock_torch_reset_peak_memory_stats,
     ):
         """Test determine_available_memory normal case (no non-torch memory allocation)"""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Setup mock - test case without non-torch memory allocation
-        mock_platform_mem_get_info.side_effect = [
+        mock_torch_mem_get_info.side_effect = [
             (8000, 10000),  # 1st call: before profile execution
             (7000, 10000),  # 2nd call: after profile execution
         ]
@@ -606,10 +599,8 @@ class TestNPUWorker(TestBase):
             result = worker.determine_available_memory()
 
             # Verify call count and order
-            mock_platform_clear_npu_memory.assert_called_once()
-            self.assertEqual(mock_platform_mem_get_info.call_count, 2)
+            self.assertEqual(mock_torch_mem_get_info.call_count, 4)
             worker.model_runner.profile_run.assert_called_once()
-            mock_platform_empty_cache.assert_called_once()
 
             # Verify calculation result with race condition simulation
             # Calculation logic:
@@ -629,24 +620,22 @@ class TestNPUWorker(TestBase):
             # Verify log output
             mock_logger.info.assert_called_once()
 
-    @patch("vllm_ascend.worker.worker.NPUPlatform.clear_npu_memory")
-    @patch("vllm_ascend.worker.worker.NPUPlatform.empty_cache")
-    @patch("vllm_ascend.worker.worker.NPUPlatform.mem_get_info")
+    @patch("torch.npu.reset_peak_memory_stats")
+    @patch("torch.npu.empty_cache")
     @patch("torch_npu.npu.memory_stats")
     @patch("torch_npu.npu.mem_get_info")
     def test_determine_available_memory_with_non_torch_allocations(
         self,
         mock_torch_mem_get_info,
         mock_torch_memory_stats,
-        mock_platform_mem_get_info,
-        mock_platform_empty_cache,
-        mock_platform_clear_npu_memory,
+        mock_torch_empty_cache,
+        mock_torch_reset_peak_memory_stats,
     ):
         """Test determine_available_memory with significant non-torch memory allocation"""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Setup mock - test case with large non-torch memory allocation
-        mock_platform_mem_get_info.side_effect = [
+        mock_torch_mem_get_info.side_effect = [
             (8000, 10000),  # 1st call
             (7000, 10000),  # 2nd call
         ]
@@ -695,15 +684,17 @@ class TestNPUWorker(TestBase):
             expected_result = max(0, int(10000 * 0.9 - 5500))
             self.assertEqual(result, expected_result)
 
-    @patch("vllm_ascend.worker.worker.NPUPlatform.clear_npu_memory")
-    @patch("vllm_ascend.worker.worker.NPUPlatform.mem_get_info")
+    @patch("torch.npu.mem_get_info")
+    @patch("torch.npu.reset_peak_memory_stats")
+    @patch("torch.npu.empty_cache")
     def test_determine_available_memory_memory_profiling_error(
-            self, mock_platform_mem_get_info, mock_platform_clear_npu_memory):
+            self, mock_torch_empty_cache, mock_torch_reset_peak_memory_stats,
+            mock_torch_mem_get_info):
         """Test determine_available_memory throws exception on memory profiling error"""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Setup mock: initial memory less than current free memory (error case)
-        mock_platform_mem_get_info.side_effect = [
+        mock_torch_mem_get_info.side_effect = [
             (8000, 10000),  # 1st call
             (9000, 10000),  # 2nd call: free memory increased instead
         ]
@@ -722,24 +713,22 @@ class TestNPUWorker(TestBase):
 
             self.assertIn("Error in memory profiling", str(cm.exception))
 
-    @patch("vllm_ascend.worker.worker.NPUPlatform.clear_npu_memory")
-    @patch("vllm_ascend.worker.worker.NPUPlatform.empty_cache")
-    @patch("vllm_ascend.worker.worker.NPUPlatform.mem_get_info")
+    @patch("torch.npu.reset_peak_memory_stats")
+    @patch("torch.npu.empty_cache")
     @patch("torch_npu.npu.memory_stats")
     @patch("torch_npu.npu.mem_get_info")
     def test_determine_available_memory_negative_result(
         self,
         mock_torch_mem_get_info,
         mock_torch_memory_stats,
-        mock_platform_mem_get_info,
-        mock_platform_empty_cache,
-        mock_platform_clear_npu_memory,
+        mock_torch_empty_cache,
+        mock_torch_reset_peak_memory_stats,
     ):
         """Test determine_available_memory returns 0 when result is negative"""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Setup mock: high peak memory causes negative available memory
-        mock_platform_mem_get_info.side_effect = [
+        mock_torch_mem_get_info.side_effect = [
             (8000, 10000),  # 1st call
             (3000, 10000),  # 2nd call
         ]
@@ -989,12 +978,10 @@ class TestNPUWorker(TestBase):
 
             self.assertIn("Sleep mode can only be", str(cm.exception))
 
-    @patch("vllm_ascend.worker.worker.NPUPlatform.seed_everything")
     @patch("vllm_ascend.worker.worker.logger")
     @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
     def test_compile_or_warm_up_model_with_eager_mode(self, mock_warm_up_atb,
-                                                      mock_logger,
-                                                      mock_seed_everything):
+                                                      mock_logger):
         """Test compile_or_warm_up_model method - eager mode"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -1032,17 +1019,13 @@ class TestNPUWorker(TestBase):
             # Verify log output
             self.assertEqual(mock_logger.info.call_count, 4)
 
-            # Verify seed setting
-            mock_seed_everything.assert_called_once_with(12345)
-
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
 
-    @patch("vllm_ascend.worker.worker.NPUPlatform.seed_everything")
     @patch("vllm_ascend.worker.worker.logger")
     @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
     def test_compile_or_warm_up_model_with_graph_capture(
-            self, mock_warm_up_atb, mock_logger, mock_seed_everything):
+            self, mock_warm_up_atb, mock_logger):
         """Test compile_or_warm_up_model method - with graph capture enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -1071,9 +1054,6 @@ class TestNPUWorker(TestBase):
 
             # Should call capture_model in non-eager mode
             worker.model_runner.capture_model.assert_called_once()
-
-            # Verify seed setting
-            mock_seed_everything.assert_called_once_with(67890)
 
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()

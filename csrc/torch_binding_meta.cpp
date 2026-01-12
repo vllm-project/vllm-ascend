@@ -157,10 +157,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
 std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
     const at::Tensor &x,
     const at::Tensor &expert_ids,
-    const at::Tensor &gmm1_permuted_weight,
-    const at::Tensor &gmm1_permuted_weight_scale,
-    const at::Tensor &gmm2_weight,
-    const at::Tensor &gmm2_weight_scale,
+    const at::TensorList &gmm1_permuted_weight,
+    const at::TensorList &gmm1_permuted_weight_scale,
+    const at::TensorList &gmm2_weight,
+    const at::TensorList &gmm2_weight_scale,
     const at::Tensor &expert_scales,
     const c10::optional<at::Tensor> &expert_smooth_scales,
     const c10::optional<at::Tensor> &x_active_mask,
@@ -181,9 +181,10 @@ std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
 
     bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
     int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
-    at::Tensor ep_recv_count = at::empty({num_local_experts * ep_rank_size}, expert_ids.options().device(at::kMeta));
-
-    return {output, ep_recv_count};
+    auto opts = expert_ids.options().dtype(at::kLong); 
+    at::Tensor expert_token_nums = at::empty({num_local_experts}, opts.device(at::kMeta)); 
+    
+    return {output, expert_token_nums};
 }
 
 void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
@@ -195,11 +196,11 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
 
 at::Tensor& dispatch_ffn_combine_meta(
     const at::Tensor& x,
-    const at::Tensor& weight1,
-    const at::Tensor& weight2,
+    const at::TensorList& weight1,
+    const at::TensorList& weight2,
     const at::Tensor& expert_idx,
-    const at::Tensor& scale1,
-    const at::Tensor& scale2,
+    const at::TensorList& scale1,
+    const at::TensorList& scale2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
@@ -365,7 +366,43 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_
     at::Tensor expanded_scale = at::empty({expanded_scale_len}, x.options().dtype(at::kFloat));
     return {expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale};
 }
+std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
+    const at::Tensor& x,
+    int64_t k,
+    int64_t k_group,
+    int64_t group_count,
+    int64_t group_select_mode,
+    int64_t renorm,
+    int64_t norm_type,
+    bool out_flag,
+    double routed_scaling_factor,
+    double eps,
+    const c10::optional<at::Tensor>& bias_opt
+    
+    )
+{
+    TORCH_CHECK(x.dim() == 2, "The x should be 2D");
+    TORCH_CHECK(
+        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
+        "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
+        x.scalar_type());
 
+    auto x_size = x.sizes();
+    auto rows = x_size[0];
+    auto expert_num = x_size[1];
+    const at::Tensor &bias = c10::value_or_else(bias_opt, [] { return at::Tensor(); });
+    if (bias.defined()) {
+        TORCH_CHECK(x.scalar_type() == bias.scalar_type(), "The dtype of x and bias should be same");
+        TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
+        auto bias_size = bias.sizes();
+        TORCH_CHECK(bias_size[0] == expert_num, "The bias first dim should be same as x second dim");
+    }
+    at::Tensor y = at::empty({rows, k}, x.options());
+    at::Tensor expert_idx = at::empty({rows, k}, x.options().dtype(at::kInt));
+    at::Tensor out = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
+}
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -373,6 +410,7 @@ namespace {
 // Register the meta implementations of the custom kernels for symbolic tracing, this will also
 // the custom kernel been captured into aclgraph
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+
     // Rotary embedding meta implementation
     ops.impl("rotary_embedding", &vllm_ascend::meta::rotary_embedding_meta);
     // Masked input and mask meta implementation
@@ -401,5 +439,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("matmul_allreduce_add_rmsnorm", &vllm_ascend::meta::matmul_allreduce_add_rmsnorm_meta);
     // moe_init_routing_custom
     ops.impl("npu_moe_init_routing_custom", &vllm_ascend::meta::npu_moe_init_routing_custom_meta);
+    // Moe_gating_top_k
+    ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
 }
 }

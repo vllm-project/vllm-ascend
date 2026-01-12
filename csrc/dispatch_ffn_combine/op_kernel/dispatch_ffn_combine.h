@@ -100,6 +100,7 @@ private:
     int32_t expertPerRank;
     int32_t maxOutputSize;
     int32_t EP;
+    int32_t listLen;
 
     optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData;
     uint64_t initRoutingQuantTilingKey;
@@ -138,6 +139,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     topK = tilingData.dispatchFFNCombineInfo.topK;
     expertPerRank = tilingData.dispatchFFNCombineInfo.expertPerRank;
     maxOutputSize = tilingData.dispatchFFNCombineInfo.maxOutputSize;
+    listLen = tilingData.dispatchFFNCombineInfo.listLen;
 
     m0 = tilingData.cocTiling.m0;
     k0 = tilingData.cocTiling.k0;
@@ -254,7 +256,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
     uint32_t epilogueGranularity = expertPerRank - 1;
 
     typename MatmulKernel::Params params{
-        problemShape, static_cast<uint32_t>(EP), static_cast<uint32_t>(expertPerRank), static_cast<uint32_t>(maxOutputSize),
+        problemShape, static_cast<uint32_t>(EP), static_cast<uint32_t>(listLen), static_cast<uint32_t>(expertPerRank), static_cast<uint32_t>(maxOutputSize),
         static_cast<uint32_t>(rank), static_cast<uint32_t>(rankSize),
         static_cast<uint32_t>(topK), initRoutingQuantTilingKey,
         epilogueCoreNum, epilogueGranularity,

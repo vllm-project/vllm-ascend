@@ -107,7 +107,6 @@ def generate_log2phy_map(global_expert_map, ep_rank):
     for rankid, map_per_rank in enumerate(global_expert_map):
         for idx, val in enumerate(map_per_rank):
             val = val.item()
-            # 计算value：当前值 + i * 有效元素个数
             if val != -1:
                 log2phy_map[idx].append(val + rankid * valid_count)
 
