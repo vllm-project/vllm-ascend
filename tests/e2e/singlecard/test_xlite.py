@@ -94,9 +94,7 @@ def test_models_with_xlite_full_mode(cur_case: LLMTestCase):
         "model_name": cur_case.model,
         "max_model_len": 1024,
         "block_size": 128,
-        "additional_config": {
-            "xlite_graph_config": {"enabled": True, "full_mode": True}
-        },
+        "additional_config": {"xlite_graph_config": {"enabled": True, "full_mode": True}},
     }
     gen_and_valid(
         runner_kwargs=runner_kwargs,

@@ -23,7 +23,6 @@ import os
 import subprocess
 import sys
 from sysconfig import get_paths
-from typing import Dict, List
 
 from setuptools import Command, Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
@@ -63,7 +62,7 @@ def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""
     return cmake_args
 
 
-def get_value_from_lines(lines: List[str], key: str) -> str:
+def get_value_from_lines(lines: list[str], key: str) -> str:
     for line in lines:
         line = " ".join(line.split())
         if key in line:
@@ -73,17 +72,10 @@ def get_value_from_lines(lines: List[str], key: str) -> str:
 
 def get_chip_type() -> str:
     try:
-        npu_info_lines = (
-            subprocess.check_output(["npu-smi", "info", "-l"])
-            .decode()
-            .strip()
-            .split("\n")
-        )
+        npu_info_lines = subprocess.check_output(["npu-smi", "info", "-l"]).decode().strip().split("\n")
         npu_id = int(get_value_from_lines(npu_info_lines, "NPU ID"))
         chip_info_lines = (
-            subprocess.check_output(
-                ["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"]
-            )
+            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
             .decode()
             .strip()
             .split("\n")
@@ -107,9 +99,7 @@ def get_chip_type() -> str:
                 return (chip_name + "_" + npu_name).lower()
         else:
             # TODO(zzzzwwjj): Currently, A5's chip name has not determined yet.
-            raise ValueError(
-                f"Unable to recognize chip name: {chip_name}, please manually set env SOC_VERSION"
-            )
+            raise ValueError(f"Unable to recognize chip name: {chip_name}, please manually set env SOC_VERSION")
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Get chip info failed: {e}")
     except FileNotFoundError:
@@ -132,10 +122,8 @@ if not envs.SOC_VERSION:
         )
     envs.SOC_VERSION = soc_version
 else:
-    if soc_version and envs.SOC_VERSION != soc_version:
-        logging.warning(
-            f"env SOC_VERSION: {envs.SOC_VERSION} is not equal to soc_version from npu-smi: {soc_version}"
-        )
+    if soc_version and soc_version != envs.SOC_VERSION:
+        logging.warning(f"env SOC_VERSION: {envs.SOC_VERSION} is not equal to soc_version from npu-smi: {soc_version}")
 
 
 def gen_build_info():
@@ -168,9 +156,7 @@ def gen_build_info():
         "ascend910_9579": "A5",
     }
 
-    assert soc_version in soc_to_device, (
-        f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
-    )
+    assert soc_version in soc_to_device, f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
     device_type = soc_to_device[soc_version]
 
     package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
@@ -211,9 +197,7 @@ class build_and_install_aclnn(Command):
     def run(self):
         try:
             print("Running bash build_aclnn.sh ...")
-            subprocess.check_call(
-                ["bash", "csrc/build_aclnn.sh", ROOT_DIR, envs.SOC_VERSION]
-            )
+            subprocess.check_call(["bash", "csrc/build_aclnn.sh", ROOT_DIR, envs.SOC_VERSION])
             print("buid_aclnn.sh executed successfully!")
         except subprocess.CalledProcessError as e:
             print(f"Error running build_aclnn.sh: {e}")
@@ -222,7 +206,7 @@ class build_and_install_aclnn(Command):
 
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
-    did_config: Dict[str, bool] = {}
+    did_config: dict[str, bool] = {}
 
     #
     # Determine number of compilation jobs
@@ -284,20 +268,14 @@ class cmake_build_ext(build_ext):
         check_or_set_default_env(cmake_args, "PYTHON_EXECUTABLE", sys.executable)
 
         # find PYTHON_INCLUDE_PATH
-        check_or_set_default_env(
-            cmake_args, "PYTHON_INCLUDE_PATH", get_paths()["include"]
-        )
+        check_or_set_default_env(cmake_args, "PYTHON_INCLUDE_PATH", get_paths()["include"])
 
         # ccache and ninja can not be applied at ascendc kernels now
 
         try:
             # if pybind11 is installed via pip
             pybind11_cmake_path = (
-                subprocess.check_output(
-                    [python_executable, "-m", "pybind11", "--cmakedir"]
-                )
-                .decode()
-                .strip()
+                subprocess.check_output([python_executable, "-m", "pybind11", "--cmakedir"]).decode().strip()
             )
         except subprocess.CalledProcessError as e:
             # else specify pybind11 path installed from source code on CI container
@@ -327,13 +305,9 @@ class cmake_build_ext(build_ext):
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
         cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
 
-        torch_npu_command = (
-            "python3 -m pip show torch-npu | grep '^Location:' | awk '{print $2}'"
-        )
+        torch_npu_command = "python3 -m pip show torch-npu | grep '^Location:' | awk '{print $2}'"
         try:
-            torch_npu_path = (
-                subprocess.check_output(torch_npu_command, shell=True).decode().strip()
-            )
+            torch_npu_path = subprocess.check_output(torch_npu_command, shell=True).decode().strip()
             torch_npu_path += "/torch_npu"
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Retrieve torch version version failed: {e}")
@@ -419,9 +393,7 @@ class cmake_build_ext(build_ext):
 
         # copy back _cann_ops_custom directory
         src_cann_ops_custom = os.path.join(ROOT_DIR, "vllm_ascend", "_cann_ops_custom")
-        dst_cann_ops_custom = os.path.join(
-            self.build_lib, "vllm_ascend", "_cann_ops_custom"
-        )
+        dst_cann_ops_custom = os.path.join(self.build_lib, "vllm_ascend", "_cann_ops_custom")
         if os.path.exists(src_cann_ops_custom):
             import shutil
 
@@ -468,10 +440,10 @@ def read_readme() -> str:
         return ""
 
 
-def get_requirements() -> List[str]:
+def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
 
-    def _read_requirements(filename: str) -> List[str]:
+    def _read_requirements(filename: str) -> list[str]:
         with open(get_path(filename)) as f:
             requirements = f.read().strip().split("\n")
         resolved_requirements = []

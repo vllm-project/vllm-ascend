@@ -19,7 +19,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional
 
 import torch
 from torch import nn
@@ -73,11 +72,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
-        q_lora_rank: Optional[int],
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         mla_modules: MLAModules,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         nn.Module.__init__(self)
@@ -131,15 +130,13 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: Optional[torch.Tensor] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
+        kv_cache: torch.Tensor | None = None,
+        attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         need_gather_q_kv = get_forward_context().sp_enabled
         output_shape = hidden_states.shape
         # FIXME: This does not seem right, should make sure the buffer is fixed
-        output = torch.empty(
-            output_shape, dtype=hidden_states.dtype, device=hidden_states.device
-        )
+        output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
         torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output, self.prefix)
         output = output.view(-1, output_shape[-1])
         return output

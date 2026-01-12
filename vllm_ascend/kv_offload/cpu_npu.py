@@ -127,10 +127,7 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         dst_sub_blocks_to_skip = -src_blocks.size % dst_block_size_factor
         src_sub_block_count = src_blocks.size * src_block_size_factor
 
-        assert (
-            src_sub_block_count
-            == dst_blocks.size * dst_block_size_factor - dst_sub_blocks_to_skip
-        )
+        assert src_sub_block_count == dst_blocks.size * dst_block_size_factor - dst_sub_blocks_to_skip
 
         src_to_dst = np.empty((src_sub_block_count, 2), dtype=np.int64)
         expand_block_ids(src_blocks, src_block_size_factor, src_to_dst[:, 0])
@@ -148,12 +145,8 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
                 src_key_cache, src_value_cache = src_tensor[0], src_tensor[1]
                 dst_key_cache, dst_value_cache = dst_tensor[0], dst_tensor[1]
 
-                torch.ops._C_ascend.swap_blocks(
-                    src_key_cache, dst_key_cache, src_to_dst_tensor
-                )
-                torch.ops._C_ascend.swap_blocks(
-                    src_value_cache, dst_value_cache, src_to_dst_tensor
-                )
+                torch.ops._C_ascend.swap_blocks(src_key_cache, dst_key_cache, src_to_dst_tensor)
+                torch.ops._C_ascend.swap_blocks(src_value_cache, dst_value_cache, src_to_dst_tensor)
 
             event.record(stream)
 

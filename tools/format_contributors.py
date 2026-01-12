@@ -20,9 +20,7 @@ import re
 import sys
 from datetime import datetime
 
-p = re.compile(
-    r"@(?P<user>[A-Za-z0-9-_]+)[^\`]*\`(?P<sha>[0-9a-fA-F]+)\`\s*[-–—]\s*(?P<date>.+)$"
-)
+p = re.compile(r"@(?P<user>[A-Za-z0-9-_]+)[^\`]*\`(?P<sha>[0-9a-fA-F]+)\`\s*[-–—]\s*(?P<date>.+)$")
 
 
 def parse_lines(lines):
@@ -64,13 +62,11 @@ def main():
         default=1,
         help="minimum number for table (oldest row will have this number)",
     )
-    ap.add_argument(
-        "--repo", default="vllm-project/vllm-ascend", help="repo used for commit links"
-    )
+    ap.add_argument("--repo", default="vllm-project/vllm-ascend", help="repo used for commit links")
     args = ap.parse_args()
 
     if args.file:
-        with open(args.file, "r", encoding="utf-8") as f:
+        with open(args.file, encoding="utf-8") as f:
             lines = f.readlines()
     else:
         lines = sys.stdin.readlines()

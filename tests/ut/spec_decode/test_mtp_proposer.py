@@ -24,9 +24,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 class TestMtpProposer:
     @pytest.fixture(autouse=True)
     def patch_supports_multimodal_inputs(self):
-        with patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
-        ):
+        with patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"):
             yield
 
     @pytest.fixture
@@ -38,9 +36,7 @@ class TestMtpProposer:
         config.speculative_config.method = "deepseek_mtp"
         config.speculative_config.draft_model_config = MagicMock()
         config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
-        config.speculative_config.speculative_token_tree = str(
-            [(i + 1) * (0,) for i in range(2)]
-        )
+        config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(2)])
 
         config.model_config = MagicMock(spec=ModelConfig)
         config.model_config.dtype = torch.float16
@@ -135,10 +131,7 @@ class TestMtpProposer:
         mock_set_context.assert_called()
 
         # Check that model was called correct number of times
-        assert (
-            proposer.model.call_count
-            == vllm_config.speculative_config.num_speculative_tokens
-        )
+        assert proposer.model.call_count == vllm_config.speculative_config.num_speculative_tokens
 
     @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")
@@ -164,19 +157,14 @@ class TestMtpProposer:
         mock_get_forward_context.cudagraph_runtime_mode = None
         mock_get_forward_context.capturing = True
         # Execute
-        proposer.dummy_run(
-            num_tokens=8, num_reqs=5, aclgraph_runtime_mode=CUDAGraphMode.FULL
-        )
+        proposer.dummy_run(num_tokens=8, num_reqs=5, aclgraph_runtime_mode=CUDAGraphMode.FULL)
 
         # Verify
         runner._sync_metadata_across_dp.assert_called_once()
         mock_set_context.assert_called()
 
         # Check that model was called correct number of times
-        assert (
-            proposer.model.call_count
-            == vllm_config.speculative_config.num_speculative_tokens
-        )
+        assert proposer.model.call_count == vllm_config.speculative_config.num_speculative_tokens
 
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
     def test_prepare_next_token_ids_cpu(self, mock_cpu_gpu_buffer):
@@ -190,9 +178,7 @@ class TestMtpProposer:
 
         proposer = MagicMock(spec=MtpProposer)
         proposer.input_ids = MagicMock(device=torch.device("cpu"))
-        proposer.prepare_next_token_ids_cpu = (
-            MtpProposer.prepare_next_token_ids_cpu.__get__(proposer)
-        )
+        proposer.prepare_next_token_ids_cpu = MtpProposer.prepare_next_token_ids_cpu.__get__(proposer)
         result = proposer.prepare_next_token_ids_cpu(
             sampled_token_ids=sampled_token_ids,
             requests={},
@@ -205,9 +191,7 @@ class TestMtpProposer:
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
     def test_prepare_next_token_ids_padded(self, mock_cpu_gpu_buffer):
         mock_common_attn_metadata = MagicMock(spec=CommonAttentionMetadata)
-        mock_common_attn_metadata.seq_lens_cpu = torch.tensor(
-            [10, 8, 5, 12], dtype=torch.int32
-        )
+        mock_common_attn_metadata.seq_lens_cpu = torch.tensor([10, 8, 5, 12], dtype=torch.int32)
         mock_sampled_token_ids = torch.tensor(
             [
                 [101, 102, 103],
@@ -250,22 +234,18 @@ class TestMtpProposer:
         proposer = MagicMock(spec=MtpProposer)
         proposer.backup_next_token_ids = mock_backup
         proposer.input_ids = MagicMock(device=torch.device("cpu"))
-        proposer.prepare_next_token_ids_padded = (
-            MtpProposer.prepare_next_token_ids_padded.__get__(proposer)
-        )
+        proposer.prepare_next_token_ids_padded = MtpProposer.prepare_next_token_ids_padded.__get__(proposer)
 
         discard_request_indices = torch.tensor([1, 3], dtype=torch.int64)
         num_discarded_requests = 2
 
-        next_token_ids, valid_sampled_tokens_count = (
-            proposer.prepare_next_token_ids_padded(
-                common_attn_metadata=mock_common_attn_metadata,
-                sampled_token_ids=mock_sampled_token_ids,
-                requests=mock_requests,
-                gpu_input_batch=mock_gpu_input_batch,
-                discard_request_indices=discard_request_indices,
-                num_discarded_requests=num_discarded_requests,
-            )
+        next_token_ids, valid_sampled_tokens_count = proposer.prepare_next_token_ids_padded(
+            common_attn_metadata=mock_common_attn_metadata,
+            sampled_token_ids=mock_sampled_token_ids,
+            requests=mock_requests,
+            gpu_input_batch=mock_gpu_input_batch,
+            discard_request_indices=discard_request_indices,
+            num_discarded_requests=num_discarded_requests,
         )
 
         mock_backup_output = proposer.backup_next_token_ids
@@ -275,18 +255,14 @@ class TestMtpProposer:
         mock_backup_output.copy_to_gpu.assert_called_once_with(4)
 
         modified_sampled = mock_sampled_token_ids.clone()
-        modified_sampled.index_fill_(
-            0, discard_request_indices[:num_discarded_requests], -1
-        )
+        modified_sampled.index_fill_(0, discard_request_indices[:num_discarded_requests], -1)
         assert valid_sampled_tokens_count[1].item() == 0
         assert valid_sampled_tokens_count[3].item() == 0
 
         expected_valid_count = torch.tensor([3, 0, 0, 0], dtype=torch.int32)
         assert torch.equal(valid_sampled_tokens_count, expected_valid_count)
 
-        expected_next_tokens = torch.tensor(
-            [103, 2, 3, 4], dtype=torch.int32, device=torch.device("cpu")
-        )
+        expected_next_tokens = torch.tensor([103, 2, 3, 4], dtype=torch.int32, device=torch.device("cpu"))
         assert torch.equal(next_token_ids, expected_next_tokens)
 
     @patch("vllm_ascend.spec_decode.eagle_proposer.HAS_TRITON", False)
@@ -296,30 +272,20 @@ class TestMtpProposer:
         mock_cpu_gpu_buffer.return_value = mock_buffer_instance
 
         mock_common_attn_metadata = MagicMock(spec=CommonAttentionMetadata)
-        mock_common_attn_metadata.query_start_loc_cpu = torch.tensor(
-            [0, 8, 16, 24], dtype=torch.int32
-        )
-        mock_common_attn_metadata.seq_lens_cpu = torch.tensor(
-            [8, 8, 8], dtype=torch.int32
-        )
+        mock_common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 8, 16, 24], dtype=torch.int32)
+        mock_common_attn_metadata.seq_lens_cpu = torch.tensor([8, 8, 8], dtype=torch.int32)
         mock_common_attn_metadata.num_input_tokens = 3
-        mock_common_attn_metadata.query_start_loc = torch.tensor(
-            [0, 8, 16, 24], dtype=torch.int32
-        )
+        mock_common_attn_metadata.query_start_loc = torch.tensor([0, 8, 16, 24], dtype=torch.int32)
         mock_common_attn_metadata.seq_lens = torch.tensor([8, 8, 8], dtype=torch.int32)
         mock_common_attn_metadata.num_actual_tokens = 24
         mock_common_attn_metadata.num_reqs = 3
-        mock_common_attn_metadata.num_computed_tokens_cpu = torch.tensor(
-            [5, 6, 7], dtype=torch.int32
-        )
+        mock_common_attn_metadata.num_computed_tokens_cpu = torch.tensor([5, 6, 7], dtype=torch.int32)
         mock_common_attn_metadata.block_table_tensor = MagicMock()
         mock_common_attn_metadata.slot_mapping = MagicMock()
         mock_common_attn_metadata.positions = MagicMock()
 
         mock_spec_decode_metadata = MagicMock(spec=SpecDecodeMetadata)
-        mock_spec_decode_metadata.cu_num_draft_tokens = torch.tensor(
-            [3, 5, 7], dtype=torch.int32
-        )
+        mock_spec_decode_metadata.cu_num_draft_tokens = torch.tensor([3, 5, 7], dtype=torch.int32)
 
         mock_runner = MagicMock()
         mock_runner.actual_seq_lengths_q = MagicMock()
@@ -332,18 +298,14 @@ class TestMtpProposer:
         proposer.runner = mock_runner
         proposer.pcp_size = 1
         proposer.arange = torch.arange(100, dtype=torch.int32)
-        proposer.prepare_inputs_padded = MtpProposer.prepare_inputs_padded.__get__(
-            proposer
-        )
+        proposer.prepare_inputs_padded = MtpProposer.prepare_inputs_padded.__get__(proposer)
 
         mock_valid_sampled_tokens_count = torch.tensor([2, 1, 2], dtype=torch.int32)
 
-        (spec_common_attn_metadata, token_indices, token_indices_to_sample) = (
-            proposer.prepare_inputs_padded(
-                common_attn_metadata=mock_common_attn_metadata,
-                spec_decode_metadata=mock_spec_decode_metadata,
-                valid_sampled_tokens_count=mock_valid_sampled_tokens_count,
-            )
+        (spec_common_attn_metadata, token_indices, token_indices_to_sample) = proposer.prepare_inputs_padded(
+            common_attn_metadata=mock_common_attn_metadata,
+            spec_decode_metadata=mock_spec_decode_metadata,
+            valid_sampled_tokens_count=mock_valid_sampled_tokens_count,
         )
 
         total_num_tokens = mock_common_attn_metadata.query_start_loc_cpu[-1].item()
@@ -364,13 +326,8 @@ class TestMtpProposer:
             spec_common_attn_metadata.query_start_loc_cpu,
             mock_common_attn_metadata.query_start_loc_cpu,
         )
-        assert torch.equal(
-            spec_common_attn_metadata.seq_lens_cpu, mock_common_attn_metadata.seq_lens
-        )
+        assert torch.equal(spec_common_attn_metadata.seq_lens_cpu, mock_common_attn_metadata.seq_lens)
         assert spec_common_attn_metadata.num_reqs == mock_common_attn_metadata.num_reqs
         assert spec_common_attn_metadata.num_actual_tokens == total_num_tokens
         assert spec_common_attn_metadata.max_query_len == 8
-        assert (
-            spec_common_attn_metadata.actual_seq_lengths_q
-            == proposer.runner.actual_seq_lengths_q
-        )
+        assert spec_common_attn_metadata.actual_seq_lengths_q == proposer.runner.actual_seq_lengths_q

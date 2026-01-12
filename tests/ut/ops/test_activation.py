@@ -71,9 +71,7 @@ def test_SiluAndMul_forward(
         mock_maybe_wait_prefetch_done.assert_called_once()
 
         actual_arg = mock_swiglu.call_args[0][0]
-        assert torch.allclose(actual_arg, expected_arg), (
-            "npu_swiglu called with unexpected input"
-        )
+        assert torch.allclose(actual_arg, expected_arg), "npu_swiglu called with unexpected input"
 
         expected_out = dummy_tensor + 1
         assert torch.allclose(out, expected_out)

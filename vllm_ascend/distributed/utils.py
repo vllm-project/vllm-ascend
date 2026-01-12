@@ -9,9 +9,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.distributed.parallel_state import get_fc3_quant_x_group, get_p_tp_group
 
 
-def kv_alltoall_and_rearrange(
-    pd_tp_ratio: int, key: torch.Tensor, value: torch.TensorType
-):
+def kv_alltoall_and_rearrange(pd_tp_ratio: int, key: torch.Tensor, value: torch.TensorType):
     if pd_tp_ratio <= 1:
         return None, None
     elif key is None or value is None:
@@ -24,9 +22,7 @@ def kv_alltoall_and_rearrange(
 def alltoall_and_rearrange(tp_ratio: int, input_tensor: torch.Tensor):
     num_kv_heads = input_tensor.size(1)
     output_tensor = torch.zeros_like(input_tensor)
-    dist.all_to_all_single(
-        output_tensor, input_tensor, group=get_p_tp_group().device_group
-    )
+    dist.all_to_all_single(output_tensor, input_tensor, group=get_p_tp_group().device_group)
     input_tensor = 0
     result = rearrange_output(output_tensor, tp_ratio, num_kv_heads)
     output_tensor = 0
@@ -36,9 +32,7 @@ def alltoall_and_rearrange(tp_ratio: int, input_tensor: torch.Tensor):
 def rearrange_output(base_output: torch.Tensor, cut_num: int, num_kv_heads: int):
     size_0 = base_output.size(0)
     if size_0 % cut_num != 0:
-        raise ValueError(
-            f"The size of dim 0 [{size_0}] must be divisible by the cut_num [{cut_num}]"
-        )
+        raise ValueError(f"The size of dim 0 [{size_0}] must be divisible by the cut_num [{cut_num}]")
     chunk_size = size_0 // cut_num
     reshaped = base_output.view(cut_num, chunk_size, -1)
     transposed = reshaped.transpose(0, 1)

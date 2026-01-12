@@ -129,9 +129,7 @@ html_theme_options = {
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
 if READTHEDOCS_VERSION_TYPE == "tag":
     # remove the warning banner if the version is a tagged release
-    header_file = os.path.join(
-        os.path.dirname(__file__), "_templates/sections/header.html"
-    )
+    header_file = os.path.join(os.path.dirname(__file__), "_templates/sections/header.html")
     # The file might be removed already if the build is triggered multiple times
     # (readthedocs build both HTML and PDF versions separately)
     if os.path.exists(header_file):

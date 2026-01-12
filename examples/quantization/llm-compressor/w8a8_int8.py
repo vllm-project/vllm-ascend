@@ -1,18 +1,17 @@
 import os
+
 import torch
-
-from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-
-from llmcompressor import oneshot
-from llmcompressor.modifiers.awq import AWQModifier
-from llmcompressor.modifiers.quantization import GPTQModifier, QuantizationModifier
 from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationScheme,
-    QuantizationType,
     QuantizationStrategy,
+    QuantizationType,
 )
+from datasets import load_dataset
+from llmcompressor import oneshot
+from llmcompressor.modifiers.awq import AWQModifier
+from llmcompressor.modifiers.quantization import GPTQModifier, QuantizationModifier
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 W8A8_W_cha_A_ten_static_symmetric = {
     "group_0": QuantizationScheme(
@@ -66,9 +65,7 @@ def load_environment_variables():
 
     # verify export model path
     if env_vars["export_path"] is None:
-        env_vars["export_path"] = (
-            env_vars["model_path"].rstrip("/") + "-" + env_vars["modifier"]
-        )
+        env_vars["export_path"] = env_vars["model_path"].rstrip("/") + "-" + env_vars["modifier"]
         if env_vars["schemes"] is not None:
             env_vars["export_path"] += "-" + env_vars["schemes"]
     os.makedirs(env_vars["export_path"], exist_ok=True)
@@ -85,20 +82,12 @@ def load_calibration_text_dataset(calib_prompt_path, tokenizer):
     elif any(f.lower().endswith(".parquet") for f in os.listdir(calib_prompt_path)):
         ds = load_dataset("parquet", data_dir=calib_prompt_path, split="train[:512]")
     else:
-        raise ValueError(
-            "Unsupported calibration file format: {}".format(
-                calib_prompt_path.split(".")[-1]
-            )
-        )
+        raise ValueError("Unsupported calibration file format: {}".format(calib_prompt_path.split(".")[-1]))
 
     # Preprocess dataset
     def preprocess(example):
         if tokenizer.chat_template is not None:
-            return {
-                "text": tokenizer.apply_chat_template(
-                    example["messages"], tokenize=False
-                )
-            }
+            return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
         else:
             return {"text": example["messages"]}
 
@@ -118,9 +107,7 @@ def load_calibration_text_dataset(calib_prompt_path, tokenizer):
 def data_collator(batch):
     assert len(batch) == 1
     return {
-        key: torch.tensor(
-            value, dtype=torch.bfloat16 if key == "pixel_values" else torch.long
-        )
+        key: torch.tensor(value, dtype=torch.bfloat16 if key == "pixel_values" else torch.long)
         for key, value in batch[0].items()
     }
 
@@ -160,12 +147,8 @@ if __name__ == "__main__":
     config = AutoConfig.from_pretrained(env_vars["model_path"], trust_remote_code=True)
     model_type = config.model_type
 
-    model = MODEL_DICT[model_type].from_pretrained(
-        env_vars["model_path"], torch_dtype="auto", trust_remote_code=True
-    )
-    tokenizer = TOKENIZER_DICT[model_type].from_pretrained(
-        env_vars["model_path"], trust_remote_code=True
-    )
+    model = MODEL_DICT[model_type].from_pretrained(env_vars["model_path"], torch_dtype="auto", trust_remote_code=True)
+    tokenizer = TOKENIZER_DICT[model_type].from_pretrained(env_vars["model_path"], trust_remote_code=True)
 
     ds = load_calibration_text_dataset(env_vars["calib_prompt_path"], tokenizer)
 

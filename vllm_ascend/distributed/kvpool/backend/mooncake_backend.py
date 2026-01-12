@@ -3,7 +3,6 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Union
 
 # Third Party
 from mooncake.store import ReplicateConfig  # type: ignore
@@ -32,9 +31,7 @@ class MooncakeBackend(Backend):
         self.store = MooncakeDistributedStore()
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
-            transfer_engine = global_te.get_transfer_engine(
-                local_hostname, device_name=None
-            )
+            transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
             self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
             ret = self.store.setup(
                 self.local_seg,
@@ -84,7 +81,7 @@ class MooncakeBackend(Backend):
 @dataclass
 class MooncakeStoreConfig:
     metadata_server: str
-    global_segment_size: Union[int, str]
+    global_segment_size: int | str
     local_buffer_size: int
     protocol: str
     device_name: str
@@ -99,9 +96,7 @@ class MooncakeStoreConfig:
             global_segment_size=_parse_global_segment_size(
                 config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
             ),
-            local_buffer_size=_parse_global_segment_size(
-                config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)
-            ),
+            local_buffer_size=_parse_global_segment_size(config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)),
             protocol=config.get("protocol", "ascend"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
@@ -111,9 +106,7 @@ class MooncakeStoreConfig:
     def load_from_env() -> "MooncakeStoreConfig":
         config_path = os.getenv("MOONCAKE_CONFIG_PATH")
         if not config_path:
-            raise ValueError(
-                "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
-            )
+            raise ValueError("The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
         return MooncakeStoreConfig.from_file(config_path)
 
 
@@ -138,9 +131,7 @@ def _parse_global_segment_size(value) -> int:
         try:
             return int(value)
         except (TypeError, ValueError) as e:
-            raise TypeError(
-                f"Unsupported type for global_segment_size: {type(value)}"
-            ) from e
+            raise TypeError(f"Unsupported type for global_segment_size: {type(value)}") from e
 
     cleaned_input = value.strip().lower()
     if not cleaned_input:

@@ -77,9 +77,7 @@ def _penalties_and_temperature_kernel(
         if use_rep_penalty:
             packed_block = block_idx * BLOCK_SIZE // 32 + tl.arange(0, BLOCK_SIZE // 32)
             packed_mask = tl.load(
-                prompt_bin_mask_ptr
-                + req_state_idx * prompt_bin_mask_stride
-                + packed_block,
+                prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride + packed_block,
                 mask=packed_block < tl.cdiv(vocab_size, 32),
             )
             prompt_bin_mask = (packed_mask[:, None] >> (tl.arange(0, 32)[None, :])) & 1

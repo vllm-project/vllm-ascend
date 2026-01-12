@@ -54,10 +54,8 @@ LONG_PROMPT = (
 )
 
 INPUT_PROMPTS = [
-    LONG_PROMPT
-    + "Question: what is the age of John Doe? Your answer: The age of John Doe is ",
-    LONG_PROMPT
-    + "Question: what is the age of Zack Blue? Your answer: The age of Zack Blue is ",
+    LONG_PROMPT + "Question: what is the age of John Doe? Your answer: The age of John Doe is ",
+    LONG_PROMPT + "Question: what is the age of Zack Blue? Your answer: The age of Zack Blue is ",
 ]
 
 

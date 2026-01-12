@@ -38,11 +38,7 @@ DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "500"})
 def test_qwen3_external_launcher(model):
-    script = (
-        Path(__file__).parent.parent.parent.parent.parent
-        / "examples"
-        / "offline_external_launcher.py"
-    )
+    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
     cmd = [
@@ -81,11 +77,7 @@ def test_qwen3_external_launcher(model):
 
 @pytest.mark.parametrize("model", MOE_MODELS)
 def test_qwen3_moe_external_launcher_ep_tp2(model):
-    script = (
-        Path(__file__).parent.parent.parent.parent.parent
-        / "examples"
-        / "offline_external_launcher.py"
-    )
+    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
     cmd = [
@@ -124,11 +116,7 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_qwen3_external_launcher_with_sleepmode():
-    script = (
-        Path(__file__).parent.parent.parent.parent.parent
-        / "examples"
-        / "offline_external_launcher.py"
-    )
+    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
     cmd = [
@@ -171,11 +159,7 @@ def test_qwen3_external_launcher_with_sleepmode():
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_qwen3_external_launcher_with_sleepmode_level2():
-    script = (
-        Path(__file__).parent.parent.parent.parent.parent
-        / "examples"
-        / "offline_external_launcher.py"
-    )
+    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     model_path = snapshot_download("Qwen/Qwen3-8B")
     # TODO: Add moe model test
@@ -224,15 +208,9 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
     reason="This test is only for Ascend910B devices.",
 )
 @pytest.mark.parametrize("model", MODELS)
-@patch.dict(
-    os.environ, {"VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1", "HCCL_BUFFSIZE": "500"}
-)
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1", "HCCL_BUFFSIZE": "500"})
 def test_qwen3_external_launcher_with_matmul_allreduce(model):
-    script = (
-        Path(__file__).parent.parent.parent.parent.parent
-        / "examples"
-        / "offline_external_launcher.py"
-    )
+    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     cmd = [
         sys.executable,

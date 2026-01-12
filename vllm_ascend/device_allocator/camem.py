@@ -18,15 +18,16 @@
 #
 import dataclasses
 import os
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any
 
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
 from vllm.logger import logger
 
 
-def find_loaded_library(lib_name) -> Optional[str]:
+def find_loaded_library(lib_name) -> str | None:
     """
     According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
@@ -47,9 +48,7 @@ def find_loaded_library(lib_name) -> Optional[str]:
     start = found_line.index("/")
     path = found_line[start:].strip()
     filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), (
-        f"Unexpected filename: {filename} for library {lib_name}"
-    )
+    assert filename.rpartition(".so")[0].startswith(lib_name), f"Unexpected filename: {filename} for library {lib_name}"
     return path
 
 
@@ -64,9 +63,7 @@ try:
     lib_name = find_loaded_library("vllm_ascend_C")
     camem_available = True
 except ImportError as e:
-    logger.warning(
-        "Failed to import vllm_ascend_C:%s. Sleep mode will be disabled. ", e
-    )
+    logger.warning("Failed to import vllm_ascend_C:%s. Sleep mode will be disabled. ", e)
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None
@@ -74,14 +71,14 @@ except ImportError as e:
     libcudart = None
 
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = Tuple[int, int, int, int]
+HandleType = tuple[int, int, int, int]
 
 
 @dataclasses.dataclass
 class AllocationData:
     handle: HandleType
     tag: str
-    cpu_backup_tensor: Optional[torch.Tensor] = None
+    cpu_backup_tensor: torch.Tensor | None = None
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -156,18 +153,16 @@ class CaMemAllocator:
             "for the latest updates."
         )
 
-        self.pointer_to_data: Dict[int, AllocationData] = {}
+        self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CaMemAllocator.default_tag
-        self.allocator_and_pools: Dict[str, Any] = {}
+        self.allocator_and_pools: dict[str, Any] = {}
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
         Internal method to store the allocation data
         when memory is allocated in the memory pool."""
         py_d_mem = allocation_handle[2]
-        self.pointer_to_data[py_d_mem] = AllocationData(
-            allocation_handle, self.current_tag
-        )
+        self.pointer_to_data[py_d_mem] = AllocationData(allocation_handle, self.current_tag)
         return
 
     def python_free_callback(self, ptr: int) -> HandleType:
@@ -179,7 +174,7 @@ class CaMemAllocator:
             data.cpu_backup_tensor = None
         return data.handle
 
-    def sleep(self, offload_tags: Optional[Union[Tuple[str, ...], str]] = None) -> None:
+    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
         """
         Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
@@ -200,9 +195,7 @@ class CaMemAllocator:
             handle = data.handle
             if data.tag in offload_tags:
                 size_in_bytes = handle[1]
-                cpu_backup_tensor = torch.empty(
-                    size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=True
-                )
+                cpu_backup_tensor = torch.empty(size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=True)
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 ACL_MEMCPY_DEVICE_TO_HOST = 2
                 dest_max = cpu_ptr + size_in_bytes * 2
@@ -210,7 +203,7 @@ class CaMemAllocator:
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         """
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
@@ -222,9 +215,7 @@ class CaMemAllocator:
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
+                        size_in_bytes = cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         ACL_MEMCPY_HOST_TO_DEVICE = 1
                         dest_max = ptr + size_in_bytes * 2
@@ -238,7 +229,7 @@ class CaMemAllocator:
                         data.cpu_backup_tensor = None
 
     @contextmanager
-    def use_memory_pool(self, tag: Optional[str] = None):
+    def use_memory_pool(self, tag: str | None = None):
         """
         A context manager to use the memory pool.
         All memory allocation created inside the context will be allocated
@@ -253,9 +244,7 @@ class CaMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
-        with use_memory_pool_with_allocator(
-            self.python_malloc_callback, self.python_free_callback
-        ) as data:
+        with use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback) as data:
             # start to hit another PyTorch bug in PyTorch 2.6,
             # possibly because of gc-related issue w.r.t. the allocator and
             # the memory pool.

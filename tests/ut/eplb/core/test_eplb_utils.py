@@ -23,9 +23,7 @@ class TestAscendConfig(unittest.TestCase):
         ascend_config = init_ascend_config(vllm_config)
         ascend_config.dynamic_eplb = True
         ascend_config.init_redundancy_expert = 2
-        moe_parallel_config = FusedMoEParallelConfig(
-            2, 0, 1, 2, 1, 1, 1, 1, True, "hccl"
-        )
+        moe_parallel_config = FusedMoEParallelConfig(2, 0, 1, 2, 1, 1, 1, 1, True, "hccl")
         moe_config = FusedMoEConfig(8, 8, 8192, 5, moe_parallel_config, torch.float16)
         moe_config.supports_eplb = True
         self.ascend_config = ascend_config
@@ -33,9 +31,7 @@ class TestAscendConfig(unittest.TestCase):
         self.mock_npu = patch("torch.Tensor.npu", new=lambda self: self).start()
 
     def test_init_eplb_config_with_eplb(self):
-        expert_map, log2phy, redundant_experts = init_eplb_config(
-            self.ascend_config, 0, self.moe_config
-        )
+        expert_map, log2phy, redundant_experts = init_eplb_config(self.ascend_config, 0, self.moe_config)
         gt_expert_map = torch.tensor([4, -1, -1, -1, 0, 1, 2, 3])
         gt_log2phy = torch.tensor([9, 1, 2, 3, 5, 6, 7, 8])
         self.assertTrue(torch.equal(expert_map, gt_expert_map))
@@ -45,9 +41,7 @@ class TestAscendConfig(unittest.TestCase):
     def test_init_eplb_config_with_eplb_withmap(self):
         _TEST_DIR = os.path.dirname(__file__)
         self.ascend_config.expert_map_path = _TEST_DIR + "/expert_map.json"
-        expert_map, log2phy, redundant_experts = init_eplb_config(
-            self.ascend_config, 0, self.moe_config
-        )
+        expert_map, log2phy, redundant_experts = init_eplb_config(self.ascend_config, 0, self.moe_config)
         gt_expert_map = torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3])
         gt_log2phy = torch.tensor([2, 6, 9, 3, 7, 4, 5, 8])
         self.assertTrue(torch.equal(expert_map, gt_expert_map))
@@ -57,9 +51,7 @@ class TestAscendConfig(unittest.TestCase):
     def test_init_eplb_config_without_eplb(self):
         self.ascend_config.dynamic_eplb = False
         self.ascend_config.expert_map_path = None
-        expert_map, log2phy, redundant_experts = init_eplb_config(
-            self.ascend_config, 0, self.moe_config
-        )
+        expert_map, log2phy, redundant_experts = init_eplb_config(self.ascend_config, 0, self.moe_config)
         gt_expert_map = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3])
         print(expert_map, log2phy, redundant_experts)
         self.assertTrue(torch.equal(expert_map, gt_expert_map))

@@ -1,6 +1,6 @@
+import argparse
 import os
 import time
-import argparse
 
 from vllm import LLM, SamplingParams
 
@@ -14,9 +14,7 @@ if __name__ == "__main__":
     parser.add_argument("--input_len", type=int, default=1024)
     parser.add_argument("--output_len", type=int, default=128)
     parser.add_argument("--bs", type=int, default=1)
-    parser.add_argument(
-        "--model_path", type=str, default="deepseek-ai/DeepSeek-V2-Lite"
-    )
+    parser.add_argument("--model_path", type=str, default="deepseek-ai/DeepSeek-V2-Lite")
     parser.add_argument("--tp", type=int, default=2)
     parser.add_argument("--pcp", type=int, default=2)
     parser.add_argument("--dcp", type=int, default=1)
@@ -31,9 +29,7 @@ if __name__ == "__main__":
         "AI future is",
     ]
 
-    sampling_params = SamplingParams(
-        temperature=0.8, top_p=0.95, max_tokens=args.output_len
-    )
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=args.output_len)
     llm = LLM(
         model=args.model_path,
         trust_remote_code=True,

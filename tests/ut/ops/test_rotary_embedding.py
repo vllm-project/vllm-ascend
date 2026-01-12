@@ -40,40 +40,28 @@ class TestCustomRotaryEmbeddingEnabled(unittest.TestCase):
 
     def test_custom_rotary_embedding_enabled(self):
         # Test when all conditions are True
-        with patch(
-            "vllm_ascend.ops.rotary_embedding.enable_custom_op", return_value=True
-        ):
+        with patch("vllm_ascend.ops.rotary_embedding.enable_custom_op", return_value=True):
             result = _custom_rotary_embedding_enabled(self.query, True, self.head_size)
             self.assertTrue(result)
 
         # Test when dtype is not float16
-        with patch(
-            "vllm_ascend.ops.rotary_embedding.enable_custom_op", return_value=True
-        ):
+        with patch("vllm_ascend.ops.rotary_embedding.enable_custom_op", return_value=True):
             query = self.query.to(torch.float32)
             result = _custom_rotary_embedding_enabled(query, True, self.head_size)
             self.assertFalse(result)
 
         # Test when neox_style is False
-        with patch(
-            "vllm_ascend.ops.rotary_embedding.enable_custom_op", return_value=True
-        ):
+        with patch("vllm_ascend.ops.rotary_embedding.enable_custom_op", return_value=True):
             result = _custom_rotary_embedding_enabled(self.query, False, self.head_size)
             self.assertFalse(result)
 
         # Test when head_size is not divisible by 32
-        with patch(
-            "vllm_ascend.ops.rotary_embedding.enable_custom_op", return_value=True
-        ):
-            result = _custom_rotary_embedding_enabled(
-                self.query, True, self.head_size + 1
-            )
+        with patch("vllm_ascend.ops.rotary_embedding.enable_custom_op", return_value=True):
+            result = _custom_rotary_embedding_enabled(self.query, True, self.head_size + 1)
             self.assertFalse(result)
 
         # Test when custom op is disabled
-        with patch(
-            "vllm_ascend.ops.rotary_embedding.enable_custom_op", return_value=False
-        ):
+        with patch("vllm_ascend.ops.rotary_embedding.enable_custom_op", return_value=False):
             result = _custom_rotary_embedding_enabled(self.query, True, self.head_size)
             self.assertFalse(result)
 
@@ -121,15 +109,11 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     ):
         mock__c.rotary_embedding.return_value = self.query, self.key
         vllm_config = VllmConfig()
-        model_config = ModelConfig(
-            MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND
-        )
+        model_config = ModelConfig(MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND)
         model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
-            result_q, result_k = self.layer.forward(
-                self.positions, self.query, self.key
-            )
+            result_q, result_k = self.layer.forward(self.positions, self.query, self.key)
 
         mock__c.rotary_embedding.assert_called_once()
         self.assertEqual(result_q.shape, self.query.shape)
@@ -149,15 +133,11 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         non_contig_query = self.query.transpose(0, 1)
         non_contig_key = self.key.transpose(0, 1)
         vllm_config = VllmConfig()
-        model_config = ModelConfig(
-            MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND
-        )
+        model_config = ModelConfig(MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND)
         model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
-            result_q, result_k = self.layer.forward(
-                self.positions, non_contig_query, non_contig_key
-            )
+            result_q, result_k = self.layer.forward(self.positions, non_contig_query, non_contig_key)
 
         mock_npu_rotary.assert_called_once()
         self.assertEqual(result_q.shape, non_contig_query.shape)
@@ -172,9 +152,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         offsets = torch.tensor([1, 2, 3])
         with self.assertRaises(NotImplementedError):
             vllm_config = VllmConfig()
-            model_config = ModelConfig(
-                MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND
-            )
+            model_config = ModelConfig(MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND)
             model_config.hf_text_config = PretrainedConfig()
             vllm_config.model_config = model_config
             with set_ascend_forward_context(None, vllm_config):
@@ -189,20 +167,14 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.distributed.parallel_state._DP", MagicMock(world_size=1))
     @patch("vllm.distributed.parallel_state._TP", MagicMock(world_size=1))
-    def test_rope_forward_oot_neox_style_override(
-        self, mock_npu_rotary, mock_custom_enabled
-    ):
+    def test_rope_forward_oot_neox_style_override(self, mock_npu_rotary, mock_custom_enabled):
         # Test neox_style override
         vllm_config = VllmConfig()
-        model_config = ModelConfig(
-            MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND
-        )
+        model_config = ModelConfig(MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND)
         model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
-            result_q, result_k = self.layer.forward(
-                self.positions, self.query, self.key, is_neox_style_override=False
-            )
+            result_q, result_k = self.layer.forward(self.positions, self.query, self.key, is_neox_style_override=False)
         # Check that neox_style=False was passed to the NPU function
         args, kwargs = mock_npu_rotary.call_args
         self.assertFalse(args[-1])
@@ -216,23 +188,17 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.distributed.parallel_state._DP", MagicMock(world_size=1))
     @patch("vllm.distributed.parallel_state._TP", MagicMock(world_size=1))
-    def test_rope_forward_oot_rotary_dim_less_than_head_size(
-        self, mock_npu_rotary, mock_custom_enabled
-    ):
+    def test_rope_forward_oot_rotary_dim_less_than_head_size(self, mock_npu_rotary, mock_custom_enabled):
         # test case when rotary_dim < head_size
         org_rotary_dim = self.layer.rotary_dim
         self.layer.rotary_dim = self.layer.head_size // 2
 
         vllm_config = VllmConfig()
-        model_config = ModelConfig(
-            MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND
-        )
+        model_config = ModelConfig(MODEL, tokenizer=MODEL, max_model_len=MAX_NUM_BATCHED_TOKEND)
         model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
-            result_q, result_k = self.layer.forward(
-                self.positions, self.query, self.key
-            )
+            result_q, result_k = self.layer.forward(self.positions, self.query, self.key)
 
         mock_npu_rotary.assert_called_once()
         self.assertEqual(result_q.shape, self.query.shape)
@@ -295,9 +261,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
     @patch("vllm_ascend.ops.rotary_embedding._rope_forward_oot")
     @patch("vllm.platforms.current_platform.device_type", new=torch.device("cpu"))
     @patch("vllm_ascend.ops.rotary_embedding.NPUPlatform", new_callable=PropertyMock)
-    def test_native_rope_deepseek_forward_key_reshaping(
-        self, mock_npuplatform, mock_rope_forward_oot
-    ):
+    def test_native_rope_deepseek_forward_key_reshaping(self, mock_npuplatform, mock_rope_forward_oot):
         mock_npuplatform.device_type = torch.device("cpu")
         self.layer = self._create_layer()
 
@@ -313,9 +277,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
     @patch("vllm_ascend.ops.rotary_embedding._rope_forward_oot")
     @patch("vllm.platforms.current_platform.device_type", new=torch.device("cpu"))
     @patch("vllm_ascend.ops.rotary_embedding.NPUPlatform", new_callable=PropertyMock)
-    def test_native_rope_deepseek_forward_non_neox_style(
-        self, mock_npuplatform, mock_rope_forward_oot
-    ):
+    def test_native_rope_deepseek_forward_non_neox_style(self, mock_npuplatform, mock_rope_forward_oot):
         mock_npuplatform.device_type = torch.device("cpu")
         self.layer = self._create_layer()
 
@@ -338,17 +300,12 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
         base = 10000
         max_position_embeddings = 2048
 
-        result = self.layer._yarn_find_correction_dim(
-            num_rotations, dim, base, max_position_embeddings
-        )
+        result = self.layer._yarn_find_correction_dim(num_rotations, dim, base, max_position_embeddings)
 
         # Calculate expected value manually
-        expected = (
-            dim
-            * torch.log(
-                torch.tensor(max_position_embeddings) / (num_rotations * 2 * torch.pi)
-            )
-        ) / (2 * torch.log(torch.tensor(base)))
+        expected = (dim * torch.log(torch.tensor(max_position_embeddings) / (num_rotations * 2 * torch.pi))) / (
+            2 * torch.log(torch.tensor(base))
+        )
 
         self.assertTrue(torch.allclose(result, expected))
 
@@ -394,12 +351,8 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
         self.positions_1d = torch.tensor([1, 2, 3])
         self.positions_2d = torch.randint(1, 10, (3, self.number_tokens))
 
-        self.query = torch.randn(
-            (self.number_tokens, self.num_head * self.head_size), dtype=torch.bfloat16
-        )
-        self.key = torch.randn(
-            (self.number_tokens, self.num_kvhead * self.head_size), dtype=torch.bfloat16
-        )
+        self.query = torch.randn((self.number_tokens, self.num_head * self.head_size), dtype=torch.bfloat16)
+        self.key = torch.randn((self.number_tokens, self.num_kvhead * self.head_size), dtype=torch.bfloat16)
 
         # Qwen2.5-VL mrope section case
         self.mrope_section = [16, 24, 24]
@@ -418,9 +371,7 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
 
     def _create_vllm_config(self):
         vllm_config = VllmConfig()
-        model_config = ModelConfig(
-            MODEL_VL, tokenizer=MODEL_VL, max_model_len=MAX_NUM_BATCHED_TOKEND
-        )
+        model_config = ModelConfig(MODEL_VL, tokenizer=MODEL_VL, max_model_len=MAX_NUM_BATCHED_TOKEND)
         model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         return vllm_config
@@ -441,9 +392,7 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
 
         vllm_config = self._create_vllm_config()
         with set_ascend_forward_context(None, vllm_config):
-            result_q, result_k = self.layer.forward_oot(
-                self.positions_1d, self.query, self.key
-            )
+            result_q, result_k = self.layer.forward_oot(self.positions_1d, self.query, self.key)
 
         mock_npu_mrope.assert_called_once()
         self.assertFalse(torch.isnan(result_q).any().item())
@@ -466,9 +415,7 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
 
         vllm_config = self._create_vllm_config()
         with set_ascend_forward_context(None, vllm_config):
-            result_q, result_k = self.layer.forward_oot(
-                self.positions_2d, self.query, self.key
-            )
+            result_q, result_k = self.layer.forward_oot(self.positions_2d, self.query, self.key)
 
         mock_npu_mrope.assert_called_once()
         self.assertFalse(torch.isnan(result_q).any().item())

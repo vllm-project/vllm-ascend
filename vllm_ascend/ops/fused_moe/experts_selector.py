@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 
@@ -27,13 +27,13 @@ def select_experts(
     top_k: int,
     use_grouped_topk: bool,
     renormalize: bool,
-    topk_group: Optional[int] = None,
-    num_expert_group: Optional[int] = None,
-    custom_routing_function: Optional[Callable] = None,
+    topk_group: int | None = None,
+    num_expert_group: int | None = None,
+    custom_routing_function: Callable | None = None,
     scoring_func: str = "softmax",
     routed_scaling_factor=1.0,
-    e_score_correction_bias: Optional[torch.Tensor] = None,
-    indices_type: Optional[torch.dtype] = None,
+    e_score_correction_bias: torch.Tensor | None = None,
+    indices_type: torch.dtype | None = None,
     global_num_experts: int = -1,
 ):
     """
@@ -60,9 +60,7 @@ def select_experts(
     # prefetch w1_w3_proj.weight preprocess
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
-        weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
-            hidden_states, "gate_up"
-        )
+        weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
     is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
         hidden_states=hidden_states,
         top_k=top_k,
@@ -108,14 +106,12 @@ def check_npu_moe_gating_top_k(
     hidden_states: torch.Tensor,
     top_k: int,
     renormalize: bool,
-    topk_group: Optional[int] = None,
-    num_expert_group: Optional[int] = None,
+    topk_group: int | None = None,
+    num_expert_group: int | None = None,
     scoring_func: str = "softmax",
-    custom_routing_function: Optional[Callable] = None,
+    custom_routing_function: Callable | None = None,
 ):
-    if (
-        scoring_func == "sigmoid" and not renormalize
-    ):  # sigmoid + renorm=0 is not supported in current branch
+    if scoring_func == "sigmoid" and not renormalize:  # sigmoid + renorm=0 is not supported in current branch
         return False
     if custom_routing_function is not None:
         return False
@@ -140,19 +136,15 @@ def check_npu_moe_gating_top_k(
 
 def _native_grouped_topk(
     topk_weights: torch.Tensor,
-    num_expert_group: Optional[int],
-    topk_group: Optional[int],
+    num_expert_group: int | None,
+    topk_group: int | None,
 ):
     topk_group = 0 if topk_group is None else topk_group
     num_expert_group = 0 if num_expert_group is None else num_expert_group
 
     num_token = topk_weights.shape[0]
-    grouped_weights = (
-        topk_weights.view(num_token, num_expert_group, -1).max(dim=-1).values
-    )
-    topk_group_indices = torch.topk(
-        grouped_weights.to(torch.float32), k=topk_group, dim=-1, sorted=False
-    )[1]
+    grouped_weights = topk_weights.view(num_token, num_expert_group, -1).max(dim=-1).values
+    topk_group_indices = torch.topk(grouped_weights.to(torch.float32), k=topk_group, dim=-1, sorted=False)[1]
     topk_group_mask = torch.zeros_like(grouped_weights)
     topk_group_mask.scatter_(1, topk_group_indices, 1)
     topk_weight_mask = (
@@ -176,11 +168,11 @@ def _renormalize_topk_weights(
 
 def _select_expert_use_group_topk(
     topk_weights: torch.Tensor,
-    topk_group: Optional[int],
+    topk_group: int | None,
     renormalize: bool,
     top_k: int,
-    num_expert_group: Optional[int],
-    e_score_correction_bias: Optional[torch.Tensor],
+    num_expert_group: int | None,
+    e_score_correction_bias: torch.Tensor | None,
 ):
     assert topk_group is not None
     assert num_expert_group is not None
@@ -196,15 +188,11 @@ def _select_expert_use_group_topk(
     topk_weights = _native_grouped_topk(topk_weights, num_expert_group, topk_group)
     # TODO bfloat16 is not supported in torch.topk with ge graph.
     if e_score_correction_bias is not None:
-        topk_ids = torch.topk(
-            topk_weights.to(torch.float32), k=top_k, dim=-1, sorted=False
-        )[1]
+        topk_ids = torch.topk(topk_weights.to(torch.float32), k=top_k, dim=-1, sorted=False)[1]
         # Use original unbiased scores for the routing weights
         topk_weights = original_weights.gather(1, topk_ids)
     else:
-        topk_weights, topk_ids = torch.topk(
-            topk_weights.to(torch.float32), k=top_k, dim=-1, sorted=False
-        )
+        topk_weights, topk_ids = torch.topk(topk_weights.to(torch.float32), k=top_k, dim=-1, sorted=False)
     topk_ids = topk_ids.to(torch.int32)
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
     return topk_weights, topk_ids
@@ -216,9 +204,9 @@ def _select_experts_with_fusion_ops(
     top_k: int,
     use_grouped_topk: bool,
     renormalize: bool,
-    e_score_correction_bias: Optional[torch.Tensor],
-    topk_group: Optional[int],
-    num_expert_group: Optional[int],
+    e_score_correction_bias: torch.Tensor | None,
+    topk_group: int | None,
+    num_expert_group: int | None,
     scoring_func: str = "softmax",
     routed_scaling_factor=1.0,
     global_num_experts: int = -1,
@@ -227,10 +215,7 @@ def _select_experts_with_fusion_ops(
     num_expert_group = num_expert_group if num_expert_group is not None else 1
     renorm = int(renormalize)
     norm_type = 0 if scoring_func == "softmax" else 1
-    if (
-        e_score_correction_bias is not None
-        and e_score_correction_bias.dtype != router_logits.dtype
-    ):
+    if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
     topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k(
         router_logits,
@@ -242,7 +227,7 @@ def _select_experts_with_fusion_ops(
         norm_type=norm_type,  # 0: softmax; 1: sigmoid
         out_flag=False,
         routed_scaling_factor=routed_scaling_factor,
-        eps=float(1e-20),
+        eps=1e-20,
         bias_opt=e_score_correction_bias,
     )
 
@@ -255,12 +240,12 @@ def _native_select_experts(
     top_k: int,
     use_grouped_topk: bool,
     renormalize: bool,
-    topk_group: Optional[int] = None,
-    num_expert_group: Optional[int] = None,
-    custom_routing_function: Optional[Callable] = None,
+    topk_group: int | None = None,
+    num_expert_group: int | None = None,
+    custom_routing_function: Callable | None = None,
     scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None,
-    global_num_experts: Optional[torch.Tensor] = None,
+    e_score_correction_bias: torch.Tensor | None = None,
+    global_num_experts: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Select top-k experts based on router logits.

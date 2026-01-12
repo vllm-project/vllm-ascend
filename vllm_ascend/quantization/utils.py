@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Type
+from typing import Any
 
 import torch
 from vllm.logger import logger
@@ -13,7 +13,7 @@ from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLine
 from .w8a8_pdmix import AscendW8A8PDMixFusedMoeMethod, AscendW8A8PDMixLinearMethod
 from .w8a16 import AscendW8A16LinearMethod
 
-ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
+ASCEND_QUANTIZATION_METHOD_MAP: dict[str, dict[str, type[Any]]] = {
     "W4A16": {
         "moe": AscendW4A16FusedMoEMethod,
     },
@@ -42,16 +42,15 @@ ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
 
 
 def get_linear_quant_type(
-    quant_description: Dict[str, Any],
+    quant_description: dict[str, Any],
     prefix: str,
-    packed_modules_mapping: Dict[str, Any],
+    packed_modules_mapping: dict[str, Any],
 ):
     proj_name = prefix.split(".")[-1]
     if proj_name in packed_modules_mapping:
         quant_type = None
         shard_prefixes = [
-            prefix.replace(proj_name, shard_proj_name)
-            for shard_proj_name in packed_modules_mapping[proj_name]
+            prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
             shard_quant_type = quant_description[shard_prefix + ".weight"]
@@ -70,18 +69,16 @@ def get_linear_quant_type(
 
 
 def get_quant_method(
-    quant_description: Dict[str, Any],
+    quant_description: dict[str, Any],
     prefix: str,
     layer_type: str,
-    packed_modules_mapping: Optional[Dict[str, Any]] = None,
+    packed_modules_mapping: dict[str, Any] | None = None,
     layer: torch.nn.Module = None,
 ):
     if quant_description.get("quant_method") == COMPRESSED_TENSORS_METHOD:
         return get_quant_method_llmcompressor(layer)
 
-    return get_quant_method_modelslim(
-        quant_description, prefix, layer_type, packed_modules_mapping
-    )
+    return get_quant_method_modelslim(quant_description, prefix, layer_type, packed_modules_mapping)
 
 
 def get_quant_method_llmcompressor(layer: torch.nn.Module):
@@ -92,32 +89,27 @@ def get_quant_method_llmcompressor(layer: torch.nn.Module):
 
 
 def get_quant_method_modelslim(
-    quant_description: Dict[str, Any],
+    quant_description: dict[str, Any],
     prefix: str,
     layer_type: str,
-    packed_modules_mapping: Optional[Dict[str, Any]] = None,
+    packed_modules_mapping: dict[str, Any] | None = None,
 ):
     logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
     if packed_modules_mapping is None:
         packed_modules_mapping = dict()
     # Attention
-    if ".attn" in prefix and "fa_quant_type" in quant_description.keys():
+    if ".attn" in prefix and "fa_quant_type" in quant_description:
         quant_type = quant_description["fa_quant_type"]
     # Linear
     else:
-        quant_type = get_linear_quant_type(
-            quant_description, prefix, packed_modules_mapping
-        )
-    if quant_type in ASCEND_QUANTIZATION_METHOD_MAP.keys():
+        quant_type = get_linear_quant_type(quant_description, prefix, packed_modules_mapping)
+    if quant_type in ASCEND_QUANTIZATION_METHOD_MAP:
         method_map = ASCEND_QUANTIZATION_METHOD_MAP[quant_type]
         if layer_type in method_map.keys():
             method_cls = method_map[layer_type]
             return method_cls()
         else:
-            raise NotImplementedError(
-                f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}."
-            )
+            raise NotImplementedError(f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}.")
     raise NotImplementedError(
-        "Currently, vLLM Ascend only supports following quant types:"
-        f"{list(ASCEND_QUANTIZATION_METHOD_MAP.keys())}"
+        f"Currently, vLLM Ascend only supports following quant types:{list(ASCEND_QUANTIZATION_METHOD_MAP.keys())}"
     )

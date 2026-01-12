@@ -48,9 +48,7 @@ class GraphFusionPassManager:
 
     def configure(self, config: VllmConfig):
         # By default, we enable the graph fusion and quantization fusion pass.
-        self.ascend_compilation_config: dict = config.additional_config.get(
-            "ascend_compilation_config", {}
-        )
+        self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
         if self.ascend_compilation_config.get("fuse_norm_quant", True):
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 

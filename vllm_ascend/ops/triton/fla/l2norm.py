@@ -15,9 +15,7 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
 @triton.jit
-def l2norm_fwd_kernel2_loop(
-    X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr, NUM_CHUNKS: tl.constexpr
-):
+def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr, NUM_CHUNKS: tl.constexpr):
     base_row = tl.program_id(0) * (NUM_CHUNKS * MBLOCK)
     rindex = tl.arange(0, N)[None, :]
 
@@ -33,9 +31,7 @@ def l2norm_fwd_kernel2_loop(
         tl.store(Y + (rindex + N * row_idx), xs * rsqrt, xmask)
 
 
-def l2norm_fwd(
-    x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None
-):
+def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
     x_shape_og = x.shape
     x = x.reshape(-1, x.shape[-1])
     # allocate output

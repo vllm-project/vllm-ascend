@@ -196,9 +196,7 @@ def test_npu_moe_gating_topk_compare(
     )
 
     # Verify consistency between NPU and NumPy results
-    assert numpy.allclose(
-        y.cpu().numpy(), y_npu.cpu().numpy(), rtol=RTOL_TOLERANCE, atol=ATOL_TOLERANCE
-    )
+    assert numpy.allclose(y.cpu().numpy(), y_npu.cpu().numpy(), rtol=RTOL_TOLERANCE, atol=ATOL_TOLERANCE)
     assert numpy.allclose(
         expert_idx,
         expert_idx_npu.cpu().numpy(),

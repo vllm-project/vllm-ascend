@@ -242,7 +242,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B \
 
 If the service starts successfully, the following information will be displayed on node 0:
 
-```
+```shell
 INFO:     Started server process [44610]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -605,7 +605,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 
 PD proxy:
 
-```
+```shell
 python load_balance_proxy_server_example.py --port 12347 --prefiller-hosts prefill_node_1_ip --prefiller-port 8000 --decoder-hosts decode_node_1_ip --decoder-ports 8000
 ```
 

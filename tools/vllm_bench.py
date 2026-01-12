@@ -72,9 +72,7 @@ class VllmbenchRunner:
         self.model_path = model_path
         if not self.model_path:
             self.model_path = maybe_download_from_modelscope(model_name)
-        assert self.model_path is not None, (
-            f"Failed to download model: model={self.model_path}"
-        )
+        assert self.model_path is not None, f"Failed to download model: model={self.model_path}"
         self.port = port
         self.host_ip = host_ip
         curr_time = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -114,16 +112,12 @@ class VllmbenchRunner:
         stdout, stderr = self.proc.communicate()
 
         if self.proc.returncode != 0:
-            logging.error(
-                f"vllm bench command failed, return code: {self.proc.returncode}"
-            )
+            logging.error(f"vllm bench command failed, return code: {self.proc.returncode}")
             logging.error(f"Standard output: {stdout}")
             logging.error(f"Standard error: {stderr}")
             raise RuntimeError(f"vllm bench command execution failed: {stderr}")
 
-        logging.info(
-            f"vllm bench command completed, return code: {self.proc.returncode}"
-        )
+        logging.info(f"vllm bench command completed, return code: {self.proc.returncode}")
         if stdout:
             lines = stdout.split("\n")
             last_lines = lines[-100:] if len(lines) > 100 else lines
@@ -136,7 +130,7 @@ class VllmbenchRunner:
     def _get_result(self):
         result_file = os.path.join(os.getcwd(), self.result_filename)
         print("Getting performance results from file: ", result_file)
-        with open(result_file, "r", encoding="utf-8") as f:
+        with open(result_file, encoding="utf-8") as f:
             self.result = json.load(f)
 
     def _performance_verify(self):

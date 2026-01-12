@@ -84,17 +84,11 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None):
     if output_split_sizes is None:
         dim_size[0] = dim_size[0] * world_size
 
-        output = torch.empty(
-            dim_size, dtype=input_.dtype, device=torch.npu.current_device()
-        )
-        torch.distributed.all_gather_into_tensor(
-            output, input_.contiguous(), group=group
-        )
+        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.npu.current_device())
+        torch.distributed.all_gather_into_tensor(output, input_.contiguous(), group=group)
     else:
         dim_size[0] = sum(output_split_sizes)
-        output = torch.empty(
-            dim_size, dtype=input_.dtype, device=torch.npu.current_device()
-        )
+        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.npu.current_device())
         output_tensor_list = list(torch.split(output, output_split_sizes, dim=0))
         torch.distributed.all_gather(output_tensor_list, input_, group=group)
 

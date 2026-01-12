@@ -49,9 +49,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(params["weight_offset_second"].shape, (32, 1))
         # new quant version weight
         self.method.new_quant_version = True
-        params = self.method.get_pergroup_param(
-            8, 32, torch.bfloat16, layer_type="column"
-        )
+        params = self.method.get_pergroup_param(8, 32, torch.bfloat16, layer_type="column")
         self.assertEqual(params["scale_bias"].dtype, torch.float32)
         self.assertEqual(params["scale_bias"].shape, (32, 1))
         params = self.method.get_pergroup_param(8, 32, torch.bfloat16, layer_type="row")
@@ -61,25 +59,15 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
     @patch("torch_npu.npu_convert_weight_to_int4pack")
     @patch("torch.Tensor.npu")
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading(
-        self, mock_format_cast, mock_npu, mock_npu_convert_weight
-    ):
+    def test_process_weights_after_loading(self, mock_format_cast, mock_npu, mock_npu_convert_weight):
         mock_npu.side_effect = lambda: torch.zeros((1, 32), dtype=torch.float32)
         mock_npu_convert_weight.return_value = torch.zeros((32, 4), dtype=torch.int32)
         # old quant version weight
         layer = torch.nn.Module()
-        layer.weight = torch.nn.Parameter(
-            torch.zeros((32, 8), dtype=torch.int8), requires_grad=False
-        )
-        layer.weight_scale = torch.nn.Parameter(
-            torch.ones((32, 1), dtype=torch.float32), requires_grad=False
-        )
-        layer.weight_offset = torch.nn.Parameter(
-            torch.empty_like(layer.weight_scale.data), requires_grad=False
-        )
-        layer.weight_scale_second = torch.nn.Parameter(
-            torch.ones((32, 1), dtype=torch.float32), requires_grad=False
-        )
+        layer.weight = torch.nn.Parameter(torch.zeros((32, 8), dtype=torch.int8), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.float32), requires_grad=False)
+        layer.weight_offset = torch.nn.Parameter(torch.empty_like(layer.weight_scale.data), requires_grad=False)
+        layer.weight_scale_second = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.float32), requires_grad=False)
         layer.weight_offset_second = torch.nn.Parameter(
             torch.empty_like(layer.weight_scale_second.data), requires_grad=False
         )
@@ -91,27 +79,17 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         # new quant version weight
         self.method.new_quant_version = True
         new_layer = torch.nn.Module()
-        new_layer.weight = torch.nn.Parameter(
-            torch.zeros((16, 8), dtype=torch.int8), requires_grad=False
-        )
-        new_layer.weight_scale = torch.nn.Parameter(
-            torch.ones((32, 1), dtype=torch.float32), requires_grad=False
-        )
-        new_layer.weight_offset = torch.nn.Parameter(
-            torch.empty_like(new_layer.weight_scale.data), requires_grad=False
-        )
+        new_layer.weight = torch.nn.Parameter(torch.zeros((16, 8), dtype=torch.int8), requires_grad=False)
+        new_layer.weight_scale = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.float32), requires_grad=False)
+        new_layer.weight_offset = torch.nn.Parameter(torch.empty_like(new_layer.weight_scale.data), requires_grad=False)
         new_layer.weight_scale_second = torch.nn.Parameter(
             torch.ones((32, 1), dtype=torch.float32), requires_grad=False
         )
         new_layer.weight_offset_second = torch.nn.Parameter(
             torch.empty_like(new_layer.weight_scale_second.data), requires_grad=False
         )
-        new_layer.scale_bias = torch.nn.Parameter(
-            torch.zeros((32, 1), dtype=torch.float32), requires_grad=False
-        )
-        mock_format_cast.return_value = new_layer.weight.data.transpose(
-            0, 1
-        ).contiguous()
+        new_layer.scale_bias = torch.nn.Parameter(torch.zeros((32, 1), dtype=torch.float32), requires_grad=False)
+        mock_format_cast.return_value = new_layer.weight.data.transpose(0, 1).contiguous()
         self.method.process_weights_after_loading(new_layer)
         self.assertEqual(new_layer.scale_bias.data.shape, (32,))
         self.assertTrue(hasattr(new_layer, "weight_scale_second"))
@@ -143,9 +121,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         mock_get_ascend_config.return_value = mock_ascend_config
 
         mock_vllm_config = Mock()
-        mock_vllm_config.quant_config = Mock(
-            quant_description={"group_size": self.group_size, "version": "0.0.0"}
-        )
+        mock_vllm_config.quant_config = Mock(quant_description={"group_size": self.group_size, "version": "0.0.0"})
         mock_vllm_config.parallel_config = Mock(enable_expert_parallel=True)
         mock_vllm_config.scheduler_config = Mock(
             max_num_batched_tokens=2048,
@@ -157,9 +133,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
 
     def test_get_weight(self):
         # old quant version w4a8 weight
-        param_dict = self.quant_method.get_weight(
-            self.experts, self.input_size, self.output_size, torch.bfloat16
-        )
+        param_dict = self.quant_method.get_weight(self.experts, self.input_size, self.output_size, torch.bfloat16)
         self.assertEqual(param_dict["w13_weight"].dtype, torch.int8)
         self.assertEqual(
             param_dict["w13_weight"].shape,
@@ -167,9 +141,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         )
         # new quant version weight
         self.quant_method.new_quant_version = True
-        param_dict = self.quant_method.get_weight(
-            self.experts, self.input_size, self.output_size, torch.bfloat16
-        )
+        param_dict = self.quant_method.get_weight(self.experts, self.input_size, self.output_size, torch.bfloat16)
         self.assertEqual(param_dict["w13_weight"].dtype, torch.int8)
         self.assertEqual(
             param_dict["w13_weight"].shape,
@@ -182,18 +154,14 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
             self.experts, self.input_size, self.output_size, torch.bfloat16
         )
         self.assertEqual(param_dict["w13_weight_scale"].dtype, torch.float32)
-        self.assertEqual(
-            param_dict["w13_weight_scale"].shape, (self.experts, 2 * self.input_size, 1)
-        )
+        self.assertEqual(param_dict["w13_weight_scale"].shape, (self.experts, 2 * self.input_size, 1))
         self.assertEqual(param_dict["w13_weight_scale_second"].dtype, torch.float32)
         self.assertEqual(
             param_dict["w13_weight_scale_second"].shape,
             (self.experts, 2 * self.input_size, self.output_size // self.group_size),
         )
         self.assertEqual(param_dict["w2_weight_scale"].dtype, torch.float32)
-        self.assertEqual(
-            param_dict["w2_weight_scale"].shape, (self.experts, self.output_size, 1)
-        )
+        self.assertEqual(param_dict["w2_weight_scale"].shape, (self.experts, self.output_size, 1))
         self.assertEqual(param_dict["w2_weight_scale_second"].dtype, torch.float32)
         self.assertEqual(
             param_dict["w2_weight_scale_second"].shape,
@@ -227,9 +195,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         layer = torch.nn.Module()
         if is_new_quant_version:
             layer.w13_weight = torch.nn.Parameter(
-                torch.zeros(
-                    (self.experts, self.input_size, self.output_size), dtype=torch.int8
-                ),
+                torch.zeros((self.experts, self.input_size, self.output_size), dtype=torch.int8),
                 requires_grad=False,
             )
             layer.w2_weight = torch.nn.Parameter(
@@ -239,12 +205,8 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
                 ),
                 requires_grad=False,
             )
-            w13_scale_bias = torch.zeros(
-                (self.experts, 2 * self.input_size, 1), dtype=torch.float32
-            )
-            layer.w13_scale_bias = torch.nn.Parameter(
-                w13_scale_bias, requires_grad=False
-            )
+            w13_scale_bias = torch.zeros((self.experts, 2 * self.input_size, 1), dtype=torch.float32)
+            layer.w13_scale_bias = torch.nn.Parameter(w13_scale_bias, requires_grad=False)
             w2_scale_bias = torch.zeros(
                 (self.experts, self.output_size, 16 // self.quant_method.tp_size),
                 dtype=torch.float32,
@@ -259,9 +221,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
                 requires_grad=False,
             )
             layer.w2_weight = torch.nn.Parameter(
-                torch.zeros(
-                    (self.experts, self.output_size, self.input_size), dtype=torch.int8
-                ),
+                torch.zeros((self.experts, self.output_size, self.input_size), dtype=torch.int8),
                 requires_grad=False,
             )
         layer.w13_weight_scale = torch.nn.Parameter(
@@ -307,9 +267,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_quantize")
     @patch("torch.Tensor.npu")
-    def test_process_weights_after_loading(
-        self, mock_npu, mock_npu_quantize, mock_npu_format_cast
-    ):
+    def test_process_weights_after_loading(self, mock_npu, mock_npu_quantize, mock_npu_format_cast):
         mock_npu.return_value = torch.Tensor()
         mock_npu_quantize.return_value = torch.Tensor()
 
@@ -321,32 +279,20 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         layer = self.build_layer(is_new_quant_version=False)
         self.quant_method.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "w13_scale_bias"))
-        self.assertEqual(
-            layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size)
-        )
+        self.assertEqual(layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(layer.w13_scale_bias.data.dtype, torch.float32)
         self.assertTrue(hasattr(layer, "w2_scale_bias"))
-        self.assertEqual(
-            layer.w2_scale_bias.data.shape, (self.experts, self.output_size)
-        )
+        self.assertEqual(layer.w2_scale_bias.data.shape, (self.experts, self.output_size))
         self.assertEqual(layer.w2_scale_bias.data.dtype, torch.float32)
         # new quant version weight
         self.quant_method.new_quant_version = True
         new_layer = self.build_layer(is_new_quant_version=True)
         self.quant_method.process_weights_after_loading(new_layer)
-        self.assertEqual(
-            new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size)
-        )
-        self.assertEqual(
-            new_layer.w2_scale_bias.data.shape, (self.experts, self.output_size)
-        )
+        self.assertEqual(new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
+        self.assertEqual(new_layer.w2_scale_bias.data.shape, (self.experts, self.output_size))
         self.assertFalse(hasattr(new_layer, "w13_weight_scale_second"))
         # per-channel weight
         self.quant_method.is_per_channel_weight = True
-        per_channel_layer = self.build_layer(
-            is_new_quant_version=True, is_per_channel_weight=True
-        )
+        per_channel_layer = self.build_layer(is_new_quant_version=True, is_per_channel_weight=True)
         self.quant_method.process_weights_after_loading(per_channel_layer)
-        self.assertEqual(
-            new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size)
-        )
+        self.assertEqual(new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))

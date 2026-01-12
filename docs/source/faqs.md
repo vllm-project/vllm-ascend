@@ -94,7 +94,7 @@ Basically, the reason is that the NPU environment is not configured correctly. Y
 
 If all above steps are not working, you can try the following code with python to check whether there is any error:
 
-```
+```python
 import torch
 import torch_npu
 import vllm
@@ -208,7 +208,7 @@ This package will install `librosa` and its related dependencies, resolving the 
 
 ### 18. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
 
-```
+```shell
 error example in detail: 
 ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph sizes capture fail: RuntimeError:
 ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph has insufficient available streams to capture the configured number of sizes.Please verify both the availability of adequate streams and the appropriateness of the configured size count.

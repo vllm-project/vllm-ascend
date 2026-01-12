@@ -54,9 +54,7 @@ def test_prepare_inputs_padded(num_reqs):
     query_start_loc[1:] = torch.cumsum(seq_lens, dim=0)
 
     # Run PyTorch reference
-    out_ref = prepare_inputs_padded_ref(
-        cu_num_draft_tokens, valid_sampled_tokens_count, query_start_loc
-    )
+    out_ref = prepare_inputs_padded_ref(cu_num_draft_tokens, valid_sampled_tokens_count, query_start_loc)
 
     # Run Triton kernel
     out_tri = torch.empty(num_reqs, dtype=torch.int32, device=device)

@@ -106,9 +106,7 @@ def test_piecewise_res_consistency(cur_case: LLMTestCase):
     )
 
 
-@pytest.mark.parametrize(
-    "cur_case", [CASE_QWEN_FULL_DECODE_ONLY, CASE_DS_FULL_DECODE_ONLY]
-)
+@pytest.mark.parametrize("cur_case", [CASE_QWEN_FULL_DECODE_ONLY, CASE_DS_FULL_DECODE_ONLY])
 def test_full_decode_only_res_consistency(cur_case: LLMTestCase, monkeypatch):
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
     runner_kwargs = {

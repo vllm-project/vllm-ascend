@@ -3,7 +3,6 @@ import os
 import socket
 import time
 from contextlib import contextmanager
-from typing import List, Optional
 
 import psutil
 
@@ -45,7 +44,7 @@ def dns_resolver(retries: int = 240, base_delay: float = 0.5):
     return resolve
 
 
-def get_cluster_dns_list(world_size: int) -> List[str]:
+def get_cluster_dns_list(world_size: int) -> list[str]:
     if world_size < 1:
         raise ValueError(f"world_size must be >= 1, got {world_size}")
 
@@ -61,9 +60,7 @@ def get_cluster_dns_list(world_size: int) -> List[str]:
 
     leader_name, group_name, namespace = parts[0], parts[1], parts[2]
 
-    worker_dns_list = [
-        f"{leader_name}-{idx}.{group_name}.{namespace}" for idx in range(1, world_size)
-    ]
+    worker_dns_list = [f"{leader_name}-{idx}.{group_name}.{namespace}" for idx in range(1, world_size)]
 
     return [leader_dns, *worker_dns_list]
 
@@ -111,7 +108,7 @@ def get_cur_ip(retries: int = 20, base_delay: float = 0.5):
                 delay = min(delay * 1.5, 5)
 
 
-def get_net_interface(ip: Optional[str] = None) -> str:
+def get_net_interface(ip: str | None = None) -> str:
     """
     Returns specified IP's inetwork interface.
     If no IP is provided, uses the first from hostname -I.

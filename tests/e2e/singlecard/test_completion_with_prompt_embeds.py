@@ -30,9 +30,7 @@ MODELS = ["Qwen/Qwen3-0.6B"]
 
 def get_prompt_embeds(chat, tokenizer, embedding_layer):
     """Convert chat messages to prompt embeddings."""
-    token_ids = tokenizer.apply_chat_template(
-        chat, add_generation_prompt=True, return_tensors="pt"
-    )
+    token_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors="pt")
     prompt_embeds = embedding_layer(token_ids).squeeze(0)
     return prompt_embeds
 

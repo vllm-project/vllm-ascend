@@ -82,18 +82,14 @@ class TestAscendQuantConfig(TestBase):
                 "vllm_ascend.quantization.quant_config.get_current_vllm_config",
                 return_value=mock_config,
             ),
-            patch.object(
-                self.ascend_config, "is_layer_skipped_ascend", return_value=True
-            ),
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
         ):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIsInstance(method, AscendUnquantizedLinearMethod)
 
         # Test quantized layer
         with (
-            patch.object(
-                self.ascend_config, "is_layer_skipped_ascend", return_value=False
-            ),
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
             patch(
                 "vllm_ascend.quantization.quant_config.get_current_vllm_config",
                 return_value=mock_config,
@@ -139,9 +135,7 @@ class TestAscendQuantConfig(TestBase):
 
         # Test skipped layer
         with (
-            patch.object(
-                self.ascend_config, "is_layer_skipped_ascend", return_value=True
-            ),
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
             patch(
                 "vllm_ascend.quantization.quant_config.get_current_vllm_config",
                 return_value=mock_config,
@@ -156,9 +150,7 @@ class TestAscendQuantConfig(TestBase):
 
         # Test quantized layer
         with (
-            patch.object(
-                self.ascend_config, "is_layer_skipped_ascend", return_value=False
-            ),
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
             patch(
                 "vllm_ascend.quantization.quant_config.get_current_vllm_config",
                 return_value=mock_config,
@@ -180,9 +172,7 @@ class TestAscendQuantConfig(TestBase):
 
         # Test fused layer
         fused_mapping = {"fused_layer": ["shard1", "shard2"]}
-        self.assertTrue(
-            self.ascend_config.is_layer_skipped_ascend("fused_layer", fused_mapping)
-        )
+        self.assertTrue(self.ascend_config.is_layer_skipped_ascend("fused_layer", fused_mapping))
 
         # Test inconsistent fused layer shards
         bad_config = {"shard1.weight": "FLOAT", "shard2.weight": "INT8"}

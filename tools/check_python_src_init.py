@@ -62,9 +62,7 @@ def main():
         all_missing.update(missing)
 
     if all_missing:
-        print(
-            "❌ Missing '__init__.py' files in the following Python package directories:"
-        )
+        print("❌ Missing '__init__.py' files in the following Python package directories:")
         for pkg in sorted(all_missing):
             print(f" - {pkg}")
         sys.exit(1)

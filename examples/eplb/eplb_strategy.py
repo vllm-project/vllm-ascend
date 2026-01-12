@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import json
 import os
@@ -92,23 +91,18 @@ def deepseek_deploy(
     from eplb_deepseek import rebalance_experts
 
     num_replicas = num_original_expert + num_redundancy_expert
-    hy2log, log2phy, logcnt = rebalance_experts(
-        workload, num_replicas, num_groups, num_nodes, num_gpus
-    )
+    hy2log, log2phy, logcnt = rebalance_experts(workload, num_replicas, num_groups, num_nodes, num_gpus)
 
     # Convert to global_deployment
     workload = workload.cpu().numpy()
     global_deployment = []
     layer_num = log2phy.shape[0]
-    num_physical_experts_local = (
-        num_original_expert + num_redundancy_expert
-    ) // num_gpus
+    num_physical_experts_local = (num_original_expert + num_redundancy_expert) // num_gpus
     for layer_idx in range(layer_num):
         layer_deployment = []
         for gpu_idx in range(num_gpus):
             local_deployment = hy2log[layer_idx][
-                gpu_idx * num_physical_experts_local : (gpu_idx + 1)
-                * num_physical_experts_local
+                gpu_idx * num_physical_experts_local : (gpu_idx + 1) * num_physical_experts_local
             ]
             local_deployment = local_deployment.flatten()
             layer_deployment.append(local_deployment.tolist())
@@ -123,19 +117,15 @@ def deepseek_deploy(
         new_value = workload[layer_idx].reshape(num_gpus, -1)
         row_sum = np.sum(new_value, axis=1)
         original_weights.append(row_sum.max())
-        average_weights.append((np.sum(workload[layer_idx]) / num_gpus))
+        average_weights.append(np.sum(workload[layer_idx]) / num_gpus)
 
-        opt_workload = np.zeros(
-            (num_original_expert + num_redundancy_expert), dtype=np.float64
-        )
+        opt_workload = np.zeros((num_original_expert + num_redundancy_expert), dtype=np.float64)
         for expert_idx in range(num_original_expert):
             physical_expert_idxs = log2phy[layer_idx][expert_idx]
             physical_expert_idxs = physical_expert_idxs.flatten()
             physical_expert_idxs = physical_expert_idxs[physical_expert_idxs != -1]
             for physical_expert_idx in physical_expert_idxs:
-                opt_workload[physical_expert_idx] += workload[layer_idx][
-                    expert_idx
-                ] / len(physical_expert_idxs)
+                opt_workload[physical_expert_idx] += workload[layer_idx][expert_idx] / len(physical_expert_idxs)
         opt_workload = opt_workload.reshape(num_gpus, -1)
         row_sum = np.sum(opt_workload, axis=1)
         max_weights.append(row_sum.max())

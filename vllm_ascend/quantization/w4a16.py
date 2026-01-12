@@ -15,7 +15,8 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch_npu
@@ -41,12 +42,8 @@ def unpack_from_int32(
     :param packed_dim: Dimension along which weights are packed (0 or 1), defaults to 1
     :return: Unpacked tensor with int8 dtype after applying offset correction
     """
-    assert weight.dtype == torch.int32, (
-        f"Expecting `weight.dtype` is torch.int32 but got {weight.dtype}."
-    )
-    assert num_bits <= 8, (
-        f"Expecting `num_bits` should not be larger than 8 but got {num_bits}."
-    )
+    assert weight.dtype == torch.int32, f"Expecting `weight.dtype` is torch.int32 but got {weight.dtype}."
+    assert num_bits <= 8, f"Expecting `num_bits` should not be larger than 8 but got {num_bits}."
 
     pack_factor = 32 // num_bits
     mask = (1 << num_bits) - 1
@@ -85,23 +82,17 @@ def pack_to_int32(weight: torch.Tensor) -> torch.Tensor:
     :param weight: The 3D tensor to pack, must be int8 or int32 dtype
     :return: Packed tensor with int32 dtype optimized for storage
     """
-    assert weight.dim() == 3, (
-        f"Expecting `weight.dim()` is 3 ([e, n, k] or [e, k, n]) but got {weight.dim()}."
-    )
+    assert weight.dim() == 3, f"Expecting `weight.dim()` is 3 ([e, n, k] or [e, k, n]) but got {weight.dim()}."
     assert weight.dtype in [torch.int8, torch.int32], (
         f"Expecting `weight.dtype` is torch.int8 or torch.int32 bug got {weight.dtype}."
     )
 
     if weight.dtype == torch.int32:
-        assert weight.shape[-1] % 8 == 0, (
-            "the last dim of weight needs to be divided by 8."
-        )
+        assert weight.shape[-1] % 8 == 0, "the last dim of weight needs to be divided by 8."
         packed_weight = torch_npu.npu_convert_weight_to_int4pack(weight.flatten(0, 1))
         packed_weight = packed_weight.view(weight.shape[0], weight.shape[1], -1)
     else:
-        assert weight.shape[-1] % 4 == 0, (
-            "the last dim of weight needs to be divided by 4."
-        )
+        assert weight.shape[-1] % 4 == 0, "the last dim of weight needs to be divided by 4."
         packed_weight = weight.view(torch.int32).contiguous()
 
     return packed_weight
@@ -116,13 +107,9 @@ class AscendW4A16FusedMoEMethod:
         self.pack_factor = 8  # pack 8 of torch.int4 tensors to torch.int32
 
         vllm_config = get_current_vllm_config()
-        self.group_size = vllm_config.quant_config.quant_description.get(
-            "group_size", 32
-        )
+        self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
-        self.dynamic_eplb = (
-            ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
-        )
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
 
     def get_weight(
         self,
@@ -130,7 +117,7 @@ class AscendW4A16FusedMoEMethod:
         intermediate_size_per_partition: int,
         hidden_sizes: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         assert intermediate_size_per_partition % self.pack_factor == 0, (
             f"Expecting `intermediate_size_per_partition` {intermediate_size_per_partition} can be divided by `pack_factor` {self.pack_factor}"
         )
@@ -161,7 +148,7 @@ class AscendW4A16FusedMoEMethod:
         intermediate_size_per_partition: int,
         hidden_sizes: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         assert intermediate_size_per_partition % self.group_size == 0, (
             f"Expecting `intermediate_size_per_partition` {intermediate_size_per_partition} can be divided by `group_size` {self.group_size}"
         )
@@ -209,25 +196,25 @@ class AscendW4A16FusedMoEMethod:
         renormalize: bool,
         use_grouped_topk: bool = False,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = True,
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
+        shared_experts: Any | None = None,
+        quantized_x_for_share: Any | None = None,
+        dynamic_scale_for_share: Any | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert (
-            router_logits.shape[1] == global_num_experts - global_redundant_expert_num
-        ), "Number of global experts mismatch (excluding redundancy)"
+        assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, (
+            "Number of global experts mismatch (excluding redundancy)"
+        )
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -264,7 +251,7 @@ class AscendW4A16FusedMoEMethod:
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
             dynamic_eplb=self.dynamic_eplb,
-            mc2_mask=kwargs.get("mc2_mask", None),
+            mc2_mask=kwargs.get("mc2_mask"),
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -274,9 +261,7 @@ class AscendW4A16FusedMoEMethod:
             unpacked_w13_weight = (
                 unpack_from_int32(
                     layer.w13_weight_packed.data.flatten(0, 1),
-                    torch.Size(
-                        [w13_shape[0] * w13_shape[1], w13_shape[2] * self.pack_factor]
-                    ),
+                    torch.Size([w13_shape[0] * w13_shape[1], w13_shape[2] * self.pack_factor]),
                     self.num_bits,
                 )
                 .view(w13_shape[0], w13_shape[1], -1)
@@ -287,9 +272,7 @@ class AscendW4A16FusedMoEMethod:
             unpacked_w2_weight = (
                 unpack_from_int32(
                     layer.w2_weight_packed.data.flatten(0, 1),
-                    torch.Size(
-                        [w2_shape[0] * w2_shape[1], w2_shape[2] * self.pack_factor]
-                    ),
+                    torch.Size([w2_shape[0] * w2_shape[1], w2_shape[2] * self.pack_factor]),
                     self.num_bits,
                 )
                 .view(w2_shape[0], w2_shape[1], -1)
@@ -300,16 +283,8 @@ class AscendW4A16FusedMoEMethod:
             layer.w13_weight_packed.data = pack_to_int32(unpacked_w13_weight)
             layer.w2_weight_packed.data = pack_to_int32(unpacked_w2_weight)
 
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(
-                1, 2
-            ).contiguous()
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(
-                1, 2
-            ).contiguous()
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
 
-            layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(
-                1, 2
-            ).contiguous()
-            layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(
-                1, 2
-            ).contiguous()
+            layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(1, 2).contiguous()
+            layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(1, 2).contiguous()

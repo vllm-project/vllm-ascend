@@ -23,9 +23,7 @@ from tests.e2e.model_utils import check_outputs_equal
 
 def test_qwen3_w8a8_quant():
     max_tokens = 5
-    example_prompts = [
-        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."
-    ]
+    example_prompts = ["vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."]
     vllm_target_outputs = [
         (
             [
@@ -66,9 +64,7 @@ def test_qwen3_w8a8_quant():
         cudagraph_capture_sizes=[1, 2, 4, 8],
         quantization="ascend",
     ) as vllm_model:
-        vllm_quant_w8a8_outputs = vllm_model.generate_greedy(
-            example_prompts, max_tokens
-        )
+        vllm_quant_w8a8_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(
         outputs_0_lst=vllm_target_outputs,
@@ -80,9 +76,7 @@ def test_qwen3_w8a8_quant():
 
 def test_qwen3_dense_w8a16():
     max_tokens = 5
-    example_prompts = [
-        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."
-    ]
+    example_prompts = ["vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."]
     vllm_target_outputs = [
         (
             [
@@ -123,9 +117,7 @@ def test_qwen3_dense_w8a16():
         gpu_memory_utilization=0.7,
         quantization="ascend",
     ) as vllm_model:
-        vllm_quant_w8a16_outputs = vllm_model.generate_greedy(
-            example_prompts, max_tokens
-        )
+        vllm_quant_w8a16_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(
         outputs_0_lst=vllm_target_outputs,

@@ -52,9 +52,7 @@ def is_valid_path_prefix(path_prefix):
 
     if path_prefix.startswith("/") or path_prefix.startswith("\\"):
         if not os.path.exists(os.path.dirname(path_prefix)):
-            logger.warning(
-                f"The directory for the path prefix {os.path.dirname(path_prefix)} does not exist."
-            )
+            logger.warning(f"The directory for the path prefix {os.path.dirname(path_prefix)} does not exist.")
             return False
     else:
         if not os.path.exists(os.path.dirname(os.path.abspath(path_prefix))):

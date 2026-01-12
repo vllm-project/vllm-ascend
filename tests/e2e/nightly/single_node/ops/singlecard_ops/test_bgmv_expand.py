@@ -38,14 +38,10 @@ def test_bgmv_expand():
     y_npu = y.npu()
 
     y_out = bgmv_expand_cpu_impl(x, w, indices, y, 0, 128)
-    y_out_npu = torch.ops._C_ascend.bgmv_expand(
-        x_npu, w_npu, indices_npu, y_npu, 0, 128
-    )
+    y_out_npu = torch.ops._C_ascend.bgmv_expand(x_npu, w_npu, indices_npu, y_npu, 0, 128)
 
     # Compare the results.
-    torch.testing.assert_close(
-        y_out_npu.cpu(), y_out, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
-    )
+    torch.testing.assert_close(y_out_npu.cpu(), y_out, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

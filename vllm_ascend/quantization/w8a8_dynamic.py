@@ -15,7 +15,8 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch_npu
@@ -42,21 +43,19 @@ class AscendW8A8DynamicLinearMethod:
         pass
 
     @staticmethod
-    def get_weight(
-        input_size: int, output_size: int, params_dtype: torch.dtype
-    ) -> Dict[str, Any]:
+    def get_weight(input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict
 
     @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pertensor_param(params_dtype: torch.dtype) -> dict[str, Any]:
         return {}
 
     @staticmethod
     def get_perchannel_param(
         output_size: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(output_size, 1, dtype=params_dtype)
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
@@ -67,16 +66,16 @@ class AscendW8A8DynamicLinearMethod:
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
-        layer_type: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        layer_type: str | None = None,
+    ) -> dict[str, Any]:
         return {}
 
     @staticmethod
     def apply(
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-        tp_rank: Optional[int] = 0,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
     ) -> torch.Tensor:
         quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
         output = torch_npu.npu_quant_matmul(
@@ -112,9 +111,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         )
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
 
-        self.dynamic_eplb = (
-            ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
-        )
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
 
@@ -133,7 +130,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         intermediate_size_per_partition: int,
         hidden_sizes: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         param_dict = {}
         param_dict["w13_weight"] = torch.empty(
             num_experts,
@@ -152,7 +149,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         intermediate_size_per_partition: int,
         hidden_sizes: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         param_dict = {}
         param_dict["w13_weight_scale"] = torch.empty(
             num_experts, 2 * intermediate_size_per_partition, 1, dtype=params_dtype
@@ -160,12 +157,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         param_dict["w13_weight_offset"] = torch.empty(
             num_experts, 2 * intermediate_size_per_partition, 1, dtype=params_dtype
         )
-        param_dict["w2_weight_scale"] = torch.empty(
-            num_experts, hidden_sizes, 1, dtype=params_dtype
-        )
-        param_dict["w2_weight_offset"] = torch.empty(
-            num_experts, hidden_sizes, 1, dtype=params_dtype
-        )
+        param_dict["w2_weight_scale"] = torch.empty(num_experts, hidden_sizes, 1, dtype=params_dtype)
+        param_dict["w2_weight_offset"] = torch.empty(num_experts, hidden_sizes, 1, dtype=params_dtype)
         return param_dict
 
     def apply(
@@ -177,30 +170,29 @@ class AscendW8A8DynamicFusedMoEMethod:
         renormalize: bool,
         use_grouped_topk: bool = False,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
-        pertoken_scale: Optional[Any] = None,
+        shared_experts: Any | None = None,
+        quantized_x_for_share: Any | None = None,
+        dynamic_scale_for_share: Any | None = None,
+        pertoken_scale: Any | None = None,
         **kwargs,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         if zero_expert_num == 0 or zero_expert_type is None:
-            assert (
-                router_logits.shape[1]
-                == global_num_experts - global_redundant_expert_num
-            ), "Number of global experts mismatch (excluding redundancy)"
+            assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, (
+                "Number of global experts mismatch (excluding redundancy)"
+            )
 
         if self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
@@ -241,9 +233,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 global_num_experts - global_redundant_expert_num,
                 device=topk_ids.device,
             )
-            topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(
-                topk_ids.dtype
-            )
+            topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
@@ -258,20 +248,12 @@ class AscendW8A8DynamicFusedMoEMethod:
             w1 = layer.w13_weight_list
             w1_scale = layer.w13_weight_scale_fp32_list
             w2 = layer.w2_weight_list
-            w2_scale = (
-                layer.w2_weight_scale_fp32_list
-                if w2_weight_scale_fp32_flag
-                else layer.w2_weight_scale_list
-            )
+            w2_scale = layer.w2_weight_scale_fp32_list if w2_weight_scale_fp32_flag else layer.w2_weight_scale_list
         else:
             w1 = [layer.w13_weight]
             w1_scale = [layer.w13_weight_scale_fp32]
             w2 = [layer.w2_weight]
-            w2_scale = [
-                layer.w2_weight_scale_fp32
-                if w2_weight_scale_fp32_flag
-                else layer.w2_weight_scale
-            ]
+            w2_scale = [layer.w2_weight_scale_fp32 if w2_weight_scale_fp32_flag else layer.w2_weight_scale]
 
         fused_scale_flag = (
             get_forward_context().moe_comm_type == MoECommType.FUSED_MC2
@@ -293,7 +275,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
             dynamic_eplb=self.dynamic_eplb,
-            mc2_mask=kwargs.get("mc2_mask", None),
+            mc2_mask=kwargs.get("mc2_mask"),
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
@@ -304,47 +286,27 @@ class AscendW8A8DynamicFusedMoEMethod:
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
         # TODO(zzzzwwjj): Currently, `torch_npu.npu_grouped_matmul_swiglu_quant`
         # can only support weight nz.
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ
-        )
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ
-        )
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
-            layer.w13_weight_scale.data.shape[0], -1
-        )
+        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
-        layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(
-            layer.w13_weight_offset.data.shape[0], -1
-        )
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(
-            layer.w2_weight_scale.data.shape[0], -1
-        )
+        layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_scale_fp32 = layer.w2_weight_scale.data.to(torch.float32)
-        layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
-            layer.w2_weight_offset.data.shape[0], -1
-        )
+        layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
         layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
         layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
 
         if self.dynamic_eplb:
-            layer.w13_weight_list = [
-                weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)
-            ]
-            layer.w2_weight_list = [
-                weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)
-            ]
+            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
             layer.w13_weight_scale_fp32_list = [
-                weight.clone()
-                for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
+                weight.clone() for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
             ]
-            layer.w2_weight_scale_list = [
-                weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)
-            ]
+            layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
             layer.w2_weight_scale_fp32_list = [
-                weight.clone()
-                for weight in layer.w2_weight_scale_fp32.data.unbind(dim=0)
+                weight.clone() for weight in layer.w2_weight_scale_fp32.data.unbind(dim=0)
             ]
             del layer.w13_weight
             del layer.w2_weight
@@ -359,8 +321,6 @@ def scale_from_float_to_int64(scale):
     import numpy as np
 
     scale = torch.from_numpy(
-        np.frombuffer(
-            scale.cpu().to(torch.float32).numpy().tobytes(), dtype=np.int32
-        ).astype(np.int64)
+        np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(), dtype=np.int32).astype(np.int64)
     ).to(scale.device)
     return scale

@@ -82,9 +82,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
         mc2_mask = None
 
-        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(
-            hidden_states, topk_weights, topk_ids, expert_map, mc2_mask
-        )
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(hidden_states, topk_weights, topk_ids, expert_map, mc2_mask)
         self.assertIn("x", kwargs)
         self.assertIn("expert_ids", kwargs)
         self.assertEqual(kwargs["moe_expert_num"], 8)
@@ -99,9 +97,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             "torch_npu.npu_moe_distribute_dispatch_v2",
             return_value=(torch.randn(10, 128),) * 5 + (None, None),
         ) as mock_dispatch:
-            output = self.dispatcher.token_dispatch(
-                hidden_states, topk_weights, topk_ids, expert_map
-            )
+            output = self.dispatcher.token_dispatch(hidden_states, topk_weights, topk_ids, expert_map)
             mock_dispatch.assert_called_once()
             self.assertEqual(output.group_list_type, 0)  # group_list_type == 0
 
@@ -173,21 +169,15 @@ class TestTokenDispatcherWithAllGather(TestBase):
         self.dispatcher = TokenDispatcherWithAllGather(**kwargs)
 
         # Mock NPU functions
-        self.patcher_npu_moe_init_routing_custom = patch(
-            "torch.ops._C_ascend.npu_moe_init_routing_custom"
-        )
-        self.mock_npu_moe_init_routing_custom = (
-            self.patcher_npu_moe_init_routing_custom.start()
-        )
+        self.patcher_npu_moe_init_routing_custom = patch("torch.ops._C_ascend.npu_moe_init_routing_custom")
+        self.mock_npu_moe_init_routing_custom = self.patcher_npu_moe_init_routing_custom.start()
         self.mock_npu_moe_init_routing_custom.return_value = (
             torch.randn(6, 128),  # sorted_hidden_states
             torch.tensor([0, 1, 2, 3, 4, 5]),  # expanded_row_idx
             torch.tensor([0, 1, 0, 1, 0, 1]),  # expanded_expert_idx
             torch.tensor([0, 1, 0, 1, 0, 1]),
         )
-        self.patcher_npu_moe_token_unpermute = patch(
-            "torch_npu.npu_moe_token_unpermute"
-        )
+        self.patcher_npu_moe_token_unpermute = patch("torch_npu.npu_moe_token_unpermute")
         self.mock_npu_moe_token_unpermute = self.patcher_npu_moe_token_unpermute.start()
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(6, 128)
 
@@ -200,9 +190,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
-        results = self.dispatcher.token_dispatch(
-            hidden_states, topk_weights, topk_ids, None
-        )
+        results = self.dispatcher.token_dispatch(hidden_states, topk_weights, topk_ids, None)
 
         # Verify npu_moe_init_routing is called
         self.mock_npu_moe_init_routing_custom.assert_called_once()
@@ -216,9 +204,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
-        results = self.dispatcher.token_dispatch(
-            hidden_states, topk_weights, topk_ids, None
-        )
+        results = self.dispatcher.token_dispatch(hidden_states, topk_weights, topk_ids, None)
 
         # Verify npu_moe_init_routing is called
         self.mock_npu_moe_init_routing_custom.assert_called_once()
@@ -240,9 +226,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
-        results = self.dispatcher_quant.token_dispatch(
-            hidden_states, topk_weights, topk_ids, None
-        )
+        results = self.dispatcher_quant.token_dispatch(hidden_states, topk_weights, topk_ids, None)
 
         self.assertEqual(results.group_list_type, 1)
 
@@ -260,9 +244,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
-        results = self.dispatcher_quant.token_dispatch(
-            hidden_states, topk_weights, topk_ids, None, with_quant=True
-        )
+        results = self.dispatcher_quant.token_dispatch(hidden_states, topk_weights, topk_ids, None, with_quant=True)
 
         self.assertIsNotNone(results.hidden_states)
         self.assertIsNotNone(results.group_list)
@@ -276,9 +258,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
             "topk_weights": torch.tensor([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
         }
         self.dispatcher.original_shape = (6, 128)
-        final_hidden_states = self.dispatcher.token_combine(
-            hidden_states, context_metadata
-        ).routed_out
+        final_hidden_states = self.dispatcher.token_combine(hidden_states, context_metadata).routed_out
         self.assertEqual(final_hidden_states.shape, (6, 128))
 
     def test_token_combine_without_expert_map(self):
@@ -288,9 +268,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
             "topk_weights": torch.tensor([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
         }
         self.dispatcher.original_shape = (6, 128)
-        final_hidden_states = self.dispatcher.token_combine(
-            hidden_states, context_metadata
-        ).routed_out
+        final_hidden_states = self.dispatcher.token_combine(hidden_states, context_metadata).routed_out
         self.mock_npu_moe_token_unpermute.assert_called_once()
         self.assertEqual(final_hidden_states.shape, (6, 128))
 
@@ -300,9 +278,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7], [0.6], [0.5]])  # topk=1
         topk_ids = torch.tensor([[0], [1], [2]])
 
-        results = self.dispatcher.token_dispatch(
-            hidden_states, topk_weights, topk_ids, None
-        )
+        results = self.dispatcher.token_dispatch(hidden_states, topk_weights, topk_ids, None)
         self.assertEqual(results.hidden_states.shape, (6, 128))
 
 
@@ -362,9 +338,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         )
 
         # Mock gather_from_sequence_parallel_region
-        patcher7 = patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.gather_from_sequence_parallel_region"
-        )
+        patcher7 = patch("vllm_ascend.ops.fused_moe.token_dispatcher.gather_from_sequence_parallel_region")
         self.mock_gather_from_sequence_parallel_region = patcher7.start()
         self.addCleanup(patcher7.stop)
         self.mock_gather_from_sequence_parallel_region.return_value = torch.tensor(
@@ -409,9 +383,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.addCleanup(patcher12.stop)
         self.mock_repeat_interleave.return_value = torch.arange(16)
 
-        self.dispatcher = TokenDispatcherWithAll2AllV(
-            top_k=2, num_experts=4, num_local_experts=2, with_quant=False
-        )
+        self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=4, num_local_experts=2, with_quant=False)
 
     def test_token_dispatch(self):
         hidden_states = torch.randn(8, 16)
@@ -452,9 +424,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.assertEqual(output.routed_out.shape, (8, 16))
 
     def test_token_dispatch_with_quant(self):
-        self.dispatcher = TokenDispatcherWithAll2AllV(
-            top_k=2, num_experts=4, num_local_experts=2
-        )
+        self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=4, num_local_experts=2)
 
         hidden_states = torch.randn(8, 16)
         topk_weights = torch.rand(8, 4)
@@ -478,9 +448,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.assertEqual(result.group_list_type, 1)
 
     def test_token_dispatch_with_quant_no_active_tokens(self):
-        self.dispatcher = TokenDispatcherWithAll2AllV(
-            top_k=2, num_experts=4, num_local_experts=2
-        )
+        self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=4, num_local_experts=2)
 
         self.mock_repeat_interleave.return_value = torch.tensor([], dtype=torch.long)
 

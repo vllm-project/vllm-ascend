@@ -113,9 +113,7 @@ def emb_model_name(request):
 def test_embedding_score_1_to_1(emb_model_name):
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 
-    with HfRunner(
-        emb_model_name, dtype=DTYPE, is_sentence_transformer=True
-    ) as hf_model:
+    with HfRunner(emb_model_name, dtype=DTYPE, is_sentence_transformer=True) as hf_model:
         hf_embeddings = hf_model.encode(text_pair)
         hf_outputs = [F.cosine_similarity(*map(torch.tensor, hf_embeddings), dim=0)]
 
@@ -140,14 +138,9 @@ def test_embedding_score_1_to_N(emb_model_name):
         [TEXTS_1[0], TEXTS_2[1]],
     ]
 
-    with HfRunner(
-        emb_model_name, dtype=DTYPE, is_sentence_transformer=True
-    ) as hf_model:
+    with HfRunner(emb_model_name, dtype=DTYPE, is_sentence_transformer=True) as hf_model:
         hf_embeddings = [hf_model.encode(text_pair) for text_pair in text_pairs]
-        hf_outputs = [
-            F.cosine_similarity(*map(torch.tensor, pair), dim=0)
-            for pair in hf_embeddings
-        ]
+        hf_outputs = [F.cosine_similarity(*map(torch.tensor, pair), dim=0) for pair in hf_embeddings]
 
     with VllmRunner(
         emb_model_name,
@@ -171,14 +164,9 @@ def test_embedding_score_N_to_N(emb_model_name):
         [TEXTS_1[1], TEXTS_2[1]],
     ]
 
-    with HfRunner(
-        emb_model_name, dtype=DTYPE, is_sentence_transformer=True
-    ) as hf_model:
+    with HfRunner(emb_model_name, dtype=DTYPE, is_sentence_transformer=True) as hf_model:
         hf_embeddings = [hf_model.encode(text_pair) for text_pair in text_pairs]
-        hf_outputs = [
-            F.cosine_similarity(*map(torch.tensor, pair), dim=0)
-            for pair in hf_embeddings
-        ]
+        hf_outputs = [F.cosine_similarity(*map(torch.tensor, pair), dim=0) for pair in hf_embeddings]
 
     with VllmRunner(
         emb_model_name,

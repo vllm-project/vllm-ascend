@@ -1,6 +1,6 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Callable, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -21,9 +21,7 @@ class LayerMetadata:
 
     layer_idx: int  # The index of the layer.
     layer: LinearBase  # The layer object.
-    post_method: Callable[
-        [torch.nn.Module], None
-    ]  # The `process_weights_after_loading` method from the quant method.
+    post_method: Callable[[torch.nn.Module], None]  # The `process_weights_after_loading` method from the quant method.
     weight: torch.Tensor  # The weight tensor.
     window_idx: int  # The index of the window.
 
@@ -34,7 +32,7 @@ class ShardWindowMetadata:
 
     weight: torch.Tensor  # The weight tensor to be shard by layers.
     data_layer_idx: int  # The index of the layer this window's weight is equal to.
-    work: Optional[torch.distributed.Work]  # The asynchronous broadcast work.
+    work: torch.distributed.Work | None  # The asynchronous broadcast work.
 
 
 @dataclass
@@ -64,9 +62,9 @@ class SeriesMetadata:
         self.layers.sort(key=lambda x: x.layer_idx)
         self.num_layers = len(self.layers)
         assert self.num_layers > 0, "No layers in the series"
-        assert self.prefetch_step >= 0 and self.prefetch_step <= max(
-            0, self.num_layers - 2
-        ), "prefetch_step must be in [0, num_layers - 2]"
+        assert self.prefetch_step >= 0 and self.prefetch_step <= max(0, self.num_layers - 2), (
+            "prefetch_step must be in [0, num_layers - 2]"
+        )
         self.start_layer = self.layers[0].layer_idx
         self.end_layer = self.layers[-1].layer_idx + 1
 
@@ -117,9 +115,7 @@ class SeriesMetadata:
 
     def reach_layer(self, layer_idx: int):
         # The index of the layer to be prefetched.
-        next_layer_idx = (
-            layer_idx + self.prefetch_step
-        ) % self.num_layers + self.start_layer
+        next_layer_idx = (layer_idx + self.prefetch_step) % self.num_layers + self.start_layer
         next_layer = self.layers[next_layer_idx - self.start_layer]
         # The index of the window to store the weight for the coming layer.
         next_layer.window_idx = self.window_offset
@@ -142,9 +138,7 @@ class SeriesMetadata:
     def wait_weight(self, layer_idx: int):
         # Find the asynchronous broadcast work and wait for it.
         assert self.shard_windows
-        window = self.shard_windows[
-            self.layers[layer_idx - self.start_layer].window_idx
-        ]
+        window = self.shard_windows[self.layers[layer_idx - self.start_layer].window_idx]
         # Make sure the data in the corresponding shard window is for the current layer.
         assert window.data_layer_idx == layer_idx
         if window.work is not None:
@@ -165,9 +159,7 @@ _series_dict: dict[str, SeriesMetadata] = {}
 _layer_external_dict: dict[int, LayerExternalMetadata] = {}
 
 
-def _create_forward_wrapper(
-    forward: Callable, series: SeriesMetadata, layer_idx: int
-) -> Callable:
+def _create_forward_wrapper(forward: Callable, series: SeriesMetadata, layer_idx: int) -> Callable:
     def wrapped_forward(*args, **kwargs):
         # Wait for the weight.
         series.wait_weight(layer_idx)
@@ -276,7 +268,7 @@ def is_hidden_layer(layer: LinearBase) -> bool:
 
 
 def register_all_layers_to_shard_weight_series(
-    layer_sharding: List[LinearBase],
+    layer_sharding: list[LinearBase],
 ):
     for curr_layer in layer_sharding or []:
         if is_hidden_layer(curr_layer):

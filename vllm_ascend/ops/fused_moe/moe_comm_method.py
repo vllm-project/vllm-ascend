@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 from vllm.forward_context import get_forward_context
@@ -40,13 +40,13 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 
-_MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
+_MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
 
 def get_moe_comm_method(
-    moe_comm_type: Optional[MoECommType],
-) -> Optional[MoECommMethod]:
-    return _MoECommMethods.get(moe_comm_type, None)
+    moe_comm_type: MoECommType | None,
+) -> MoECommMethod | None:
+    return _MoECommMethods.get(moe_comm_type)
 
 
 def setup_moe_comm_method(moe_config):
@@ -80,17 +80,13 @@ class MoECommMethod(ABC):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
-    ]:
-        hidden_states, router_logits, mc2_mask, context_metadata = (
-            self.prepare_finalize.prepare(
-                hidden_states,
-                router_logits,
-                enable_shared_expert_dp,
-                replace_allreduce,
-                quant_type,
-            )
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        hidden_states, router_logits, mc2_mask, context_metadata = self.prepare_finalize.prepare(
+            hidden_states,
+            router_logits,
+            enable_shared_expert_dp,
+            replace_allreduce,
+            quant_type,
         )
         return hidden_states, router_logits, mc2_mask, context_metadata
 
@@ -98,11 +94,9 @@ class MoECommMethod(ABC):
         self,
         hidden_states: torch.Tensor,
         reduce_results: bool,
-        context_metadata: Optional[dict] = None,
+        context_metadata: dict | None = None,
     ) -> torch.Tensor:
-        hidden_states = self.prepare_finalize.finalize(
-            hidden_states, reduce_results, context_metadata
-        )
+        hidden_states = self.prepare_finalize.finalize(hidden_states, reduce_results, context_metadata)
         return hidden_states
 
     def fused_experts(
@@ -117,24 +111,24 @@ class MoECommMethod(ABC):
         use_int8_w8a8: bool = False,
         use_int4_w4a8: bool = False,
         use_int4_w4a16: bool = False,
-        global_num_experts: Optional[int] = None,
-        expert_map: Optional[torch.Tensor] = None,
-        w1_scale: Optional[list[torch.Tensor]] = None,
-        w2_scale: Optional[list[torch.Tensor]] = None,
+        global_num_experts: int | None = None,
+        expert_map: torch.Tensor | None = None,
+        w1_scale: list[torch.Tensor] | None = None,
+        w2_scale: list[torch.Tensor] | None = None,
         w1_scale_bias: torch.Tensor = None,
         w2_scale_bias: torch.Tensor = None,
-        w1_offset: Optional[torch.Tensor] = None,
-        w2_offset: Optional[torch.Tensor] = None,
+        w1_offset: torch.Tensor | None = None,
+        w2_offset: torch.Tensor | None = None,
         # For Cube/Vector parallel
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
+        shared_experts: Any | None = None,
+        quantized_x_for_share: Any | None = None,
+        dynamic_scale_for_share: Any | None = None,
         # For load balance
         log2phy: torch.Tensor = None,
         need_trans: bool = False,
         dynamic_eplb: bool = False,
         mc2_mask: torch.Tensor = None,
-        pertoken_scale: Optional[torch.Tensor] = None,
+        pertoken_scale: torch.Tensor | None = None,
     ):
         # Check constraints
         assert hidden_states.dtype in [
@@ -299,28 +293,26 @@ class FusedMC2CommImpl(MoECommMethod):
         use_int8_w8a8: bool = False,
         use_int4_w4a8: bool = False,
         use_int4_w4a16: bool = False,
-        global_num_experts: Optional[int] = None,
-        expert_map: Optional[torch.Tensor] = None,
-        w1_scale: Optional[list[torch.Tensor]] = None,
-        w2_scale: Optional[list[torch.Tensor]] = None,
+        global_num_experts: int | None = None,
+        expert_map: torch.Tensor | None = None,
+        w1_scale: list[torch.Tensor] | None = None,
+        w2_scale: list[torch.Tensor] | None = None,
         w1_scale_bias: torch.Tensor = None,
         w2_scale_bias: torch.Tensor = None,
-        w1_offset: Optional[torch.Tensor] = None,
-        w2_offset: Optional[torch.Tensor] = None,
+        w1_offset: torch.Tensor | None = None,
+        w2_offset: torch.Tensor | None = None,
         # For Cube/Vector parallel
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
+        shared_experts: Any | None = None,
+        quantized_x_for_share: Any | None = None,
+        dynamic_scale_for_share: Any | None = None,
         # For load balance
         log2phy: torch.Tensor = None,
         need_trans: bool = False,
         dynamic_eplb: bool = False,
         mc2_mask: torch.Tensor = None,
-        pertoken_scale: Optional[torch.Tensor] = None,
+        pertoken_scale: torch.Tensor | None = None,
     ):
-        assert not (w1_scale is None or w2_scale is None), (
-            "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
-        )
+        assert not (w1_scale is None or w2_scale is None), "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
 
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
@@ -360,9 +352,5 @@ class FusedMC2CommImpl(MoECommMethod):
                 global_bs=self.token_dispatcher.fused_global_bs,
             )
         else:
-            raise ValueError(
-                f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}"
-            )
-        return FusedExpertsResult(
-            routed_out=out, group_list_type=group_list_type, expert_tokens=expert_tokens
-        )
+            raise ValueError(f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
+        return FusedExpertsResult(routed_out=out, group_list_type=group_list_type, expert_tokens=expert_tokens)

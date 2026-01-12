@@ -46,9 +46,7 @@ def test_minicpm(model) -> None:
     ]
     max_tokens = 5
 
-    with VllmRunner(
-        snapshot_download(model), max_model_len=512, gpu_memory_utilization=0.7
-    ) as runner:
+    with VllmRunner(snapshot_download(model), max_model_len=512, gpu_memory_utilization=0.7) as runner:
         runner.generate_greedy(example_prompts, max_tokens)
 
 

@@ -4,7 +4,7 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import os
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from vllm import SamplingParams
@@ -45,23 +45,9 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.encoder_cache_manager.cached) == 0
 
     # KVCache Manager.
-    assert (
-        len(
-            scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks
-        )
-        == 0
-    )
-    assert (
-        len(
-            scheduler.kv_cache_manager.coordinator.single_type_managers[
-                0
-            ].num_cached_block
-        )
-        == 0
-    )
-    num_free_blocks = (
-        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
-    )
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].num_cached_block) == 0
+    num_free_blocks = scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
     assert num_free_blocks == (scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
 
     # NOTE(rob): just the ref count on blocks will be 0. The hash
@@ -156,7 +142,7 @@ def create_request(
 
     block_hasher = get_request_block_hasher(block_size, sha256)
 
-    kv_transfer_params: Optional[dict[str, Any]] = None
+    kv_transfer_params: dict[str, Any] | None = None
 
     if do_remote_decode:
         assert not do_remote_prefill
@@ -196,8 +182,8 @@ def create_request(
 
 def create_model_runner_output(
     reqs: list[Request],
-    finished_sending: Optional[list[str]] = None,
-    finished_recving: Optional[list[str]] = None,
+    finished_sending: list[str] | None = None,
+    finished_recving: list[str] | None = None,
     use_eos: bool = False,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
@@ -214,9 +200,7 @@ def create_model_runner_output(
     extra_args = {}
     from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput  # type: ignore  # noqa
 
-    kv_connector_output = KVConnectorOutput(
-        finished_sending=finished_sending, finished_recving=finished_recving
-    )
+    kv_connector_output = KVConnectorOutput(finished_sending=finished_sending, finished_recving=finished_recving)
     extra_args = {"kv_connector_output": kv_connector_output}
 
     model_runner_output = ModelRunnerOutput(

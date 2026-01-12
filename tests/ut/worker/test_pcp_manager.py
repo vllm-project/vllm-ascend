@@ -149,9 +149,7 @@ def test_update_tokens_for_pcp_basic(
     input_batch.num_computed_tokens_cpu = np.array(num_computed_tokens, dtype=np.int32)
     input_batch.num_prompt_tokens = np.array(num_prompt_tokens, dtype=np.int32)
     arange_np = np.arange(10000)
-    pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(
-        np.array(tokens), arange_np, num_reqs, 1
-    )
+    pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(np.array(tokens), arange_np, num_reqs, 1)
 
     assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), (
         f"Expected pcp_tokens: {expected_pcp_tokens}, got: {pcp_tokens_result}"

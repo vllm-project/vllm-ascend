@@ -311,9 +311,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.envs_vllm")
     @patch("vllm_ascend.worker.worker.envs_ascend")
-    def test_profile_and_msmonitor_both_enabled_raises_error(
-        self, mock_envs_vllm, mock_envs_ascend
-    ):
+    def test_profile_and_msmonitor_both_enabled_raises_error(self, mock_envs_vllm, mock_envs_ascend):
         """Test profile method raises exception when both profiler and msmonitor are enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -381,9 +379,7 @@ class TestNPUWorker(TestBase):
 
             mock_model_runner.get_model.return_value = mock_model
             mock_model_runner.get_kv_cache_spec.return_value = mock_kv_cache_spec
-            mock_model_runner.get_supported_pooling_tasks.return_value = (
-                mock_pooling_tasks
-            )
+            mock_model_runner.get_supported_pooling_tasks.return_value = mock_pooling_tasks
             mock_model_runner.get_supported_tasks.return_value = mock_supported_tasks
 
             # Test each get method
@@ -503,12 +499,8 @@ class TestNPUWorker(TestBase):
             self.assertTrue(profile_kwargs["with_stack"])
             self.assertTrue(profile_kwargs["profile_memory"])
             self.assertFalse(profile_kwargs["with_modules"])
-            self.assertEqual(
-                profile_kwargs["experimental_config"], mock_experimental_config_instance
-            )
-            self.assertEqual(
-                profile_kwargs["on_trace_ready"], mock_trace_handler_instance
-            )
+            self.assertEqual(profile_kwargs["experimental_config"], mock_experimental_config_instance)
+            self.assertEqual(profile_kwargs["on_trace_ready"], mock_trace_handler_instance)
 
             # Verify return value
             self.assertEqual(result, mock_profiler_instance)
@@ -572,9 +564,7 @@ class TestNPUWorker(TestBase):
         ]
         mock_torch_memory_stats.side_effect = [
             {"allocated_bytes.all.peak": 2000},  # peak memory
-            {
-                "allocated_bytes.all.current": 3000
-            },  # current allocated = total_allocated_bytes
+            {"allocated_bytes.all.current": 3000},  # current allocated = total_allocated_bytes
         ]
         # Mock setup to simulate memory change between calls, exposing potential race condition
         # The implementation calls torch_npu.npu.mem_get_info() twice in total_allocated_bytes calculation
@@ -592,9 +582,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
-            worker.init_npu_memory = (
-                8500  # Initial memory greater than current free memory
-            )
+            worker.init_npu_memory = 8500  # Initial memory greater than current free memory
             worker.model_runner = MagicMock()
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
@@ -807,9 +795,7 @@ class TestNPUWorker(TestBase):
             result = worker.execute_model(mock_scheduler_output)
 
             # Verify call
-            worker.model_runner.execute_model.assert_called_once_with(
-                mock_scheduler_output, None
-            )
+            worker.model_runner.execute_model.assert_called_once_with(mock_scheduler_output, None)
             self.assertEqual(result, mock_model_output)
 
     @patch("vllm_ascend.worker.worker.get_pp_group")
@@ -840,9 +826,7 @@ class TestNPUWorker(TestBase):
             # Mock return IntermediateTensors - use real type
             mock_intermediate_output = MagicMock(spec=IntermediateTensors)
             mock_intermediate_output.tensors = {"output_tensor": "data"}
-            mock_intermediate_output.kv_connector_output = (
-                None  # Set to None to trigger return None
-            )
+            mock_intermediate_output.kv_connector_output = None  # Set to None to trigger return None
             worker.model_runner.execute_model.return_value = mock_intermediate_output
 
             mock_scheduler_output = MagicMock()
@@ -882,9 +866,7 @@ class TestNPUWorker(TestBase):
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
-            worker.vllm_config.parallel_config.distributed_executor_backend = (
-                "external_launcher"
-            )
+            worker.vllm_config.parallel_config.distributed_executor_backend = "external_launcher"
 
             # Set as non-last rank
             mock_pp_group = MagicMock()
@@ -977,9 +959,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.logger")
     @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
-    def test_compile_or_warm_up_model_with_eager_mode(
-        self, mock_warm_up_atb, mock_logger
-    ):
+    def test_compile_or_warm_up_model_with_eager_mode(self, mock_warm_up_atb, mock_logger):
         """Test compile_or_warm_up_model method - eager mode"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -1020,9 +1000,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.logger")
     @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
-    def test_compile_or_warm_up_model_with_graph_capture(
-        self, mock_warm_up_atb, mock_logger
-    ):
+    def test_compile_or_warm_up_model_with_graph_capture(self, mock_warm_up_atb, mock_logger):
         """Test compile_or_warm_up_model method - with graph capture enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -1081,9 +1059,7 @@ class TestNPUWorker(TestBase):
             # Verify calls
             mock_allocator_class.get_instance.assert_called_once()
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(
-                mock_kv_cache_config
-            )
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
     def test_initialize_from_config_without_sleep_mode(self):
         """Test initialize_from_config method - without sleep mode enabled"""
@@ -1104,16 +1080,12 @@ class TestNPUWorker(TestBase):
             worker.initialize_from_config(mock_kv_cache_config)
 
             # Verify calls
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(
-                mock_kv_cache_config
-            )
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
     @patch("vllm_ascend.worker.worker.get_pp_group")
     @patch("vllm_ascend.worker.worker.get_tp_group")
     @patch("vllm_ascend.worker.worker.EMPTY_MODEL_RUNNER_OUTPUT")
-    def test_execute_model_kv_connector_not_finished(
-        self, mock_empty_output, mock_get_tp_group, mock_get_pp_group
-    ):
+    def test_execute_model_kv_connector_not_finished(self, mock_empty_output, mock_get_tp_group, mock_get_pp_group):
         """Test execute_model method - kv_connector_output not finished sending/recving case"""
         from vllm.sequence import IntermediateTensors
 

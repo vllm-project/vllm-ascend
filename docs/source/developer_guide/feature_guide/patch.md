@@ -16,7 +16,7 @@ We should keep in mind that Patch is not the best way to make vLLM Ascend compat
 
 In `vllm_ascend/patch`, you can see the code structure as follows:
 
-```
+```shell
 vllm_ascend
 ├── patch
 │   ├── platform
@@ -54,7 +54,7 @@ Before writing a patch, following the principle above, we should patch the least
 5. Import the patch file in `__init__.py`. In this example, add `import vllm_ascend.patch.platform.patch_distributed` into `vllm_ascend/patch/platform/__init__.py`.
 6. Add the description of the patch in `vllm_ascend/patch/__init__.py`. The description format is as follows:
 
-    ```
+    ```shell
     # ** File: <The patch file name> **
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     #   1. `<The target patch module in vLLM>`

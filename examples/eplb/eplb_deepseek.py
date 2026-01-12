@@ -5,14 +5,10 @@ The rearrangement algorithm is adapted from
 [DeepSeek EPLB](https://github.com/deepseek-ai/eplb).
 """
 
-from typing import Tuple
-
 import torch
 
 
-def balanced_packing(
-    weight: torch.Tensor, num_packs: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def balanced_packing(weight: torch.Tensor, num_packs: int) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Pack n weighted objects to m packs, such that each bin contains exactly n/m objects and the weights of all packs
     are as balanced as possible.
@@ -30,9 +26,7 @@ def balanced_packing(
     groups_per_pack = num_groups // num_packs
 
     if groups_per_pack == 1:
-        pack_index = torch.arange(
-            weight.size(-1), dtype=torch.int64, device=weight.device
-        ).expand(weight.shape)
+        pack_index = torch.arange(weight.size(-1), dtype=torch.int64, device=weight.device).expand(weight.shape)
         rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
         return pack_index, rank_in_pack
 
@@ -55,9 +49,7 @@ def balanced_packing(
     return pack_index, rank_in_pack
 
 
-def replicate_experts(
-    weight: torch.Tensor, num_phy: int
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def replicate_experts(weight: torch.Tensor, num_phy: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Replicate `num_log` experts to `num_phy` replicas, such that the maximum load of all replicas is minimized.
 
@@ -120,9 +112,7 @@ def rebalance_experts_hierarchical(
         inv.scatter_(
             1,
             perm,
-            torch.arange(perm.size(1), dtype=torch.int64, device=perm.device).expand(
-                perm.shape
-            ),
+            torch.arange(perm.size(1), dtype=torch.int64, device=perm.device).expand(perm.shape),
         )
         return inv
 
@@ -130,21 +120,15 @@ def rebalance_experts_hierarchical(
     tokens_per_group = weight.unflatten(-1, (num_groups, group_size)).sum(-1)
     group_pack_index, group_rank_in_pack = balanced_packing(tokens_per_group, num_nodes)
     log2mlog = (
-        (
-            (group_pack_index * groups_per_node + group_rank_in_pack) * group_size
-        ).unsqueeze(-1)
+        ((group_pack_index * groups_per_node + group_rank_in_pack) * group_size).unsqueeze(-1)
         + torch.arange(group_size, dtype=torch.int64, device=group_pack_index.device)
     ).flatten(-2)
     mlog2log = inverse(log2mlog)
 
     # Step 2: construct redundant experts within nodes
     # [num_layers * num_nodes, num_logical_experts // num_nodes]
-    tokens_per_mlog = weight.gather(-1, mlog2log).view(
-        -1, num_logical_experts // num_nodes
-    )
-    phy2mlog, phyrank, mlogcnt = replicate_experts(
-        tokens_per_mlog, num_physical_experts // num_nodes
-    )
+    tokens_per_mlog = weight.gather(-1, mlog2log).view(-1, num_logical_experts // num_nodes)
+    phy2mlog, phyrank, mlogcnt = replicate_experts(tokens_per_mlog, num_physical_experts // num_nodes)
 
     # Step 3: pack physical_experts to GPUs
     # [num_layers * num_nodes, num_physical_experts // num_nodes]
@@ -153,9 +137,7 @@ def rebalance_experts_hierarchical(
     phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
     pphy2phy = inverse(phy2pphy)
 
-    pphy2mlog = phy2mlog.gather(
-        -1, pphy2phy
-    )  # [num_layers * num_nodes, num_log_per_nodes]
+    pphy2mlog = phy2mlog.gather(-1, pphy2phy)  # [num_layers * num_nodes, num_log_per_nodes]
     pphy2mlog = (
         pphy2mlog.view(num_layers, num_nodes, -1)
         + torch.arange(
@@ -177,7 +159,7 @@ def rebalance_experts(
     num_groups: int,
     num_nodes: int,
     num_gpus: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Entry point for expert-parallelism load balancer.
 
@@ -197,14 +179,10 @@ def rebalance_experts(
     weight = weight.float().cpu()
     if num_groups % num_nodes == 0:
         # use hierarchical load-balance policy
-        phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
-            weight, num_replicas, num_groups, num_nodes, num_gpus
-        )
+        phy2log, phyrank, logcnt = rebalance_experts_hierarchical(weight, num_replicas, num_groups, num_nodes, num_gpus)
     else:
         # use global load-balance policy
-        phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
-            weight, num_replicas, 1, 1, num_gpus
-        )
+        phy2log, phyrank, logcnt = rebalance_experts_hierarchical(weight, num_replicas, 1, 1, num_gpus)
     maxlogcnt = logcnt.max().item()
     log2phy: torch.Tensor = torch.full(
         (num_layers, num_logical_experts, maxlogcnt),
@@ -215,9 +193,7 @@ def rebalance_experts(
     log2phy.view(num_layers, -1).scatter_(
         -1,
         phy2log * maxlogcnt + phyrank,
-        torch.arange(num_replicas, dtype=torch.int64, device=log2phy.device).expand(
-            num_layers, -1
-        ),
+        torch.arange(num_replicas, dtype=torch.int64, device=log2phy.device).expand(num_layers, -1),
     )
     return phy2log, log2phy, logcnt
 

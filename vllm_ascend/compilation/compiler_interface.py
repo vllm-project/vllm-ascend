@@ -16,7 +16,8 @@
 # limitations under the License.
 #
 import functools
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.fx as fx
@@ -37,9 +38,7 @@ def compile_fx(
     inner_compile: Callable,
     decompositions: dict,
 ) -> Callable:
-    recursive_compile_fx = functools.partial(
-        compile_fx, inner_compile=inner_compile, decompositions=decompositions
-    )
+    recursive_compile_fx = functools.partial(compile_fx, inner_compile=inner_compile, decompositions=decompositions)
 
     if not graph_returns_tuple(graph):
         return make_graph_return_tuple(graph, example_inputs, recursive_compile_fx)
@@ -51,8 +50,8 @@ def fusion_pass_compile(
     example_inputs: list[Any],
     compiler_config: dict[str, Any],
     compile_range: Range,
-    key: Optional[str] = None,
-) -> tuple[Optional[Callable], Optional[Any]]:
+    key: str | None = None,
+) -> tuple[Callable | None, Any | None]:
     def compile_inner(graph, example_inputs):
         current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
         graph = current_pass_manager(graph)
@@ -75,8 +74,8 @@ def npugraph_ex_compile(
     example_inputs: list[Any],
     compiler_config: dict[str, Any],
     compile_range: Range,
-    key: Optional[str] = None,
-) -> tuple[Optional[Callable], Optional[Any]]:
+    key: str | None = None,
+) -> tuple[Callable | None, Any | None]:
     # When currently using the FULL_DECODE_ONLY mode,
     # the piecewise compilation level slicing process
     # in vllm is also encountered.
@@ -88,9 +87,7 @@ def npugraph_ex_compile(
         output_node = fx_graph.output_node()
         with fx_graph.inserting_before(output_node):
             return_value = output_node.args[0]
-            tuple_node = fx_graph.create_node(
-                "call_function", tuple, args=([return_value],)
-            )
+            tuple_node = fx_graph.create_node("call_function", tuple, args=([return_value],))
         output_node.args = (tuple_node,)
         graph.recompile()
 
@@ -129,14 +126,10 @@ class AscendCompiler(CompilerInterface):
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
         compile_range: Range,
-        key: Optional[str] = None,
-    ) -> tuple[Optional[Callable], Optional[Any]]:
+        key: str | None = None,
+    ) -> tuple[Callable | None, Any | None]:
         ascend_config = get_ascend_config()
         if ascend_config.enable_npugraph_ex:
-            return npugraph_ex_compile(
-                graph, example_inputs, compiler_config, compile_range, key
-            )
+            return npugraph_ex_compile(graph, example_inputs, compiler_config, compile_range, key)
         else:
-            return fusion_pass_compile(
-                graph, example_inputs, compiler_config, compile_range, key
-            )
+            return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)

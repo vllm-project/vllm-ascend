@@ -93,7 +93,6 @@ import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
-from typing import List
 
 import httpx
 from fastapi import FastAPI, Request
@@ -125,9 +124,7 @@ class ServerState:
         self.client = httpx.AsyncClient(
             timeout=None,
             base_url=self.url,
-            limits=httpx.Limits(
-                max_connections=100000, max_keepalive_connections=100000
-            ),
+            limits=httpx.Limits(max_connections=100000, max_keepalive_connections=100000),
         )
         self.active_tokens = 0
         self.active_kv_cache = 0  # Only for prefiller
@@ -138,12 +135,8 @@ class ServerState:
 
 class ProxyState:
     def __init__(self, prefiller_instances, decoder_instances):
-        self.prefillers: List[ServerState] = [
-            ServerState(h, p) for h, p in prefiller_instances
-        ]
-        self.decoders: List[ServerState] = [
-            ServerState(h, p) for h, p in decoder_instances
-        ]
+        self.prefillers: list[ServerState] = [ServerState(h, p) for h, p in prefiller_instances]
+        self.decoders: list[ServerState] = [ServerState(h, p) for h, p in decoder_instances]
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
         # Removed selection locks - no longer needed for synchronous methods
@@ -151,9 +144,7 @@ class ProxyState:
         # Initialize priority queues for efficient server selection
         # Each entry is (priority_score, server_index, server_reference)
         # Lower priority score = higher priority (less loaded)
-        self.prefiller_heap = [
-            (0, i, server) for i, server in enumerate(self.prefillers)
-        ]
+        self.prefiller_heap = [(0, i, server) for i, server in enumerate(self.prefillers)]
         self.decoder_heap = [(0, i, server) for i, server in enumerate(self.decoders)]
         heapq.heapify(self.prefiller_heap)
         heapq.heapify(self.decoder_heap)
@@ -166,9 +157,7 @@ class ProxyState:
         # Priority based on active_tokens and active_kv_cache
         priority = server.active_tokens + server.active_kv_cache * 0.3
         # Remove old entry and add new one
-        self.prefiller_heap = [
-            (p, i, s) for p, i, s in self.prefiller_heap if i != server_idx
-        ]
+        self.prefiller_heap = [(p, i, s) for p, i, s in self.prefiller_heap if i != server_idx]
         heapq.heappush(self.prefiller_heap, (priority, server_idx, server))  # type: ignore
 
     def _update_decoder_priority(self, server_idx: int):
@@ -176,14 +165,10 @@ class ProxyState:
         server = self.decoders[server_idx]
         priority = server.active_tokens
         # Remove old entry and add new one
-        self.decoder_heap = [
-            (p, i, s) for p, i, s in self.decoder_heap if i != server_idx
-        ]
+        self.decoder_heap = [(p, i, s) for p, i, s in self.decoder_heap if i != server_idx]
         heapq.heappush(self.decoder_heap, (priority, server_idx, server))  # type: ignore
 
-    def abort_prefiller_request(
-        self, server_idx: int, request_id
-    ):  # Changed to synchronous
+    def abort_prefiller_request(self, server_idx: int, request_id):  # Changed to synchronous
         """
         Mark a request as aborted. This will helps to release kv cache in
         prefiller node.
@@ -191,9 +176,7 @@ class ProxyState:
         # No lock needed - atomic operation
         self.prefillers[server_idx].aborted_requests.add(request_id)
 
-    def aquire_aborted_prefiller_requests(
-        self, server_idx: int
-    ):  # Changed to synchronous
+    def aquire_aborted_prefiller_requests(self, server_idx: int):  # Changed to synchronous
         """
         Get the set of aborted requests and clear it.
         This is used to release kv cache in prefiller node.
@@ -292,9 +275,7 @@ def parse_args():
     )
     args = parser.parse_args()
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
-        raise ValueError(
-            "Number of prefiller hosts must match number of prefiller ports"
-        )
+        raise ValueError("Number of prefiller hosts must match number of prefiller ports")
     if len(args.decoder_hosts) != len(args.decoder_ports):
         raise ValueError("Number of decoder hosts must match number of decoder ports")
     args.prefiller_instances = list(zip(args.prefiller_hosts, args.prefiller_ports))
@@ -305,12 +286,8 @@ def parse_args():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global proxy_state
-    proxy_state = ProxyState(
-        global_args.prefiller_instances, global_args.decoder_instances
-    )
-    print(
-        f"Initialized {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients."
-    )
+    proxy_state = ProxyState(global_args.prefiller_instances, global_args.decoder_instances)
+    print(f"Initialized {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients.")
     yield
     for p in proxy_state.prefillers:
         await p.client.aclose()
@@ -332,9 +309,7 @@ def with_cancellation(handler_func):
         request = kwargs["request"]
         handler_task = asyncio.create_task(handler_func(*args, **kwargs))
         cancellation_task = asyncio.create_task(listen_for_disconnect(request))
-        done, pending = await asyncio.wait(
-            [handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED
-        )
+        done, pending = await asyncio.wait([handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         if handler_task in done:
@@ -402,9 +377,7 @@ async def stream_service_response_with_retry(
     }
     for attempt in range(1, max_retries + 1):
         try:
-            async with client.stream(
-                "POST", endpoint, json=req_data, headers=headers
-            ) as response:
+            async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 response.raise_for_status()
                 first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
@@ -413,32 +386,22 @@ async def stream_service_response_with_retry(
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             if attempt < max_retries:
-                logger.warning(
-                    f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}"
-                )
+                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(
-                    f"All {max_retries} attempts failed for streaming {endpoint}."
-                )
+                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                 raise e
         except Exception as e:
             # If any chunk has been sent, do not retry, just log and drop
             if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error(
-                    f"Streaming to client interrupted after response started: {str(e)}"
-                )
+                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
                 return
             else:
                 if attempt < max_retries:
-                    logger.warning(
-                        f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}"
-                    )
+                    logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                     await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 else:
-                    logger.error(
-                        f"All {max_retries} attempts failed for streaming {endpoint}."
-                    )
+                    logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                     raise e
 
 
@@ -543,9 +506,7 @@ async def metaserver(request: Request):
         request_id = get_origin_request_id(api, request_id)
         req_data["kv_transfer_params"] = kv_transfer_params
         prefiller_score = proxy_state.calculate_prefill_scores(request_length)
-        logger.debug(
-            f"Request length: {request_length}, Prefiller score: {prefiller_score}"
-        )
+        logger.debug(f"Request length: {request_length}, Prefiller score: {prefiller_score}")
 
         # Select prefiller
         prefiller_idx = proxy_state.select_prefiller(prefiller_score)

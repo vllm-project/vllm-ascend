@@ -83,30 +83,18 @@ def parse_args():
     )
     parser.add_argument("--dp-size", type=int, default=2, help="Data parallel size")
     parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size")
-    parser.add_argument(
-        "--node-size", type=int, default=1, help="Total number of nodes"
-    )
-    parser.add_argument(
-        "--node-rank", type=int, default=0, help="Rank of the current node"
-    )
-    parser.add_argument(
-        "--master-addr", type=str, default="", help="Master node IP address"
-    )
+    parser.add_argument("--node-size", type=int, default=1, help="Total number of nodes")
+    parser.add_argument("--node-rank", type=int, default=0, help="Rank of the current node")
+    parser.add_argument("--master-addr", type=str, default="", help="Master node IP address")
     parser.add_argument("--master-port", type=int, default=0, help="Master node port")
-    parser.add_argument(
-        "--enforce-eager", action="store_true", help="Enforce eager mode execution."
-    )
-    parser.add_argument(
-        "--trust-remote-code", action="store_true", help="Trust remote code."
-    )
+    parser.add_argument("--enforce-eager", action="store_true", help="Enforce eager mode execution.")
+    parser.add_argument("--trust-remote-code", action="store_true", help="Trust remote code.")
     parser.add_argument(
         "--enable-expert-parallel",
         action="store_true",
         help="Enable expert parallel, used in MOE models.",
     )
-    parser.add_argument(
-        "--quantization", type=str, default="", help="Use quantization models"
-    )
+    parser.add_argument("--quantization", type=str, default="", help="Use quantization models")
     return parser.parse_args()
 
 
@@ -172,9 +160,7 @@ def main(
     # since we are doing data parallel, every rank can have different
     # sampling params. here we set different max_tokens for different
     # ranks for demonstration.
-    sampling_params = SamplingParams(
-        temperature=0.8, top_p=0.95, max_tokens=[16, 20][global_dp_rank % 2]
-    )
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=[16, 20][global_dp_rank % 2])
 
     # Create an LLM.
     llm = LLM(
@@ -193,10 +179,7 @@ def main(
             break
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(
-            f"DP rank {global_dp_rank}, Prompt: {prompt!r}, "
-            f"Generated text: {generated_text!r}"
-        )
+        print(f"DP rank {global_dp_rank}, Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     # Give engines time to pause their processing loops before exiting.
     sleep(5)
@@ -227,9 +210,7 @@ if __name__ == "__main__":
     from multiprocessing import Process
 
     procs = []
-    for local_dp_rank, global_dp_rank in enumerate(
-        range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)
-    ):
+    for local_dp_rank, global_dp_rank in enumerate(range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)):
         proc = Process(
             target=main,
             args=(

@@ -49,9 +49,7 @@ class MemcacheBackend(Backend):
 
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         try:
-            res = self.store.batch_get_into_layers(
-                key, addr, size, MmcDirect.COPY_G2L.value
-            )
+            res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
             for value in res:
                 if value != 0:
                     logger.error(f"Failed to get key {key},res:{res}")
@@ -60,9 +58,7 @@ class MemcacheBackend(Backend):
 
     def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         try:
-            res = self.store.batch_put_from_layers(
-                key, addr, size, MmcDirect.COPY_L2G.value
-            )
+            res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             for value in res:
                 if value != 0:
                     logger.error(f"Failed to get key {key},res:{res}")

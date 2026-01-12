@@ -26,7 +26,7 @@ import shlex
 import subprocess
 import sys
 import time
-from typing import Any, Optional, Tuple, TypeVar, Union
+from typing import Any, TypeVar, Union
 
 import numpy as np
 import openai
@@ -79,7 +79,7 @@ _M = TypeVar("_M")
 _PromptMultiModalInput = Union[list[_M], list[list[_M]]]
 
 PromptImageInput = _PromptMultiModalInput[Image.Image]
-PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
+PromptAudioInput = _PromptMultiModalInput[tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 logger = logging.getLogger(__name__)
 
@@ -103,9 +103,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
-    def _start_server(
-        self, model: str, server_cmd: list[str], env_dict: Optional[dict[str, str]]
-    ) -> None:
+    def _start_server(self, model: str, server_cmd: list[str], env_dict: dict[str, str] | None) -> None:
         """Subclasses override this method to customize server process launch"""
         env = os.environ.copy()
         # the current process might initialize npu,
@@ -124,18 +122,18 @@ class RemoteOpenAIServer:
     def __init__(
         self,
         model: str,
-        vllm_serve_args: Union[list[str], str],
+        vllm_serve_args: list[str] | str,
         *,
         server_host: str = "0.0.0.0",
         server_port: int = 8080,
-        env_dict: Optional[dict[str, str]] = None,
-        seed: Optional[int] = None,
+        env_dict: dict[str, str] | None = None,
+        seed: int | None = None,
         auto_port: bool = True,
-        nodes_info: Optional[list[NodeInfo]] = None,
-        disaggregated_prefill: Optional[DisaggregatedPrefillCfg] = None,
-        proxy_port: Optional[int] = None,
-        max_wait_seconds: Optional[float] = None,
-        override_hf_configs: Optional[dict[str, Any]] = None,
+        nodes_info: list[NodeInfo] | None = None,
+        disaggregated_prefill: DisaggregatedPrefillCfg | None = None,
+        proxy_port: int | None = None,
+        max_wait_seconds: float | None = None,
+        override_hf_configs: dict[str, Any] | None = None,
     ) -> None:
         if isinstance(vllm_serve_args, str):
             vllm_serve_args = shlex.split(vllm_serve_args)
@@ -143,9 +141,7 @@ class RemoteOpenAIServer:
             vllm_serve_args = ["vllm", "serve", model, *vllm_serve_args]
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
-                raise ValueError(
-                    "You have manually specified the port when `auto_port=True`."
-                )
+                raise ValueError("You have manually specified the port when `auto_port=True`.")
 
             # No need for a port if using unix sockets
             if "--uds" not in vllm_serve_args:
@@ -153,9 +149,7 @@ class RemoteOpenAIServer:
                 vllm_serve_args = vllm_serve_args + ["--port", str(get_open_port())]
         if seed is not None:
             if "--seed" in vllm_serve_args:
-                raise ValueError(
-                    f"You have manually specified the seed when `seed={seed}`."
-                )
+                raise ValueError(f"You have manually specified the seed when `seed={seed}`.")
 
             vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
 
@@ -176,14 +170,10 @@ class RemoteOpenAIServer:
         self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 2800
         if self.disaggregated_prefill:
-            assert proxy_port is not None, (
-                "for disaggregated_prefill, proxy port must be provided"
-            )
+            assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
             self._wait_for_server_pd(timeout=max_wait_seconds)
         else:
-            self._wait_for_multiple_servers(
-                [(self.host, self.url_for("health"))], timeout=max_wait_seconds
-            )
+            self._wait_for_multiple_servers([(self.host, self.url_for("health"))], timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
@@ -191,7 +181,7 @@ class RemoteOpenAIServer:
     def __exit__(self, exc_type, exc_value, traceback):
         self._terminate_server()
 
-    def _poll(self) -> Optional[int]:
+    def _poll(self) -> int | None:
         """Subclasses override this method to customize process polling"""
         return self.proc.poll()
 
@@ -239,9 +229,7 @@ class RemoteOpenAIServer:
         # Then wait for all api_server nodes
         self._wait_for_multiple_servers(targets=targets, timeout=timeout)
 
-    def _wait_for_multiple_servers(
-        self, targets, timeout: float, log_interval: float = 30.0
-    ):
+    def _wait_for_multiple_servers(self, targets, timeout: float, log_interval: float = 30.0):
         """
         targets: List[(node_ip, url)]
         log_interval
@@ -275,9 +263,7 @@ class RemoteOpenAIServer:
                     # check unexpected exit
                     result = self._poll()
                     if result is not None and result != 0:
-                        raise RuntimeError(
-                            f"Server at {node_ip} exited unexpectedly."
-                        ) from None
+                        raise RuntimeError(f"Server at {node_ip} exited unexpectedly.") from None
 
             if should_log:
                 last_log_time = now
@@ -337,17 +323,17 @@ class VllmRunner:
         model_name: str,
         runner: RunnerOption = "auto",
         convert: ConvertOption = "auto",
-        tokenizer_name: Optional[str] = None,
+        tokenizer_name: str | None = None,
         tokenizer_mode: str = "auto",
-        max_model_len: Optional[int] = 1024,
+        max_model_len: int | None = 1024,
         dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
         swap_space: int = 4,
-        enforce_eager: Optional[bool] = False,
-        quantization: Optional[str] = None,
+        enforce_eager: bool | None = False,
+        quantization: str | None = None,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -371,17 +357,13 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: Union[list[str], list[torch.Tensor], list[int]],
-        images: Optional[PromptImageInput] = None,
-        videos: Optional[PromptVideoInput] = None,
-        audios: Optional[PromptAudioInput] = None,
+        prompts: list[str] | list[torch.Tensor] | list[int],
+        images: PromptImageInput | None = None,
+        videos: PromptVideoInput | None = None,
+        audios: PromptAudioInput | None = None,
     ) -> list[TextPrompt]:
-        if any(
-            x is not None and len(x) != len(prompts) for x in [images, videos, audios]
-        ):
-            raise ValueError(
-                "All non-None multimodal inputs must have the same length as prompts"
-            )
+        if any(x is not None and len(x) != len(prompts) for x in [images, videos, audios]):
+            raise ValueError("All non-None multimodal inputs must have the same length as prompts")
 
         inputs = []
         for i, prompt in enumerate(prompts):
@@ -393,9 +375,7 @@ class VllmRunner:
             if audios is not None and (audio := audios[i]) is not None:
                 multi_modal_data["audio"] = audio
 
-            text_prompt_kwargs: dict[str, Any] = {
-                "multi_modal_data": multi_modal_data or None
-            }
+            text_prompt_kwargs: dict[str, Any] = {"multi_modal_data": multi_modal_data or None}
             if isinstance(prompt, str):
                 text_prompt_kwargs["prompt"] = prompt
             elif isinstance(prompt, list):
@@ -409,18 +389,16 @@ class VllmRunner:
 
     def generate(
         self,
-        prompts: Union[list[str], list[torch.Tensor]],
+        prompts: list[str] | list[torch.Tensor],
         sampling_params: SamplingParams,
-        images: Optional[PromptImageInput] = None,
-        videos: Optional[PromptVideoInput] = None,
-        audios: Optional[PromptAudioInput] = None,
+        images: PromptImageInput | None = None,
+        videos: PromptVideoInput | None = None,
+        audios: PromptAudioInput | None = None,
         **kwargs: Any,
     ) -> list[tuple[list[list[int]], list[str]]]:
         inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
 
-        req_outputs = self.model.generate(
-            inputs, sampling_params=sampling_params, **kwargs
-        )
+        req_outputs = self.model.generate(inputs, sampling_params=sampling_params, **kwargs)
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for req_output in req_outputs:
@@ -447,29 +425,23 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 output_logprobs = sample.logprobs
-            outputs.append(
-                (output_ids, output_str, output_logprobs, req_output.prompt_logprobs)
-            )
+            outputs.append((output_ids, output_str, output_logprobs, req_output.prompt_logprobs))
         return outputs
 
     def generate_w_logprobs(
         self,
         prompts: list[str],
         sampling_params: SamplingParams,
-        images: Optional[PromptImageInput] = None,
-        audios: Optional[PromptAudioInput] = None,
-        videos: Optional[PromptVideoInput] = None,
+        images: PromptImageInput | None = None,
+        audios: PromptAudioInput | None = None,
+        videos: PromptVideoInput | None = None,
         **kwargs: Any,
-    ) -> Union[list[TokensTextLogprobs], list[TokensTextLogprobsPromptLogprobs]]:
+    ) -> list[TokensTextLogprobs] | list[TokensTextLogprobsPromptLogprobs]:
         inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
 
-        req_outputs = self.model.generate(
-            inputs, sampling_params=sampling_params, **kwargs
-        )
+        req_outputs = self.model.generate(inputs, sampling_params=sampling_params, **kwargs)
 
-        toks_str_logsprobs_prompt_logprobs = self._final_steps_generate_w_logprobs(
-            req_outputs
-        )
+        toks_str_logsprobs_prompt_logprobs = self._final_steps_generate_w_logprobs(req_outputs)
         # Omit prompt logprobs if not required by sampling params
         return (
             [x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
@@ -479,11 +451,11 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: Union[list[str], list[torch.Tensor]],
+        prompts: list[str] | list[torch.Tensor],
         max_tokens: int,
-        images: Optional[PromptImageInput] = None,
-        videos: Optional[PromptVideoInput] = None,
-        audios: Optional[PromptAudioInput] = None,
+        images: PromptImageInput | None = None,
+        videos: PromptVideoInput | None = None,
+        audios: PromptAudioInput | None = None,
         **kwargs: Any,
     ) -> list[tuple[list[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
@@ -501,15 +473,15 @@ class VllmRunner:
         self,
         prompts: list[str],
         max_tokens: int,
-        num_logprobs: Optional[int],
-        num_prompt_logprobs: Optional[int] = None,
-        images: Optional[PromptImageInput] = None,
-        audios: Optional[PromptAudioInput] = None,
-        videos: Optional[PromptVideoInput] = None,
-        stop_token_ids: Optional[list[int]] = None,
-        stop: Optional[list[str]] = None,
+        num_logprobs: int | None,
+        num_prompt_logprobs: int | None = None,
+        images: PromptImageInput | None = None,
+        audios: PromptAudioInput | None = None,
+        videos: PromptVideoInput | None = None,
+        stop_token_ids: list[int] | None = None,
+        stop: list[str] | None = None,
         **kwargs: Any,
-    ) -> Union[list[TokensTextLogprobs], list[TokensTextLogprobsPromptLogprobs]]:
+    ) -> list[TokensTextLogprobs] | list[TokensTextLogprobsPromptLogprobs]:
         greedy_logprobs_params = SamplingParams(
             temperature=0.0,
             max_tokens=max_tokens,
@@ -535,9 +507,9 @@ class VllmRunner:
     def embed(
         self,
         prompts: list[str],
-        images: Optional[PromptImageInput] = None,
-        videos: Optional[PromptVideoInput] = None,
-        audios: Optional[PromptAudioInput] = None,
+        images: PromptImageInput | None = None,
+        videos: PromptVideoInput | None = None,
+        audios: PromptAudioInput | None = None,
         *args,
         **kwargs,
     ) -> list[list[float]]:
@@ -556,8 +528,8 @@ class VllmRunner:
 
     def score(
         self,
-        text_1: Union[str, list[str]],
-        text_2: Union[str, list[str]],
+        text_1: str | list[str],
+        text_2: str | list[str],
         *args,
         **kwargs,
     ) -> list[float]:
@@ -577,7 +549,7 @@ class HfRunner:
     def get_default_device(self):
         return "cpu" if current_platform.is_cpu() else current_platform.device_type
 
-    def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
+    def wrap_device(self, x: _T, device: str | None = None) -> _T:
         if x is None or isinstance(x, (bool,)):
             return x
 
@@ -597,7 +569,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "auto",
         *,
-        model_kwargs: Optional[dict[str, Any]] = None,
+        model_kwargs: dict[str, Any] | None = None,
         trust_remote_code: bool = True,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
@@ -685,10 +657,10 @@ class HfRunner:
     def get_inputs(
         self,
         prompts: list[str],
-        images: Optional[PromptImageInput] = None,
-        videos: Optional[PromptVideoInput] = None,
-        audios: Optional[PromptAudioInput] = None,
-    ) -> list[Union[BatchFeature, BatchEncoding]]:
+        images: PromptImageInput | None = None,
+        videos: PromptVideoInput | None = None,
+        audios: PromptAudioInput | None = None,
+    ) -> list[BatchFeature | BatchEncoding]:
         if images is not None:
             assert len(prompts) == len(images)
 
@@ -698,7 +670,7 @@ class HfRunner:
         if audios is not None:
             assert len(prompts) == len(audios)
 
-        all_inputs: list[Union[BatchFeature, BatchEncoding]] = []
+        all_inputs: list[BatchFeature | BatchEncoding] = []
         for i, prompt in enumerate(prompts):
             processor_kwargs: dict[str, Any] = {
                 "text": prompt,
@@ -777,10 +749,7 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
     placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
-    return [
-        f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>"
-        for question in questions
-    ]
+    return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 
 PROMPT_CONFIGS = {

@@ -46,16 +46,10 @@ def gmm_swiglu_quant(
     c_temp6 = c_temp5 * gate  # Element-wise multiplication with gating values
 
     # Quantize the output
-    max = torch.max(
-        torch.abs(c_temp6), -1
-    ).values  # Find maximum absolute value to calculate scaling factor
+    max = torch.max(torch.abs(c_temp6), -1).values  # Find maximum absolute value to calculate scaling factor
     quantScaleOutput = 127 / max  # Calculate quantization scaling factor
-    quantOutput = torch.round(c_temp6 * quantScaleOutput.reshape(m, 1)).to(
-        torch.int8
-    )  # Quantize to int8
-    quantScaleOutput = (
-        1 / quantScaleOutput
-    )  # Inverse quantization scaling factor for subsequent dequantization
+    quantOutput = torch.round(c_temp6 * quantScaleOutput.reshape(m, 1)).to(torch.int8)  # Quantize to int8
+    quantScaleOutput = 1 / quantScaleOutput  # Inverse quantization scaling factor for subsequent dequantization
 
     return quantOutput, quantScaleOutput
 
@@ -82,12 +76,8 @@ def process_groups(
         quantScaleOutput (torch.Tensor): Quantization scaling factor with shape (M,).
     """
     M, N = x.shape[0], weight.shape[2]  # Get the shape of the input tensor
-    quantOutput = torch.zeros(M, N // 2).to(
-        torch.int8
-    )  # Initialize quantized output tensor
-    quantScaleOutput = torch.zeros(M).to(
-        torch.float32
-    )  # Initialize quantization scaling factor tensor
+    quantOutput = torch.zeros(M, N // 2).to(torch.int8)  # Initialize quantized output tensor
+    quantScaleOutput = torch.zeros(M).to(torch.float32)  # Initialize quantization scaling factor tensor
 
     start_idx = 0  # Starting index
     preV = 0  # Number of tokens in the previous group
@@ -140,21 +130,15 @@ def test_gmm_swiglu_quant_weight_nz_tensor_list():
 
     group_list = torch.tensor([2048, 4096, 6144, 8192], dtype=torch.int64)
 
-    output_cpu, output_scale_cpu = process_groups(
-        x, weight, weight_scale, x_scale, group_list
-    )
-    output_npu, output_scale_npu, _ = (
-        torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
-            x.npu(), weight_nz_npu, weight_scale_npu, x_scale.npu(), group_list.npu()
-        )
+    output_cpu, output_scale_cpu = process_groups(x, weight, weight_scale, x_scale, group_list)
+    output_npu, output_scale_npu, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+        x.npu(), weight_nz_npu, weight_scale_npu, x_scale.npu(), group_list.npu()
     )
     output_npu_valid = output_npu[: group_list[-1], :]
     output_scale_npu_valid = output_scale_npu[: group_list[-1]]
 
     torch.testing.assert_close(output_npu_valid.cpu(), output_cpu, atol=1, rtol=2**-13)
-    torch.testing.assert_close(
-        output_scale_npu_valid.cpu(), output_scale_cpu, atol=1e-9, rtol=1e-6
-    )
+    torch.testing.assert_close(output_scale_npu_valid.cpu(), output_scale_cpu, atol=1e-9, rtol=1e-6)
 
     gc.collect()
     torch.npu.empty_cache()

@@ -35,9 +35,7 @@ class UCMConnectorV1(KVConnectorBase_V1):
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig",
     ):
-        super().__init__(
-            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
-        )
+        super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
 
         ImplCls = UCMConnector
@@ -169,17 +167,13 @@ class UCMConnectorV1(KVConnectorBase_V1):
         """
         return self._ucm_engine.get_num_new_matched_tokens(request, num_computed_tokens)
 
-    def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
-    ) -> None:
+    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int) -> None:
         """
         Update KVConnector state after block allocation.
         """
         self._ucm_engine.update_state_after_alloc(request, blocks, num_external_tokens)
 
-    def build_connector_meta(
-        self, scheduler_output: SchedulerOutput
-    ) -> KVConnectorMetadata:
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """
         Build the connector metadata for this step.
 
@@ -213,9 +207,7 @@ class UCMConnectorV1(KVConnectorBase_V1):
     # ==============================
 
     @classmethod
-    def build_kv_connector_stats(
-        cls, data: dict[str, Any] | None = None
-    ) -> Optional["KVConnectorStats"]:
+    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> Optional["KVConnectorStats"]:
         """
         KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,

@@ -75,10 +75,7 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
             for pos in range(len(metric.values)):
                 num_accepted_tokens_per_pos[pos] += metric.values[pos]
 
-    acceptance_per_pos = [
-        num_accepted_tokens / num_drafts
-        for num_accepted_tokens in num_accepted_tokens_per_pos
-    ]
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
     if not match:

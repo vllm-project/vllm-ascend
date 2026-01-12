@@ -1,5 +1,3 @@
-from typing import Optional
-
 import vllm
 from torch import nn
 from transformers import PretrainedConfig
@@ -30,7 +28,7 @@ class AscendColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         return type(source_layer) is AscendColumnParallelLinear
 
@@ -42,7 +40,7 @@ class AscendMergedColumnParallelLinearWithLoRA(MergedColumnParallelLinearWithLoR
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         return type(source_layer) is AscendMergedColumnParallelLinear
 
@@ -54,7 +52,7 @@ class AscendRowParallelLinearWithLoRA(RowParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         return type(source_layer) is AscendRowParallelLinear
 
@@ -66,7 +64,7 @@ class AscendVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         return type(source_layer) is AscendVocabParallelEmbedding
 
@@ -79,12 +77,9 @@ class AscendQKVParallelLinearWithLoRA(QKVParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
-        return (
-            type(source_layer) is AscendQKVParallelLinear
-            and len(packed_modules_list) == 1
-        )
+        return type(source_layer) is AscendQKVParallelLinear and len(packed_modules_list) == 1
 
 
 class AscendMergedQKVParallelLinearWithLoRA(MergedQKVParallelLinearWithLoRA):
@@ -95,12 +90,9 @@ class AscendMergedQKVParallelLinearWithLoRA(MergedQKVParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
-        return (
-            type(source_layer) is AscendQKVParallelLinear
-            and len(packed_modules_list) == 3
-        )
+        return type(source_layer) is AscendQKVParallelLinear and len(packed_modules_list) == 3
 
 
 def refresh_all_lora_classes():

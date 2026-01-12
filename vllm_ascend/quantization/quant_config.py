@@ -15,8 +15,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from collections.abc import Callable, Mapping
 from types import MappingProxyType
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Optional
 
 import torch
 from vllm.config import get_current_vllm_config
@@ -71,7 +72,7 @@ class AscendQuantConfig(QuantizationConfig):
     that are supported on ascend hardware.
     """
 
-    def __init__(self, quant_config: Dict[str, Any]):
+    def __init__(self, quant_config: dict[str, Any]):
         super().__init__()
         self.quant_description = quant_config
         # TODO(whx): remove this adaptation after adding "shared_head"
@@ -94,25 +95,23 @@ class AscendQuantConfig(QuantizationConfig):
         return ASCEND_QUANTIZATION_METHOD
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.int8, torch.float16, torch.bfloat16]
 
     @classmethod
     def get_min_capability(cls) -> int:
-        raise NotImplementedError(
-            'Ascend hardware dose not support "get_min_capability" feature.'
-        )
+        raise NotImplementedError('Ascend hardware dose not support "get_min_capability" feature.')
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quant_model_description.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AscendQuantConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AscendQuantConfig":
         return cls(config)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
+    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> str | None:
         if hf_quant_cfg is not None:
             quant_method = hf_quant_cfg.get("quant_method", None)
             if not quant_method and torch.npu.is_available():
@@ -127,9 +126,7 @@ class AscendQuantConfig(QuantizationConfig):
             return hf_to_vllm_mapper._map_name(prefix)
         return prefix
 
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_text_config.model_type
 
@@ -164,33 +161,24 @@ class AscendQuantConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
-            return AscendFusedMoEMethod(
-                self, prefix, self.packed_modules_mapping, layer
-            )
+            return AscendFusedMoEMethod(self, prefix, self.packed_modules_mapping, layer)
         elif isinstance(layer, VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 return UnquantizedEmbeddingMethod()
-            return AscendEmbeddingMethod(
-                self, prefix, self.packed_modules_mapping, layer
-            )
+            return AscendEmbeddingMethod(self, prefix, self.packed_modules_mapping, layer)
         return None
 
-    def is_layer_skipped_ascend(
-        self, prefix: str, fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
-    ):
+    def is_layer_skipped_ascend(self, prefix: str, fused_mapping: Mapping[str, list[str]] = MappingProxyType({})):
         # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
         proj_name = prefix.split(".")[-1]
         if proj_name in fused_mapping:
             shard_prefixes = [
-                prefix.replace(proj_name, shard_proj_name)
-                for shard_proj_name in fused_mapping[proj_name]
+                prefix.replace(proj_name, shard_proj_name) for shard_proj_name in fused_mapping[proj_name]
             ]
 
             is_skipped = None
             for shard_prefix in shard_prefixes:
-                is_shard_skipped = (
-                    self.quant_description[shard_prefix + ".weight"] == "FLOAT"
-                )
+                is_shard_skipped = self.quant_description[shard_prefix + ".weight"] == "FLOAT"
 
                 if is_skipped is None:
                     is_skipped = is_shard_skipped
@@ -206,7 +194,7 @@ class AscendQuantConfig(QuantizationConfig):
         assert is_skipped is not None
         return is_skipped
 
-    def get_scaled_act_names(self) -> List[str]:
+    def get_scaled_act_names(self) -> list[str]:
         return []
 
 
@@ -342,7 +330,7 @@ class AscendLinearMethod(LinearMethodBase):
         self,
         quant_config: AscendQuantConfig,
         prefix: str,
-        packed_modules_mapping: Dict[str, Any] | None,
+        packed_modules_mapping: dict[str, Any] | None,
         layer: torch.nn.Module = None,
     ) -> None:
         self.quant_method = get_quant_method(
@@ -357,7 +345,7 @@ class AscendLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -366,9 +354,7 @@ class AscendLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
-        weight_dict = self.quant_method.get_weight(
-            input_size_per_partition, output_size_per_partition, params_dtype
-        )
+        weight_dict = self.quant_method.get_weight(input_size_per_partition, output_size_per_partition, params_dtype)
 
         # Extract packing information (if present)
         packed_dim = weight_dict.pop("_packed_dim", None)
@@ -380,26 +366,20 @@ class AscendLinearMethod(LinearMethodBase):
 
             # Set packing attributes if the weight is packed
             if packed_dim is not None and packed_factor is not None:
-                set_weight_attrs(
-                    param, {"packed_dim": packed_dim, "packed_factor": packed_factor}
-                )
+                set_weight_attrs(param, {"packed_dim": packed_dim, "packed_factor": packed_factor})
 
             layer.register_parameter(weight_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
         pertensor_dict = self.quant_method.get_pertensor_param(params_dtype)
         for pertensor_name, pertensor_param in pertensor_dict.items():
-            param = PerTensorScaleParameter(
-                data=pertensor_param, weight_loader=weight_loader
-            )
+            param = PerTensorScaleParameter(data=pertensor_param, weight_loader=weight_loader)
             # disable warning
             param.ignore_warning = True
             layer.register_parameter(pertensor_name, param)
             param.weight_loader = extra_weight_attrs.get("weight_loader")
 
-        perchannel_dict = self.quant_method.get_perchannel_param(
-            output_size_per_partition, params_dtype
-        )
+        perchannel_dict = self.quant_method.get_perchannel_param(output_size_per_partition, params_dtype)
         for perchannel_name, perchannel_param in perchannel_dict.items():
             param = torch.nn.Parameter(perchannel_param, requires_grad=False)
             set_weight_attrs(param, {"output_dim": 0})
@@ -422,11 +402,8 @@ class AscendLinearMethod(LinearMethodBase):
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
-            if (
-                "weight_scale_second" in pergroup_name
-                or "weight_offset_second" in pergroup_name
-            ):
-                setattr(param, "input_dim", 1)
+            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
+                param.input_dim = 1
                 param.input_dim = 1
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -437,16 +414,14 @@ class AscendLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if isinstance(layer, RowParallelLinear):
             if layer.prefix.find("o_proj") != -1 and oproj_tp_enable():
                 tp_rank = get_otp_group().rank_in_group
             elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
                 tp_rank = get_mlp_tp_group().rank_in_group
-            elif (
-                layer.prefix.find("o_proj") != -1 or layer.prefix.find("out_proj") != -1
-            ) and flashcomm2_enable():
+            elif (layer.prefix.find("o_proj") != -1 or layer.prefix.find("out_proj") != -1) and flashcomm2_enable():
                 if get_ascend_config().flashcomm2_oproj_tensor_parallel_size == 1:
                     tp_rank = 0
                 else:
@@ -466,9 +441,7 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str) -> None:
-        self.quant_method = get_quant_method(
-            quant_config.quant_description, prefix, "attention"
-        )
+        self.quant_method = get_quant_method(quant_config.quant_description, prefix, "attention")
 
     def create_weights(self, layer: torch.nn.Module) -> None:
         # Different from linear method, there are no weight processing/slicing
@@ -492,9 +465,7 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         scale,
         output,
     ) -> torch.Tensor:
-        return self.quant_method.apply(
-            layer, query, key, value, kv_cache, attn_metadata, attn_type, scale, output
-        )
+        return self.quant_method.apply(layer, query, key, value, kv_cache, attn_metadata, attn_type, scale, output)
 
 
 class AscendFusedMoEMethod(FusedMoEMethodBase):
@@ -508,7 +479,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         self,
         quant_config: AscendQuantConfig,
         prefix: str,
-        packed_modules_mapping: Dict[str, Any],
+        packed_modules_mapping: dict[str, Any],
         layer: torch.nn.Module,
     ):
         super().__init__(layer.moe_config)
@@ -537,14 +508,10 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             layer.register_parameter(param_key, param)
             set_weight_attrs(param, extra_weight_attrs)
 
-        extra_weight_attrs.update(
-            {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
-        )
+        extra_weight_attrs.update({"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
         per_group_param = (
-            ["weight_scale_second", "weight_offset_second", "scale_bias"]
-            + ["weight_scale", "weight_offset"]
-            if hasattr(self.quant_method, "group_size")
-            and self.quant_method.group_size > 0
+            ["weight_scale_second", "weight_offset_second", "scale_bias"] + ["weight_scale", "weight_offset"]
+            if hasattr(self.quant_method, "group_size") and self.quant_method.group_size > 0
             else []
         )
         dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
@@ -555,7 +522,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             layer.register_parameter(param_key, param)
             set_weight_attrs(param, extra_weight_attrs)
             if any(fields in param_key for fields in per_group_param):
-                setattr(param, "quant_method", FusedMoeWeightScaleSupported.GROUP.value)
+                param.quant_method = FusedMoeWeightScaleSupported.GROUP.value
 
     def apply(
         self,
@@ -566,13 +533,13 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         renormalize: bool,
         use_grouped_topk: bool = False,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
@@ -626,7 +593,7 @@ class AscendEmbeddingMethod(AscendLinearMethod):
         self,
         quant_config: AscendQuantConfig,
         prefix: str,
-        packed_modules_mapping: Dict[str, Any],
+        packed_modules_mapping: dict[str, Any],
         layer: torch.nn.Module,
     ) -> None:
         self.quant_method = get_quant_method(

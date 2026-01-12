@@ -97,9 +97,7 @@ async def test_models(model: str) -> None:
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(
-        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
-    ) as server:
+    with RemoteOpenAIServer(model, server_args, server_port=port, env_dict=env_dict, auto_port=False) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,

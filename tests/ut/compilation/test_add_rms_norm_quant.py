@@ -90,16 +90,9 @@ def test_extra_stream_scope_check():
 
 
 def test_replacement_function_without_torch_npu(caplog):
-    with mock.patch.dict(
-        sys.modules, {"torch_npu": None, "torchair": None, "torch_npu.dynamo": None}
-    ):
-        if (
-            "vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant"
-            in sys.modules
-        ):
-            del sys.modules[
-                "vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant"
-            ]
+    with mock.patch.dict(sys.modules, {"torch_npu": None, "torchair": None, "torch_npu.dynamo": None}):
+        if "vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant" in sys.modules:
+            del sys.modules["vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant"]
 
         try:
             from vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant import (

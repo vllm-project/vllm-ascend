@@ -28,15 +28,9 @@ def setup_device_properties():
 def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
     device = "npu"
     torch.manual_seed(0)
-    draft_probs = torch.rand(
-        batch_size * max_spec_len, vocab_size, dtype=torch.float32, device=device
-    )
-    target_probs = torch.rand(
-        batch_size * max_spec_len, vocab_size, dtype=torch.float32, device=device
-    )
-    bonus_token_ids = torch.randint(
-        low=0, high=vocab_size, size=(batch_size, 1), dtype=torch.int64, device=device
-    )
+    draft_probs = torch.rand(batch_size * max_spec_len, vocab_size, dtype=torch.float32, device=device)
+    target_probs = torch.rand(batch_size * max_spec_len, vocab_size, dtype=torch.float32, device=device)
+    bonus_token_ids = torch.randint(low=0, high=vocab_size, size=(batch_size, 1), dtype=torch.int64, device=device)
     draft_token_ids = torch.randint(
         low=0,
         high=vocab_size,
@@ -44,9 +38,7 @@ def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
         dtype=torch.int64,
         device=device,
     )
-    output_token_ids = torch.empty(
-        (batch_size, max_spec_len + 1), dtype=torch.int64, device=device
-    )
+    output_token_ids = torch.empty((batch_size, max_spec_len + 1), dtype=torch.int64, device=device)
     original_output_token_ids = output_token_ids.clone()
     num_tokens = draft_token_ids.shape[0]
     uniform_probs = torch.rand((num_tokens,), dtype=torch.float32, device=device)
@@ -94,12 +86,8 @@ DEVICE = "npu"
 BATCH_SIZE = 7
 MAX_SPEC_LEN = 3
 VOCAB_SIZE = 5
-CU_NUM_DRAFT_TOKENS = torch.tensor(
-    [2, 2, 5, 8, 11, 14, 15], dtype=torch.int32, device=DEVICE
-)
-DRAFT_TOKEN_IDS = torch.tensor(
-    [0, 1, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0], dtype=torch.int64, device=DEVICE
-)
+CU_NUM_DRAFT_TOKENS = torch.tensor([2, 2, 5, 8, 11, 14, 15], dtype=torch.int32, device=DEVICE)
+DRAFT_TOKEN_IDS = torch.tensor([0, 1, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0], dtype=torch.int64, device=DEVICE)
 NUM_TOKENS = DRAFT_TOKEN_IDS.shape[0]
 DRAFT_PROBS = None
 TARGET_PROBS = torch.tensor(
@@ -144,12 +132,8 @@ UNIFORM_PROBS = torch.tensor(
     dtype=torch.float32,
     device=DEVICE,
 )
-BONUS_TOKEN_IDS = torch.full(
-    (BATCH_SIZE,), MAX_SPEC_LEN + 1, dtype=torch.int64, device=DEVICE
-)
-RECOVERED_TOKEN_IDS = torch.full(
-    (NUM_TOKENS,), MAX_SPEC_LEN, dtype=torch.int64, device=DEVICE
-)
+BONUS_TOKEN_IDS = torch.full((BATCH_SIZE,), MAX_SPEC_LEN + 1, dtype=torch.int64, device=DEVICE)
+RECOVERED_TOKEN_IDS = torch.full((NUM_TOKENS,), MAX_SPEC_LEN, dtype=torch.int64, device=DEVICE)
 IS_GREEDY = torch.zeros(BATCH_SIZE, dtype=torch.bool, device=DEVICE)
 IS_GREEDY[4] = True
 
@@ -181,9 +165,7 @@ def test_rejection_sampler_block_verify_triton_kernel(
 ) -> None:
     grid, block_size = cal_grid_and_block_size(batch_size)
 
-    output_token_ids_ref = torch.full(
-        (batch_size, max_spec_len + 1), -1, dtype=torch.int64, device=DEVICE
-    )
+    output_token_ids_ref = torch.full((batch_size, max_spec_len + 1), -1, dtype=torch.int64, device=DEVICE)
 
     output_token_ids_triton = output_token_ids_ref.clone()
 

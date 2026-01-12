@@ -113,14 +113,14 @@ vllm bench serve \
 
 The `vllm bench` terminal prints the benchmark result:
 
-```
+```shell
 ---------------Time to First Token----------------
 Mean TTFT (ms):                           15323.87
 ```
 
 Inspecting the vLLM server logs reveals entries like:
 
-```
+```shell
 INFO ucm_connector.py:228: request_id: xxx, total_blocks_num: 125, hit hbm: 0, hit external: 0
 ```
 
@@ -130,14 +130,14 @@ This indicates that for the first inference request, UCM did not hit any cached 
 
 Running the same benchmark again produces:
 
-```
+```shell
 ---------------Time to First Token----------------
 Mean TTFT (ms):                            1920.68
 ```
 
 The vLLM server logs now contain similar entries:
 
-```
+```shell
 INFO ucm_connector.py:228: request_id: xxx, total_blocks_num: 125, hit hbm: 0, hit external: 125
 ```
 

@@ -29,12 +29,8 @@ import pandas as pd
 from modelscope import snapshot_download  # type: ignore
 
 BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("./benchmark"))
-DATASET_CONF_DIR = os.path.join(
-    BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "datasets"
-)
-REQUEST_CONF_DIR = os.path.join(
-    BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "models", "vllm_api"
-)
+DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "datasets")
+REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "models", "vllm_api")
 DATASET_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "datasets")
 
 
@@ -87,9 +83,7 @@ class AisbenchRunner:
         self.model = model
         self.dataset_path = aisbench_config.get("dataset_path_local")
         if not self.dataset_path:
-            self.dataset_path = maybe_download_from_modelscope(
-                aisbench_config["dataset_path"], repo_type="dataset"
-            )
+            self.dataset_path = maybe_download_from_modelscope(aisbench_config["dataset_path"], repo_type="dataset")
         self.model_path = aisbench_config.get("model_path")
         if not self.model_path:
             self.model_path = maybe_download_from_modelscope(model)
@@ -138,34 +132,28 @@ class AisbenchRunner:
             conf_path = os.path.join(DATASET_CONF_DIR, f"{self.dataset_conf}.py")
             if self.dataset_conf.startswith("textvqa"):
                 self.dataset_path = os.path.join(self.dataset_path, "textvqa_val.jsonl")
-            with open(conf_path, "r", encoding="utf-8") as f:
+            with open(conf_path, encoding="utf-8") as f:
                 content = f.read()
             content = re.sub(r"path=.*", f'path="{self.dataset_path}",', content)
-            conf_path_new = os.path.join(
-                DATASET_CONF_DIR, f"{self.dataset_conf}_custom.py"
-            )
+            conf_path_new = os.path.join(DATASET_CONF_DIR, f"{self.dataset_conf}_custom.py")
             with open(conf_path_new, "w", encoding="utf-8") as f:
                 f.write(content)
 
     def _init_request_conf(self):
         conf_path = os.path.join(REQUEST_CONF_DIR, f"{self.request_conf}.py")
-        with open(conf_path, "r", encoding="utf-8") as f:
+        with open(conf_path, encoding="utf-8") as f:
             content = f.read()
         content = re.sub(r"model=.*", f'model="{self.model}",', content)
         content = re.sub(r"host_port.*", f"host_port = {self.port},", content)
         content = re.sub(r"host_ip.*", f'host_ip = "{self.host_ip}",', content)
-        content = re.sub(
-            r"max_out_len.*", f"max_out_len = {self.max_out_len},", content
-        )
+        content = re.sub(r"max_out_len.*", f"max_out_len = {self.max_out_len},", content)
         content = re.sub(r"batch_size.*", f"batch_size = {self.batch_size},", content)
         content = content.replace("top_k", "#top_k")
         content = content.replace("seed", "#seed")
         content = content.replace("repetition_penalty", "#repetition_penalty")
         if self.task_type == "performance":
             content = re.sub(r"path=.*", f'path="{self.model_path}",', content)
-            content = re.sub(
-                r"request_rate.*", f"request_rate = {self.request_rate},", content
-            )
+            content = re.sub(r"request_rate.*", f"request_rate = {self.request_rate},", content)
             content = re.sub(
                 r"temperature.*",
                 "temperature = 0,\n            ignore_eos = True,",
@@ -179,9 +167,7 @@ class AisbenchRunner:
                 content,
             )
         if self.temperature:
-            content = re.sub(
-                r"temperature.*", f"temperature = {self.temperature},", content
-            )
+            content = re.sub(r"temperature.*", f"temperature = {self.temperature},", content)
         if self.top_p:
             content = re.sub(r"#?top_p.*", f"top_p = {self.top_p},", content)
         if self.top_k:
@@ -235,15 +221,13 @@ class AisbenchRunner:
                 raise RuntimeError(error_msg) from None
 
     def _get_result_performance(self):
-        result_dir = re.search(
-            r"Performance Result files locate in (.*)", self.result_line
-        ).group(1)[:-1]
+        result_dir = re.search(r"Performance Result files locate in (.*)", self.result_line).group(1)[:-1]
         dataset_type = self.dataset_conf.split("/")[0]
         result_csv_file = os.path.join(result_dir, f"{dataset_type}dataset.csv")
         result_json_file = os.path.join(result_dir, f"{dataset_type}dataset.json")
         self.result_csv = pd.read_csv(result_csv_file, index_col=0)
         print("Getting performance results from file: ", result_json_file)
-        with open(result_json_file, "r", encoding="utf-8") as f:
+        with open(result_json_file, encoding="utf-8") as f:
             self.result_json = json.load(f)
         self.result = [self.result_csv, self.result_json]
 
@@ -254,9 +238,7 @@ class AisbenchRunner:
 
     def _performance_verify(self):
         self._get_result_performance()
-        output_throughput = self.result_json["Output Token Throughput"][
-            "total"
-        ].replace("token/s", "")
+        output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
         assert float(output_throughput) >= self.threshold * self.baseline, (
             f"Performance verification failed. The current Output Token Throughput is {output_throughput} token/s, which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
         )
@@ -264,36 +246,26 @@ class AisbenchRunner:
     def _accuracy_verify(self):
         self._get_result_accuracy()
         acc_value = self.result
-        assert (
-            self.baseline - self.threshold
-            <= acc_value
-            <= self.baseline + self.threshold
-        ), (
+        assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, (
             f"Accuracy verification failed. The accuracy of {self.dataset_path} is {acc_value}, which is not within {self.threshold} relative to baseline {self.baseline}."
         )
 
 
-def run_aisbench_cases(
-    model, port, aisbench_cases, server_args="", host_ip="localhost"
-):
+def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="localhost"):
     aisbench_results = []
     aisbench_errors = []
     for aisbench_case in aisbench_cases:
         if not aisbench_case:
             continue
         try:
-            with AisbenchRunner(
-                model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case
-            ) as aisbench:
+            with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
                 aisbench_results.append(aisbench.result)
         except Exception as e:
             aisbench_results.append("")
             aisbench_errors.append([aisbench_case, e])
             print(e)
     for failed_case, error_info in aisbench_errors:
-        error_msg = (
-            f"The following aisbench case failed: {failed_case}, reason is {error_info}"
-        )
+        error_msg = f"The following aisbench case failed: {failed_case}, reason is {error_info}"
         if server_args:
             error_msg += f"\nserver_args are {server_args}"
         logging.error(error_msg)

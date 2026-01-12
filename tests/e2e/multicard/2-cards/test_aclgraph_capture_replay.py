@@ -115,13 +115,9 @@ def _run_worker_process(
         )
 
         # Expose model config to the main test process
-        counters[
-            "hidden_layers"
-        ].value = llm.llm_engine.model_config.hf_text_config.num_hidden_layers
+        counters["hidden_layers"].value = llm.llm_engine.model_config.hf_text_config.num_hidden_layers
 
-        llm.generate(
-            local_prompts, SamplingParams(max_tokens=max_tokens, temperature=0.0)
-        )
+        llm.generate(local_prompts, SamplingParams(max_tokens=max_tokens, temperature=0.0))
 
         # Explicit cleanup is mandatory in multi-process vLLM tests
         del llm
@@ -191,9 +187,7 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
 
     # Metric 1: Graph Capture (ACL Graph Construction)
     # Ref: vllm_ascend.utils.update_aclgraph_sizes
-    max_batch_sizes = math.floor(
-        (1800 - num_comm_groups * 40) / num_acl_graphs / (1 + num_comm_groups * 2)
-    )
+    max_batch_sizes = math.floor((1800 - num_comm_groups * 40) / num_acl_graphs / (1 + num_comm_groups * 2))
 
     expected_capture = max_batch_sizes * num_acl_graphs * dp_size
     assert actual_capture == expected_capture, (
@@ -237,6 +231,4 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     # Replays happen for every aligned step across all graphs.
     expected_replay = num_acl_graphs * aligned_steps * dp_size
 
-    assert actual_replay == expected_replay, (
-        f"Replay count mismatch. Expected: {expected_replay}, Got: {actual_replay}"
-    )
+    assert actual_replay == expected_replay, f"Replay count mismatch. Expected: {expected_replay}, Got: {actual_replay}"

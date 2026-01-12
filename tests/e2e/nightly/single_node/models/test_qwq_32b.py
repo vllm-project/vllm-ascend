@@ -104,16 +104,12 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
     ]
     if mode == "single":
         server_args.remove("--compilation_config")
-        server_args.remove(
-            '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 8, 24, 48, 60]}'
-        )
+        server_args.remove('{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 8, 24, 48, 60]}')
         server_args.append("--enforce-eager")
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(
-        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
-    ) as server:
+    with RemoteOpenAIServer(model, server_args, server_port=port, env_dict=env_dict, auto_port=False) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,

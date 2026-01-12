@@ -25,7 +25,7 @@ from contextlib import contextmanager, nullcontext
 from enum import Enum
 from functools import lru_cache
 from threading import Lock
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch_npu  # noqa: F401
@@ -87,6 +87,7 @@ def acl_graph_print(*args):
     resolving unexpected hangs. Usage:
     ```python
     from vllm_ascend.utils import acl_graph_print
+
     ...
     acl_graph_print("Debug info")
     ```
@@ -112,9 +113,7 @@ def acl_graph_print(*args):
             torch_npu.npu._subscribe_report(current_compute_stream)
             _SUBSCRIBED_COMPUTE_STREAMS.add(current_compute_stream)
 
-    torch_npu.npu._launch_host_func(
-        current_compute_stream, _print_callback_on_stream, args
-    )
+    torch_npu.npu._launch_host_func(current_compute_stream, _print_callback_on_stream, args)
 
 
 def _unregister_print_streams_on_exit():
@@ -196,9 +195,7 @@ def nd_to_nz_2d(in_tensor: torch.Tensor) -> torch.Tensor:
     # after: pad_dims: [0, 2, 0, 3]
 
     # return: (1, 2, 16, 16)
-    return _custom_transpose(
-        _custom_reshape(_custom_pad(in_tensor, pad_dims), aux_dims), 1, 2
-    ).contiguous()
+    return _custom_transpose(_custom_reshape(_custom_pad(in_tensor, pad_dims), aux_dims), 1, 2).contiguous()
 
 
 def nd_to_nz_spec(mask_tensor: torch.Tensor) -> torch.Tensor:
@@ -214,9 +211,7 @@ def nd_to_nz_spec(mask_tensor: torch.Tensor) -> torch.Tensor:
         device=mask_tensor.device,
     )
     mask_tensor_pad[0][:num_tokens, :max_seq_len] = mask_tensor
-    mask = mask_tensor_pad.reshape((1, tokens_pad, max_seq_len_pad // 16, 16)).permute(
-        0, 2, 1, 3
-    )
+    mask = mask_tensor_pad.reshape((1, tokens_pad, max_seq_len_pad // 16, 16)).permute(0, 2, 1, 3)
     return mask
 
 
@@ -234,9 +229,7 @@ def aligned_16(tensor: torch.Tensor):
         return tensor
 
     # Create a new tensor with shape (n_aligned, H, W) and fill it with zeros
-    new_tensor = torch.zeros(
-        n_aligned, *tensor.shape[1:], dtype=tensor.dtype, device=tensor.device
-    )
+    new_tensor = torch.zeros(n_aligned, *tensor.shape[1:], dtype=tensor.dtype, device=tensor.device)
 
     # Copy the original tensor to the first N positions of the new tensor
     new_tensor[:n] = tensor
@@ -265,9 +258,7 @@ def enable_custom_op():
         _CUSTOM_OP_ENABLED = True
     except ImportError:
         _CUSTOM_OP_ENABLED = False
-        logger.warning(
-            "Warning: Failed to register custom ops, all custom ops will be disabled"
-        )
+        logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
     return _CUSTOM_OP_ENABLED
 
 
@@ -401,9 +392,7 @@ def get_max_hidden_layers(hf_config) -> int:
 
 
 # Update cudagraph capture sizes for vllm config
-def update_cudagraph_capture_sizes(
-    vllm_config: VllmConfig, cudagraph_capture_sizes: List[int]
-):
+def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_sizes: list[int]):
     valid_max_size = cudagraph_capture_sizes[-1] if cudagraph_capture_sizes else 0
     if (
         vllm_config.compilation_config.max_cudagraph_capture_size is not None
@@ -423,14 +412,11 @@ def update_cudagraph_capture_sizes(
 
     vllm_config.compilation_config.max_cudagraph_capture_size = valid_max_size
 
-    if vllm_config.compilation_config.cudagraph_capture_sizes is not None and len(
-        cudagraph_capture_sizes
-    ) < len(vllm_config.compilation_config.cudagraph_capture_sizes):
+    if vllm_config.compilation_config.cudagraph_capture_sizes is not None and len(cudagraph_capture_sizes) < len(
+        vllm_config.compilation_config.cudagraph_capture_sizes
+    ):
         logger.warning(
-            (
-                "cudagraph_capture_sizes specified in compilation_config"
-                " %s is overridden by config %s"
-            ),
+            ("cudagraph_capture_sizes specified in compilation_config %s is overridden by config %s"),
             vllm_config.compilation_config.cudagraph_capture_sizes,
             cudagraph_capture_sizes,
         )
@@ -443,24 +429,17 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
     Check whether it is vLLM default capture sizes.
     """
 
-    max_cudagraph_capture_size = (
-        vllm_config.compilation_config.max_cudagraph_capture_size
-    )
+    max_cudagraph_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
     cudagraph_capture_sizes = [i for i in [1, 2, 4] if i <= max_cudagraph_capture_size]
     if max_cudagraph_capture_size >= 8:
         # Step size 8 for small batch sizes, up to 256(not included)
-        cudagraph_capture_sizes += list(
-            range(8, min(max_cudagraph_capture_size + 1, 256), 8)
-        )
+        cudagraph_capture_sizes += list(range(8, min(max_cudagraph_capture_size + 1, 256), 8))
     if max_cudagraph_capture_size >= 256:
         # Step size 16 for larger batch sizes
         cudagraph_capture_sizes += list(range(256, max_cudagraph_capture_size + 1, 16))
     # in newer version, vLLM use ascending order of cudagraph_capture_sizes.
     target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes)
-    if (
-        target_cudagraph_capture_sizes
-        == vllm_config.compilation_config.cudagraph_capture_sizes
-    ):
+    if target_cudagraph_capture_sizes == vllm_config.compilation_config.cudagraph_capture_sizes:
         return True
 
     return False
@@ -491,9 +470,7 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         and vllm_config.parallel_config.data_parallel_size > 1
     ):
         max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
-        new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [
-            i for i in range(24, max_capture_size + 1, 8)
-        ]
+        new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [i for i in range(24, max_capture_size + 1, 8)]
         update_cudagraph_capture_sizes(vllm_config, new_cudagraph_capture_sizes)
 
 
@@ -553,11 +530,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             1
             + num_comm_groups
             + int(parallel_config.enable_expert_parallel)
-            + int(
-                vllm_config.additional_config.get(
-                    "multistream_overlap_shared_expert", False
-                )
-            )
+            + int(vllm_config.additional_config.get("multistream_overlap_shared_expert", False))
         )
         if is_moe_model(vllm_config):
             parallel_factor += parallel_config.data_parallel_size > 1
@@ -570,9 +543,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor(1920 / (48 + 1) / 2) = 19
-        max_num_batch_sizes = math.floor(
-            MAX_CAPTURE_SIZE / resources_per_graph / parallel_factor
-        )
+        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE / resources_per_graph / parallel_factor)
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes,
@@ -595,9 +566,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
         max_num_batch_sizes = math.floor(
-            (MAX_CAPTURE_SIZE - num_comm_groups * 40)
-            / resources_per_graph
-            / (1 + num_comm_groups * 2)
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph / (1 + num_comm_groups * 2)
         )
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",
@@ -649,7 +618,7 @@ def dispose_tensor(x: torch.Tensor):
 
 class ProfileExecuteDuration:
     _instance = None
-    _observations: List[Tuple[str, Event, Event]] = []
+    _observations: list[tuple[str, Event, Event]] = []
     _lock = Lock()
 
     def __new__(cls):
@@ -694,7 +663,7 @@ class ProfileExecuteDuration:
         return durations
 
 
-def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
+def register_ascend_customop(vllm_config: VllmConfig | None = None):
     """Register Ascend CustomOP
 
     NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
@@ -845,9 +814,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
-            logger.info(
-                "shared_expert_dp requires enable_sp = True. has set enable_sp to True"
-            )
+            logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
 
         if not _ENABLE_SP:
             return _ENABLE_SP
@@ -856,10 +823,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             "Flash Comm v1 (Sequence Parallelism) is only supported when tp_size > 1."
         )
 
-        assert (
-            not is_moe_model(vllm_config)
-            or vllm_config.parallel_config.enable_expert_parallel
-        ), (
+        assert not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel, (
             "Flash Comm v1 (Sequence Parallelism) requires enable_expert_parallel=True for MoE models."
         )
 
@@ -893,9 +857,7 @@ def speculative_enable_dispatch_gmm_combine_decode(vllm_config: VllmConfig) -> b
     if speculative_method in ["eagle", "eagle3"]:
         return False
     if speculative_method == "mtp":
-        mtp_quant_type = getattr(
-            vllm_config.model_config.hf_text_config, "mtp_quantize", None
-        )
+        mtp_quant_type = getattr(vllm_config.model_config.hf_text_config, "mtp_quantize", None)
         return mtp_quant_type == "w8a8_dynamic"
     return False
 
@@ -945,8 +907,8 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]],
-) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
+    tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor],
+) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
@@ -966,9 +928,7 @@ def weak_ref_tensors(
         return tuple(weak_ref_tensor(t) for t in tensors)
     # For IntermediateTensors used in pipeline parallelism
     if isinstance(tensors, IntermediateTensors):
-        ret = IntermediateTensors(
-            {key: weak_ref_tensor(val) for key, val in tensors.tensors.items()}
-        )
+        ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
         return ret
     raise ValueError("Invalid type for tensors")
 
@@ -992,7 +952,7 @@ def create_hccl_pg_options(group_name: str):
     return options
 
 
-def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
+def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
     """
     Get HCCL process group options for the given communication group name.
 
@@ -1035,10 +995,7 @@ def calculate_dp_buffer_size() -> int:
 # and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
 # significantly improve communication performance of MC2 ops dispatch/combine.
 def is_hierarchical_communication_enabled():
-    return (
-        os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
-        and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
-    )
+    return os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
@@ -1047,9 +1004,7 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 
     global _HAS_LAYER_IDX
     if _HAS_LAYER_IDX is None:
-        _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(
-            model_instance.model, "start_layer"
-        )
+        _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
     return _HAS_LAYER_IDX
 
 
@@ -1071,16 +1026,12 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     if not flashcomm2_enable():
         return 0
 
-    logger.info(
-        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}"
-    )
+    logger.info(f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}")
 
     layer_sharding = ascend_config.layer_sharding or []
     if layer_sharding:
         if layer_sharding == ["o_proj"]:
-            logger.info_once(
-                "Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption."
-            )
+            logger.info_once("Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption.")
         else:
             raise ValueError(
                 "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
@@ -1106,10 +1057,7 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
         logger.warning_once(
             "It is recommended to enable FLASHCOMM2 in P-scenario deployments, enable it in hybrid deployment may lead to decode performance degradation."
         )
-    if (
-        vllm_config.kv_transfer_config is not None
-        and vllm_config.kv_transfer_config.is_kv_consumer
-    ):
+    if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
         raise AssertionError(
             "FLASHCOMM2 primarily targets P-scenario deployments, with additional support for hybrid deployment scenarios. It is not applicable in D-scenario environments."
         )
@@ -1153,17 +1101,9 @@ def refresh_block_size(vllm_config):
         return
 
     # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if (
-        not model_config.hf_text_config.model_type == "qwen3_next"
-        and cache_config.block_size != 128
-    ):
-        if (
-            cache_config.enable_prefix_caching
-            or scheduler_config.enable_chunked_prefill
-        ):
-            logger.info(
-                "Block size is set to 128 if prefix cache or chunked prefill is enabled."
-            )
+    if not model_config.hf_text_config.model_type == "qwen3_next" and cache_config.block_size != 128:
+        if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
+            logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
             cache_config.block_size = 128
 
 
@@ -1201,9 +1141,7 @@ def check_kv_extra_config(vllm_config):
             vllm_config.kv_transfer_config.get_from_extra_config("prefill", {}),
         )
     if vllm_config.kv_transfer_config.is_kv_consumer:
-        _check(
-            "decode", vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
-        )
+        _check("decode", vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
 
 
 def singleton(cls):

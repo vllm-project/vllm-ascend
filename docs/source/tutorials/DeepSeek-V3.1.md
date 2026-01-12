@@ -146,7 +146,7 @@ The parameters are explained as follows:
 
 Run the following scripts on two nodes respectively.
 
-**Node 0**
+#### Node 0
 
 ```shell
 #!/bin/sh
@@ -199,7 +199,7 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-**Node 1**
+#### Node 1
 
 ```shell
 #!/bin/sh

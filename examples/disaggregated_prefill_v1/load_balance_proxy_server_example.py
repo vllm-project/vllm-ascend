@@ -125,7 +125,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, List, Tuple, Dict
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
@@ -163,9 +163,7 @@ class ServerState:
         self.client = httpx.AsyncClient(
             timeout=None,
             base_url=self.url,
-            limits=httpx.Limits(
-                max_connections=100000, max_keepalive_connections=100000
-            ),
+            limits=httpx.Limits(max_connections=100000, max_keepalive_connections=100000),
         )
         self.active_tokens = 0
         self.active_kv_cache = 0  # Only for prefiller
@@ -174,18 +172,12 @@ class ServerState:
         # Removed individual server lock - will use global locks instead
 
     def __eq__(self, other):
-        self_host = self.host.replace("localhost", "0.0.0.0").replace(
-            "127.0.0.1", "0.0.0.0"
-        )
-        other_host = other.host.replace("localhost", "0.0.0.0").replace(
-            "127.0.0.1", "0.0.0.0"
-        )
+        self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
+        other_host = other.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
         return self_host == other_host and str(self.port) == str(other.port)
 
     def __hash__(self):
-        self_host = self.host.replace("localhost", "0.0.0.0").replace(
-            "127.0.0.1", "0.0.0.0"
-        )
+        self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
         return hash((self_host, str(self.port)))
 
     def __repr__(self):
@@ -196,12 +188,8 @@ class ProxyState:
     def __init__(self, prefiller_instances, decoder_instances):
         self.node_listener = NodeListener(self)
 
-        self.prefillers: List[ServerState] = [
-            ServerState(h, p) for h, p in prefiller_instances
-        ]
-        self.decoders: List[ServerState] = [
-            ServerState(h, p) for h, p in decoder_instances
-        ]
+        self.prefillers: list[ServerState] = [ServerState(h, p) for h, p in prefiller_instances]
+        self.decoders: list[ServerState] = [ServerState(h, p) for h, p in decoder_instances]
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
         # Removed selection locks - no longer needed for synchronous methods
@@ -209,9 +197,7 @@ class ProxyState:
         # Initialize priority queues for efficient server selection
         # Each entry is (priority_score, server_index, server_reference)
         # Lower priority score = higher priority (less loaded)
-        self.prefiller_heap = [
-            (0, i, server) for i, server in enumerate(self.prefillers)
-        ]
+        self.prefiller_heap = [(0, i, server) for i, server in enumerate(self.prefillers)]
         self.decoder_heap = [(0, i, server) for i, server in enumerate(self.decoders)]
         heapq.heapify(self.prefiller_heap)
         heapq.heapify(self.decoder_heap)
@@ -222,9 +208,7 @@ class ProxyState:
         # Priority based on active_tokens and active_kv_cache
         priority = server.active_tokens + server.active_kv_cache * 0.3
         # Remove old entry and add new one
-        self.prefiller_heap = [
-            (p, i, s) for p, i, s in self.prefiller_heap if i != server_idx
-        ]
+        self.prefiller_heap = [(p, i, s) for p, i, s in self.prefiller_heap if i != server_idx]
         heapq.heappush(self.prefiller_heap, (priority, server_idx, server))  # type: ignore
 
     def _update_decoder_priority(self, server_idx: int):
@@ -232,14 +216,10 @@ class ProxyState:
         server = self.decoders[server_idx]
         priority = server.active_tokens
         # Remove old entry and add new one
-        self.decoder_heap = [
-            (p, i, s) for p, i, s in self.decoder_heap if i != server_idx
-        ]
+        self.decoder_heap = [(p, i, s) for p, i, s in self.decoder_heap if i != server_idx]
         heapq.heappush(self.decoder_heap, (priority, server_idx, server))  # type: ignore
 
-    def abort_prefiller_request(
-        self, server_idx: int, request_id
-    ):  # Changed to synchronous
+    def abort_prefiller_request(self, server_idx: int, request_id):  # Changed to synchronous
         """
         Mark a request as aborted. This will helps to release kv cache in
         prefiller node.
@@ -247,9 +227,7 @@ class ProxyState:
         # No lock needed - atomic operation
         self.prefillers[server_idx].aborted_requests.add(request_id)
 
-    def aquire_aborted_prefiller_requests(
-        self, server_idx: int
-    ):  # Changed to synchronous
+    def aquire_aborted_prefiller_requests(self, server_idx: int):  # Changed to synchronous
         """
         Get the set of aborted requests and clear it.
         This is used to release kv cache in prefiller node.
@@ -322,9 +300,7 @@ class ProxyState:
     def calculate_decode_scores(self, request_length: int) -> float:
         return request_length
 
-    async def add_instances(
-        self, instance_type: str, instances: List[ServerState]
-    ) -> Tuple[List[str], List[str]]:
+    async def add_instances(self, instance_type: str, instances: list[ServerState]) -> tuple[list[str], list[str]]:
         added_nodes, waiting_nodes = [], []
         for server in instances:
             is_valid = await self.node_listener.check_instance_status(server.client)
@@ -340,7 +316,7 @@ class ProxyState:
                 waiting_nodes.append(node)
         return added_nodes, waiting_nodes
 
-    def add_prefillers(self, instances: List[ServerState]) -> None:
+    def add_prefillers(self, instances: list[ServerState]) -> None:
         num_prefillers = len(self.prefillers)
         for idx, server in enumerate(instances):
             if server not in self.prefillers:
@@ -349,7 +325,7 @@ class ProxyState:
                 heapq.heappush(self.prefiller_heap, (0, num_prefillers + idx, server))
         self.print_status(f"Add prefiller instances: {instances}.")
 
-    def add_decoders(self, instances: List[ServerState]) -> None:
+    def add_decoders(self, instances: list[ServerState]) -> None:
         num_decoders = len(self.decoders)
         for idx, server in enumerate(instances):
             if server not in self.decoders:
@@ -358,11 +334,9 @@ class ProxyState:
                 heapq.heappush(self.decoder_heap, (0, num_decoders + idx, server))
         self.print_status(f"Add decoder instances: {instances}.")
 
-    def remove_prefillers(self, instances: List[ServerState]) -> None:
+    def remove_prefillers(self, instances: list[ServerState]) -> None:
         instances_to_remove = set(instances)
-        self.prefillers = [
-            server for server in self.prefillers if server not in instances_to_remove
-        ]
+        self.prefillers = [server for server in self.prefillers if server not in instances_to_remove]
         prefiller_heap_copy = self.prefiller_heap.copy()
         prefiller_heap_copy.sort(key=lambda x: x[1])  # sorted by key: prefiller_idx
         prefiller_heap = []
@@ -377,11 +351,9 @@ class ProxyState:
         heapq.heapify(self.prefiller_heap)
         self.print_status(f"Remove prefiller instances: {instances}.")
 
-    def remove_decoders(self, instances: List[ServerState]) -> None:
+    def remove_decoders(self, instances: list[ServerState]) -> None:
         instances_to_remove = set(instances)
-        self.decoders = [
-            server for server in self.decoders if server not in instances_to_remove
-        ]
+        self.decoders = [server for server in self.decoders if server not in instances_to_remove]
         decoder_heap_copy = self.decoder_heap.copy()
         decoder_heap_copy.sort(key=lambda x: x[1])  # sorted by key: decoder_idx
         decoder_heap = []
@@ -410,17 +382,13 @@ proxy_state = None
 class NodeListener:
     def __init__(self, proxy):
         self.proxy_state = proxy
-        self.waiting_nodes: Dict[str, Tuple[str, Any, int]] = {}
-        self.listening_thread = threading.Thread(
-            target=self._node_listener, daemon=True
-        )
+        self.waiting_nodes: dict[str, tuple[str, Any, int]] = {}
+        self.listening_thread = threading.Thread(target=self._node_listener, daemon=True)
         self.listening_thread.start()
 
     def _node_listener(self) -> None:
         while True:
-            for node, (instance_type, server, check_times) in list(
-                self.waiting_nodes.items()
-            ):
+            for node, (instance_type, server, check_times) in list(self.waiting_nodes.items()):
                 is_valid = asyncio.run(self.check_instance_status(server.client))
                 print(f"Checking instance {node}...")
                 check_times += 1
@@ -483,9 +451,7 @@ def parse_args():
     )
     args = parser.parse_args()
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
-        raise ValueError(
-            "Number of prefiller hosts must match number of prefiller ports"
-        )
+        raise ValueError("Number of prefiller hosts must match number of prefiller ports")
     if len(args.decoder_hosts) != len(args.decoder_ports):
         raise ValueError("Number of decoder hosts must match number of decoder ports")
     args.prefiller_instances = list(zip(args.prefiller_hosts, args.prefiller_ports))
@@ -496,12 +462,8 @@ def parse_args():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global proxy_state
-    proxy_state = ProxyState(
-        global_args.prefiller_instances, global_args.decoder_instances
-    )
-    print(
-        f"Initialized {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients."
-    )
+    proxy_state = ProxyState(global_args.prefiller_instances, global_args.decoder_instances)
+    print(f"Initialized {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients.")
     yield
     for p in proxy_state.prefillers:
         await p.client.aclose()
@@ -523,9 +485,7 @@ def with_cancellation(handler_func):
         request = kwargs["request"]
         handler_task = asyncio.create_task(handler_func(*args, **kwargs))
         cancellation_task = asyncio.create_task(listen_for_disconnect(request))
-        done, pending = await asyncio.wait(
-            [handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED
-        )
+        done, pending = await asyncio.wait([handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         if handler_task in done:
@@ -599,9 +559,7 @@ async def stream_service_response_with_retry(
     }
     for attempt in range(1, max_retries + 1):
         try:
-            async with client.stream(
-                "POST", endpoint, json=req_data, headers=headers
-            ) as response:
+            async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 response.raise_for_status()
                 first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
@@ -610,40 +568,28 @@ async def stream_service_response_with_retry(
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             if attempt < max_retries:
-                logger.warning(
-                    f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}"
-                )
+                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(
-                    f"All {max_retries} attempts failed for streaming {endpoint}."
-                )
+                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                 raise e
         except Exception as e:
             # If any chunk has been sent, do not retry, just log and drop
             if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error(
-                    f"Streaming to client interrupted after response started: {str(e)}"
-                )
+                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
                 return
             else:
                 if attempt < max_retries:
-                    logger.warning(
-                        f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}"
-                    )
+                    logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                     await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 else:
-                    logger.error(
-                        f"All {max_retries} attempts failed for streaming {endpoint}."
-                    )
+                    logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                     raise e
 
 
 async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     prefiller_score = proxy_state.calculate_prefill_scores(request_length)
-    logger.debug(
-        f"Request length: {request_length}, Prefiller score: {prefiller_score}"
-    )
+    logger.debug(f"Request length: {request_length}, Prefiller score: {prefiller_score}")
     request_id = await proxy_state.next_req_id()
     # Select prefiller
     prefiller_idx = proxy_state.select_prefiller(prefiller_score)
@@ -761,12 +707,7 @@ async def _handle_completions(api: str, request: Request):
                         choice = choices[0]
                         delta = choice.get("delta") or {}
                         message = choice.get("message") or {}
-                        content = (
-                            delta.get("content")
-                            or message.get("content")
-                            or choice.get("text")
-                            or ""
-                        )
+                        content = delta.get("content") or message.get("content") or choice.get("text") or ""
                         generated_token += content
 
                         stop_reason = choice.get("stop_reason")
@@ -783,15 +724,9 @@ async def _handle_completions(api: str, request: Request):
                                 messages[0]["content"] = origin_prompt + generated_token
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
-                            req_data["max_tokens"] = (
-                                origin_max_tokens - completion_tokens + retry_count
-                            )
-                            tmp_request_length = len(
-                                json.dumps(req_data).encode("utf-8")
-                            )
-                            instance_info = await _handle_select_instance(
-                                api, req_data, tmp_request_length
-                            )
+                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                            tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
+                            instance_info = await _handle_select_instance(api, req_data, tmp_request_length)
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
@@ -804,17 +739,11 @@ async def _handle_completions(api: str, request: Request):
                 logger.error(
                     f"Error during streaming from decoder {instance_info.decoder.url}: {str(e)} the aborted request {instance_info.request_id} will be routing to the target prefiller when new request is ready to dispatch to it"
                 )
-                proxy_state.abort_prefiller_request(
-                    instance_info.prefiller_idx, instance_info.request_id
-                )
-                proxy_state.release_prefiller_kv(
-                    instance_info.prefiller_idx, instance_info.prefiller_score
-                )
+                proxy_state.abort_prefiller_request(instance_info.prefiller_idx, instance_info.request_id)
+                proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
 
             # After streaming done, release tokens
-            proxy_state.release_decoder(
-                instance_info.decoder_idx, instance_info.decoder_score
-            )
+            proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
 
         return StreamingResponse(generate_stream(), media_type="application/json")
     except Exception as e:
@@ -835,10 +764,7 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
         if isinstance(instances, str):
             instances = [instances]
         instances = trans_instances(instances)
-        all_msg = (
-            f"{adjust_mode} {instance_type} instances: "
-            f"{[str(server) for server in instances]}."
-        )
+        all_msg = f"{adjust_mode} {instance_type} instances: {[str(server) for server in instances]}."
 
         if instance_type not in [InstanceType.PREFILL, InstanceType.DECODE]:
             return {
@@ -847,9 +773,7 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
             }
 
         if adjust_mode == "add":
-            added_nodes, waiting_nodes = await proxy_state.add_instances(
-                instance_type, instances
-            )
+            added_nodes, waiting_nodes = await proxy_state.add_instances(instance_type, instances)
             if waiting_nodes:
                 all_msg = (
                     f"{adjust_mode} {instance_type} instances: {added_nodes}. "
@@ -862,19 +786,15 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
                 proxy_state.remove_decoders(instances)
         return {
             "message": all_msg,
-            "current_prefill_instances": [
-                str(prefiller) for prefiller in proxy_state.prefillers
-            ],
-            "current_decode_instances": [
-                str(decoder) for decoder in proxy_state.decoders
-            ],
+            "current_prefill_instances": [str(prefiller) for prefiller in proxy_state.prefillers],
+            "current_decode_instances": [str(decoder) for decoder in proxy_state.decoders],
         }
     except Exception as e:
         logger.error(f"Failed to {adjust_mode} instances: {e}")
         raise e
 
 
-def trans_instances(instances: List[str]) -> List[ServerState]:
+def trans_instances(instances: list[str]) -> list[ServerState]:
     server_list = []
     for instance in instances:
         h, p = instance.split(":")

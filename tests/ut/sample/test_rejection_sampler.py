@@ -49,9 +49,7 @@ class TestAscendRejectionSampler(TestBase):
         """Test greedy rejection sampling: stop when draft doesn't match, otherwise append bonus token"""
         batch_size = 2
         max_spec_len = 2
-        output_token_ids = torch.full(
-            (batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID
-        )
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
 
         cu_num_draft_tokens = torch.tensor([2, 4])
         num_draft_tokens = [2, 2]
@@ -85,9 +83,7 @@ class TestAscendRejectionSampler(TestBase):
         """Test random rejection sampling: accept based on uniform probability"""
         batch_size = 2
         max_spec_len = 3
-        output_token_ids = torch.full(
-            (batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID
-        )
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
 
         cu_num_draft_tokens = torch.tensor([2, 1])
         draft_token_ids = torch.tensor([1, 0, 2])
@@ -162,26 +158,26 @@ class TestAscendRejectionSampler(TestBase):
         cu_num_tokens = torch.tensor([2, 5, 7])
         num_tokens = 7
         # Test PyTorch path
-        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):
-            with patch(
-                "vllm_ascend.sample.rejection_sampler.expand_pytorch"
-            ) as mock_pytorch:
-                expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
-                mock_pytorch.assert_called_once()
-                args = mock_pytorch.call_args[0]
-                assert (args[1] == x).all()
-                assert (args[2] == cu_num_tokens).all()
+        with (
+            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
+            patch("vllm_ascend.sample.rejection_sampler.expand_pytorch") as mock_pytorch,
+        ):
+            expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+            mock_pytorch.assert_called_once()
+            args = mock_pytorch.call_args[0]
+            assert (args[1] == x).all()
+            assert (args[2] == cu_num_tokens).all()
 
         # Test Triton kernel path
-        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True):
-            with patch(
-                "vllm_ascend.sample.rejection_sampler.expand_triton"
-            ) as mock_triton:
-                expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
-                mock_triton.assert_called_once()
-                call_args = mock_triton.call_args[0]
-                assert (call_args[2] == x).all()
-                assert (call_args[3] == cu_num_tokens).all()
+        with (
+            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True),
+            patch("vllm_ascend.sample.rejection_sampler.expand_triton") as mock_triton,
+        ):
+            expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+            mock_triton.assert_called_once()
+            call_args = mock_triton.call_args[0]
+            assert (call_args[2] == x).all()
+            assert (call_args[3] == cu_num_tokens).all()
 
         # Run actual function
         with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):

@@ -9,7 +9,6 @@
 
 # ruff: noqa: E501
 # mypy: ignore-errors
-from typing import Optional, Tuple
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -89,12 +88,7 @@ def recompute_w_u_fwd_kernel(
         for i_k in range(tl.cdiv(K, BK)):
             offs_k = i_k * BK + tl.arange(0, BK)[None, :]
             mask_k = (mask_t[:, None]) & (offs_k < K)
-            ptr_k = (
-                k
-                + (bos * Hg + i_h // (H // Hg)) * K
-                + offs_t_2d * (Hg * K)
-                + offs_k * 1
-            )
+            ptr_k = k + (bos * Hg + i_h // (H // Hg)) * K + offs_t_2d * (Hg * K) + offs_k * 1
             b_k = tl.load(ptr_k, mask=mask_k, other=0.0).to(tl.float32)
 
             b_kb = b_k * b_beta[:, None] * b_g[:, None]
@@ -110,15 +104,13 @@ def recompute_w_u_fwd(
     beta: torch.Tensor,
     g_cumsum: torch.Tensor,
     A: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, Hg, K, V = *k.shape, v.shape[-1]
     H = v.shape[-2]
     BT = A.shape[-1]
 
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    )
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     BK = 64

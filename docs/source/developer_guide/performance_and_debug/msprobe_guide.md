@@ -53,7 +53,7 @@ To restrict the operators that are captured, configure the `list` block:
 
 - `scope` (list[str]): In PyTorch pynative scenarios this field restricts the dump range. Provide two module or API names that follow the tool's naming convention to lock a range; only data between the two names will be dumped. Examples:
 
-  ```
+  ```shell
   "scope": ["Module.conv1.Conv2d.forward.0", "Module.fc2.Linear.forward.0"]
   "scope": ["Cell.conv1.Conv2d.forward.0", "Cell.fc2.Dense.backward.0"]
   "scope": ["Tensor.add.0.forward", "Functional.square.2.forward"]
@@ -188,7 +188,7 @@ Use `msprobe graph_visualize` to generate results that can be opened inside `tb_
    Replace the paths with your dump directories before invoking `msprobe graph_visualize`. **If you only need to build a single graph**, omit `bench_path` to visualize one dump.  
    Multi-rank scenarios (single rank, multi-rank, or multi-step multi-rank) are also supported. `npu_path` or `bench_path` must contain folders named `rank+number`, and every rank folder must contain a non-empty `construct.json` together with `dump.json` and `stack.json`. If any `construct.json` is empty, verify that the dump level includes `L0` or `mix`. When comparing graphs, both `npu_path` and `bench_path` must contain the same set of rank folders so they can be paired one-to-one.
 
-   ```
+   ```shell
    ├── npu_path or bench_path
    |   ├── rank0
    |   |   ├── dump_tensor_data (only when the `tensor` option is enabled)

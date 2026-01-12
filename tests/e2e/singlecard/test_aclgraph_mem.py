@@ -55,9 +55,7 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
 
     original_capture = NPUModelRunner.capture_model
 
-    with patch.object(
-        NPUModelRunner, "capture_model", new=capture_model_wrapper(original_capture)
-    ):
+    with patch.object(NPUModelRunner, "capture_model", new=capture_model_wrapper(original_capture)):
         prompts = [
             "Hello, my name is",
             "The president of the United States is",
@@ -66,9 +64,7 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
         ]
         sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
         if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
-            vllm_model = VllmRunner(
-                snapshot_download(model), max_model_len=1024, quantization="ascend"
-            )
+            vllm_model = VllmRunner(snapshot_download(model), max_model_len=1024, quantization="ascend")
         else:
             vllm_model = VllmRunner(snapshot_download(model))
         _ = vllm_model.generate(prompts, sampling_params)

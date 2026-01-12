@@ -16,7 +16,7 @@ Please refer to the EPLB section of the user guide for detailed information: [Ho
 
 **EPLB Module Architecture**
 
-```
+```shell
 vllm_ascend
 ├── eplb
 │   ├── adaptor
@@ -37,7 +37,8 @@ vllm_ascend
 └───────────
 ```
 
-**1. Adaptor Module**  
+### 1. Adaptor Module
+
 *Handles registration and adaptation for different MoE model types*
 
 - `abstract_adaptor.py`  
@@ -45,7 +46,8 @@ vllm_ascend
 - `vllm_adaptor.py`  
   Implementation supporting Qwen3-MoE and DeepSeek models, standardizing parameter handling for policy algorithms
 
-**2. Core Module**  
+### 2. Core Module
+
 *Implements core algorithms, updates, and asynchronous processing*
 
 - **Policy Submodule**  
@@ -68,7 +70,7 @@ vllm_ascend
 - `eplb_worker.py`  
   Asynchronous algorithm orchestration and result processing
 
-**3. System Components**
+### 3. System Components
 
 - `eplb_updator.py`  
   Central coordinator for load balancing during inference workflows

@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import vllm.envs as envs
 import zmq
@@ -24,28 +24,18 @@ class KVPoolScheduler:
     def __init__(self, vllm_config: "VllmConfig", use_layerwise):
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.consumer_is_to_load = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "consumer_is_to_load", False
-            )
+        self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "consumer_is_to_load", False
         )
-        self.consumer_is_to_put = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "consumer_is_to_put", False
-            )
+        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "consumer_is_to_put", False
         )
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "load_async", False
-        )
+        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         self.client = LookupKeyClient(vllm_config)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
-        self.pcp_size = getattr(
-            vllm_config.parallel_config, "prefill_context_parallel_size", 1
-        )
-        self.dcp_size = getattr(
-            vllm_config.parallel_config, "decode_context_parallel_size", 1
-        )
+        self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
+        self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
         self._block_size = vllm_config.cache_config.block_size
         if self.pcp_size > 1:
@@ -55,10 +45,8 @@ class KVPoolScheduler:
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         # Whether to discard partial chunks
-        self._discard_partial_chunks = (
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "discard_partial_chunks", True
-            )
+        self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
+            "discard_partial_chunks", True
         )
         self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
         self._unfinished_request_ids: set[str] = set()
@@ -84,9 +72,7 @@ class KVPoolScheduler:
             return 0, False
 
         if self._discard_partial_chunks:
-            token_len = (
-                len(request.prompt_token_ids) // self._block_size * self._block_size
-            )
+            token_len = len(request.prompt_token_ids) // self._block_size * self._block_size
         else:
             token_len = len(request.prompt_token_ids)
 
@@ -116,9 +102,7 @@ class KVPoolScheduler:
 
         return need_to_allocate, self.load_async and not self.use_layerwise
 
-    def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
-    ):
+    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         """
         Update KVConnector state after temporary buffer alloc.
 
@@ -154,9 +138,7 @@ class KVPoolScheduler:
 
         self.load_specs[request.request_id].can_load = True
 
-    def build_connector_meta(
-        self, scheduler_output: SchedulerOutput
-    ) -> KVConnectorMetadata:
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """Attach the connector metadata to the request object.
 
         This function should NOT modify other fields in the scheduler_output
@@ -179,13 +161,8 @@ class KVPoolScheduler:
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
             load_spec = self.load_specs.pop(request.req_id, None)
-            num_tokens_to_compute = (
-                request.num_computed_tokens
-                + scheduler_output.num_scheduled_tokens[request.req_id]
-            )
-            request_tracker = RequestTracker.from_new_request(
-                request, num_tokens_to_compute
-            )
+            num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
+            request_tracker = RequestTracker.from_new_request(request, num_tokens_to_compute)
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
                 (len(request.prompt_token_ids) // self._block_size * self._block_size)
@@ -215,14 +192,11 @@ class KVPoolScheduler:
                 if req_tuple:
                     request = req_tuple[0]
                     num_current_tokens = request_tracker.token_len
-                    new_token_ids = request.all_token_ids[
-                        num_current_tokens : num_current_tokens + num_new_tokens
-                    ]
+                    new_token_ids = request.all_token_ids[num_current_tokens : num_current_tokens + num_new_tokens]
                     request_tracker.token_len += len(new_token_ids)
                 else:
                     raise ValueError(
-                        f"Request {req_id} is not in _unfinished_requests, "
-                        f"but it is scheduled to be cached"
+                        f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached"
                     )
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if not new_block_ids:
@@ -230,11 +204,7 @@ class KVPoolScheduler:
                 request_tracker.update(new_block_ids)
 
                 last_chunk_tokens_num = (
-                    (
-                        len(request.prompt_token_ids)
-                        // self._block_size
-                        * self._block_size
-                    )
+                    (len(request.prompt_token_ids) // self._block_size * self._block_size)
                     if self._discard_partial_chunks
                     else len(request.prompt_token_ids)
                 )
@@ -286,7 +256,7 @@ class KVPoolScheduler:
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.

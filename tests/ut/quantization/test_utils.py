@@ -12,9 +12,7 @@ class TestGetQuantMethod(TestBase):
         self.original_quantization_method_map = ASCEND_QUANTIZATION_METHOD_MAP.copy()
         for quant_type, layer_map in ASCEND_QUANTIZATION_METHOD_MAP.items():
             for layer_type in layer_map.keys():
-                ASCEND_QUANTIZATION_METHOD_MAP[quant_type][layer_type] = (
-                    types.new_class(f"{quant_type}_{layer_type}")
-                )
+                ASCEND_QUANTIZATION_METHOD_MAP[quant_type][layer_type] = types.new_class(f"{quant_type}_{layer_type}")
 
     def tearDown(self):
         # Restore original map
@@ -26,9 +24,7 @@ class TestGetQuantMethod(TestBase):
             if "linear" in layer_map.keys():
                 prefix = "linear_layer"
                 cls = layer_map["linear"]
-                method = get_quant_method(
-                    {"linear_layer.weight": quant_type}, prefix, "linear"
-                )
+                method = get_quant_method({"linear_layer.weight": quant_type}, prefix, "linear")
                 self.assertIsInstance(method, cls)
 
     def test_moe_quant_methods(self):

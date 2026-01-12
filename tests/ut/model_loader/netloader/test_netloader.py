@@ -76,9 +76,7 @@ def test_init_with_extra_config_file(tmp_path, monkeypatch):
 
     dummy_logger = MagicMock()
     monkeypatch.setattr("vllm.logger.logger", dummy_logger)
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix", lambda x: True
-    )
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix", lambda x: True)
 
     extra = {"CONFIG_FILE": str(config_file)}
     loader = make_loader_with_config(extra)
@@ -92,9 +90,7 @@ def test_init_with_extra_config_file(tmp_path, monkeypatch):
 def test_init_with_extra_config(monkeypatch):
     dummy_logger = MagicMock()
     monkeypatch.setattr("vllm.logger.logger", dummy_logger)
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix", lambda x: True
-    )
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix", lambda x: True)
 
     extra = {
         "SOURCE": [{"device_id": 0}],
@@ -114,9 +110,7 @@ def test_init_with_extra_config(monkeypatch):
 def test_init_with_invalid_config(monkeypatch):
     dummy_logger = MagicMock()
     monkeypatch.setattr("vllm.logger.logger", dummy_logger)
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix", lambda x: False
-    )
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix", lambda x: False)
     # c
     extra = {
         "SOURCE": None,
@@ -145,9 +139,7 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
 
     monkeypatch.setattr("torch.device", lambda d: FakeContext())
     # patch deep copy
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.deepcopy", lambda x: x
-    )
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.deepcopy", lambda x: x)
     # patch set_default_torch_dtype
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.set_default_torch_dtype",
@@ -173,9 +165,7 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
     # patch get_ip
     monkeypatch.setattr("vllm.utils.network_utils.get_ip", lambda: "127.0.0.1")
     # patch find_free_port
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.find_free_port", lambda: 8888
-    )
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.find_free_port", lambda: 8888)
 
     # patch ElasticServer
     class DummyElasticServer:
@@ -185,9 +175,7 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
         def start(self):
             pass
 
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.ElasticServer", DummyElasticServer
-    )
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.ElasticServer", DummyElasticServer)
     # write output_prefix to the temporary directory
     extra = {
         "SOURCE": [{"device_id": 0}],

@@ -18,7 +18,7 @@
 import ctypes
 import platform
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import torch
 from torch.distributed import ReduceOp
@@ -107,7 +107,7 @@ class hcclRedOpTypeEnum:
 class Function:
     name: str
     restype: Any
-    argtypes: List[Any]
+    argtypes: list[Any]
 
 
 class HCCLLibrary:
@@ -168,13 +168,13 @@ class HCCLLibrary:
 
     # class attribute to store the mapping from the path to the library
     # to avoid loading the same library multiple times
-    path_to_library_cache: Dict[str, Any] = {}
+    path_to_library_cache: dict[str, Any] = {}
 
     # class attribute to store the mapping from library path
     # to the correspongding directory
-    path_to_dict_mapping: Dict[str, Dict[str, Any]] = {}
+    path_to_dict_mapping: dict[str, dict[str, Any]] = {}
 
-    def __init__(self, so_file: Optional[str] = None):
+    def __init__(self, so_file: str | None = None):
         so_file = so_file or find_hccl_library()
 
         try:
@@ -197,7 +197,7 @@ class HCCLLibrary:
             raise e
 
         if so_file not in HCCLLibrary.path_to_dict_mapping:
-            _funcs: Dict[str, Any] = {}
+            _funcs: dict[str, Any] = {}
             for func in HCCLLibrary.exported_functions:
                 f = getattr(self.lib, func.name)
                 f.restype = func.restype
@@ -219,14 +219,10 @@ class HCCLLibrary:
         self.HCCL_CHECK(self._funcs["HcclGetRootInfo"](ctypes.byref(unique_id)))
         return unique_id
 
-    def hcclCommInitRank(
-        self, world_size: int, unique_id: hcclUniqueId, rank: int
-    ) -> hcclComm_t:
+    def hcclCommInitRank(self, world_size: int, unique_id: hcclUniqueId, rank: int) -> hcclComm_t:
         comm = hcclComm_t()
         self.HCCL_CHECK(
-            self._funcs["HcclCommInitRootInfo"](
-                world_size, ctypes.byref(unique_id), rank, ctypes.byref(comm)
-            )
+            self._funcs["HcclCommInitRootInfo"](world_size, ctypes.byref(unique_id), rank, ctypes.byref(comm))
         )
         return comm
 
@@ -245,11 +241,7 @@ class HCCLLibrary:
         # both are aliases of `ctypes.c_int`
         # when we pass int to a function, it will be converted to `ctypes.c_int`
         # by ctypes automatically
-        self.HCCL_CHECK(
-            self._funcs["HcclAllReduce"](
-                sendbuff, recvbuff, count, datatype, op, comm, stream
-            )
-        )
+        self.HCCL_CHECK(self._funcs["HcclAllReduce"](sendbuff, recvbuff, count, datatype, op, comm, stream))
 
     def hcclBroadcast(
         self,
@@ -260,9 +252,7 @@ class HCCLLibrary:
         comm: hcclComm_t,
         stream: aclrtStream_t,
     ) -> None:
-        self.HCCL_CHECK(
-            self._funcs["HcclBroadcast"](buf, count, datatype, root, comm, stream)
-        )
+        self.HCCL_CHECK(self._funcs["HcclBroadcast"](buf, count, datatype, root, comm, stream))
 
     def hcclCommDestroy(self, comm: hcclComm_t) -> None:
         self.HCCL_CHECK(self._funcs["HcclCommDestroy"](comm))

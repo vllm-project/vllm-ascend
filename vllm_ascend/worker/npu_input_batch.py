@@ -103,9 +103,7 @@ class NPUInputBatch(InputBatch):
         )
 
         # Sampling-related.
-        self.temperature = torch.empty(
-            (max_num_reqs,), dtype=torch.float32, device=device
-        )
+        self.temperature = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
         self.temperature_cpu_tensor = torch.empty(
             (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory
         )
@@ -114,16 +112,12 @@ class NPUInputBatch(InputBatch):
         self.random_reqs: set[str] = set()
 
         self.top_p = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
-        self.top_p_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory
-        )
+        self.top_p_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory)
         self.top_p_cpu = self.top_p_cpu_tensor.numpy()
         self.top_p_reqs: set[str] = set()
 
         self.top_k = torch.empty((max_num_reqs,), dtype=torch.int32, device=device)
-        self.top_k_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory
-        )
+        self.top_k_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
 
@@ -131,9 +125,7 @@ class NPUInputBatch(InputBatch):
         self.spec_decode_unsupported_reqs: set[str] = set()
 
         # Frequency penalty related data structures
-        self.frequency_penalties = torch.empty(
-            (max_num_reqs,), dtype=torch.float, device=device
-        )
+        self.frequency_penalties = torch.empty((max_num_reqs,), dtype=torch.float, device=device)
         self.frequency_penalties_cpu_tensor = torch.empty(
             (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
         )
@@ -141,9 +133,7 @@ class NPUInputBatch(InputBatch):
         self.frequency_penalties_reqs: set[str] = set()
 
         # Presence penalty related data structures
-        self.presence_penalties = torch.empty(
-            (max_num_reqs,), dtype=torch.float, device=device
-        )
+        self.presence_penalties = torch.empty((max_num_reqs,), dtype=torch.float, device=device)
         self.presence_penalties_cpu_tensor = torch.empty(
             (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
         )
@@ -151,9 +141,7 @@ class NPUInputBatch(InputBatch):
         self.presence_penalties_reqs: set[str] = set()
 
         # Repetition penalty related data structures
-        self.repetition_penalties = torch.empty(
-            (max_num_reqs,), dtype=torch.float, device=device
-        )
+        self.repetition_penalties = torch.empty((max_num_reqs,), dtype=torch.float, device=device)
         self.repetition_penalties_cpu_tensor = torch.empty(
             (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
         )

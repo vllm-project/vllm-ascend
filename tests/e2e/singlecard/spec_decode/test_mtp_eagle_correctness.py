@@ -84,9 +84,7 @@ def test_deepseek_mtp_correctness(
             cudagraph_capture_sizes=[20],
         ),
     ) as spec_llm:
-        sampling_config = SamplingParams(
-            temperature=0, max_tokens=256, ignore_eos=False
-        )
+        sampling_config = SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)
         spec_outputs = spec_llm.generate(example_prompts, sampling_config)
 
     with VllmRunner(
@@ -99,9 +97,7 @@ def test_deepseek_mtp_correctness(
             cudagraph_capture_sizes=[20],
         ),
     ) as ref_llm:
-        sampling_config = SamplingParams(
-            temperature=0, max_tokens=256, ignore_eos=False
-        )
+        sampling_config = SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
 
     matches = 0
@@ -174,9 +170,7 @@ def test_llama_qwen3_eagle_correctness(
             "max_model_len": 128,
             "draft_vocab_size": 128256,
         },
-        compilation_config=CompilationConfig(
-            cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[12]
-        ),
+        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[12]),
     ) as llm:
         spec_outputs = llm.generate(example_prompts, sampling_params)
         cleanup_dist_env_and_memory()
@@ -191,9 +185,7 @@ def test_llama_qwen3_eagle_correctness(
         max_model_len=4096,
         seed=1024,
         async_scheduling=async_scheduling,
-        compilation_config=CompilationConfig(
-            cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[12]
-        ),
+        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[12]),
     ) as llm:
         ref_outputs = llm.generate(example_prompts, sampling_params)
         cleanup_dist_env_and_memory()

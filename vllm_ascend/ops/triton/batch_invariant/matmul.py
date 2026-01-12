@@ -114,9 +114,7 @@ def matmul_persistent(x, y, bias=None):
     # Validate input shapes
     assert x.dim() == 2, "x must be a 2D tensor"
     assert y.dim() == 2, "y must be a 2D tensor"
-    assert x.shape[1] == y.shape[0], (
-        f"Matrix dimension mismatch: x.shape[1]={x.shape[1]}, y.shape[0]={y.shape[0]}"
-    )
+    assert x.shape[1] == y.shape[0], f"Matrix dimension mismatch: x.shape[1]={x.shape[1]}, y.shape[0]={y.shape[0]}"
 
     M, K = x.shape
     _, N = y.shape
@@ -224,15 +222,11 @@ def linear_persistent_kernel(
             k_mask = k_indices < K
 
             # Load block of tensor a: shape [BLOCK_M, BLOCK_K]
-            a_ptrs = (
-                a_ptr + m_indices[:, None] * stride_am + k_indices[None, :] * stride_ak
-            )
+            a_ptrs = a_ptr + m_indices[:, None] * stride_am + k_indices[None, :] * stride_ak
             a_vals = tl.load(a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0)
 
             # Load block of tensor b: shape [BLOCK_N, BLOCK_K]
-            b_ptrs = (
-                b_ptr + n_indices[:, None] * stride_bn + k_indices[None, :] * stride_bk
-            )
+            b_ptrs = b_ptr + n_indices[:, None] * stride_bn + k_indices[None, :] * stride_bk
             b_vals = tl.load(b_ptrs, mask=n_mask[:, None] & k_mask[None, :], other=0.0)
 
             # Explicitly transpose b matrix using tl.trans: shape becomes [BLOCK_K, BLOCK_N]
@@ -261,9 +255,7 @@ def linear_persistent(x, y):
     # Validate input shapes
     assert x.dim() == 2, "x must be a 2D tensor"
     assert y.dim() == 2, "y must be a 2D tensor"
-    assert x.shape[1] == y.shape[1], (
-        f"Matrix dimension mismatch: x.shape[1]={x.shape[1]}, y.shape[1]={y.shape[1]}"
-    )
+    assert x.shape[1] == y.shape[1], f"Matrix dimension mismatch: x.shape[1]={x.shape[1]}, y.shape[1]={y.shape[1]}"
 
     M, K = x.shape
     N, _ = y.shape
@@ -279,12 +271,7 @@ def linear_persistent(x, y):
     num_blocks_n = triton.cdiv(N, BLOCK_N)
 
     # Set fixed 1D grid size
-    grid_size = (
-        driver.active.utils.get_device_properties(torch.npu.current_device())[
-            "num_vectorcore"
-        ]
-        // 2
-    )
+    grid_size = driver.active.utils.get_device_properties(torch.npu.current_device())["num_vectorcore"] // 2
     grid = (grid_size,)
 
     # Launch kernel
@@ -330,10 +317,7 @@ def bmm_batch_invariant(a, b, *, out=None):
             return out
         return result
     else:
-        raise ValueError(
-            f"bmm_batch_invariant expects 3D tensors, "
-            f"got shapes {a.shape} and {b.shape}"
-        )
+        raise ValueError(f"bmm_batch_invariant expects 3D tensors, got shapes {a.shape} and {b.shape}")
 
 
 def addmm_batch_invariant(bias, a, b):

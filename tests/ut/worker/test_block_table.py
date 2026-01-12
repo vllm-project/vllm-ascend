@@ -90,9 +90,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
             block_ids = list(range(i * 4, (i + 1) * 4))  # [0,1,2,3], [4,5,6,7], etc.
             block_table.add_row(block_ids, i)
 
-    def _test_slot_mapping_for_ranks(
-        self, dcp_world_size, pcp_world_size, cp_kv_cache_interleave_size, test_configs
-    ):
+    def _test_slot_mapping_for_ranks(self, dcp_world_size, pcp_world_size, cp_kv_cache_interleave_size, test_configs):
         """Helper method to test slot_mapping across multiple ranks
 
         Args:
@@ -198,12 +196,8 @@ class TestBlockTableComputeSlotMapping(TestBase):
         for pcp_rank in range(2):
             for dcp_rank in range(4):
                 current_rank = 4 * pcp_rank + dcp_rank
-                expected_result = np.array(
-                    rank_expectations[current_rank], dtype=np.int32
-                )
-                test_configs.append(
-                    (dcp_rank, pcp_rank, req_indices, positions, expected_result)
-                )
+                expected_result = np.array(rank_expectations[current_rank], dtype=np.int32)
+                test_configs.append((dcp_rank, pcp_rank, req_indices, positions, expected_result))
 
         self._test_slot_mapping_for_ranks(
             dcp_world_size=4,

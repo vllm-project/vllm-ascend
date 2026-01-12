@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import List
 
 import pytest
 import torch
@@ -43,17 +42,13 @@ class TestModelWithoutBias(nn.Module):
         AddRMSNorm → Quantization (without bias)
     """
 
-    def __init__(
-        self, hidden_size: int, dtype: torch.dtype, eps: float = 1e-6, device="npu"
-    ):
+    def __init__(self, hidden_size: int, dtype: torch.dtype, eps: float = 1e-6, device="npu"):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.rms_norm_weight = nn.Parameter(torch.randn(hidden_size, device=device))
         self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_scale_reciprocal = torch.ones(
-            hidden_size, dtype=dtype, device=device
-        )
+        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
         self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
 
     def forward(self, x):
@@ -65,9 +60,7 @@ class TestModelWithoutBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
-            x, residual, self.rms_norm_weight, self.eps
-        )
+        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
 
         quantized_output = torch.ops.vllm.quantize(
             norm_output,
@@ -78,11 +71,11 @@ class TestModelWithoutBias(nn.Module):
 
         return quantized_output, new_residual
 
-    def ops_in_model_before(self) -> List[OpOverload]:
+    def ops_in_model_before(self) -> list[OpOverload]:
         """Return the list of expected operators BEFORE fusion."""
         return [torch.ops.npu.npu_add_rms_norm.default, torch.ops.vllm.quantize.default]
 
-    def ops_in_model_after(self) -> List[OpOverload]:
+    def ops_in_model_after(self) -> list[OpOverload]:
         """Return the list of expected operators AFTER successful fusion."""
         return [torch.ops.npu.npu_add_rms_norm_quant.default]
 
@@ -93,18 +86,14 @@ class TestModelWithBias(nn.Module):
         AddRMSNorm → Add Bias → Quantization (with bias)
     """
 
-    def __init__(
-        self, hidden_size: int, dtype: torch.dtype, eps: float = 1e-6, device="npu"
-    ):
+    def __init__(self, hidden_size: int, dtype: torch.dtype, eps: float = 1e-6, device="npu"):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.rms_norm_weight = nn.Parameter(torch.randn(hidden_size, device=device))
         self.bias = nn.Parameter(torch.randn(hidden_size, device=device))
         self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_scale_reciprocal = torch.ones(
-            hidden_size, dtype=dtype, device=device
-        )
+        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
         self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
 
     def forward(self, x):
@@ -117,9 +106,7 @@ class TestModelWithBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
-            x, residual, self.rms_norm_weight, self.eps
-        )
+        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
 
         # Add bias
         norm_output_with_bias = norm_output + self.bias
@@ -133,7 +120,7 @@ class TestModelWithBias(nn.Module):
 
         return quantized_output, new_residual
 
-    def ops_in_model_before(self) -> List[OpOverload]:
+    def ops_in_model_before(self) -> list[OpOverload]:
         """Return the list of expected operators BEFORE fusion."""
         return [
             torch.ops.npu.npu_add_rms_norm.default,
@@ -141,7 +128,7 @@ class TestModelWithBias(nn.Module):
             torch.ops.vllm.quantize.default,
         ]
 
-    def ops_in_model_after(self) -> List[OpOverload]:
+    def ops_in_model_after(self) -> list[OpOverload]:
         """Return the list of expected operators AFTER successful fusion."""
         return [torch.ops.npu.npu_add_rms_norm_quant.default]
 
@@ -152,17 +139,13 @@ class TestModelSPWithoutBias(nn.Module):
         AddRMSNorm → maybe_allgather → Quantization (without bias)
     """
 
-    def __init__(
-        self, hidden_size: int, dtype: torch.dtype, eps: float = 1e-6, device="npu"
-    ):
+    def __init__(self, hidden_size: int, dtype: torch.dtype, eps: float = 1e-6, device="npu"):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.rms_norm_weight = nn.Parameter(torch.randn(hidden_size, device=device))
         self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_scale_reciprocal = torch.ones(
-            hidden_size, dtype=dtype, device=device
-        )
+        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
         self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
 
     def forward(self, x):
@@ -175,9 +158,7 @@ class TestModelSPWithoutBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
-            x, residual, self.rms_norm_weight, self.eps
-        )
+        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
 
         norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output, True)
 
@@ -190,7 +171,7 @@ class TestModelSPWithoutBias(nn.Module):
 
         return quantized_output, new_residual
 
-    def ops_in_model_before(self) -> List[OpOverload]:
+    def ops_in_model_before(self) -> list[OpOverload]:
         """Return the list of expected operators BEFORE fusion."""
         return [
             torch.ops.npu.npu_add_rms_norm.default,
@@ -198,7 +179,7 @@ class TestModelSPWithoutBias(nn.Module):
             torch.ops.vllm.quantize.default,
         ]
 
-    def ops_in_model_after(self) -> List[OpOverload]:
+    def ops_in_model_after(self) -> list[OpOverload]:
         """Return the list of expected operators AFTER successful fusion."""
         return [
             torch.ops.npu.npu_add_rms_norm_quant.default,
@@ -212,18 +193,14 @@ class TestModelSPWithBias(nn.Module):
         AddRMSNorm → Add bias → maybe_allgather → Quantization (without bias)
     """
 
-    def __init__(
-        self, hidden_size: int, dtype: torch.dtype, eps: float = 1e-6, device="npu"
-    ):
+    def __init__(self, hidden_size: int, dtype: torch.dtype, eps: float = 1e-6, device="npu"):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.rms_norm_weight = nn.Parameter(torch.randn(hidden_size, device=device))
         self.bias = nn.Parameter(torch.randn(hidden_size, device=device))
         self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_scale_reciprocal = torch.ones(
-            hidden_size, dtype=dtype, device=device
-        )
+        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
         self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
 
     def forward(self, x):
@@ -237,16 +214,12 @@ class TestModelSPWithBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
-            x, residual, self.rms_norm_weight, self.eps
-        )
+        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
 
         # Add bias
         norm_output_with_bias = norm_output + self.bias
 
-        norm_output_with_bias = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            norm_output_with_bias, True
-        )
+        norm_output_with_bias = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output_with_bias, True)
 
         quantized_output = torch.ops.vllm.quantize(
             norm_output_with_bias,
@@ -257,7 +230,7 @@ class TestModelSPWithBias(nn.Module):
 
         return quantized_output, new_residual
 
-    def ops_in_model_before(self) -> List[OpOverload]:
+    def ops_in_model_before(self) -> list[OpOverload]:
         """Return the list of expected operators BEFORE fusion."""
         return [
             torch.ops.npu.npu_add_rms_norm.default,
@@ -266,7 +239,7 @@ class TestModelSPWithBias(nn.Module):
             torch.ops.vllm.quantize.default,
         ]
 
-    def ops_in_model_after(self) -> List[OpOverload]:
+    def ops_in_model_after(self) -> list[OpOverload]:
         """Return the list of expected operators AFTER successful fusion."""
         return [
             torch.ops.npu.npu_add_rms_norm_quant.default,
@@ -309,37 +282,28 @@ def test_rmsnorm_quant_fusion(
     init_distributed_environment()
     ensure_model_parallel_initialized(1, 1)
 
-    with vllm.config.set_current_vllm_config(vllm_config):
-        with set_ascend_forward_context(None, vllm_config):
-            backend = TestBackend(
-                custom_passes=[AddRMSNormQuantFusionPass(vllm_config=vllm_config)]
-            )
-            if use_bias:
-                if sp_enable:
-                    model = TestModelSPWithBias(hidden_size, dtype, eps, device="npu")
-                else:
-                    model = TestModelWithBias(hidden_size, dtype, eps, device="npu")
+    with vllm.config.set_current_vllm_config(vllm_config), set_ascend_forward_context(None, vllm_config):
+        backend = TestBackend(custom_passes=[AddRMSNormQuantFusionPass(vllm_config=vllm_config)])
+        if use_bias:
+            if sp_enable:
+                model = TestModelSPWithBias(hidden_size, dtype, eps, device="npu")
             else:
-                if sp_enable:
-                    model = TestModelSPWithoutBias(
-                        hidden_size, dtype, eps, device="npu"
-                    )
-                else:
-                    model = TestModelWithoutBias(hidden_size, dtype, eps, device="npu")
-            model = model.to("npu")
+                model = TestModelWithBias(hidden_size, dtype, eps, device="npu")
+        else:
+            if sp_enable:
+                model = TestModelSPWithoutBias(hidden_size, dtype, eps, device="npu")
+            else:
+                model = TestModelWithoutBias(hidden_size, dtype, eps, device="npu")
+        model = model.to("npu")
 
-            x = torch.rand(
-                num_tokens, hidden_size, device="npu", dtype=dtype, requires_grad=False
-            )
+        x = torch.rand(num_tokens, hidden_size, device="npu", dtype=dtype, requires_grad=False)
 
-            result_unfused = model(x)
-            print("Unfused result:", [t.shape for t in result_unfused])
-            model_fused = torch.compile(model, backend=backend)
-            result_fused = model_fused(x)
-            print("Fused result:", [t.shape for t in result_fused])
+        result_unfused = model(x)
+        print("Unfused result:", [t.shape for t in result_unfused])
+        model_fused = torch.compile(model, backend=backend)
+        result_fused = model_fused(x)
+        print("Fused result:", [t.shape for t in result_fused])
 
-            print("=== Checking operator fusion ===")
-            backend.check_before_ops(
-                model.ops_in_model_before(), fully_replaced=not sp_enable
-            )
-            backend.check_after_ops(model.ops_in_model_after())
+        print("=== Checking operator fusion ===")
+        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=not sp_enable)
+        backend.check_after_ops(model.ops_in_model_after())

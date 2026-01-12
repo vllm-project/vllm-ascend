@@ -74,9 +74,7 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
     if model_args.get("enable_expert_parallel", False):
         parallel_mode += " + EP"
 
-    execution_model = (
-        f"{'Eager' if model_args.get('enforce_eager', False) else 'ACLGraph'}"
-    )
+    execution_model = f"{'Eager' if model_args.get('enforce_eager', False) else 'ACLGraph'}"
 
     report_content = template.render(
         vllm_version=env_config.vllm_version,
@@ -101,9 +99,7 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         execution_model=execution_model,
     )
 
-    report_output = os.path.join(
-        report_dir, f"{os.path.basename(eval_config['model_name'])}.md"
-    )
+    report_output = os.path.join(report_dir, f"{os.path.basename(eval_config['model_name'])}.md")
     os.makedirs(os.path.dirname(report_output), exist_ok=True)
     with open(report_output, "w", encoding="utf-8") as f:
         f.write(report_content)
@@ -154,9 +150,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
                 {
                     "task": task_name,
                     "metric": metric_name,
-                    "value": f"✅{measured_value}"
-                    if success
-                    else f"❌{measured_value}",
+                    "value": f"✅{measured_value}" if success else f"❌{measured_value}",
                     "stderr": task_result[
                         metric_name.replace(",", "_stderr,")
                         if metric_name == "acc,none"

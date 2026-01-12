@@ -24,8 +24,8 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 
-import os
 import argparse
+import os
 
 from vllm.assets.audio import AudioAsset
 
@@ -41,11 +41,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def prepare_inputs(audio_count: int, audio_path1: str, audio_path2: str):
-    use_vllm_audio_assert = (
-        True
-        if audio_path1 == "mary_had_lamb" and audio_path2 == "winning_call"
-        else False
-    )
+    use_vllm_audio_assert = True if audio_path1 == "mary_had_lamb" and audio_path2 == "winning_call" else False
     if use_vllm_audio_assert:
         audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
     else:
@@ -59,12 +55,7 @@ def prepare_inputs(audio_count: int, audio_path1: str, audio_path2: str):
         2: "What sport and what nursery rhyme are referenced?",
     }
 
-    audio_in_prompt = "".join(
-        [
-            f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n"
-            for idx in range(audio_count)
-        ]
-    )
+    audio_in_prompt = "".join([f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)])
     question = question_per_audio_count[audio_count]
     prompt = (
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
@@ -99,9 +90,7 @@ def main(audio_count: int, audio_path1: str, audio_path2: str):
 
     inputs = prepare_inputs(audio_count, audio_path1, audio_path2)
 
-    sampling_params = SamplingParams(
-        temperature=0.2, max_tokens=64, stop_token_ids=None
-    )
+    sampling_params = SamplingParams(temperature=0.2, max_tokens=64, stop_token_ids=None)
 
     outputs = llm.generate(inputs, sampling_params=sampling_params)
 

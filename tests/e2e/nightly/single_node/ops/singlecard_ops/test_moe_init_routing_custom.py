@@ -48,9 +48,7 @@ def moe_init_routing_golden(
     h = x.shape[1]
     k = expert_idx.shape[-1]
     expert_idx_in = expert_idx.copy().reshape(-1)
-    actual_expert_total_num: int = np.sum(
-        (expert_idx_in >= expert_start) & (expert_idx_in < expert_end)
-    )
+    actual_expert_total_num: int = np.sum((expert_idx_in >= expert_start) & (expert_idx_in < expert_end))
 
     expert_idx_in[(expert_idx_in < expert_start)] = np.int32(np.iinfo(np.int32).max)
     sorted_expert_indices = np.argsort(expert_idx_in, axis=-1, kind="stable")
@@ -67,34 +65,24 @@ def moe_init_routing_golden(
     else:
         if drop_pad_mode == 0:
             if expert_tokens_num_type == 1:
-                expert_tokens_count = np.bincount(
-                    sorted_expert_idx[:actual_expert_total_num] - expert_start
-                )
+                expert_tokens_count = np.bincount(sorted_expert_idx[:actual_expert_total_num] - expert_start)
                 expert_tokens_count = np.concatenate(
                     [
                         expert_tokens_count,
-                        np.zeros(
-                            (expert_end - expert_start) - len(expert_tokens_count)
-                        ).astype(np.int64),
+                        np.zeros((expert_end - expert_start) - len(expert_tokens_count)).astype(np.int64),
                     ]
                 )
             elif expert_tokens_num_type == 0:
-                expert_tokens_count = np.bincount(
-                    sorted_expert_idx[:actual_expert_total_num] - expert_start
-                )
+                expert_tokens_count = np.bincount(sorted_expert_idx[:actual_expert_total_num] - expert_start)
                 expert_tokens_count = np.concatenate(
                     [
                         expert_tokens_count,
-                        np.zeros(
-                            (expert_end - expert_start) - len(expert_tokens_count)
-                        ).astype(np.int64),
+                        np.zeros((expert_end - expert_start) - len(expert_tokens_count)).astype(np.int64),
                     ]
                 )
                 expert_tokens_count = np.cumsum(expert_tokens_count)
             elif expert_tokens_num_type == 2:
-                expert_id, counts = np.unique(
-                    sorted_expert_idx[:actual_expert_total_num], return_counts=True
-                )
+                expert_id, counts = np.unique(sorted_expert_idx[:actual_expert_total_num], return_counts=True)
                 expert_tokens_count = np.column_stack((expert_id, counts))
                 if expert_tokens_count.shape[0] < expert_num:
                     expert_tokens_count = np.concatenate(
@@ -107,12 +95,8 @@ def moe_init_routing_golden(
                         axis=0,
                     )
         else:
-            expert_tokens_count = np.bincount(
-                sorted_expert_idx[:actual_expert_total_num] - expert_start
-            )
-            zeros_array = np.zeros(
-                (expert_end - expert_start) - len(expert_tokens_count), dtype=np.int64
-            )
+            expert_tokens_count = np.bincount(sorted_expert_idx[:actual_expert_total_num] - expert_start)
+            zeros_array = np.zeros((expert_end - expert_start) - len(expert_tokens_count), dtype=np.int64)
             expert_tokens_count = np.concatenate([expert_tokens_count, zeros_array])
         expert_tokens_count = expert_tokens_count.astype(np.int64)
 
@@ -136,9 +120,7 @@ def moe_init_routing_golden(
                 if lastExpertId != sorted_expert_idx[i]:
                     offset_tmp = 0
                     lastExpertId = sorted_expert_idx[i]
-                sort_row_tmp[sorted_expert_idx[i] * expert_capacity + offset_tmp] = (
-                    sorted_expert_indices[i]
-                )
+                sort_row_tmp[sorted_expert_idx[i] * expert_capacity + offset_tmp] = sorted_expert_indices[i]
                 offset_tmp = offset_tmp + 1
 
         expanded_row_idx = np.full(sorted_expert_indices.shape, -1)
@@ -157,9 +139,7 @@ def moe_init_routing_golden(
         expanded_x = expanded_x
         expanded_row_idx = expanded_row_idx
         if scale is not None and drop_pad_mode == 1:
-            expanded_scale = np.full(
-                (expert_num * expert_capacity,), 0, dtype=scale.dtype
-            )
+            expanded_scale = np.full((expert_num * expert_capacity,), 0, dtype=scale.dtype)
             for i, val in enumerate(sort_row_tmp):
                 if val != -1:
                     expanded_scale[i] = scale[val // k]
@@ -196,9 +176,7 @@ def moe_init_routing_golden(
                 x_final = x_final * scale
             else:
                 if drop_pad_mode == 0:
-                    x_final = (
-                        x_final * scale[sorted_expert_idx[:active_num] - expert_start]
-                    )
+                    x_final = x_final * scale[sorted_expert_idx[:active_num] - expert_start]
 
                 else:
                     for i, val in enumerate(sort_row_tmp):
@@ -258,9 +236,7 @@ def cmp_out_golden(x_golden, x_out, dtype):
     if dtype == "int8":
         cmp = np.isclose(x_out.cpu().numpy()[: len(x_golden)], x_golden, atol=1)
     else:
-        cmp = np.isclose(
-            x_out.cpu().numpy()[: len(x_golden)], x_golden, rtol=1e-05, atol=1e-05
-        )
+        cmp = np.isclose(x_out.cpu().numpy()[: len(x_golden)], x_golden, rtol=1e-05, atol=1e-05)
     return np.all(cmp)
 
 
@@ -310,31 +286,27 @@ def test_moe_npu(
         row_idx_type,
     )
 
-    expanded_x, expanded_row_idx, expert_token_cumsum_or_count, expanded_scale = (
-        npu_pta(
-            x_npu,
-            expert_idx_npu,
-            scale_npu,
-            offset_npu,
-            active_num,
-            expert_capacity,
-            expert_num,
-            drop_pad_mode,
-            expert_tokens_num_type,
-            expert_tokens_num_flag,
-            quant_mode,
-            active_expert_range,
-            row_idx_type,
-        )
+    expanded_x, expanded_row_idx, expert_token_cumsum_or_count, expanded_scale = npu_pta(
+        x_npu,
+        expert_idx_npu,
+        scale_npu,
+        offset_npu,
+        active_num,
+        expert_capacity,
+        expert_num,
+        drop_pad_mode,
+        expert_tokens_num_type,
+        expert_tokens_num_flag,
+        quant_mode,
+        active_expert_range,
+        row_idx_type,
     )
     if quant_mode == -1:
         expanded_x_result = cmp_out_golden(expanded_x_golden, expanded_x, "float32")
     else:
         expanded_x_result = cmp_out_golden(expanded_x_golden, expanded_x, "int8")
 
-    expanded_row_idx_result = cmp_out_golden(
-        expanded_row_idx_golden, expanded_row_idx, "int32"
-    )
+    expanded_row_idx_result = cmp_out_golden(expanded_row_idx_golden, expanded_row_idx, "int32")
 
     if expert_tokens_num_flag:
         expert_tokens_result = cmp_out_golden(
@@ -344,18 +316,11 @@ def test_moe_npu(
         expert_tokens_result = True
 
     if quant_mode == 1 or (quant_mode == -1 and scale is not None):
-        expand_scale_result = cmp_out_golden(
-            expanded_scale_golden.flatten(), expanded_scale, "float32"
-        )
+        expand_scale_result = cmp_out_golden(expanded_scale_golden.flatten(), expanded_scale, "float32")
     else:
         expand_scale_result = True
 
-    compare_result = (
-        expanded_x_result
-        and expanded_row_idx_result
-        and expert_tokens_result
-        and expand_scale_result
-    )
+    compare_result = expanded_x_result and expanded_row_idx_result and expert_tokens_result and expand_scale_result
     # print('=======case result=======: ', compare_result)
     return compare_result
 

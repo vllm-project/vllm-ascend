@@ -63,9 +63,7 @@ class TestAscendW8A8LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.w8a8.get_weight_prefetch_method")
     @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_quant_matmul")
-    def test_apply_with_x_not_int8(
-        self, mock_npu_quant_matmul, mock_quantize, mock_get_weight_prefetch_method
-    ):
+    def test_apply_with_x_not_int8(self, mock_npu_quant_matmul, mock_quantize, mock_get_weight_prefetch_method):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
         layer.aclnn_input_offset = 0.2
@@ -104,9 +102,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         expected_y_output += bias
         self.assertTrue(torch.equal(output, expected_y_output))
 
-    @patch(
-        "vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P
-    )
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P)
     @patch("torch_npu.npu_quant_matmul")
     def test_apply_with_x_is_310p(self, mock_npu_quant_matmul, mock_soc_version):
         layer = MagicMock()

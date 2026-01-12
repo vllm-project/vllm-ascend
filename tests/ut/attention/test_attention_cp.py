@@ -1,4 +1,3 @@
-from typing import List
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -28,9 +27,7 @@ class TestAscendAttentionCPImpl(TestBase):
         self.attn_metadata = MagicMock()
         self.attn_metadata.return_value = "1"
 
-        self.layer_no_quant = MagicMock(
-            spec=["layer_name", "_k_scale_float", "_v_scale_float"]
-        )
+        self.layer_no_quant = MagicMock(spec=["layer_name", "_k_scale_float", "_v_scale_float"])
         self.layer_no_quant.layer_name = "test_layer"
         self.layer_no_quant._k_scale_float = 1.0
         self.layer_no_quant._v_scale_float = 1.0
@@ -65,9 +62,7 @@ class TestAscendAttentionCPImpl(TestBase):
             return mock_output, mock_lse
 
         self.impl._attention_with_nomask_and_mask = MagicMock()
-        self.impl._attention_with_nomask_and_mask.side_effect = (
-            mock_attention_with_nomask_and_mask
-        )
+        self.impl._attention_with_nomask_and_mask.side_effect = mock_attention_with_nomask_and_mask
 
         attn_metadata = MagicMock()
         attn_metadata.prefill = MagicMock()
@@ -78,9 +73,7 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata.prefill.pcp_metadata.kv_with_q_tail_nomask_idx = torch.tensor([0])
         attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx = torch.tensor([0])
 
-        output, attn_lse = self.impl._forward_prefill_cp(
-            query, key, value, attn_metadata
-        )
+        output, attn_lse = self.impl._forward_prefill_cp(query, key, value, attn_metadata)
 
         self.assertEqual(output.shape[0], 2)
         self.assertEqual(output.shape[1], 4)
@@ -108,22 +101,16 @@ class TestAscendAttentionCPImpl(TestBase):
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
-        def mock_npu_fused_infer_attention_score_func(
-            query, k_nope, value, **common_kwargs
-        ):
+        def mock_npu_fused_infer_attention_score_func(query, k_nope, value, **common_kwargs):
             mock_output = torch.randn_like(query)
             mock_lse = torch.randn(query.shape[0], query.shape[1], 1)
             return mock_output, mock_lse
 
-        mock_npu_fused_infer_attention_score.side_effect = (
-            mock_npu_fused_infer_attention_score_func
-        )
+        mock_npu_fused_infer_attention_score.side_effect = mock_npu_fused_infer_attention_score_func
 
         attn_metadata = MagicMock()
         attn_metadata.decode_meta = MagicMock()
-        attn_metadata.decode_meta.batch_seq_mask = torch.tensor(
-            [1, 0], dtype=torch.bool
-        )
+        attn_metadata.decode_meta.batch_seq_mask = torch.tensor([1, 0], dtype=torch.bool)
         output = self.impl._forward_decode_pcp_dcp(query, attn_metadata)
 
         self.assertEqual(output.shape[0], 2)
@@ -137,9 +124,7 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata = MagicMock()
         attn_metadata.prefill = MagicMock()
         attn_metadata.prefill.chunked_context = MagicMock()
-        attn_metadata.prefill.chunked_context.cp_kv_recover_idx_for_chunk = (
-            torch.tensor([1, 2, 3, 0])
-        )
+        attn_metadata.prefill.chunked_context.cp_kv_recover_idx_for_chunk = torch.tensor([1, 2, 3, 0])
         output = self.impl._prefill_query_all_gather(attn_metadata, query)
 
         self.assertEqual(output.shape[0], 4)
@@ -168,22 +153,12 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata.prefill = MagicMock()
         attn_metadata.prefill.chunked_context = MagicMock()
         local_context_lens_allranks = torch.tensor([[[256, 256], [256, 256]]])
-        attn_metadata.prefill.chunked_context.local_context_lens_allranks = (
-            local_context_lens_allranks
-        )
-        attn_metadata.prefill.chunked_context.batch_chunk_seq_mask = torch.randint(
-            0, 2, (1024,), dtype=torch.bool
-        )
-        attn_metadata.prefill.chunked_context.local_total_toks = (
-            local_context_lens_allranks[:, 0, 0].sum()
-        )
+        attn_metadata.prefill.chunked_context.local_context_lens_allranks = local_context_lens_allranks
+        attn_metadata.prefill.chunked_context.batch_chunk_seq_mask = torch.randint(0, 2, (1024,), dtype=torch.bool)
+        attn_metadata.prefill.chunked_context.local_total_toks = local_context_lens_allranks[:, 0, 0].sum()
 
-        def mock_load_kv_for_chunk(
-            attn_metadata, kv_cache, local_chunked_kv_lens_rank, query, total_toks
-        ):
-            return torch.randn(total_toks, kv_num_heads, head_size), torch.randn(
-                total_toks, kv_num_heads, head_size
-            )
+        def mock_load_kv_for_chunk(attn_metadata, kv_cache, local_chunked_kv_lens_rank, query, total_toks):
+            return torch.randn(total_toks, kv_num_heads, head_size), torch.randn(total_toks, kv_num_heads, head_size)
 
         self.impl._load_kv_for_chunk = MagicMock()
         self.impl._load_kv_for_chunk.side_effect = mock_load_kv_for_chunk
@@ -193,19 +168,11 @@ class TestAscendAttentionCPImpl(TestBase):
             torch.randn(batch_size, num_heads, 1),
         )
 
-        context_output = self.impl._compute_prefill_context(
-            query, kv_cache, attn_metadata
-        )
-        local_context_output = (
-            torch.cat(context_output, dim=-1).permute([1, 2, 0]).contiguous()
-        )
-        global_context_output = self.impl._gather_global_context_output(
-            local_context_output
-        )
+        context_output = self.impl._compute_prefill_context(query, kv_cache, attn_metadata)
+        local_context_output = torch.cat(context_output, dim=-1).permute([1, 2, 0]).contiguous()
+        global_context_output = self.impl._gather_global_context_output(local_context_output)
         global_context_output = global_context_output.permute([2, 0, 1]).contiguous()
-        result_output, result_lse = self.impl._update_global_context_output(
-            global_context_output
-        )
+        result_output, result_lse = self.impl._update_global_context_output(global_context_output)
 
         self.assertEqual(result_output.shape[0], batch_size)
         self.assertEqual(result_output.shape[1], self.impl.num_heads)
@@ -264,9 +231,7 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata.slot_mapping = torch.randn(2)
         attn_metadata.num_actual_tokens_pcp_padded = num_tokens * self.impl.pcp_size
         attn_metadata.prefill = MagicMock()
-        attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx = torch.tensor(
-            [0, 3, 1, 2, 0, 0, 0, 0]
-        )
+        attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx = torch.tensor([0, 3, 1, 2, 0, 0, 0, 0])
 
         key = torch.randn(num_tokens, num_heads, head_size)
         value = torch.randn(num_tokens, num_heads, head_size)
@@ -295,9 +260,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.attn_metadata = MagicMock()
         self.attn_metadata.return_value = "1"
 
-        self.layer_no_quant = MagicMock(
-            spec=["layer_name", "_k_scale_float", "_v_scale_float"]
-        )
+        self.layer_no_quant = MagicMock(spec=["layer_name", "_k_scale_float", "_v_scale_float"])
         self.layer_no_quant.layer_name = "test_layer"
         self.layer_no_quant._k_scale_float = 1.0
         self.layer_no_quant._v_scale_float = 1.0
@@ -327,19 +290,15 @@ class TestUpdateNpuAttnOutLse(TestBase):
 
         # TND layout requires cumulative sum computation.
         self.q_seqlens_cumsum = self._cumsum(self.q_lens_per_batch)  # [32, 96]
-        self.kv_seqlens_nomask_cumsum = self._cumsum(
-            self.kv_lens_nomask_per_batch
-        )  # [32, 96]
-        self.kv_seqlens_mask_cumsum = self._cumsum(
-            self.kv_lens_mask_per_batch
-        )  # [32, 96]
+        self.kv_seqlens_nomask_cumsum = self._cumsum(self.kv_lens_nomask_per_batch)  # [32, 96]
+        self.kv_seqlens_mask_cumsum = self._cumsum(self.kv_lens_mask_per_batch)  # [32, 96]
 
         # Compute T value in TND layout
         self.q_total_tokens = self.q_seqlens_cumsum[-1]
         self.kv_total_nomask = self.kv_seqlens_nomask_cumsum[-1]  #
         self.kv_total_mask = self.kv_seqlens_mask_cumsum[-1]
 
-    def _cumsum(self, arr: List[int]) -> List[int]:
+    def _cumsum(self, arr: list[int]) -> list[int]:
         result = []
         total = 0
         for val in arr:
@@ -385,12 +344,8 @@ class TestUpdateNpuAttnOutLse(TestBase):
         k_nomask = None
         v_nomask = None
         kv_seqlens_nomask = self.kv_seqlens_nomask_cumsum
-        k_mask = torch.randn(
-            self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size
-        )
-        v_mask = torch.randn(
-            self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size
-        )
+        k_mask = torch.randn(self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size)
+        v_mask = torch.randn(self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size)
         kv_seqlens_mask = self.kv_seqlens_mask_cumsum
         mask = torch.randn(self.q_total_tokens, self.kv_total_mask)
         attn_metadata = self._build_attn_metadata(with_chunked_context=False)
@@ -436,26 +391,14 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.assertEqual(attn_lse.shape, (96, 8, 1))
 
     @patch("torch.ops.npu.npu_fused_infer_attention_score")
-    @patch(
-        "vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._update_out_and_lse"
-    )
-    def test_attention_with_nomask_and_mask_chunk(
-        self, mock_update_out_and_lse, mock_npu_fused_infer_attention_score
-    ):
+    @patch("vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._update_out_and_lse")
+    def test_attention_with_nomask_and_mask_chunk(self, mock_update_out_and_lse, mock_npu_fused_infer_attention_score):
         # Mock input data
         q = torch.randn(self.q_total_tokens, self.impl.num_heads, self.impl.head_size)
-        k_nomask = torch.randn(
-            self.kv_total_nomask, self.impl.num_kv_heads, self.impl.head_size
-        )
-        v_nomask = torch.randn(
-            self.kv_total_nomask, self.impl.num_kv_heads, self.impl.head_size
-        )
-        k_mask = torch.randn(
-            self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size
-        )
-        v_mask = torch.randn(
-            self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size
-        )
+        k_nomask = torch.randn(self.kv_total_nomask, self.impl.num_kv_heads, self.impl.head_size)
+        v_nomask = torch.randn(self.kv_total_nomask, self.impl.num_kv_heads, self.impl.head_size)
+        k_mask = torch.randn(self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size)
+        v_mask = torch.randn(self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size)
 
         mask = torch.randn(self.q_total_tokens, self.kv_total_mask)
         attn_metadata = self._build_attn_metadata(with_chunked_context=True)
@@ -488,26 +431,16 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.assertIsNotNone(attn_lse)
 
     @patch("torch.ops.npu.npu_fused_infer_attention_score")
-    @patch(
-        "vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update"
-    )
+    @patch("vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update")
     def test_attention_with_nomask_and_mask_nochunk(
         self, mock_npu_attn_out_lse_update, mock_npu_fused_infer_attention_score
     ):
         # Mock input data
         q = torch.randn(self.q_total_tokens, self.impl.num_heads, self.impl.head_size)
-        k_nomask = torch.randn(
-            self.kv_total_nomask, self.impl.num_kv_heads, self.impl.head_size
-        )
-        v_nomask = torch.randn(
-            self.kv_total_nomask, self.impl.num_kv_heads, self.impl.head_size
-        )
-        k_mask = torch.randn(
-            self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size
-        )
-        v_mask = torch.randn(
-            self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size
-        )
+        k_nomask = torch.randn(self.kv_total_nomask, self.impl.num_kv_heads, self.impl.head_size)
+        v_nomask = torch.randn(self.kv_total_nomask, self.impl.num_kv_heads, self.impl.head_size)
+        k_mask = torch.randn(self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size)
+        v_mask = torch.randn(self.kv_total_mask, self.impl.num_kv_heads, self.impl.head_size)
         mask = torch.randn(self.q_total_tokens, self.kv_total_mask)
 
         attn_metadata = self._build_attn_metadata(with_chunked_context=True)
@@ -541,12 +474,8 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.assertIsNotNone(output)
         self.assertEqual(attn_lse, None)
 
-    @patch(
-        "vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update"
-    )
-    def test_update_chunk_attn_out_lse_with_current_attn_out_lse(
-        self, mock_npu_attn_out_lse_update
-    ):
+    @patch("vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update")
+    def test_update_chunk_attn_out_lse_with_current_attn_out_lse(self, mock_npu_attn_out_lse_update):
         # Mock input data
         current_attn_output_prefill = torch.randn(32764, 8, 128)
         current_attn_lse_prefill = torch.randn(32764, 8, 1)
@@ -555,12 +484,8 @@ class TestUpdateNpuAttnOutLse(TestBase):
         prefill_query = torch.randn(32764, 8, 128)
         # mock attn_metadata
         attn_metadata = self._build_attn_metadata(with_chunked_context=True)
-        attn_metadata.prefill.chunked_context.chunk_seq_mask_filtered_indices = (
-            torch.arange(32764, dtype=torch.int32)
-        )
-        attn_metadata.prefill.chunked_context.kv_inverse_idx_for_chunk = torch.arange(
-            32764, dtype=torch.int32
-        )
+        attn_metadata.prefill.chunked_context.chunk_seq_mask_filtered_indices = torch.arange(32764, dtype=torch.int32)
+        attn_metadata.prefill.chunked_context.kv_inverse_idx_for_chunk = torch.arange(32764, dtype=torch.int32)
         # Mock output
         mock_npu_attn_out_lse_update.return_value = torch.randn(32764, 8, 128)
         # test pcp_size > 1
@@ -603,9 +528,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         mock_npu_attention_update.return_value = (torch.randn(8 * 128, 128), None)
 
         # Call the method under test
-        output = self.impl._npu_attn_out_lse_update(
-            attn_lse_mask, attn_lse_nomask, attn_out_mask, attn_out_nomask
-        )
+        output = self.impl._npu_attn_out_lse_update(attn_lse_mask, attn_lse_nomask, attn_out_mask, attn_out_nomask)
 
         # Assert the method call
         self.assertIsInstance(output, torch.Tensor)
@@ -622,18 +545,14 @@ class TestUpdateNpuAttnOutLse(TestBase):
         out_final, lse_final = self.impl._update_out_and_lse(out_list, lse_list)
 
         # Assert the method call
-        self.assertEqual(
-            out_final.shape, (2, 4, 8)
-        )  # [batch_size, num_heads, head_size]
+        self.assertEqual(out_final.shape, (2, 4, 8))  # [batch_size, num_heads, head_size]
         self.assertEqual(lse_final.shape, (2, 4, 1))  # [batch_size, num_heads, 1]
 
         self.assertIsInstance(out_final, torch.Tensor)
         self.assertIsInstance(lse_final, torch.Tensor)
 
     @patch_distributed_groups(dcp_size=2, pcp_size=3)
-    def test_update_chunk_attn_out_lse_dcp2_pcp3(
-        self, mock_all_to_all_single, mock_dcp, mock_pcp
-    ):
+    def test_update_chunk_attn_out_lse_dcp2_pcp3(self, mock_all_to_all_single, mock_dcp, mock_pcp):
         # Mock input data
         prefix_chunk_output = torch.randn(2, 4, 8)
         prefix_chunk_lse = torch.randn(2, 4, 1)
@@ -642,11 +561,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.impl.head_size = 8
 
         # Call the method under test
-        chunk_data = (
-            torch.cat([prefix_chunk_output, prefix_chunk_lse], dim=-1)
-            .permute([1, 2, 0])
-            .contiguous()
-        )
+        chunk_data = torch.cat([prefix_chunk_output, prefix_chunk_lse], dim=-1).permute([1, 2, 0]).contiguous()
         global_context_output = self.impl._gather_global_context_output(chunk_data)
         global_context_output = global_context_output.permute([2, 0, 1]).contiguous()
         output, lse = self.impl._update_global_context_output(global_context_output)
@@ -661,9 +576,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         mock_pcp.all_gather.assert_called_once()
 
     @patch_distributed_groups(dcp_size=2)
-    def test_update_chunk_attn_out_lse_dcp2_pcp1(
-        self, mock_all_to_all_single, mock_dcp, mock_pcp
-    ):
+    def test_update_chunk_attn_out_lse_dcp2_pcp1(self, mock_all_to_all_single, mock_dcp, mock_pcp):
         # Mock input data
         prefix_chunk_output = torch.randn(2, 4, 8)
         prefix_chunk_lse = torch.randn(2, 4, 1)
@@ -673,11 +586,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.impl.head_size = 8
 
         # Call the method under test
-        chunk_data = (
-            torch.cat([prefix_chunk_output, prefix_chunk_lse], dim=-1)
-            .permute([1, 2, 0])
-            .contiguous()
-        )
+        chunk_data = torch.cat([prefix_chunk_output, prefix_chunk_lse], dim=-1).permute([1, 2, 0]).contiguous()
         global_context_output = self.impl._gather_global_context_output(chunk_data)
         global_context_output = global_context_output.permute([2, 0, 1]).contiguous()
         output, lse = self.impl._update_global_context_output(global_context_output)
@@ -692,9 +601,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         mock_pcp.all_gather.assert_not_called()
 
     @patch_distributed_groups(pcp_size=2)
-    def test_update_chunk_attn_out_lse_dcp1_pcp2(
-        self, mock_all_to_all_single, mock_dcp, mock_pcp
-    ):
+    def test_update_chunk_attn_out_lse_dcp1_pcp2(self, mock_all_to_all_single, mock_dcp, mock_pcp):
         # Mock input data
         prefix_chunk_output = torch.randn(2, 4, 8)
         prefix_chunk_lse = torch.randn(2, 4, 1)
@@ -704,11 +611,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.impl.head_size = 8
 
         # Call the method under test
-        chunk_data = (
-            torch.cat([prefix_chunk_output, prefix_chunk_lse], dim=-1)
-            .permute([1, 2, 0])
-            .contiguous()
-        )
+        chunk_data = torch.cat([prefix_chunk_output, prefix_chunk_lse], dim=-1).permute([1, 2, 0]).contiguous()
         global_context_output = self.impl._gather_global_context_output(chunk_data)
         global_context_output = global_context_output.permute([2, 0, 1]).contiguous()
         output, lse = self.impl._update_global_context_output(global_context_output)

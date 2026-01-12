@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, List, Optional
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -37,10 +37,7 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
 @lru_cache(maxsize=1)
 def enable_cp():
     prefill_config = get_current_vllm_config().parallel_config
-    return (
-        prefill_config.prefill_context_parallel_size > 1
-        or prefill_config.decode_context_parallel_size > 1
-    )
+    return prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1
 
 
 @dataclass
@@ -52,7 +49,7 @@ class AscendPrefillContextParallelMetadata:
 
     num_actual_tokens_pcp_padded: int = 0
 
-    num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
+    num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None
 
     q_head_idx_tensor: torch.Tensor = None
 
@@ -108,14 +105,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # padding tokens. It is used to handle some padding operations.
     num_input_tokens: int = 0
 
-    prefill_context_parallel_metadata: Optional[
-        AscendPrefillContextParallelMetadata
-    ] = None
+    prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
-    def unpadded(
-        self, num_actual_tokens: int, num_actual_reqs: int
-    ) -> "AscendCommonAttentionMetadata":
+    def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
         # This only use to eagle now. It will be use to enforce_eager in future.
         return AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
@@ -145,7 +138,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
 def filter_chunked_req_indices(
     seq_len: torch.Tensor,
-    mask_for_non_zero_chunk: Optional[List[bool]],
+    mask_for_non_zero_chunk: list[bool] | None,
 ) -> torch.Tensor:
     """
     filter the reqs which are doing real chunk_prefill.
@@ -156,9 +149,7 @@ def filter_chunked_req_indices(
     Returns:
         filtered_indices: the real chunked req's indices
     """
-    assert mask_for_non_zero_chunk is not None and len(seq_len) == len(
-        mask_for_non_zero_chunk
-    )
+    assert mask_for_non_zero_chunk is not None and len(seq_len) == len(mask_for_non_zero_chunk)
     offsets = torch.cumsum(torch.cat([torch.tensor([0]), seq_len[:-1]]), dim=0)
     filtered_indices = torch.cat(
         [
@@ -192,17 +183,9 @@ def split_decodes_and_prefills(
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
     long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-    query_lens_pcp_full = (
-        long_seq_metadata.query_lens_pcp_full_cpu if long_seq_metadata else None
-    )
-    max_query_len_pcp_full = (
-        long_seq_metadata.max_query_len_pcp_full if long_seq_metadata else 0
-    )
-    max_query_len = (
-        common_attn_metadata.max_query_len
-        if max_query_len_pcp_full == 0
-        else max_query_len_pcp_full
-    )
+    query_lens_pcp_full = long_seq_metadata.query_lens_pcp_full_cpu if long_seq_metadata else None
+    max_query_len_pcp_full = long_seq_metadata.max_query_len_pcp_full if long_seq_metadata else 0
+    max_query_len = common_attn_metadata.max_query_len if max_query_len_pcp_full == 0 else max_query_len_pcp_full
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
@@ -210,11 +193,7 @@ def split_decodes_and_prefills(
     if max_query_len <= decode_threshold:
         return num_reqs, 0, num_tokens, 0
 
-    query_lens = (
-        (query_start_loc[1:] - query_start_loc[:-1])
-        if query_lens_pcp_full is None
-        else query_lens_pcp_full
-    )
+    query_lens = (query_start_loc[1:] - query_start_loc[:-1]) if query_lens_pcp_full is None else query_lens_pcp_full
     is_prefill = query_lens > decode_threshold
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
@@ -243,7 +222,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
 def maybe_save_kv_layer_to_connector(
     layer_name: str,
-    kv_cache_layer: List[torch.Tensor],
+    kv_cache_layer: list[torch.Tensor],
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -269,9 +248,7 @@ def trans_rope_weight(weight, rope_dim):
         return weight.contiguous()
     nope_part = weight[..., :-rope_dim, :]
     rope_part = weight[..., -rope_dim:, :]
-    reordered_rope_part = torch.cat(
-        (rope_part[..., ::2, :], rope_part[..., 1::2, :]), dim=-2
-    )
+    reordered_rope_part = torch.cat((rope_part[..., ::2, :], rope_part[..., 1::2, :]), dim=-2)
     return torch.cat((nope_part, reordered_rope_part), dim=-2).contiguous()
 
 
@@ -288,7 +265,5 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
         ),
         [2, 0, 1, 3],
     )
-    nz_mat = torch.reshape(
-        nz_mat, (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3])
-    )
+    nz_mat = torch.reshape(nz_mat, (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3]))
     return nz_mat

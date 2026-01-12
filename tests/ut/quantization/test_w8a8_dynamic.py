@@ -22,9 +22,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         mock_get_mc2_group,
         mock_get_rank,
     ):
-        with patch(
-            "vllm_ascend.quantization.w8a8_dynamic.get_current_vllm_config"
-        ) as mock_get_current_vllm_config:
+        with patch("vllm_ascend.quantization.w8a8_dynamic.get_current_vllm_config") as mock_get_current_vllm_config:
             mock_vllm_config = Mock()
             mock_vllm_config.quant_config = Mock(quant_description={"group_size": 256})
             mock_vllm_config.scheduler_config = Mock(
@@ -86,28 +84,14 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             ),
             requires_grad=False,
         )
-        w13_weight_scale = torch.zeros(
-            (self.num_experts, 2 * self.intermediate_size, 1), dtype=torch.float32
-        )
-        layer.w13_weight_scale = torch.nn.Parameter(
-            w13_weight_scale, requires_grad=False
-        )
-        w13_weight_offset = torch.zeros(
-            (self.num_experts, 2 * self.intermediate_size, 1), dtype=torch.float32
-        )
-        layer.w13_weight_offset = torch.nn.Parameter(
-            w13_weight_offset, requires_grad=False
-        )
-        w2_weight_scale = torch.zeros(
-            (self.num_experts, self.hidden_size, 1), dtype=torch.float32
-        )
+        w13_weight_scale = torch.zeros((self.num_experts, 2 * self.intermediate_size, 1), dtype=torch.float32)
+        layer.w13_weight_scale = torch.nn.Parameter(w13_weight_scale, requires_grad=False)
+        w13_weight_offset = torch.zeros((self.num_experts, 2 * self.intermediate_size, 1), dtype=torch.float32)
+        layer.w13_weight_offset = torch.nn.Parameter(w13_weight_offset, requires_grad=False)
+        w2_weight_scale = torch.zeros((self.num_experts, self.hidden_size, 1), dtype=torch.float32)
         layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale, requires_grad=False)
-        w2_weight_offset = torch.zeros(
-            (self.num_experts, self.hidden_size, 1), dtype=torch.float32
-        )
-        layer.w2_weight_offset = torch.nn.Parameter(
-            w2_weight_offset, requires_grad=False
-        )
+        w2_weight_offset = torch.zeros((self.num_experts, self.hidden_size, 1), dtype=torch.float32)
+        layer.w2_weight_offset = torch.nn.Parameter(w2_weight_offset, requires_grad=False)
         return layer
 
     @patch("torch_npu.npu_format_cast")

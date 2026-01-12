@@ -47,9 +47,7 @@ class TestMatrixMultiplication(unittest.TestCase):
                 f"Relative error too large: {relative_diff} > {rtol}. Max difference: {max_diff}",
             )
 
-        self.assertLessEqual(
-            max_diff, atol, f"Absolute error too large: {max_diff} > {atol}"
-        )
+        self.assertLessEqual(max_diff, atol, f"Absolute error too large: {max_diff} > {atol}")
 
     def test_boundary_conditions(self):
         """Test boundary conditions"""

@@ -19,14 +19,15 @@
 #
 
 import os
-from typing import Any, Callable, Dict
+from collections.abc import Callable
+from typing import Any
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
 # begin-env-vars-definition
 
-env_variables: Dict[str, Callable[[], Any]] = {
+env_variables: dict[str, Callable[[], Any]] = {
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
@@ -70,25 +71,17 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "USE_OPTIMIZED_MODEL": lambda: bool(int(os.getenv("USE_OPTIMIZED_MODEL", "1"))),
     # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
     # this feature is supported in A2, and eager mode will get better performance.
-    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))
-    ),
+    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))),
     # Whether to enable FlashComm optimization when tensor parallel is enabled.
     # This feature will get better performance when concurrency is large.
-    "VLLM_ASCEND_ENABLE_FLASHCOMM1": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))
-    ),
+    "VLLM_ASCEND_ENABLE_FLASHCOMM1": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))),
     # Whether to enable FLASHCOMM2. Setting it to 0 disables the feature, while setting it to 1 or above enables it.
     # The specific value set will be used as the O-matrix TP group size for flashcomm2.
     # For a detailed introduction to the parameters and the differences and applicable scenarios
     # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
-    "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": lambda: int(
-        os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)
-    ),
+    "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
     # Whether to enable MLP weight prefetch, only used in small concurrency.
-    "VLLM_ASCEND_ENABLE_PREFETCH_MLP": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0"))
-    ),
+    "VLLM_ASCEND_ENABLE_PREFETCH_MLP": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0"))),
     # buffer size for gate up prefetch
     "VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE": lambda: int(
         os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", 18 * 1024 * 1024)
@@ -99,18 +92,14 @@ env_variables: Dict[str, Callable[[], Any]] = {
     ),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
-    "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "0"))
-    ),
+    "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "0"))),
     # Whether to enable weight cast format to FRACTAL_NZ.
     # 0: close nz;
     # 1: only quant case enable nz;
     # 2: enable nz as long as possible.
     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Decide whether we should enable CP parallelism.
-    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", "0"))
-    ),
+    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", "0"))),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
     # Whether to enable fused mc2(`dispatch_gmm_combine_decode`/`dispatch_ffn_combine` operator)
@@ -120,13 +109,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # 2: MC2 might be replaced by `dispatch_gmm_combine_decode` operator.
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
     # with W8A8. And MTP layer must be W8A8.
-    "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(
-        os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")
-    ),
+    "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
     # Whether to anbale balance scheduling
-    "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))
-    ),
+    "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
 }
 
 # end-env-vars-definition

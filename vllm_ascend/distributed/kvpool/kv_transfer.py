@@ -144,9 +144,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         starts = []
         ends = []
         keys = []
-        for start, end, key in self.token_database.process_tokens(
-            token_len, req_meta.block_hashes
-        ):
+        for start, end, key in self.token_database.process_tokens(token_len, req_meta.block_hashes):
             starts.append(start)
             ends.append(end)
             keys.append(key.to_string())
@@ -173,8 +171,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys = keys[skip_block_num:]
 
         logger.info(
-            "Storing KV cache for %d out of %d blocks "
-            "(skip_block_num=%d) for request %s",
+            "Storing KV cache for %d out of %d blocks (skip_block_num=%d) for request %s",
             len(keys),
             token_len // self.block_size,
             skip_block_num,
@@ -191,16 +188,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
             addrs = []
             sizes = []
             for index, start in enumerate(starts):
-                addr, size, _ = self.token_database.prepare_value(
-                    start, ends[index], block_ids
-                )
+                addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids)
                 addrs.append(addr)
                 sizes.append(size)
 
             if self.kv_role == "kv_consumer":
-                keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(
-                    keys, addrs, sizes
-                )
+                keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
             if current_event is not None:
                 current_event.synchronize()
@@ -245,24 +238,13 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         for start, end, key in self.token_database.process_tokens(
             req_meta.token_len_chunk, req_meta.block_hashes, mask_num
         ):
-            addr, size, _ = self.token_database.prepare_value(
-                start, end, req_meta.block_ids
-            )
+            addr, size, _ = self.token_database.prepare_value(start, end, req_meta.block_ids)
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_c = (
-            key_list[self.tp_rank % len(key_list) :]
-            + key_list[: self.tp_rank % len(key_list)]
-        )
-        addr_list_c = (
-            addr_list[self.tp_rank % len(addr_list) :]
-            + addr_list[: self.tp_rank % len(addr_list)]
-        )
-        size_list_c = (
-            size_list[self.tp_rank % len(size_list) :]
-            + size_list[: self.tp_rank % len(size_list)]
-        )
+        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+        addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+        size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
         self.m_store.get(key_list_c, addr_list_c, size_list_c)
         self.set_finished_request(req_id)
         self.request_queue.task_done()
@@ -350,8 +332,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.request_queue.task_done()
 
         logger.info(
-            "Storing KV cache for %d out of %d blocks "
-            "(skip_block_num=%d) for request %s",
+            "Storing KV cache for %d out of %d blocks (skip_block_num=%d) for request %s",
             len(keys),
             total_block,
             skip_block_num,
@@ -402,18 +383,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_c = (
-            key_list[self.tp_rank % len(key_list) :]
-            + key_list[: self.tp_rank % len(key_list)]
-        )
-        addr_list_c = (
-            addr_list[self.tp_rank % len(addr_list) :]
-            + addr_list[: self.tp_rank % len(addr_list)]
-        )
-        size_list_c = (
-            size_list[self.tp_rank % len(size_list) :]
-            + size_list[: self.tp_rank % len(size_list)]
-        )
+        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+        addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+        size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
         self.m_store.get(key_list_c, addr_list_c, size_list_c)
 
         self.request_queue.task_done()

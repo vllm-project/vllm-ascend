@@ -1,9 +1,10 @@
 import math
 import os
 import pickle
+from collections.abc import Callable
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
-from typing import Any, Callable, Optional
+from typing import Any
 
 import torch
 import vllm.envs as envs
@@ -72,13 +73,9 @@ class MetadataServer:
                 self.shared_memory_dict = memory_dict
                 result = {}
                 for key, shm in memory_dict.items():
-                    tensor = torch.frombuffer(shm.buf, dtype=layer_dtype).reshape(
-                        layer_size
-                    )
+                    tensor = torch.frombuffer(shm.buf, dtype=layer_dtype).reshape(layer_size)
                     if mla_config is not None:
-                        tensor = tensor.split(
-                            [mla_config.nope_dim, mla_config.rope_dim], dim=-1
-                        )
+                        tensor = tensor.split([mla_config.nope_dim, mla_config.rope_dim], dim=-1)
                     result[key] = tensor
             return result
 
@@ -139,12 +136,7 @@ class MetadataServer:
         logger.info(f"receive pp rank: {pp_rank}, tp rank: {tp_rank}")
         # follow the assumption that each layer has the same spec
         layer = next(iter(kv_cache_specs.values()))
-        assert all(
-            [
-                layer.page_size_bytes == any.page_size_bytes
-                for any in kv_cache_specs.values()
-            ]
-        )
+        assert all([layer.page_size_bytes == any.page_size_bytes for any in kv_cache_specs.values()])
         use_mla = isinstance(layer, MLAAttentionSpec)
         # mla shares the same kv cache among different tp
         if use_mla:
@@ -175,7 +167,7 @@ class MetadataServer:
                 layer.head_size,
             )  # type: ignore
         nbytes = math.prod(layer_size) * get_dtype_size(layer.dtype)
-        for layer_name in kv_cache_specs.keys():
+        for layer_name in kv_cache_specs:
             # only this format can share during ZeroMQ+pickle
             shared_memory_dict[layer_name] = MetadataServer._safe_create_shared_memory(
                 f"cpu_kv_cache_{pp_rank}_{tp_rank}_{layer_name}", nbytes
@@ -255,10 +247,7 @@ class MetadataServer:
 class MetadataServerProc:
     @staticmethod
     def run_metadata_server(vllm_config: VllmConfig):
-        if (
-            not vllm_config.cache_config.enable_prefix_caching
-            or get_cpu_offload_connector(vllm_config) is None
-        ):
+        if not vllm_config.cache_config.enable_prefix_caching or get_cpu_offload_connector(vllm_config) is None:
             return
 
         shutdown_requested = False
@@ -272,7 +261,7 @@ class MetadataServerProc:
         # Either SIGTERM or SIGINT will terminate the worker
         # signal.signal(signal.SIGTERM, _signal_handler)
         # signal.signal(signal.SIGINT, _signal_handler)
-        metadata_server: Optional[MetadataServer] = None
+        metadata_server: MetadataServer | None = None
         try:
             metadata_server = MetadataServer(vllm_config)
             logger.info("Metadata server started.")

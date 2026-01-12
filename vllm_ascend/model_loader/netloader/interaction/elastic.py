@@ -18,7 +18,6 @@ import json
 import re
 import socket
 import threading
-from typing import List, Optional, Tuple
 
 import torch
 from vllm.logger import logger
@@ -32,9 +31,7 @@ class ElasticClient:
     Class for handling the client-side logic of Netloader of models.
     """
 
-    def __init__(
-        self, sources: list[str], device_id: int, model_path: str, tp: int, pp: int
-    ):
+    def __init__(self, sources: list[str], device_id: int, model_path: str, tp: int, pp: int):
         """
         Initializes the ElasticClient instance.
 
@@ -51,10 +48,10 @@ class ElasticClient:
         self.tp = tp
         self.pp = pp
 
-        self.s: Optional[socket.socket] = None
-        self.ack: Optional[Tuple[str, int]] = None
-        self.server_addr: Optional[str] = None
-        self.server_port: Optional[int] = None
+        self.s: socket.socket | None = None
+        self.ack: tuple[str, int] | None = None
+        self.server_addr: str | None = None
+        self.server_port: int | None = None
 
         for source in self.sources:
             try:
@@ -69,13 +66,9 @@ class ElasticClient:
 
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                logger.info(
-                    f"Start connection to server: {self.server_addr}:{self.server_port}"
-                )
+                logger.info(f"Start connection to server: {self.server_addr}:{self.server_port}")
                 sock.connect((self.server_addr, self.server_port))
-                logger.info(
-                    f"Finish connection to server: {self.server_addr}:{self.server_port}"
-                )
+                logger.info(f"Finish connection to server: {self.server_addr}:{self.server_port}")
                 sock.settimeout(60)
 
                 self.s = sock
@@ -152,9 +145,7 @@ class ElasticClient:
         data_str = self.s.recv(buffer_size).decode("utf-8")
         return data_str
 
-    def register(
-        self, device_id: int, model_path: str, tp: int, pp: int
-    ) -> Tuple[str, int]:
+    def register(self, device_id: int, model_path: str, tp: int, pp: int) -> tuple[str, int]:
         """
         Registers the client with the server.
 
@@ -192,9 +183,7 @@ class ElasticClient:
         try:
             ack = json.loads(ack_str)
         except Exception as e:
-            raise RuntimeError(
-                f"Receive data {ack_str} cannot be converted to JSON format, detail: {e}"
-            )
+            raise RuntimeError(f"Receive data {ack_str} cannot be converted to JSON format, detail: {e}")
 
         logger.info(f"Receive ack: {ack}")
 
@@ -209,9 +198,7 @@ class ElasticClient:
         elif "label" in ack and ack["label"] == "JOIN_NACK" and "content" in ack:
             raise RuntimeError(f"Receive nack from server, reason: {ack['content']}")
         else:
-            raise RuntimeError(
-                f"Receive ack {ack} from server does not contain required fields"
-            )
+            raise RuntimeError(f"Receive ack {ack} from server does not contain required fields")
 
 
 class ElasticServer:
@@ -229,7 +216,7 @@ class ElasticServer:
         tp: int,
         pp: int,
         int8_cache: str,
-        int8_cache_name: Optional[List[str]],
+        int8_cache_name: list[str] | None,
     ):
         """
         Initializes the ElasticServer instance.
@@ -259,30 +246,22 @@ class ElasticServer:
         self.pp = pp
 
         self.original_int8 = {}
-        int8_pattern = (
-            "|".join(map(re.escape, int8_cache_name))
-            if int8_cache_name is not None
-            else "(?:)"
-        )
+        int8_pattern = "|".join(map(re.escape, int8_cache_name)) if int8_cache_name is not None else "(?:)"
         for name, param in self.model.named_parameters():
             if param.dtype == torch.int8:
                 if int8_cache == "hbm":
                     if int8_cache_name is None or (
-                        int8_cache_name is not None
-                        and re.search(int8_pattern, name) is not None
+                        int8_cache_name is not None and re.search(int8_pattern, name) is not None
                     ):
                         try:
                             self.original_int8[name] = param.data.clone().detach()
                         except RuntimeError as e:
-                            logger.error(
-                                f"Failed to cache int8 tensor {name} to HBM, change to DRAM, due to {e}"
-                            )
+                            logger.error(f"Failed to cache int8 tensor {name} to HBM, change to DRAM, due to {e}")
                             self.original_int8[name] = param.data.cpu()
 
                 elif int8_cache == "dram":
                     if int8_cache_name is None or (
-                        int8_cache_name is not None
-                        and re.search(int8_pattern, name) is not None
+                        int8_cache_name is not None and re.search(int8_pattern, name) is not None
                     ):
                         self.original_int8[name] = param.data.cpu()
                 elif int8_cache == "no":
@@ -359,9 +338,7 @@ class ElasticServer:
             if not all(k in content for k in required_keys):
                 return False
             port = content["port"]
-            if not (
-                isinstance(port, int) or (isinstance(port, str) and port.isdigit())
-            ):
+            if not (isinstance(port, int) or (isinstance(port, str) and port.isdigit())):
                 return False
             return True
 
@@ -409,18 +386,10 @@ class ElasticServer:
             conn.close()
             return
 
-        if (
-            ack["content"]
-            and isinstance(ack["content"], dict)
-            and "name" in ack["content"]
-        ):
+        if ack["content"] and isinstance(ack["content"], dict) and "name" in ack["content"]:
             try:
-                p2psend = P2PSend(
-                    self.addr, data["content"]["port"], ack["content"]["name"]
-                )
+                p2psend = P2PSend(self.addr, data["content"]["port"], ack["content"]["name"])
                 p2psend.send(self.model, self.original_int8)
             except Exception as e:
-                logger.error(
-                    f"P2PSend Failed to send model to {self.addr}, details: {e}"
-                )
+                logger.error(f"P2PSend Failed to send model to {self.addr}, details: {e}")
         conn.close()

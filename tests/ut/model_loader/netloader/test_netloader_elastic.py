@@ -32,9 +32,7 @@ from vllm_ascend.model_loader.netloader.interaction.elastic import (
 
 # Simulate server's normal response
 def mock_server_response(data):
-    return json.dumps({"label": "JOIN_ACK", "content": {"name": "mocked_name"}}).encode(
-        "utf-8"
-    )
+    return json.dumps({"label": "JOIN_ACK", "content": {"name": "mocked_name"}}).encode("utf-8")
 
 
 # Simulate server's error response
@@ -105,9 +103,8 @@ def test_elastic_client_register_error_response():
         mock_socket_instance.connect.return_value = None
         mock_socket_instance.recv.return_value = mock_server_error_response(None)
 
-        with ElasticClient(sources, device_id, model_path, tp, pp) as client:
-            with pytest.raises(RuntimeError):
-                client.register(device_id, model_path, tp, pp)
+        with ElasticClient(sources, device_id, model_path, tp, pp) as client, pytest.raises(RuntimeError):
+            client.register(device_id, model_path, tp, pp)
         mock_socket_instance.close.assert_called_once()
 
 
@@ -127,9 +124,8 @@ def test_elastic_client_register_exception():
         mock_socket_instance.__enter__.return_value = mock_socket_instance
         mock_socket_instance.__exit__.return_value = None
 
-        with ElasticClient(sources, device_id, model_path, tp, pp) as client:
-            with pytest.raises(RuntimeError):
-                client.register(device_id, model_path, tp, pp)
+        with ElasticClient(sources, device_id, model_path, tp, pp) as client, pytest.raises(RuntimeError):
+            client.register(device_id, model_path, tp, pp)
         mock_socket_instance.close.assert_called_once()
 
 
@@ -197,17 +193,13 @@ def test_server_initialization(server_config, mock_model):
 
         # Check the socket configuration
         mock_socket.assert_called_with(socket.AF_INET, socket.SOCK_STREAM)
-        mock_socket.return_value.setsockopt.assert_called_with(
-            socket.SOL_SOCKET, socket.SO_REUSEADDR, 1
-        )
+        mock_socket.return_value.setsockopt.assert_called_with(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         mock_socket.return_value.bind.assert_called_with(("127.0.0.1", 8080))
         mock_socket.return_value.listen.assert_called_with(256)
 
         # Check int8 cache
         assert "param2" in server.original_int8
-        assert (
-            server.original_int8["param2"].device.type == "cpu"
-        )  # Verifying DRAM Cache
+        assert server.original_int8["param2"].device.type == "cpu"  # Verifying DRAM Cache
 
         assert server.addr == server_config["addr"]
         assert server.port == server_config["port"]
@@ -226,12 +218,8 @@ def test_server_initialization(server_config, mock_model):
 
 
 # Test the int8 cache option
-@pytest.mark.parametrize(
-    "cache_option,expected_device", [("dram", "cpu"), ("no", None), ("invalid", None)]
-)
-def test_int8_cache_handling(
-    server_config, mock_model, cache_option, expected_device, caplog
-):
+@pytest.mark.parametrize("cache_option,expected_device", [("dram", "cpu"), ("no", None), ("invalid", None)])
+def test_int8_cache_handling(server_config, mock_model, cache_option, expected_device, caplog):
     server_config["int8_cache"] = cache_option
     server_config["model"] = mock_model
 
@@ -259,9 +247,7 @@ def test_int8_cache_handling(
 # Test client processing
 def test_client_handler_valid_join(server_config, mock_model):
     server_config["model"] = mock_model
-    with patch(
-        "vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend"
-    ) as mock_p2p_send:
+    with patch("vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend") as mock_p2p_send:
         # Create a simulated connection
         mock_conn = MagicMock()
         mock_addr = ("192.168.1.1", 12345)
@@ -352,11 +338,7 @@ def test_client_handler_invalid_requests(server_config, invalid_data, should_sen
             mock_addr = ("192.168.1.1", 12345)
 
             if isinstance(invalid_data, (str, bytes)):
-                mock_conn.recv.return_value = (
-                    invalid_data
-                    if isinstance(invalid_data, bytes)
-                    else invalid_data.encode()
-                )
+                mock_conn.recv.return_value = invalid_data if isinstance(invalid_data, bytes) else invalid_data.encode()
             else:
                 mock_conn.recv.return_value = json.dumps(invalid_data).encode("utf-8")
 
@@ -367,9 +349,7 @@ def test_client_handler_invalid_requests(server_config, invalid_data, should_sen
                     "label": "JOIN_NACK",
                     "content": f"Received data does not contain required fields: {invalid_data}",
                 }
-                mock_conn.send.assert_called_once_with(
-                    json.dumps(expected_ack).encode("utf-8")
-                )
+                mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
             else:
                 mock_conn.send.assert_not_called()
 

@@ -46,9 +46,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         fake_stream = MagicMock(name="FakeStream")
         fake_stream.synchronize = MagicMock()
 
-        self.first_kv_cache = torch.zeros(
-            (2, 2, 2, 8), dtype=torch.float32, device="cpu"
-        )
+        self.first_kv_cache = torch.zeros((2, 2, 2, 8), dtype=torch.float32, device="cpu")
 
         self.ready_event = threading.Event()
 
@@ -105,9 +103,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         side_effect=lambda x, _align: x,
     )
     @patch("vllm_ascend.distributed.mooncake_layerwise_connector.torch.npu.synchronize")
-    @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.group_concurrent_contiguous"
-    )
+    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.group_concurrent_contiguous")
     def test_transfer_pd_gt1_uses_buffers_and_calls_engine(
         self, mock_group, _mock_sync, _mock_align, _mock_dataptr, mock_stream_switch
     ):
@@ -150,9 +146,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         thread._transfer_kv_cache(send_task)
 
         self.engine.batch_transfer_sync_write.assert_called_once()
-        session_id, src_list, dst_list, length_list = (
-            self.engine.batch_transfer_sync_write.call_args[0]
-        )
+        session_id, src_list, dst_list, length_list = self.engine.batch_transfer_sync_write.call_args[0]
         self.assertEqual(session_id, "127.0.0.1:6000")
 
         self.assertEqual(len(src_list), 4)
@@ -245,9 +239,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
 
 class TestKVCacheRecvingLayerThread(unittest.TestCase):
     def setUp(self):
-        self.meta = MooncakeAgentMetadata(
-            te_rpc_port=6000, kv_caches_base_addr=[0x1, 0x2]
-        )
+        self.meta = MooncakeAgentMetadata(te_rpc_port=6000, kv_caches_base_addr=[0x1, 0x2])
         self.ready_event = threading.Event()
 
     def test_get_and_clear_finished_requests(self):
@@ -303,12 +295,8 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
         "vllm_ascend.distributed.mooncake_layerwise_connector.make_zmq_path",
         side_effect=lambda proto, host, port: f"{proto}://{host}:{port}",
     )
-    @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Decoder"
-    )
-    @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Encoder"
-    )
+    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Decoder")
+    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Encoder")
     @patch("vllm_ascend.distributed.mooncake_layerwise_connector.zmq_ctx")
     def test_run_loop_handles_meta_done_invalid_unexpected_and_ack(
         self,
@@ -388,12 +376,8 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
         "vllm_ascend.distributed.mooncake_layerwise_connector.get_ip",
         return_value="127.0.0.1",
     )
-    @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Decoder"
-    )
-    @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Encoder"
-    )
+    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Decoder")
+    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Encoder")
     @patch("vllm_ascend.distributed.mooncake_layerwise_connector.zmq_ctx")
     def test_run_loop_pd_head_ratio_gt1_requires_multiple_done(
         self, mock_zmq_ctx, mock_Encoder, mock_Decoder, _mock_get_ip, _mock_logger
@@ -464,9 +448,7 @@ class MockVllmConfig:
 
 
 class MockRequest:
-    def __init__(
-        self, request_id, prompt_token_ids=None, kv_transfer_params=None, status=None
-    ):
+    def __init__(self, request_id, prompt_token_ids=None, kv_transfer_params=None, status=None):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids or [1, 2, 3, 4]
         self.kv_transfer_params = kv_transfer_params or {}
@@ -541,9 +523,7 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
 class _MockBlocks:
     def __init__(self, unhashed, block_ids_tuple=None):
         self._unhashed = list(unhashed)
-        self._block_ids_tuple = (
-            block_ids_tuple if block_ids_tuple is not None else ([1, 2],)
-        )
+        self._block_ids_tuple = block_ids_tuple if block_ids_tuple is not None else ([1, 2],)
 
     def get_unhashed_block_ids(self):
         return list(self._unhashed)
@@ -583,9 +563,7 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
             prompt_token_ids=list(range(32)),
             kv_transfer_params={"do_remote_prefill": True},
         )
-        tokens, async_flag = self.scheduler.get_num_new_matched_tokens(
-            req, num_computed_tokens=16
-        )
+        tokens, async_flag = self.scheduler.get_num_new_matched_tokens(req, num_computed_tokens=16)
         self.assertEqual(tokens, 16)
         self.assertTrue(async_flag)
 
@@ -664,12 +642,8 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         meta = self.scheduler.build_connector_meta(out)
         self.assertEqual(len(meta.requests), 0)
 
-    @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.group_concurrent_contiguous"
-    )
-    def test_build_connector_meta_emits_when_tokens_reach_total(
-        self, mock_group_concurrent_contiguous
-    ):
+    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.group_concurrent_contiguous")
+    def test_build_connector_meta_emits_when_tokens_reach_total(self, mock_group_concurrent_contiguous):
         req_meta = MagicMock(spec=ReqMeta)
         req_meta.local_block_ids = [1, 2, 3]
         req_meta.remote_block_ids = [4, 5]
@@ -746,9 +720,8 @@ class TestHelperFunctions(unittest.TestCase):
         self.assertNotEqual(hash1, hash3)
 
     def test_zmq_ctx_invalid_type(self):
-        with self.assertRaises(ValueError):
-            with zmq_ctx("INVALID", "tcp://127.0.0.1:5555"):
-                pass
+        with self.assertRaises(ValueError), zmq_ctx("INVALID", "tcp://127.0.0.1:5555"):
+            pass
 
     @patch("vllm_ascend.distributed.mooncake_layerwise_connector.make_zmq_socket")
     def test_zmq_ctx_ok(self, mock_make_socket):
@@ -917,9 +890,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
             ),
             patch(
                 "vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config",
-                return_value=SimpleNamespace(
-                    pd_tp_ratio=1, num_head_replica=1, pd_head_ratio=1
-                ),
+                return_value=SimpleNamespace(pd_tp_ratio=1, num_head_replica=1, pd_head_ratio=1),
             ),
         ]
 

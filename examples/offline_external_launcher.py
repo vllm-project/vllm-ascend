@@ -63,13 +63,13 @@ from multiprocessing import Process
 from time import sleep
 
 import torch
+from safetensors.torch import load_file
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (  # noqa E402
     destroy_distributed_environment,
     destroy_model_parallel,
     get_tp_group,
 )
-from safetensors.torch import load_file
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_open_port
 
@@ -80,9 +80,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 def patch_vllm_moe_model_weight_loader(model):
     model = getattr(model, "model", None) or getattr(model, "language_model", None)
     if model is None:
-        raise ValueError(
-            "The provided model does not have a valid 'model' or 'language_model' attribute."
-        )
+        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
     for layer in model.layers:
         mlp_attr = "mlp"
         mlp = getattr(layer, mlp_attr)
@@ -114,25 +112,13 @@ def parse_args():
         help="Model name or path",
     )
     parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size")
-    parser.add_argument(
-        "--node-size", type=int, default=1, help="Total number of nodes"
-    )
-    parser.add_argument(
-        "--node-rank", type=int, default=0, help="Rank of the current node"
-    )
-    parser.add_argument(
-        "--proc-per-node", type=int, default=1, help="Number of processes per node"
-    )
-    parser.add_argument(
-        "--master-addr", type=str, default="", help="Master node IP address"
-    )
+    parser.add_argument("--node-size", type=int, default=1, help="Total number of nodes")
+    parser.add_argument("--node-rank", type=int, default=0, help="Rank of the current node")
+    parser.add_argument("--proc-per-node", type=int, default=1, help="Number of processes per node")
+    parser.add_argument("--master-addr", type=str, default="", help="Master node IP address")
     parser.add_argument("--master-port", type=int, default=0, help="Master node port")
-    parser.add_argument(
-        "--enforce-eager", action="store_true", help="Enforce eager mode execution."
-    )
-    parser.add_argument(
-        "--trust-remote-code", action="store_true", help="Trust remote code."
-    )
+    parser.add_argument("--enforce-eager", action="store_true", help="Enforce eager mode execution.")
+    parser.add_argument("--trust-remote-code", action="store_true", help="Trust remote code.")
     parser.add_argument(
         "--enable-expert-parallel",
         action="store_true",
@@ -170,13 +156,9 @@ def parse_args():
                 "model-weight-gib must be provided, and temperature must be zero when enable-sleep-mode is set."
             )
         if args.model_weight_gib <= 0:
-            parser.error(
-                "model-weight-gib must be greater than 0 when enable-sleep-mode is set."
-            )
+            parser.error("model-weight-gib must be greater than 0 when enable-sleep-mode is set.")
         if args.model == parser.get_default("model") and args.model_weight_gib is None:
-            parser.error(
-                "model-weight-gib must be provided for default model when enable-sleep-mode is set."
-            )
+            parser.error("model-weight-gib must be provided for default model when enable-sleep-mode is set.")
 
     return args
 
@@ -249,9 +231,7 @@ def main(
             llm.wake_up()
         else:
             llm.wake_up(tags=["weights"])
-            run_model = (
-                llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
-            )
+            run_model = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
             patch_vllm_moe_model_weight_loader(run_model)
             sd = load_and_merge_safetensors(model)
             run_model.load_weights(sd.items())
@@ -269,10 +249,7 @@ def main(
             break
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(
-            f"Global rank: {rank}, Prompt: {prompt!r}, "
-            f"Generated text: {generated_text!r}"
-        )
+        print(f"Global rank: {rank}, Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     # Give engines time to pause their processing loops before exiting.
     sleep(5)
@@ -308,9 +285,7 @@ if __name__ == "__main__":
     world_size = node_size * proc_per_node
 
     procs = []
-    for local_rank, rank in enumerate(
-        range(proc_per_node * node_rank, proc_per_node * (node_rank + 1))
-    ):
+    for local_rank, rank in enumerate(range(proc_per_node * node_rank, proc_per_node * (node_rank + 1))):
         proc = Process(
             target=main,
             args=(

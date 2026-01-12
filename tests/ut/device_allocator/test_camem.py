@@ -56,9 +56,7 @@ class TestCaMem(PytestBase):
         ],
     )
     def test_create_and_map_calls_python_create_and_map(self, handle):
-        with patch(
-            "vllm_ascend.device_allocator.camem.python_create_and_map"
-        ) as mock_create:
+        with patch("vllm_ascend.device_allocator.camem.python_create_and_map") as mock_create:
             create_and_map(handle)
             mock_create.assert_called_once_with(*handle)
 
@@ -70,9 +68,7 @@ class TestCaMem(PytestBase):
         ],
     )
     def test_unmap_and_release_calls_python_unmap_and_release(self, handle):
-        with patch(
-            "vllm_ascend.device_allocator.camem.python_unmap_and_release"
-        ) as mock_release:
+        with patch("vllm_ascend.device_allocator.camem.python_unmap_and_release") as mock_release:
             unmap_and_release(handle)
             mock_release.assert_called_once_with(*handle)
 
@@ -159,9 +155,7 @@ class TestCaMem(PytestBase):
 
     @patch("vllm_ascend.device_allocator.camem.create_and_map")
     @patch("vllm_ascend.device_allocator.camem.memcpy")
-    def test_wake_up_loads_and_clears_cpu_backup(
-        self, mock_memcpy, mock_create_and_map
-    ):
+    def test_wake_up_loads_and_clears_cpu_backup(self, mock_memcpy, mock_create_and_map):
         allocator = CaMemAllocator.get_instance()
 
         handle = (1, 10, 1000, 0)

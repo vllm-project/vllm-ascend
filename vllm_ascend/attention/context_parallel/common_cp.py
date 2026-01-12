@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -23,7 +22,7 @@ class AscendPCPMetadata:
     head_attn_nomask_seqlens: torch.Tensor = None
     tail_attn_nomask_seqlens: torch.Tensor = None
     q_full_idx: torch.Tensor = None
-    pcp_allgather_restore_idx: Optional[list[int]] = None
+    pcp_allgather_restore_idx: list[int] | None = None
 
 
 @dataclass
@@ -39,11 +38,11 @@ class CPChunkedContextMetadata:
     chunk_seq_lens_npu: torch.Tensor
     # for mla DCP & PCP
     padded_chunk_seq_lens_npu: torch.Tensor = None
-    padded_local_chunk_seq_lens: Optional[list[list[int]]] = None
-    local_context_lens_allranks: Optional[list[list[int]]] = None
+    padded_local_chunk_seq_lens: list[list[int]] | None = None
+    local_context_lens_allranks: list[list[int]] | None = None
     padded_local_cu_seq_lens: torch.Tensor = None
-    cu_seq_lens_lst: Optional[list[list[int]]] = None
-    chunk_size: Optional[int] = None
+    cu_seq_lens_lst: list[list[int]] | None = None
+    chunk_size: int | None = None
 
 
 @dataclass
@@ -54,16 +53,16 @@ class AscendMetadataForPrefill:
         actual_seq_lengths_kv: torch.Tensor
         starts: torch.Tensor
         chunk_seq_mask_filtered_indices: torch.Tensor
-        chunked_req_mask: Optional[list[bool]] = None
-        local_context_lens_allranks: Optional[list[list[int]]] = None
-        cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
-        kv_inverse_idx_for_chunk: Optional[list[int]] = None
-        batch_chunk_seq_mask: Optional[list[bool]] = None
-        local_total_toks: Optional[int] = None
+        chunked_req_mask: list[bool] | None = None
+        local_context_lens_allranks: list[list[int]] | None = None
+        cp_kv_recover_idx_for_chunk: list[int] | None = None
+        kv_inverse_idx_for_chunk: list[int] | None = None
+        batch_chunk_seq_mask: list[bool] | None = None
+        local_total_toks: int | None = None
 
     """ Prefill Specific Metadata for Ascend"""
-    pcp_metadata: Optional[AscendPCPMetadata] = None
-    chunked_context: Optional[ChunkedContextMetadata] = None
+    pcp_metadata: AscendPCPMetadata | None = None
+    chunked_context: ChunkedContextMetadata | None = None
     block_tables: torch.Tensor = None
     actual_seq_lengths_q: torch.Tensor = None
 
@@ -72,7 +71,7 @@ class AscendMetadataForPrefill:
 class AscendMetadataForDecode:
     """Decode Specific Metadata for Ascend"""
 
-    num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
+    num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None
     batch_seq_mask: torch.Tensor = None
     block_tables: torch.Tensor = None
 

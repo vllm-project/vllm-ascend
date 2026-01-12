@@ -203,9 +203,7 @@ class TestUtils(TestBase):
         self.assertIn("num_hidden_layers", str(context.exception))
 
     def test_update_aclgraph_sizes(self):
-        test_compilation_config = CompilationConfig(
-            cudagraph_capture_sizes=[i for i in range(150)]
-        )
+        test_compilation_config = CompilationConfig(cudagraph_capture_sizes=[i for i in range(150)])
         model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
         test_model_config = ModelConfig(model=model_path, enforce_eager=True)
         test_parallel_config = ParallelConfig()
@@ -219,9 +217,7 @@ class TestUtils(TestBase):
         utils.update_aclgraph_sizes(test_vllm_config)
         del os.environ["HCCL_OP_EXPANSION_MODE"]
 
-        self.assertEqual(
-            0, len(test_vllm_config.compilation_config.cudagraph_capture_sizes)
-        )
+        self.assertEqual(0, len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
 
     @mock.patch("vllm.model_executor.custom_op.CustomOp")
     @mock.patch("vllm_ascend.ops.activation.AscendQuickGELU")
@@ -238,16 +234,12 @@ class TestUtils(TestBase):
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        self.assertEqual(
-            mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS)
-        )
+        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        self.assertEqual(
-            mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS)
-        )
+        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
 
 
 class TestProfileExecuteDuration(TestBase):
@@ -290,9 +282,7 @@ class TestProfileExecuteDuration(TestBase):
     def test_lock_usage(self):
         original_lock = utils.ProfileExecuteDuration._lock
 
-        with mock.patch.object(
-            utils.ProfileExecuteDuration, "_lock", wraps=original_lock
-        ) as mock_lock:
+        with mock.patch.object(utils.ProfileExecuteDuration, "_lock", wraps=original_lock) as mock_lock:
             utils.ProfileExecuteDuration()
             mock_lock.__enter__.assert_called()
             mock_lock.__exit__.assert_called()

@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 import torch_npu
@@ -35,9 +35,7 @@ def quant_per_tensor(
     input_offset: torch.Tensor,
     function=False,
 ):
-    return torch_npu.npu_quantize(
-        in_tensor, input_scale, input_offset, torch.qint8, -1, function
-    )
+    return torch_npu.npu_quantize(in_tensor, input_scale, input_offset, torch.qint8, -1, function)
 
 
 class AscendW8A8LinearMethod:
@@ -55,12 +53,12 @@ class AscendW8A8LinearMethod:
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype = torch.bfloat16,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict
 
     @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pertensor_param(params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {}
         params_dict["input_scale"] = torch.empty(1, dtype=params_dtype)
         params_dict["input_offset"] = torch.empty(1, dtype=torch.int8)
@@ -70,7 +68,7 @@ class AscendW8A8LinearMethod:
     def get_perchannel_param(
         output_size: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         params_dict = {}
         params_dict["quant_bias"] = torch.empty(output_size, dtype=torch.int32)
         if params_dtype == torch.bfloat16:
@@ -86,16 +84,16 @@ class AscendW8A8LinearMethod:
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
-        layer_type: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        layer_type: str | None = None,
+    ) -> dict[str, Any]:
         return {}
 
     @staticmethod
     def apply(
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-        tp_rank: Optional[int] = 0,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
     ) -> torch.Tensor:
         if x.dtype != torch.int8:
             layer_cls_name = layer.__class__.__name__
@@ -108,7 +106,7 @@ class AscendW8A8LinearMethod:
                     start_flag=x,
                 )
             try:
-                quant_comm_config = getattr(layer, "_quant_comm_config")
+                quant_comm_config = layer._quant_comm_config
             except AttributeError:
                 quant_comm_config = {}
             comm_fn = quant_comm_config.get("communication_fn")
@@ -116,9 +114,7 @@ class AscendW8A8LinearMethod:
                 "o_proj" in layer.prefix or "out_proj" in layer.prefix
             )
             if enable_flashcomm2_quant_comm:
-                quant_input_x = x.contiguous().view(
-                    -1, layer.aclnn_input_scale_reciprocal.size(0)
-                )
+                quant_input_x = x.contiguous().view(-1, layer.aclnn_input_scale_reciprocal.size(0))
                 quant_x = torch.ops.vllm.quantize(
                     quant_input_x,
                     layer.aclnn_input_scale,
@@ -147,7 +143,7 @@ class AscendW8A8LinearMethod:
         quant_bias = layer.quant_bias if tp_rank == 0 else None
 
         try:
-            ascend_quant_method = getattr(layer, "ascend_quant_method")
+            ascend_quant_method = layer.ascend_quant_method
         except AttributeError:
             ascend_quant_method = ""
         if ascend_quant_method == COMPRESSED_TENSORS_METHOD:

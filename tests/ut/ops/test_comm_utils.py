@@ -42,18 +42,12 @@ class TestDistributedCommunication(PytestBase):
             (torch.randn(16, 32), None, None),
         ],
     )
-    def test_async_all_to_all(
-        self, input_tensor, output_split_sizes, input_split_sizes, mocker: MockerFixture
-    ):
+    def test_async_all_to_all(self, input_tensor, output_split_sizes, input_split_sizes, mocker: MockerFixture):
         """Test async_all_to_all"""
         mock_group = mocker.MagicMock()
-        mocker.patch(
-            "torch.distributed.all_to_all_single", return_value=mocker.MagicMock()
-        )
+        mocker.patch("torch.distributed.all_to_all_single", return_value=mocker.MagicMock())
 
-        _, a2a_out, handle = async_all_to_all(
-            input_tensor, output_split_sizes, input_split_sizes, mock_group
-        )
+        _, a2a_out, handle = async_all_to_all(input_tensor, output_split_sizes, input_split_sizes, mock_group)
 
         # Check if the output tensor is created properly
         if output_split_sizes is None:
@@ -71,9 +65,7 @@ class TestDistributedCommunication(PytestBase):
         "world_size, test_tensor, expected",
         [(1, torch.randn(8, 16), (8, 16)), (4, torch.randn(8, 16), (32, 16))],
     )
-    def test_gather_along_first_dim(
-        self, test_tensor, expected, world_size, mocker: MockerFixture
-    ):
+    def test_gather_along_first_dim(self, test_tensor, expected, world_size, mocker: MockerFixture):
         """Test _gather_along_first_dim"""
         mocker.patch("torch.distributed.get_world_size", return_value=world_size)
 
@@ -85,15 +77,11 @@ class TestDistributedCommunication(PytestBase):
         "input_tensor, output_split_sizes",
         [(torch.randn(8, 16), None), (torch.randn(8, 16), [2, 2, 2, 2])],
     )
-    def test_gather_from_sequence_parallel_region(
-        self, input_tensor, output_split_sizes, mocker: MockerFixture
-    ):
+    def test_gather_from_sequence_parallel_region(self, input_tensor, output_split_sizes, mocker: MockerFixture):
         """Test gather_from_sequence_parallel_region"""
         mock_group = mocker.MagicMock()
 
-        result = gather_from_sequence_parallel_region(
-            input_tensor, mock_group, output_split_sizes
-        )
+        result = gather_from_sequence_parallel_region(input_tensor, mock_group, output_split_sizes)
 
         # If output_split_sizes is not provided, result should have expanded first dimension by world size
         if output_split_sizes is None:

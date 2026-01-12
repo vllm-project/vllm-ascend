@@ -30,22 +30,14 @@ class TestPatchDistributed(TestBase):
         self.mock_use_device_comm = False
 
         patcher_get_rank = patch("torch.distributed.get_rank", return_value=0)
-        patcher_new_group = patch(
-            "torch.distributed.new_group", return_value=MagicMock()
-        )
-        patcher_is_cuda_alike = patch(
-            "vllm.platforms.current_platform.is_cuda_alike", return_value=True
-        )
+        patcher_new_group = patch("torch.distributed.new_group", return_value=MagicMock())
+        patcher_is_cuda_alike = patch("vllm.platforms.current_platform.is_cuda_alike", return_value=True)
         patcher_device_comm_cls = patch(
             "vllm.distributed.parallel_state.resolve_obj_by_qualname",
             return_value=MagicMock(),
         )
-        patcher_calculate_dp_buffer = patch(
-            "vllm_ascend.utils.calculate_dp_buffer_size", return_value=64
-        )
-        patcher_npu_current_device = patch(
-            "torch.npu.current_device", return_value=MagicMock()
-        )
+        patcher_calculate_dp_buffer = patch("vllm_ascend.utils.calculate_dp_buffer_size", return_value=64)
+        patcher_npu_current_device = patch("torch.npu.current_device", return_value=MagicMock())
 
         self.mock_get_rank = patcher_get_rank.start()
         self.mock_new_group = patcher_new_group.start()
@@ -119,10 +111,6 @@ class TestPatchDistributed(TestBase):
         scatter_dim = 0
         gather_dim = 1
 
-        self.group_coordinator.all_to_all(
-            input_tensor, scatter_dim=scatter_dim, gather_dim=gather_dim
-        )
+        self.group_coordinator.all_to_all(input_tensor, scatter_dim=scatter_dim, gather_dim=gather_dim)
 
-        mock_communicator.all_to_all.assert_called_once_with(
-            input_tensor, scatter_dim, gather_dim, None, None
-        )
+        mock_communicator.all_to_all.assert_called_once_with(input_tensor, scatter_dim, gather_dim, None, None)

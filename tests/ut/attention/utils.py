@@ -4,9 +4,7 @@ from unittest.mock import MagicMock, patch
 from vllm.distributed.parallel_state import all_gather_fake
 
 
-def patch_distributed_groups(
-    dcp_size=1, dcp_rank=0, pcp_size=1, pcp_rank=0, needs_mocks=True
-):
+def patch_distributed_groups(dcp_size=1, dcp_rank=0, pcp_size=1, pcp_rank=0, needs_mocks=True):
     """
     Decorator to patch common distributed group mocks with configuration
 
@@ -48,14 +46,10 @@ def patch_distributed_groups(
                 input_, dim, mock_pcp.world_size, "mock_pcp_group"
             )
 
-            mock_all_to_all_single.side_effect = (
-                lambda output, input, *a, **kw: output.copy_(input)
-            )
+            mock_all_to_all_single.side_effect = lambda output, input, *a, **kw: output.copy_(input)
 
             if needs_mocks:
-                return func(
-                    self, mock_all_to_all_single, mock_dcp, mock_pcp, *args, **kwargs
-                )
+                return func(self, mock_all_to_all_single, mock_dcp, mock_pcp, *args, **kwargs)
             else:
                 return func(self, *args, **kwargs)
 

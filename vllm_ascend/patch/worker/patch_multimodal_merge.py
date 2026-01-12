@@ -58,6 +58,4 @@ def _merge_multimodal_embeddings(
     return inputs_embeds
 
 
-vllm.model_executor.models.utils._merge_multimodal_embeddings = (
-    _merge_multimodal_embeddings
-)
+vllm.model_executor.models.utils._merge_multimodal_embeddings = _merge_multimodal_embeddings

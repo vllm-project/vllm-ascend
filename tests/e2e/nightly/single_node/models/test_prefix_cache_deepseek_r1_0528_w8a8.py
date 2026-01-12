@@ -107,19 +107,13 @@ async def test_models(model: str) -> None:
         "--speculative-config",
         json.dumps(speculative_config),
     ]
-    with RemoteOpenAIServer(
-        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
-    ):
+    with RemoteOpenAIServer(model, server_args, server_port=port, env_dict=env_dict, auto_port=False):
         run_aisbench_cases(model, port, aisbench_warm_up)
         result = run_aisbench_cases(model, port, aisbench_cases0)
         TTFT0 = get_TTFT(result)
-    with RemoteOpenAIServer(
-        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
-    ):
+    with RemoteOpenAIServer(model, server_args, server_port=port, env_dict=env_dict, auto_port=False):
         run_aisbench_cases(model, port, aisbench_warm_up)
         result = run_aisbench_cases(model, port, aisbench_cases75)
         TTFT75 = get_TTFT(result)
-    assert TTFT75 < 0.8 * TTFT0, (
-        f"The TTFT for prefix75 {TTFT75} is not less than 0.8*TTFT for prefix0 {TTFT0}."
-    )
+    assert TTFT75 < 0.8 * TTFT0, f"The TTFT for prefix75 {TTFT75} is not less than 0.8*TTFT for prefix0 {TTFT0}."
     print(f"The TTFT for prefix75 {TTFT75} is less than 0.8*TTFT for prefix0 {TTFT0}.")

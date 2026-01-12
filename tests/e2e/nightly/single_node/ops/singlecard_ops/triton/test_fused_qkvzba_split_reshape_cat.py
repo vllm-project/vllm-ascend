@@ -11,9 +11,7 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import (
 def validate_cmp(y_cal, y_ref, dtype, device="npu"):
     y_cal = y_cal.to(device)
     y_ref = y_ref.to(device)
-    if dtype == torch.float16:
-        torch.testing.assert_close(y_ref, y_cal, rtol=5e-03, atol=5e-03, equal_nan=True)
-    elif dtype == torch.bfloat16:
+    if dtype == torch.float16 or dtype == torch.bfloat16:
         torch.testing.assert_close(y_ref, y_cal, rtol=5e-03, atol=5e-03, equal_nan=True)
     elif dtype == torch.float32:
         torch.testing.assert_close(y_ref, y_cal, rtol=1e-03, atol=1e-03, equal_nan=True)
@@ -23,9 +21,7 @@ def validate_cmp(y_cal, y_ref, dtype, device="npu"):
         or dtype == torch.int16
         or dtype == torch.int8
         or dtype == torch.uint32
-    ):
-        assert torch.equal(y_cal, y_ref)
-    elif dtype == torch.bool:
+    ) or dtype == torch.bool:
         assert torch.equal(y_cal, y_ref)
     else:
         raise ValueError('Invalid parameter "dtype" is found : {}'.format(dtype))
@@ -58,9 +54,7 @@ def test_fused_qkvzba_split_reshape_cat(
         device=device,
     )
 
-    projected_states_ba = torch.randn(
-        seq_len, 2 * num_heads_v, dtype=dtype, device=device
-    )
+    projected_states_ba = torch.randn(seq_len, 2 * num_heads_v, dtype=dtype, device=device)
 
     projected_states_qkvz_copy = projected_states_qkvz.clone()
     projected_states_ba_copy = projected_states_ba.clone()
@@ -84,9 +78,7 @@ def test_fused_qkvzba_split_reshape_cat(
     query, key, value, z_ref, b_ref, a_ref = gdn.fix_query_key_value_ordering(
         mixed_qkvz=projected_states_qkvz, mixed_ba=projected_states_ba
     )
-    query, key, value = map(
-        lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-    )
+    query, key, value = map(lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value))
     mixed_qkv_ref = torch.cat((query, key, value), dim=-1)
 
     validate_cmp(mixed_qkv, mixed_qkv_ref, dtype)

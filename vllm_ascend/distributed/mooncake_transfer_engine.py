@@ -1,6 +1,5 @@
 import ipaddress
 import threading
-from typing import Optional
 
 from mooncake.engine import TransferEngine  # type: ignore
 
@@ -12,7 +11,7 @@ class GlobalTE:
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
-    def get_transfer_engine(self, hostname: str, device_name: Optional[str]):
+    def get_transfer_engine(self, hostname: str, device_name: str | None):
         try:
             ip = ipaddress.ip_address(hostname)
             if isinstance(ip, ipaddress.IPv6Address):
@@ -29,20 +28,14 @@ class GlobalTE:
                         raise RuntimeError("mooncake is not available")
                     self.transfer_engine = TransferEngine()
                     device_name = device_name if device_name is not None else ""
-                    ret_value = self.transfer_engine.initialize(
-                        hostname, "P2PHANDSHAKE", "ascend", device_name
-                    )
+                    ret_value = self.transfer_engine.initialize(hostname, "P2PHANDSHAKE", "ascend", device_name)
                     if ret_value != 0:
-                        raise RuntimeError(
-                            f"TransferEngine initialization failed with ret_value: {ret_value}"
-                        )
+                        raise RuntimeError(f"TransferEngine initialization failed with ret_value: {ret_value}")
         return self.transfer_engine
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
         with self.register_buffer_lock:
-            assert self.transfer_engine is not None, (
-                "Transfer engine must be initialized"
-            )
+            assert self.transfer_engine is not None, "Transfer engine must be initialized"
             if self.is_register_buffer:
                 return
             for ptr, size in zip(ptrs, sizes):

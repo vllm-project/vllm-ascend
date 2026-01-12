@@ -7,16 +7,10 @@ import sys
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--dp-size", type=int, required=True, help="Data parallel size."
-    )
+    parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
     parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
-    parser.add_argument(
-        "--dp-size-local", type=int, default=-1, help="Local data parallel size."
-    )
-    parser.add_argument(
-        "--dp-rank-start", type=int, default=0, help="Starting rank for data parallel."
-    )
+    parser.add_argument("--dp-size-local", type=int, default=-1, help="Local data parallel size.")
+    parser.add_argument("--dp-rank-start", type=int, default=0, help="Starting rank for data parallel.")
     parser.add_argument(
         "--dp-address",
         type=str,
@@ -76,12 +70,8 @@ if __name__ == "__main__":
     for i in range(dp_size_local):
         dp_rank = dp_rank_start + i
         vllm_engine_port = vllm_start_port + i
-        visiable_devices = ",".join(
-            str(x) for x in range(i * tp_size, (i + 1) * tp_size)
-        )
-        process = multiprocessing.Process(
-            target=run_command, args=(visiable_devices, dp_rank, vllm_engine_port)
-        )
+        visiable_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+        process = multiprocessing.Process(target=run_command, args=(visiable_devices, dp_rank, vllm_engine_port))
         processes.append(process)
         process.start()
 

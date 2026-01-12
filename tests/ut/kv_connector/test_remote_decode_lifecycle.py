@@ -41,9 +41,7 @@ def test_basic_lifecycle():
     NUM_EXTERNAL_FULL_BLOCKS = 2
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
-    request = create_request(
-        request_id=1, max_tokens=1, num_tokens=NUM_TOKENS, do_remote_decode=True
-    )
+    request = create_request(request_id=1, max_tokens=1, num_tokens=NUM_TOKENS, do_remote_decode=True)
 
     scheduler.add_request(request)
     request_id = request.request_id
@@ -58,9 +56,7 @@ def test_basic_lifecycle():
     model_runner_output = create_model_runner_output(reqs=[request])
 
     # (1c): update_from_output()
-    engine_core_outputs = scheduler.update_from_output(
-        scheduler_output, model_runner_output
-    )
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
 
     # Ensure the request is finished after 1 tokens.
     assert request.is_finished()
@@ -75,9 +71,7 @@ def test_basic_lifecycle():
     assert len(scheduler.waiting) == 0
 
     # ... but blocks should not be freed.
-    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
-        0
-    ].req_to_blocks[request_id]
+    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
 
@@ -108,9 +102,7 @@ def test_basic_lifecycle():
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput  # type: ignore  # noqa
 
-    model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_sending=[request_id]
-    )
+    model_runner_output.kv_connector_output = KVConnectorOutput(finished_sending=[request_id])
 
     # (3c): update_from_output()
     scheduler.update_from_output(scheduler_output, model_runner_output)
@@ -134,9 +126,7 @@ def test_prefix_cache_lifecycle():
 
     scheduler.add_request(request_remote_a)
     scheduler_output = scheduler.schedule()
-    model_runner_output = create_model_runner_output(
-        reqs=[request_remote_a], use_eos=True
-    )
+    model_runner_output = create_model_runner_output(reqs=[request_remote_a], use_eos=True)
     scheduler.update_from_output(scheduler_output, model_runner_output)
     scheduler.schedule()
     scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
@@ -148,9 +138,7 @@ def test_prefix_cache_lifecycle():
     NUM_EXTERNAL_FULL_BLOCKS -= 1
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
-    request_remote = create_request(
-        request_id=1, num_tokens=NUM_TOKENS, do_remote_decode=True
-    )
+    request_remote = create_request(request_id=1, num_tokens=NUM_TOKENS, do_remote_decode=True)
 
     scheduler.add_request(request_remote)
     scheduler_output = scheduler.schedule()
@@ -166,9 +154,7 @@ def test_prefix_cache_lifecycle():
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput  # noqa
 
-    model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_sending=[request_remote.request_id]
-    )
+    model_runner_output.kv_connector_output = KVConnectorOutput(finished_sending=[request_remote.request_id])
     scheduler.update_from_output(scheduler_output, model_runner_output)
     _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)

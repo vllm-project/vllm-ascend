@@ -89,7 +89,7 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
@@ -115,9 +115,7 @@ class ServerState:
         self.client = httpx.AsyncClient(
             timeout=None,
             base_url=self.url,
-            limits=httpx.Limits(
-                max_connections=100000, max_keepalive_connections=100000
-            ),
+            limits=httpx.Limits(max_connections=100000, max_keepalive_connections=100000),
         )
         self.active_tokens = 0
         self.aborted_requests = set()  # Track aborted requests
@@ -125,9 +123,7 @@ class ServerState:
 
 class ProxyState:
     def __init__(self, server_instances):
-        self.dp_servers: List[ServerState] = [
-            ServerState(h, p) for h, p in server_instances
-        ]
+        self.dp_servers: list[ServerState] = [ServerState(h, p) for h, p in server_instances]
         self.req_id_lock = asyncio.Lock()
         # Removed selection locks - no longer needed for synchronous methods
 
@@ -170,9 +166,7 @@ class ProxyState:
         # Update priority queue after releasing
         self._update_server_priority(idx)
 
-    def calculate_request_score(
-        self, request_length: int, max_tokens: int = 16, ignore_eos: bool = False
-    ) -> float:
+    def calculate_request_score(self, request_length: int, max_tokens: int = 16, ignore_eos: bool = False) -> float:
         if ignore_eos:
             return request_length + max_tokens
         else:
@@ -233,9 +227,7 @@ def with_cancellation(handler_func):
         request = kwargs["request"]
         handler_task = asyncio.create_task(handler_func(*args, **kwargs))
         cancellation_task = asyncio.create_task(listen_for_disconnect(request))
-        done, pending = await asyncio.wait(
-            [handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED
-        )
+        done, pending = await asyncio.wait([handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         if handler_task in done:
@@ -262,9 +254,7 @@ async def stream_service_response_with_retry(
     }
     for attempt in range(1, max_retries + 1):
         try:
-            async with client.stream(
-                "POST", endpoint, json=req_data, headers=headers
-            ) as response:
+            async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 response.raise_for_status()
                 first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
@@ -273,32 +263,22 @@ async def stream_service_response_with_retry(
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             if attempt < max_retries:
-                logger.warning(
-                    f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}"
-                )
+                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(
-                    f"All {max_retries} attempts failed for streaming {endpoint}."
-                )
+                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                 raise e
         except Exception as e:
             # If any chunk has been sent, do not retry, just log and drop
             if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error(
-                    f"Streaming to client interrupted after response started: {str(e)}"
-                )
+                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
                 return
             else:
                 if attempt < max_retries:
-                    logger.warning(
-                        f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}"
-                    )
+                    logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                     await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 else:
-                    logger.error(
-                        f"All {max_retries} attempts failed for streaming {endpoint}."
-                    )
+                    logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                     raise e
 
 
@@ -306,9 +286,7 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     # refer to vLLM sampling_params: max_token default value
     max_tokens = req_data.get("max_tokens", 16)
     ignore_eos = req_data.get("ignore_eos", False)
-    priority_score = proxy_state.calculate_request_score(
-        request_length, max_tokens=max_tokens, ignore_eos=ignore_eos
-    )
+    priority_score = proxy_state.calculate_request_score(request_length, max_tokens=max_tokens, ignore_eos=ignore_eos)
     logger.debug(
         f"Request length: {request_length}, max tokens: {max_tokens}, ignore_eos: {ignore_eos}, Priority score: {priority_score}"
     )
@@ -359,9 +337,7 @@ async def _handle_completions(api: str, request: Request):
                 )
 
             # After streaming done, release tokens
-            proxy_state.release_server(
-                instance_info.server_idx, instance_info.priority_score
-            )
+            proxy_state.release_server(instance_info.server_idx, instance_info.priority_score)
 
         return StreamingResponse(generate_stream(), media_type="application/json")
     except Exception as e:

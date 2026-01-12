@@ -43,9 +43,7 @@ class EplbUpdator:
         self.rank_id = dist.get_rank()
         self.num_expert_load_gather = 10
         self.periodic_load_gather = True
-        self.num_iterations_eplb_update: torch.int64 = (
-            self.ascend_config.num_iterations_eplb_update
-        )
+        self.num_iterations_eplb_update: torch.int64 = self.ascend_config.num_iterations_eplb_update
         EPLBParamUtils.check_iterations(self.num_iterations_eplb_update)
         self.expert_map_path = expert_map_path
         self.expert_map_record_path = self.ascend_config.expert_map_record_path
@@ -66,9 +64,7 @@ class EplbUpdator:
 
         self.cur_iterations: torch.int64 = 0
 
-        self.num_wait_worker_iterations: torch.int64 = (
-            self.ascend_config.num_wait_worker_iterations
-        )
+        self.num_wait_worker_iterations: torch.int64 = self.ascend_config.num_wait_worker_iterations
         EPLBParamUtils.check_iterations(self.num_wait_worker_iterations)
 
         self.process = process
@@ -78,24 +74,18 @@ class EplbUpdator:
     def update_iteration(self):
         self.cur_iterations += 1
         if self.cur_iterations == (
-            self.num_iterations_eplb_update
-            + self.num_wait_worker_iterations
-            + self.num_moe_layers
+            self.num_iterations_eplb_update + self.num_wait_worker_iterations + self.num_moe_layers
         ):
             logger.info("Finish expert parallel load balancing.")
             if self.expert_map_record_path is not None:
-                self.adaptor._export_tensor_to_file(
-                    self.shared_dict["expert_maps"], self.expert_map_record_path
-                )
+                self.adaptor._export_tensor_to_file(self.shared_dict["expert_maps"], self.expert_map_record_path)
 
             self.adaptor.model.clear_all_moe_loads()
             if not self.gate_eplb:
                 self.cur_iterations = 0
 
     def get_update_info_flag(self):
-        return self.cur_iterations == (
-            self.num_iterations_eplb_update + self.num_wait_worker_iterations - 1
-        )
+        return self.cur_iterations == (self.num_iterations_eplb_update + self.num_wait_worker_iterations - 1)
 
     def wakeup_eplb_worker_flag(self):
         return self.cur_iterations == (self.num_iterations_eplb_update - 1)
@@ -104,23 +94,17 @@ class EplbUpdator:
         weight_update_counter = self.cur_iterations - (
             self.num_iterations_eplb_update + self.num_wait_worker_iterations
         )
-        return (
-            weight_update_counter >= 0 and weight_update_counter < self.num_moe_layers
-        )
+        return weight_update_counter >= 0 and weight_update_counter < self.num_moe_layers
 
     def get_init_expert_map(self):
         try:
             if not self.expert_map_initialized:
-                self.shared_dict["expert_maps"] = (
-                    self.adaptor.get_init_expert_map_from_file(
-                        self.num_moe_layers, self.expert_map_path
-                    )
+                self.shared_dict["expert_maps"] = self.adaptor.get_init_expert_map_from_file(
+                    self.num_moe_layers, self.expert_map_path
                 )
                 self.expert_map_initialized = True
         except Exception as e:
-            logger.warning(
-                f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True
-            )
+            logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
 
     def wakeup_eplb_worker(self):
         self.eplb_process.planner_q.put(1)
@@ -136,9 +120,7 @@ class EplbUpdator:
             ) = self.update_info_all.pop(0)
             log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
             self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
-            updated_expert_map_this_rank = torch.from_numpy(
-                numpy.array(updated_expert_map)
-            )
+            updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
             self.eplb_loader.generate_expert_d2d_transfer_task(
                 expert_send_info,
                 expert_recv_info,
@@ -174,23 +156,17 @@ class EplbUpdator:
             self.device = local_load.device
             if self._gather_buffer is None:
                 shape = (self.world_size, *local_load.shape)
-                self._gather_buffer = torch.empty(
-                    shape, dtype=local_load.dtype, device=self.device
-                )
+                self._gather_buffer = torch.empty(shape, dtype=local_load.dtype, device=self.device)
 
             dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
             moe_load = self._gather_buffer.permute(1, 0, 2)
             self.shared_dict["moe_load"] = moe_load.cpu()
-            logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-            )
+            logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
         else:
             moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()
-            logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-            )
+            logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
 
         if dist.is_initialized() and dist.get_rank() == 0:
             self.compute_moe_imbalance(moe_load)
@@ -211,10 +187,7 @@ class EplbUpdator:
 
             moe_load_imbalance = max_load / (mean_load + 1e-6)
 
-            logger.debug(
-                f"[ModelRunner][MOE_load_stats][Layer {layer_idx}] "
-                f"PAR={moe_load_imbalance:.4f}"
-            )
+            logger.debug(f"[ModelRunner][MOE_load_stats][Layer {layer_idx}] PAR={moe_load_imbalance:.4f}")
 
             self.moe_imbalance_dict[layer_idx] = moe_load_imbalance
 

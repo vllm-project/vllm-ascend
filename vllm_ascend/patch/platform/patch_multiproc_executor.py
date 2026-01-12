@@ -43,10 +43,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
         pp_parallel_size = self.parallel_config.pipeline_parallel_size
         pcp_parallel_size = self.parallel_config.prefill_context_parallel_size
-        assert (
-            self.world_size
-            == tensor_parallel_size * pp_parallel_size * pcp_parallel_size
-        ), (
+        assert self.world_size == tensor_parallel_size * pp_parallel_size * pcp_parallel_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
             f"_parallel_size ({pp_parallel_size}) x prefill_context"
@@ -59,9 +56,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
         # get_loopback_ip() for communication.
-        distributed_init_method = get_distributed_init_method(
-            get_loopback_ip(), get_open_port()
-        )
+        distributed_init_method = get_distributed_init_method(get_loopback_ip(), get_open_port())
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -83,9 +78,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
-            global_start_rank = (
-                self.local_world_size * self.parallel_config.node_rank_within_dp
-            )
+            global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 unready_workers.append(
@@ -118,9 +111,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                         assert local_message_queue is not None
                         self.response_mqs.append(local_message_queue)
                     else:
-                        remote_message_queue = self.workers[0].peer_worker_response_mqs[
-                            rank
-                        ]
+                        remote_message_queue = self.workers[0].peer_worker_response_mqs[rank]
                         assert remote_message_queue is not None
                         self.response_mqs.append(remote_message_queue)
 

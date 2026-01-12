@@ -68,14 +68,8 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         forward_context = get_forward_context()
         is_cuda_graph = forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
         # triton grid should be less than 66536
-        divide_grid = projected_states_qkvz.shape[0] * triton.cdiv(
-            self.num_k_heads, self.tp_size
-        )
-        if (
-            self.num_v_heads // self.num_k_heads in [1, 2, 4]
-            and is_cuda_graph
-            and divide_grid < 65536
-        ):
+        divide_grid = projected_states_qkvz.shape[0] * triton.cdiv(self.num_k_heads, self.tp_size)
+        if self.num_v_heads // self.num_k_heads in [1, 2, 4] and is_cuda_graph and divide_grid < 65536:
             mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
                 projected_states_qkvz,
                 projected_states_ba,
@@ -85,12 +79,8 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
                 self.head_v_dim,
             )
         else:
-            query, key, value, z, b, a = self.fix_query_key_value_ordering(
-                projected_states_qkvz, projected_states_ba
-            )
-            query, key, value = map(
-                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-            )
+            query, key, value, z, b, a = self.fix_query_key_value_ordering(projected_states_qkvz, projected_states_ba)
+            query, key, value = map(lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value))
             mixed_qkv = torch.cat((query, key, value), dim=-1)
 
         # ============================================================
@@ -163,9 +153,7 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
+        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -185,9 +173,7 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=spec_state_indices_tensor[:, 0][
-                    : attn_metadata.num_spec_decodes
-                ],
+                conv_state_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes],
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
                 max_query_len=spec_state_indices_tensor.size(-1),
@@ -218,17 +204,13 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[
-                    : attn_metadata.num_actual_tokens
-                ],
+                conv_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
                 validate_data=True,
             )
         else:
             mixed_qkv_non_spec = None
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
-            mixed_qkv_non_spec
-        )
+        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
         if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
             is_cuda_graph = forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
@@ -258,22 +240,18 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
 
             # 2.1: Process the multi-query part
             if spec_sequence_masks is not None:
-                core_attn_out_spec, last_recurrent_state = (
-                    fused_recurrent_gated_delta_rule(
-                        q=query_spec,
-                        k=key_spec,
-                        v=value_spec,
-                        g=g_spec,
-                        beta=beta_spec,
-                        initial_state=ssm_state,
-                        inplace_final_state=True,
-                        cu_seqlens=spec_query_start_loc[
-                            : attn_metadata.num_spec_decodes + 1
-                        ],
-                        ssm_state_indices=spec_state_indices_tensor,
-                        num_accepted_tokens=num_accepted_tokens,
-                        use_qk_l2norm_in_kernel=True,
-                    )
+                core_attn_out_spec, last_recurrent_state = fused_recurrent_gated_delta_rule(
+                    q=query_spec,
+                    k=key_spec,
+                    v=value_spec,
+                    g=g_spec,
+                    beta=beta_spec,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
+                    ssm_state_indices=spec_state_indices_tensor,
+                    num_accepted_tokens=num_accepted_tokens,
+                    use_qk_l2norm_in_kernel=True,
                 )
             else:
                 core_attn_out_spec, last_recurrent_state = None, None
@@ -298,25 +276,19 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
                     use_qk_l2norm_in_kernel=True,
                 )
                 # Init cache
-                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                    ssm_state.dtype
-                )
+                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
             elif attn_metadata.num_decodes > 0:
-                core_attn_out_non_spec, last_recurrent_state = (
-                    fused_recurrent_gated_delta_rule(
-                        q=query_non_spec,
-                        k=key_non_spec,
-                        v=value_non_spec,
-                        g=g_non_spec,
-                        beta=beta_non_spec,
-                        initial_state=ssm_state,
-                        inplace_final_state=True,
-                        cu_seqlens=non_spec_query_start_loc[
-                            : attn_metadata.num_decodes + 1
-                        ],
-                        ssm_state_indices=non_spec_state_indices_tensor,
-                        use_qk_l2norm_in_kernel=True,
-                    )
+                core_attn_out_non_spec, last_recurrent_state = fused_recurrent_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    use_qk_l2norm_in_kernel=True,
                 )
             else:
                 core_attn_out_non_spec, last_recurrent_state = None, None

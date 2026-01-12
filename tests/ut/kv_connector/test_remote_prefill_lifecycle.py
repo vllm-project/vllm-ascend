@@ -40,9 +40,7 @@ def test_basic_lifecycle():
     BLOCK_SIZE = vllm_config.cache_config.block_size
     NUM_EXTERNAL_FULL_BLOCKS = 2
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
-    START_FREE_BLOCK_QUEUE_SIZE = (
-        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
-    )
+    START_FREE_BLOCK_QUEUE_SIZE = scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
 
     request = create_request(
         request_id=1,
@@ -75,9 +73,7 @@ def test_basic_lifecycle():
     block_pool = scheduler.kv_cache_manager.block_pool
     assert block_pool.free_block_queue.num_free_blocks < START_FREE_BLOCK_QUEUE_SIZE
     assert len(block_pool.cached_block_hash_to_block) == 0
-    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
-        0
-    ].req_to_blocks[request_id]
+    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_id]
     for block in blocks:
         assert block._block_hash is None
 
@@ -85,9 +81,7 @@ def test_basic_lifecycle():
     model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
 
     # (1c): update_from_output()
-    engine_core_outputs = scheduler.update_from_output(
-        scheduler_output, model_runner_output
-    )
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
     assert not engine_core_outputs or not engine_core_outputs[0].outputs
 
     # STEP (2):
@@ -100,14 +94,10 @@ def test_basic_lifecycle():
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput  # type: ignore  # noqa
 
-    model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_recving=[request_id]
-    )
+    model_runner_output.kv_connector_output = KVConnectorOutput(finished_recving=[request_id])
 
     # (2c): update_from_output():
-    engine_core_outputs = scheduler.update_from_output(
-        scheduler_output, model_runner_output
-    )
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.waiting) == 1
     assert request_id in scheduler.finished_recving_kv_req_ids
 
@@ -118,9 +108,7 @@ def test_basic_lifecycle():
 
     # Confirm the block are actually allocated.
     num_hashed_blocks = 0
-    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
-        0
-    ].req_to_blocks[request_id]
+    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
         num_hashed_blocks += 1 if block._block_hash is not None else 0
@@ -141,9 +129,7 @@ def test_basic_lifecycle():
     # Step (4): Hit EOS.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output([request], use_eos=True)
-    engine_core_outputs = scheduler.update_from_output(
-        scheduler_output, model_runner_output
-    )
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
     scheduler.schedule()
 
     assert_scheduler_empty(scheduler)
@@ -180,9 +166,9 @@ def test_no_spurious_prefix_caching():
     scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
     assert len(scheduler.waiting) == 1
 
-    remote_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
-        0
-    ].req_to_blocks[request_remote.request_id]
+    remote_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
+        request_remote.request_id
+    ]
 
     # Remote blocks should not be cached.
     for block in remote_blocks:
@@ -201,9 +187,7 @@ def test_full_block_prompt():
     NUM_EXTERNAL_FULL_BLOCKS = 2
     NUM_TOKENS = int(BLOCK_SIZE * NUM_EXTERNAL_FULL_BLOCKS)
 
-    request = create_request(
-        request_id=1, num_tokens=NUM_TOKENS, do_remote_prefill=True
-    )
+    request = create_request(request_id=1, num_tokens=NUM_TOKENS, do_remote_prefill=True)
 
     scheduler.add_request(request)
     request_id = request.request_id
@@ -211,11 +195,7 @@ def test_full_block_prompt():
     # STEP (1): Initialize a recv.
     scheduler_output = scheduler.schedule()
     # All blocks should be allocated.
-    num_blocks = len(
-        scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
-            request_id
-        ]
-    )
+    num_blocks = len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_id])
     assert num_blocks == NUM_EXTERNAL_FULL_BLOCKS
     model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
     scheduler.update_from_output(scheduler_output, model_runner_output)
@@ -225,9 +205,7 @@ def test_full_block_prompt():
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput  # type: ignore  # noqa
 
-    model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_recving=[request_id]
-    )
+    model_runner_output.kv_connector_output = KVConnectorOutput(finished_recving=[request_id])
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.waiting) == 1
     assert request_id in scheduler.finished_recving_kv_req_ids
@@ -237,11 +215,7 @@ def test_full_block_prompt():
 
     # We need to recompute the final token of the prompt to generate
     # the first new token, so we should not have a new block.
-    num_blocks = len(
-        scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
-            request_id
-        ]
-    )
+    num_blocks = len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_id])
     assert num_blocks == NUM_EXTERNAL_FULL_BLOCKS
     assert scheduler_output.scheduled_new_reqs[0].num_computed_tokens == NUM_TOKENS - 1
     assert scheduler_output.num_scheduled_tokens[request_id] == 1

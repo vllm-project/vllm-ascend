@@ -64,9 +64,7 @@ aisbench_cases = [
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("max_num_batched_tokens", MAX_NUM_BATCHED_TOKENS)
-async def test_models(
-    model: str, mode: str, tp_size: int, max_num_batched_tokens: int
-) -> None:
+async def test_models(model: str, mode: str, tp_size: int, max_num_batched_tokens: int) -> None:
     port = get_open_port()
     env_dict = {
         "OMP_NUM_THREADS": "10",
@@ -95,9 +93,7 @@ async def test_models(
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(
-        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
-    ) as server:
+    with RemoteOpenAIServer(model, server_args, server_port=port, env_dict=env_dict, auto_port=False) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,

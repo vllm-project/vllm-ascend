@@ -2,7 +2,6 @@ import os
 import subprocess
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import Dict, List, Optional, Tuple, Union
 
 import psutil
 import torch_npu
@@ -13,9 +12,7 @@ CPU_BINDING_NUM = os.getenv("CPU_BINDING_NUM")
 
 
 def execute_command(cmd_list):
-    with subprocess.Popen(
-        cmd_list, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    ) as p:
+    with subprocess.Popen(cmd_list, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as p:
         out, err = p.communicate(timeout=1000)
     res = out.decode()
     return res
@@ -30,13 +27,11 @@ class DeviceInfo:
     _info_line: str = ""
     npu_id: int = 0
     chip_id: int = 0
-    chip_logic_id: Union[int, str] = 0
+    chip_logic_id: int | str = 0
     chip_name: str = ""
 
     def __post_init__(self):
-        npu_id_str, chip_id_str, chip_logic_id_str, self.chip_name = (
-            self._info_line.strip().split(None, 3)
-        )
+        npu_id_str, chip_id_str, chip_logic_id_str, self.chip_name = self._info_line.strip().split(None, 3)
         self.npu_id = int(npu_id_str)
         self.chip_id = int(chip_id_str)
         if chip_logic_id_str.isnumeric():
@@ -44,9 +39,9 @@ class DeviceInfo:
 
 
 class NpuHbmInfo:
-    visible_npu_ids: Optional[List[int]] = None
-    hbm_capacity: Optional[int] = None
-    hbm_usage: Optional[int] = None
+    visible_npu_ids: list[int] | None = None
+    hbm_capacity: int | None = None
+    hbm_usage: int | None = None
 
     @classmethod
     def set_visible_devices(cls, world_size):
@@ -83,9 +78,7 @@ class NpuHbmInfo:
             cls.set_visible_devices(world_size)
         assert cls.visible_npu_ids is not None
         npu_id = cls.visible_npu_ids[rank]
-        memory_info = execute_command(
-            ["npu-smi", "info", "-i", f"{npu_id}", "-t", "memory"]
-        ).split("\n")[1:]
+        memory_info = execute_command(["npu-smi", "info", "-i", f"{npu_id}", "-t", "memory"]).split("\n")[1:]
         if soc_version == 240:
             hbm_capacity_key = "Capacity(MB)"
         elif not need_nz:
@@ -114,9 +107,7 @@ class NpuHbmInfo:
             cls.set_visible_devices(world_size)
         assert cls.visible_npu_ids is not None
         npu_id = cls.visible_npu_ids[rank]
-        usage_info = execute_command(
-            ["npu-smi", "info", "-i", f"{npu_id}", "-t", "usages"]
-        ).split("\n")[1:]
+        usage_info = execute_command(["npu-smi", "info", "-i", f"{npu_id}", "-t", "usages"]).split("\n")[1:]
         soc_version = torch_npu._C._npu_get_soc_version()
         if soc_version == 240:
             hbm_capacity_key = "Memory Usage Rate(%)"
@@ -135,7 +126,7 @@ class NpuHbmInfo:
         raise ValueError("not found valid hbm usage")
 
 
-def _get_device_map_info() -> Dict[int, DeviceInfo]:
+def _get_device_map_info() -> dict[int, DeviceInfo]:
     """
     Build and return a mapping from logical chip ID (int) to its DeviceInfo object.
     """
@@ -148,7 +139,7 @@ def _get_device_map_info() -> Dict[int, DeviceInfo]:
     return device_map_info
 
 
-def _get_pcie_info(devices: List[int], keyword="PCIeBusInfo"):
+def _get_pcie_info(devices: list[int], keyword="PCIeBusInfo"):
     """
     Query each NPU in the given device list and return a mapping
     from logical device ID to its PCIe bus address.
@@ -158,9 +149,7 @@ def _get_pcie_info(devices: List[int], keyword="PCIeBusInfo"):
     for device in devices:
         device_info = device_map_info.get(device)
         if not device_info:
-            raise RuntimeError(
-                "Can not get device info, you can use BIND_CPU=0 to skip."
-            )
+            raise RuntimeError("Can not get device info, you can use BIND_CPU=0 to skip.")
         pcie_info = (
             execute_command(
                 [
@@ -190,8 +179,8 @@ def _get_numa_info(pcie_tbl, keyword="NUMAnode"):
     """
     Build two mappings: device → NUMA node, and NUMA node → [devices].
     """
-    device_numa_tbl: Dict[int, int] = {}  # device id -> numa id
-    numa_devices_tbl: Dict[int, List[int]] = {}  # numa id -> device ids
+    device_numa_tbl: dict[int, int] = {}  # device id -> numa id
+    numa_devices_tbl: dict[int, list[int]] = {}  # numa id -> device ids
 
     for device, pcie_no in pcie_tbl.items():
         numa_info = execute_command(["lspci", "-s", f"{pcie_no}", "-vvv"]).split("\n")
@@ -201,7 +190,7 @@ def _get_numa_info(pcie_tbl, keyword="NUMAnode"):
                 numa_id = int(line[len(keyword) + 1 :])
                 device_numa_tbl[device] = numa_id
 
-                devices = numa_devices_tbl.get(numa_id, None)
+                devices = numa_devices_tbl.get(numa_id)
                 if devices is None:
                     numa_devices_tbl[numa_id] = list()
 
@@ -211,9 +200,7 @@ def _get_numa_info(pcie_tbl, keyword="NUMAnode"):
     return device_numa_tbl, numa_devices_tbl
 
 
-def _get_numa_info_v2(
-    devices: List[int], keyword="NUMAnode(s)"
-) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
+def _get_numa_info_v2(devices: list[int], keyword="NUMAnode(s)") -> tuple[dict[int, int], dict[int, list[int]]]:
     """
     Evenly distribute the given device list across all NUMA nodes and return
     both device-to-numa and numa-to-devices mappings.
@@ -228,22 +215,14 @@ def _get_numa_info_v2(
         break
 
     device_per_numa, tail_device = divmod(len(devices), numa_nodes)
-    device_count_per_numa_list = [
-        device_per_numa + (i < tail_device) for i in range(numa_nodes)
-    ]
+    device_count_per_numa_list = [device_per_numa + (i < tail_device) for i in range(numa_nodes)]
 
     ends = list(accumulate(device_count_per_numa_list))
     starts = [0] + ends[:-1]
 
-    numa_devices_tbl = {
-        ind: devices[start:end] for ind, (start, end) in enumerate(zip(starts, ends))
-    }
+    numa_devices_tbl = {ind: devices[start:end] for ind, (start, end) in enumerate(zip(starts, ends))}
 
-    device_numa_tbl = {
-        device: numa
-        for numa, _devices in numa_devices_tbl.items()
-        for device in _devices
-    }
+    device_numa_tbl = {device: numa for numa, _devices in numa_devices_tbl.items() for device in _devices}
 
     return device_numa_tbl, numa_devices_tbl
 
@@ -268,9 +247,7 @@ def _get_cpu_info(numa_ids, keyword1="NUMAnode", keyword2="CPU(s)"):
                 if len(endpoints) != 2:
                     raise Exception("lscpu command output error, please check !")
 
-                ranges += [
-                    cid for cid in range(int(endpoints[0]), int(endpoints[1]) + 1)
-                ]
+                ranges += [cid for cid in range(int(endpoints[0]), int(endpoints[1]) + 1)]
 
             numa_id = int(split_info[0].replace(keyword1, "").replace(keyword2, ""))
             cpu_idx_tbl[numa_id] = ranges
@@ -324,15 +301,10 @@ def bind_cpus(rank_id, ratio=0.5):
             raise ValueError("CPU_BINDING_NUM should not be less than 0.")
 
     idx = shard_devices.index(cur_device)
-    binding_cpus = [
-        all_cpus[_]
-        for _ in range(idx * cpu_num_per_device, (idx + 1) * cpu_num_per_device)
-    ]
+    binding_cpus = [all_cpus[_] for _ in range(idx * cpu_num_per_device, (idx + 1) * cpu_num_per_device)]
 
     # cpu bind
     p = psutil.Process()
     p.cpu_affinity(binding_cpus)
     new_affinity = p.cpu_affinity()
-    logger.info(
-        f"process {p.pid}, new_affinity is {new_affinity}, cpu count {cpu_num_per_device}"
-    )
+    logger.info(f"process {p.pid}, new_affinity is {new_affinity}, cpu count {cpu_num_per_device}")
