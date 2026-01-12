@@ -109,8 +109,11 @@ class KVCacheTaskTracker:
         # intentionally delayed. Each entry is a tuple of (request_id,
         # timestamp). If a request remains in this queue for too long, it will
         # be force-freed.
-        self.record_finished_requests: set[str] = set()
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
+        self.reqs_to_process: set[str] = set()
+
+    def add_req_to_process(self, request_id: str):
+        self.reqs_to_process.add(request_id)
 
     def add_not_transfer_request(self, request_id: str):
         with self.done_task_lock:
@@ -118,11 +121,10 @@ class KVCacheTaskTracker:
 
     def update_done_task_count(self, request_id: str):
         with self.done_task_lock:
-            self.finished_requests.add(request_id)
-            if request_id in self.delayed_free_requests:
-                self._remove_delayed_requests(request_id)
-            else:
-                self.record_finished_requests.add(request_id)
+            if request_id in self.reqs_to_process:
+                self.finished_requests.add(request_id)
+                self.reqs_to_process.discard(request_id)
+                self.delayed_free_requests.pop(request_id, None)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -140,10 +142,7 @@ class KVCacheTaskTracker:
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         """Add a delayed free request."""
         with self.done_task_lock:
-            if request_id not in self.record_finished_requests:
-                self.delayed_free_requests[request_id] = delay_start_time
-            else:
-                self.record_finished_requests.discard(request_id)
+            self.delayed_free_requests[request_id] = delay_start_time
 
     def _retrieve_expired_requests(self):
         """Retrieve all expired delayed requests."""
@@ -156,15 +155,12 @@ class KVCacheTaskTracker:
             if (current_time - delay_start_time
                     > envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT):
                 self.delayed_free_requests.popitem(last=False)
+                self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
                 logger.info("Force freed request: %s", request_id)
             else:
                 break
         return expired_requests
-
-    def _remove_delayed_requests(self, request_id: str):
-        """Remove all delayed free requests matching the given request_id."""
-        self.delayed_free_requests.pop(request_id)
 
 
 class KVCacheSendingThread(threading.Thread):
@@ -1600,6 +1596,10 @@ class MooncakeConnectorWorker:
                         tp_num_need_pulls=self.tp_num_need_pulls,
                         all_task_done=(i == self.tp_num_need_pulls *
                                        self._prefill_pp_size - 1))
+
+        if self.kv_send_thread is not None:
+            for req_id, meta in metadata.requests.items():
+                self.kv_send_thread.task_tracker.add_req_to_process(req_id)
 
         if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
             for req_id, delay_start_time in metadata.requests_to_send.items():
