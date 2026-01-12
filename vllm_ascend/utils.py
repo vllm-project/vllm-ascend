@@ -789,5 +789,3 @@ def singleton(cls):
 
 
 #TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32. and subsequent updates will introduce new interfaces. --zzhx1
-
-

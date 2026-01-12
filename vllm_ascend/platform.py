@@ -29,10 +29,10 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 from vllm_ascend.config.vllm_ascend import init_ascend_config
 
 # isort: off
-from vllm_ascend.utils import (
-    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD,
-    COMPILATION_PASS_KEY, AscendDeviceType, get_ascend_device_type,
-    update_cudagraph_capture_sizes)
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
+                               COMPRESSED_TENSORS_METHOD, COMPILATION_PASS_KEY,
+                               AscendDeviceType, get_ascend_device_type,
+                               update_cudagraph_capture_sizes)
 from vllm_ascend.config.utils import is_vl_model, enable_sp, update_default_aclgraph_sizes, update_aclgraph_sizes, \
     refresh_block_size, check_kv_extra_config
 

@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, Optional
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.config.utils import enable_sp, get_flashcomm2_config_and_validate
+from vllm_ascend.config.utils import (enable_sp,
+                                      get_flashcomm2_config_and_validate)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

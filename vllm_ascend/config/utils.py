@@ -7,12 +7,14 @@ from vllm.logger import logger
 
 from vllm_ascend import envs as envs_ascend
 from vllm_ascend.config.vllm_ascend import get_ascend_config
-from vllm_ascend.utils import VllmConfig, _is_default_capture_sizes, update_cudagraph_capture_sizes, \
-    get_max_hidden_layers
+from vllm_ascend.utils import (VllmConfig, _is_default_capture_sizes,
+                               get_max_hidden_layers,
+                               update_cudagraph_capture_sizes)
 
 _IS_MOE_MODEL = None
 _IS_VL_MODEL = None
 _ENABLE_SP = None
+_HAS_ROPE = None
 
 
 def _is_contain_expert(config: Any):
@@ -78,9 +80,6 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
         ), "Flash Comm v1 (Sequence Parallelism) requires enable_expert_parallel=True for MoE models."
 
     return _ENABLE_SP
-
-
-_HAS_ROPE = None
 
 
 def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
