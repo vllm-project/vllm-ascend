@@ -54,7 +54,7 @@ jobs:
             tests: tests/e2e/nightly/single_node/models/test_qwen3_8b.py
           - name: qwen3next
             os: linux-aarch64-a2-4
-            ests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
           - name: qwen3-32b
             os: linux-aarch64-a2-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_32b.py
