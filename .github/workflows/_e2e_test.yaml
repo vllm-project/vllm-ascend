@@ -139,8 +139,9 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
         TRANSFORMERS_OFFLINE: 1
+        TRITON_DEBUG: 1
         TRITON_KERNEL_DUMP: 1
-        TRITON_DUMP_DIR: ~/root/.cache/cmh/triton_dump
+        TRITON_DUMP_DIR: /root/.cache/cmh/triton_dump
     steps:
       - name: Check npu and CANN info
         run: |
@@ -251,8 +252,9 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         TRANSFORMERS_OFFLINE: 1
+        TRITON_DEBUG: 1
         TRITON_KERNEL_DUMP: 1
-        TRITON_DUMP_DIR: ~/root/.cache/cmh/triton_dump
+        TRITON_DUMP_DIR: /root/.cache/cmh/triton_dump
     steps:
       - name: Check npu and CANN info
         run: |
