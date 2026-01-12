@@ -23,7 +23,6 @@ def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
     input_offsets = row_start * hidden_size + cols
     for _ in tl.range(row_start, batch_size, row_step):
         # add
-
         buffered_values = tl.load(input_ptr + input_offsets,
                                   mask=valid_mask,
                                   other=0.0)
