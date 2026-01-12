@@ -63,28 +63,25 @@ from multiprocessing import Process
 from time import sleep
 
 import torch
-from safetensors.torch import load_file
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (  # noqa E402
     destroy_distributed_environment, destroy_model_parallel, get_tp_group)
-from vllm.model_executor.model_loader.utils import \
-    process_weights_after_loading
+from safetensors.torch import load_file
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_open_port
+
+from vllm.model_executor.model_loader.utils import \
+    process_weights_after_loading
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-
 def patch_vllm_moe_model_weight_loader(model):
     # Define MLP attribute mapping for different model types
 
-    model = getattr(model, "model", None) or getattr(model, "language_model",
-                                                     None)
+    model = getattr(model, "model", None) or getattr(model, "language_model", None)
     if model is None:
-        raise ValueError(
-            "The provided model does not have a valid 'model' or 'language_model' attribute."
-        )
+        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
 
     for layer in model.layers:
         mlp_attr = "mlp"
@@ -95,23 +92,21 @@ def patch_vllm_moe_model_weight_loader(model):
             if "w13_weight" in name or "w2_weight" in name:
                 param.weight_loader = mlp.experts.weight_loader
 
-
 def load_and_merge_safetensors(directory):
     merged_dict = {}
-
+    
     if not os.path.isdir(directory):
         raise ValueError(f"directory is not exist : {directory}")
-
+    
     for filename in os.listdir(directory):
         if filename.endswith('.safetensors'):
             file_path = os.path.join(directory, filename)
             print(f"loading file: {file_path}")
-
+            
             f = load_file(file_path)
             merged_dict.update(f)
-
+    
     return merged_dict
-
 
 def parse_args():
 
@@ -158,32 +153,23 @@ def parse_args():
     parser.add_argument("--enable-sleep-mode",
                         action="store_true",
                         help="Enable sleep mode for the engine.")
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.8,
-        help="Float that controls the randomness of the sampling.")
-    parser.add_argument(
-        "--model-weight-gib",
-        type=float,
-        default=None,
-        help="Model weight memory usage in GiB (e.g., 1.0 for 0.5B model).")
+    parser.add_argument("--temperature",
+                        type=float,
+                        default=0.8,
+                        help="Float that controls the randomness of the sampling.")
+    parser.add_argument("--model-weight-gib",
+                        type=float,
+                        default=None,
+                        help="Model weight memory usage in GiB (e.g., 1.0 for 0.5B model).")
 
     args = parser.parse_args()
     if args.enable_sleep_mode:
         if args.model_weight_gib is None or args.temperature != 0:
-            parser.error(
-                "model-weight-gib must be provided, and temperature must be zero when enable-sleep-mode is set."
-            )
+            parser.error("model-weight-gib must be provided, and temperature must be zero when enable-sleep-mode is set.")
         if args.model_weight_gib <= 0:
-            parser.error(
-                "model-weight-gib must be greater than 0 when enable-sleep-mode is set."
-            )
-        if args.model == parser.get_default(
-                "model") and args.model_weight_gib is None:
-            parser.error(
-                "model-weight-gib must be provided for default model when enable-sleep-mode is set."
-            )
+            parser.error("model-weight-gib must be greater than 0 when enable-sleep-mode is set.")
+        if args.model == parser.get_default("model") and args.model_weight_gib is None:
+            parser.error("model-weight-gib must be provided for default model when enable-sleep-mode is set.")
 
     return args
 
@@ -233,7 +219,7 @@ def main(
         trust_remote_code=trust_remote_code,
         distributed_executor_backend="external_launcher",
         seed=0,
-        gpu_memory_utilization=0.95,
+        gpu_memory_utilization = 0.95,
         enable_sleep_mode=enable_sleep_mode,
     )
     outputs = llm.generate(prompts, sampling_params)
@@ -267,8 +253,7 @@ def main(
         outputs_after_wakeup = llm.generate(prompts, sampling_params)
         if rank == 0:
             # cmp output
-            assert outputs[0].outputs[0].text == outputs_after_wakeup[
-                0].outputs[0].text
+            assert outputs[0].outputs[0].text == outputs_after_wakeup[0].outputs[0].text
             print("Sleep and wake up successfully!!")
 
     for i, output in enumerate(outputs):

@@ -19,8 +19,8 @@ Run:
 """
 
 import torch
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          PreTrainedTokenizer)
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
+
 from vllm import LLM
 
 
@@ -37,24 +37,24 @@ def get_prompt_embeds(
     tokenizer: PreTrainedTokenizer,
     embedding_layer: torch.nn.Module,
 ):
-    token_ids = tokenizer.apply_chat_template(chat,
-                                              add_generation_prompt=True,
-                                              return_tensors="pt")
+    token_ids = tokenizer.apply_chat_template(
+        chat, add_generation_prompt=True, return_tensors="pt"
+    )
     prompt_embeds = embedding_layer(token_ids).squeeze(0)
     return prompt_embeds
 
 
-def single_prompt_inference(llm: LLM, tokenizer: PreTrainedTokenizer,
-                            embedding_layer: torch.nn.Module):
-    chat = [{
-        "role": "user",
-        "content": "Please tell me about the capital of France."
-    }]
+def single_prompt_inference(
+    llm: LLM, tokenizer: PreTrainedTokenizer, embedding_layer: torch.nn.Module
+):
+    chat = [{"role": "user", "content": "Please tell me about the capital of France."}]
     prompt_embeds = get_prompt_embeds(chat, tokenizer, embedding_layer)
 
-    outputs = llm.generate({
-        "prompt_embeds": prompt_embeds,
-    })
+    outputs = llm.generate(
+        {
+            "prompt_embeds": prompt_embeds,
+        }
+    )
 
     print("\n[Single Inference Output]")
     print("-" * 30)
@@ -63,30 +63,20 @@ def single_prompt_inference(llm: LLM, tokenizer: PreTrainedTokenizer,
     print("-" * 30)
 
 
-def batch_prompt_inference(llm: LLM, tokenizer: PreTrainedTokenizer,
-                           embedding_layer: torch.nn.Module):
+def batch_prompt_inference(
+    llm: LLM, tokenizer: PreTrainedTokenizer, embedding_layer: torch.nn.Module
+):
     chats = [
-        [{
-            "role": "user",
-            "content": "Please tell me about the capital of France."
-        }],
-        [{
-            "role": "user",
-            "content": "When is the day longest during the year?"
-        }],
-        [{
-            "role": "user",
-            "content": "Where is bigger, the moon or the sun?"
-        }],
+        [{"role": "user", "content": "Please tell me about the capital of France."}],
+        [{"role": "user", "content": "When is the day longest during the year?"}],
+        [{"role": "user", "content": "Where is bigger, the moon or the sun?"}],
     ]
 
     prompt_embeds_list = [
         get_prompt_embeds(chat, tokenizer, embedding_layer) for chat in chats
     ]
 
-    outputs = llm.generate([{
-        "prompt_embeds": embeds
-    } for embeds in prompt_embeds_list])
+    outputs = llm.generate([{"prompt_embeds": embeds} for embeds in prompt_embeds_list])
 
     print("\n[Batch Inference Outputs]")
     print("-" * 30)

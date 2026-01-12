@@ -1,9 +1,10 @@
 from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 from llmcompressor.utils import dispatch_for_generation
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Select model and load it.
 MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
@@ -20,15 +21,13 @@ NUM_CALIBRATION_SAMPLES = 512
 MAX_SEQUENCE_LENGTH = 2048
 
 # Load dataset and preprocess.
-ds = load_dataset(DATASET_ID,
-                  split=f"{DATASET_SPLIT}[:{NUM_CALIBRATION_SAMPLES}]")
+ds = load_dataset(DATASET_ID, split=f"{DATASET_SPLIT}[:{NUM_CALIBRATION_SAMPLES}]")
 ds = ds.shuffle(seed=42)
 
 
 def preprocess(example):
     return {
-        "text":
-        tokenizer.apply_chat_template(
+        "text": tokenizer.apply_chat_template(
             example["messages"],
             tokenize=False,
         )
@@ -73,8 +72,7 @@ oneshot(
 print("\n\n")
 print("========== SAMPLE GENERATION ==============")
 dispatch_for_generation(model)
-input_ids = tokenizer("Hello my name is",
-                      return_tensors="pt").input_ids.to("npu")
+input_ids = tokenizer("Hello my name is", return_tensors="pt").input_ids.to("npu")
 output = model.generate(input_ids, max_new_tokens=100)
 print(tokenizer.decode(output[0]))
 print("==========================================\n\n")

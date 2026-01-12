@@ -23,7 +23,7 @@
 # ----------------------------------
 # You need to have at least two vLLM servers running in data parallel.
 # These can be mock servers or actual vLLM servers.
-# Note that this proxy also works with only one vLLM server running, but
+# Note that this proxy also works with only one vLLM server running, but 
 # will fall back to direct request forwarding which is meaningless.
 #
 # For testing, you can use the provided mock server:
@@ -136,7 +136,7 @@ class ProxyState:
         # Each entry is (priority_score, server_index, server_reference)
         # Lower priority score = higher priority (less loaded)
         self.lb_heap = [(0, i, server)
-                        for i, server in enumerate(self.dp_servers)]
+                               for i, server in enumerate(self.dp_servers)]
         heapq.heapify(self.lb_heap)
 
     def _update_server_priority(self, server_idx: int):
@@ -145,7 +145,7 @@ class ProxyState:
         priority = server.active_tokens
         # Remove old entry and add new one
         self.lb_heap = [(p, i, s) for p, i, s in self.lb_heap
-                        if i != server_idx]
+                             if i != server_idx]
         heapq.heappush(self.lb_heap,
                        (priority, server_idx, server))  # type: ignore
 
@@ -174,10 +174,7 @@ class ProxyState:
         # Update priority queue after releasing
         self._update_server_priority(idx)
 
-    def calculate_request_score(self,
-                                request_length: int,
-                                max_tokens: int = 16,
-                                ignore_eos: bool = False) -> float:
+    def calculate_request_score(self, request_length: int, max_tokens: int = 16, ignore_eos: bool = False) -> float:
         if ignore_eos:
             return request_length + max_tokens
         else:
@@ -197,7 +194,10 @@ def parse_args():
                         type=str,
                         nargs="+",
                         default=["localhost"])
-    parser.add_argument("--dp-ports", type=int, nargs="+", default=[8001])
+    parser.add_argument("--dp-ports",
+                        type=int,
+                        nargs="+",
+                        default=[8001])
     parser.add_argument("--max-retries",
                         type=int,
                         default=3,
@@ -209,7 +209,8 @@ def parse_args():
         help="Base delay (seconds) for exponential backoff retries")
     args = parser.parse_args()
     if len(args.dp_hosts) != len(args.dp_ports):
-        raise ValueError("Number of dp hosts must match number of dp ports")
+        raise ValueError(
+            "Number of dp hosts must match number of dp ports")
     args.server_instances = list(zip(args.dp_hosts, args.dp_ports))
     return args
 
@@ -218,7 +219,9 @@ def parse_args():
 async def lifespan(app: FastAPI):
     global proxy_state
     proxy_state = ProxyState(global_args.server_instances)
-    print(f"Initialized {len(proxy_state.dp_servers)} dp server clients.")
+    print(
+        f"Initialized {len(proxy_state.dp_servers)} dp server clients."
+    )
     yield
     for p in proxy_state.dp_servers:
         await p.client.aclose()
@@ -306,13 +309,12 @@ async def stream_service_response_with_retry(client: httpx.AsyncClient,
                     raise e
 
 
-async def _select_instance(api: str, req_data: Any, request_length: int):
+async def _select_instance(api: str, req_data: Any,
+                                  request_length: int):
     # refer to vLLM sampling_params: max_token default value
     max_tokens = req_data.get("max_tokens", 16)
     ignore_eos = req_data.get("ignore_eos", False)
-    priority_score = proxy_state.calculate_request_score(request_length,
-                                                         max_tokens=max_tokens,
-                                                         ignore_eos=ignore_eos)
+    priority_score = proxy_state.calculate_request_score(request_length,max_tokens=max_tokens, ignore_eos=ignore_eos)
     logger.debug(
         f"Request length: {request_length}, max tokens: {max_tokens}, ignore_eos: {ignore_eos}, Priority score: {priority_score}"
     )
@@ -320,8 +322,7 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     # Select dp server based on priority score
     server_idx = proxy_state.select_server(priority_score)
     choosen_server = proxy_state.dp_servers[server_idx]
-    logger.debug(
-        f"Choose server {choosen_server.url} to process request {request_id}")
+    logger.debug(f"Choose server {choosen_server.url} to process request {request_id}")
     return InstanceInfo(request_id=request_id,
                         server_idx=server_idx,
                         priority_score=priority_score,
@@ -341,8 +342,8 @@ async def _handle_completions(api: str, request: Request):
         req_data = await request.json()
         req_body = await request.body()
         request_length = len(req_body)
-        instance_info = await _select_instance(api, req_data, request_length)
-
+        instance_info = await _select_instance(api, req_data,
+                                                      request_length)
         async def generate_stream():
             nonlocal instance_info
             # Only one await per chunk, minimal logic in loop
@@ -362,7 +363,7 @@ async def _handle_completions(api: str, request: Request):
 
             # After streaming done, release tokens
             proxy_state.release_server(instance_info.server_idx,
-                                       instance_info.priority_score)
+                                        instance_info.priority_score)
 
         return StreamingResponse(generate_stream(),
                                  media_type="application/json")

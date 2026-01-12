@@ -136,8 +136,8 @@ class TestEagleProposerLoadModel(TestBase):
         self.mock_cpugpubuffer.stop()
         self.mock_supports_multimodal_inputs.stop()
 
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config"
-           )
+    @patch(
+        "vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
     @patch("vllm_ascend.spec_decode.eagle_proposer.get_model")
     @patch("vllm_ascend.spec_decode.eagle_proposer.get_pp_group")
     def test_load_model_pp1(self, mock_pp_group, mock_get_model,
@@ -169,8 +169,8 @@ class TestEagleProposerLoadModel(TestBase):
         self.assertIs(self.proposer.model.model.embed_tokens,
                       mock_model.model.embed_tokens)
 
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config"
-           )
+    @patch(
+        "vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
     @patch("vllm_ascend.spec_decode.eagle_proposer.get_model")
     @patch("vllm_ascend.spec_decode.eagle_proposer.get_pp_group")
     def test_load_model_pp_gt1(self, mock_pp_group, mock_get_model,
@@ -198,8 +198,8 @@ class TestEagleProposerLoadModel(TestBase):
                          mock_model.model.embed_tokens)
         self.assertEqual(self.proposer.attn_layer_name, ["layer2"])
 
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config"
-           )
+    @patch(
+        "vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
     @patch("vllm_ascend.spec_decode.eagle_proposer.get_model")
     @patch("vllm_ascend.spec_decode.eagle_proposer.get_pp_group")
     @patch("vllm_ascend.spec_decode.eagle_proposer.supports_multimodal")

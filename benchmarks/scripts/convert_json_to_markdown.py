@@ -49,16 +49,19 @@ def read_markdown(file):
 
 
 def results_to_json(latency, throughput, serving):
-    return json.dumps({
-        "latency": latency.to_dict(),
-        "throughput": throughput.to_dict(),
-        "serving": serving.to_dict(),
-    })
+    return json.dumps(
+        {
+            "latency": latency.to_dict(),
+            "throughput": throughput.to_dict(),
+            "serving": serving.to_dict(),
+        }
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Process the results of the benchmark tests.")
+        description="Process the results of the benchmark tests."
+    )
     parser.add_argument(
         "--results_folder",
         type=str,
@@ -77,12 +80,12 @@ if __name__ == "__main__":
         default="./perf_result_template.md",
         help="The template file for the markdown report.",
     )
-    parser.add_argument("--tag",
-                        default="main",
-                        help="Tag to be used for release message.")
-    parser.add_argument("--commit_id",
-                        default="",
-                        help="Commit ID to be used for release message.")
+    parser.add_argument(
+        "--tag", default="main", help="Tag to be used for release message."
+    )
+    parser.add_argument(
+        "--commit_id", default="", help="Commit ID to be used for release message."
+    )
 
     args = parser.parse_args()
     results_folder = (CUR_PATH / args.results_folder).resolve()
@@ -114,7 +117,8 @@ if __name__ == "__main__":
             for perc in [10, 25, 50, 75, 90, 99]:
                 # Multiply 1000 to convert the time unit from s to ms
                 raw_result.update(
-                    {f"P{perc}": 1000 * raw_result["percentiles"][str(perc)]})
+                    {f"P{perc}": 1000 * raw_result["percentiles"][str(perc)]}
+                )
             raw_result["avg_latency"] = raw_result["avg_latency"] * 1000
 
             # add the result to raw_result
@@ -138,40 +142,38 @@ if __name__ == "__main__":
     serving_results = pd.DataFrame.from_dict(serving_results)
     throughput_results = pd.DataFrame.from_dict(throughput_results)
 
-    raw_results_json = results_to_json(latency_results, throughput_results,
-                                       serving_results)
+    raw_results_json = results_to_json(
+        latency_results, throughput_results, serving_results
+    )
 
     # remapping the key, for visualization purpose
     if not latency_results.empty:
-        latency_results = latency_results[list(
-            latency_column_mapping.keys())].rename(
-                columns=latency_column_mapping)
+        latency_results = latency_results[list(latency_column_mapping.keys())].rename(
+            columns=latency_column_mapping
+        )
     if not serving_results.empty:
-        serving_results = serving_results[list(
-            serving_column_mapping.keys())].rename(
-                columns=serving_column_mapping)
+        serving_results = serving_results[list(serving_column_mapping.keys())].rename(
+            columns=serving_column_mapping
+        )
     if not throughput_results.empty:
-        throughput_results = throughput_results[list(
-            throughput_results_column_mapping.keys())].rename(
-                columns=throughput_results_column_mapping)
+        throughput_results = throughput_results[
+            list(throughput_results_column_mapping.keys())
+        ].rename(columns=throughput_results_column_mapping)
 
-    processed_results_json = results_to_json(latency_results,
-                                             throughput_results,
-                                             serving_results)
+    processed_results_json = results_to_json(
+        latency_results, throughput_results, serving_results
+    )
 
     # get markdown tables
-    latency_md_table = tabulate(latency_results,
-                                headers="keys",
-                                tablefmt="pipe",
-                                showindex=False)
-    serving_md_table = tabulate(serving_results,
-                                headers="keys",
-                                tablefmt="pipe",
-                                showindex=False)
-    throughput_md_table = tabulate(throughput_results,
-                                   headers="keys",
-                                   tablefmt="pipe",
-                                   showindex=False)
+    latency_md_table = tabulate(
+        latency_results, headers="keys", tablefmt="pipe", showindex=False
+    )
+    serving_md_table = tabulate(
+        serving_results, headers="keys", tablefmt="pipe", showindex=False
+    )
+    throughput_md_table = tabulate(
+        throughput_results, headers="keys", tablefmt="pipe", showindex=False
+    )
 
     # document the result
     print(output_folder)

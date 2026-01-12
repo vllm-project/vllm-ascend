@@ -25,7 +25,6 @@ from vllm import LLM
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-
 def get_detailed_instruct(task_description: str, query: str) -> str:
     return f'Instruct: {task_description}\nQuery:{query}'
 
