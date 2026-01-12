@@ -27,7 +27,7 @@ deployment:
         --enable-expert-parallel
         --max-num-seqs 128
         --max-model-len 40960
-        --max-num-batched-tokens 256
+        --max-num-batched-tokens 2048
         --trust-remote-code
         --gpu-memory-utilization 0.9
         --async-scheduling
@@ -44,7 +44,7 @@ deployment:
         --seed 1024
         --max-num-seqs 128
         --max-model-len 40960
-        --max-num-batched-tokens 256
+        --max-num-batched-tokens 2048
         --enable-expert-parallel
         --trust-remote-code
         --gpu-memory-utilization 0.9
