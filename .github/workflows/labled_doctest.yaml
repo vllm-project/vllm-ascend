@@ -23,6 +23,7 @@ on:
     branches:
       - 'main'
       - '*-dev'
+      - 'releases/v*'
     paths:
       # If we are changing the doctest we should do a PR test
       - '.github/workflows/labled_doctest.yaml'
