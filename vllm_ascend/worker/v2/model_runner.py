@@ -161,7 +161,8 @@ class NPUModelRunner(GPUModelRunner):
         idx_mapping = self.input_buffers.idx_mapping
         idx_mapping.np[:num_reqs] = idx_mapping_list
         idx_mapping_np = idx_mapping.np[:num_reqs]
-        idx_mapping = idx_mapping.copy_to_gpu(num_reqs)
+        idx_mapping_cpu = idx_mapping.cpu[:num_reqs]
+        idx_mapping_npu = idx_mapping.copy_to_gpu(num_reqs)
 
         # Get the number of draft tokens for each request.
         if not scheduler_output.scheduled_spec_decode_tokens:
@@ -191,7 +192,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs + 1)
 
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
-        block_tables = self.block_tables.gather_block_tables(idx_mapping)
+        block_tables = self.block_tables.gather_block_tables(idx_mapping_npu)
 
         # Get query_start_loc.
         np.cumsum(
@@ -215,7 +216,7 @@ class NPUModelRunner(GPUModelRunner):
         prepare_prefill_inputs(
             self.input_buffers.input_ids,
             self.req_states.next_prefill_tokens,
-            idx_mapping,
+            idx_mapping_npu,
             query_start_loc_gpu,
             # use prefill_token_ids.copy_to_gpu() because npu doesn't
             # support uva buffer.
@@ -226,7 +227,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
-            idx_mapping,
+            idx_mapping_npu,
             query_start_loc_gpu,
             self.req_states.num_computed_tokens,
             self.input_buffers.positions,
@@ -238,7 +239,7 @@ class NPUModelRunner(GPUModelRunner):
         # and draft tokens. Also, get the logits indices to sample tokens from.
         logits_indices = combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids,
-            idx_mapping,
+            idx_mapping_npu,
             self.req_states.last_sampled_tokens,
             query_start_loc_gpu,
             seq_lens,
@@ -263,7 +264,9 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_gpu=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
-            seq_lens_cpu=self.input_buffers.seq_lens_cpu,
+            seq_lens_np=self.input_buffers.seq_lens_np,
+            num_computed_tokens_cpu=self.req_states.
+            num_computed_tokens_cpu[idx_mapping_cpu],
             block_tables=block_tables,
             # torch_npu._reshape_and_cache operator requires slot_mappings to
             # be torch.int32.
@@ -277,7 +280,7 @@ class NPUModelRunner(GPUModelRunner):
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
-            idx_mapping=idx_mapping,
+            idx_mapping=idx_mapping_npu,
             idx_mapping_np=idx_mapping_np,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,

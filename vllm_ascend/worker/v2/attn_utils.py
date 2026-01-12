@@ -50,7 +50,8 @@ def build_attn_metadata(
     query_start_loc_gpu: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
     seq_lens: torch.Tensor,
-    seq_lens_cpu: torch.Tensor,
+    seq_lens_np: np.ndarray,
+    num_computed_tokens_cpu: torch.Tensor | None,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
@@ -64,6 +65,7 @@ def build_attn_metadata(
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
     max_query_len = int(query_start_loc_cpu.max())
+    seq_lens_cpu = torch.from_numpy(seq_lens_np)
     max_seq_len = int(seq_lens_cpu.max())
 
     attn_metadata: dict[str, Any] = {}

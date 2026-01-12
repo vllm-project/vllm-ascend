@@ -23,7 +23,7 @@ import torch
 from vllm.v1.worker.gpu.spec_decode.eagle import EagleSpeculator
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample as ascend_gumbel_sample
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 
@@ -34,8 +34,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         attnention metadata building in Ascend backend needs more information,
         such as seq_lens_cpu from input_batch, so we need to override __init__.
         """
-        with triton_op_wrapper():
-            super().__init__(vllm_config, device)
+        super().__init__(vllm_config, device)
         # when in decode phase of eagle speculator, we need some value in
         # main model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
@@ -57,16 +56,18 @@ class AscendEagleSpeculator(EagleSpeculator):
         generate_draft.
         """
         self.input_batch = input_batch
-        return super().propose(
-            input_batch,
-            sampling_metadata,
-            last_hidden_states,
-            aux_hidden_states,
-            num_sampled,
-            num_rejected,
-            last_sampled,
-            next_prefill_tokens,
-        )
+        # wrap build_attn_metadata to use Ascend attention metadata building.
+        with build_attn_metadata_wrapper():
+            return super().propose(
+                input_batch,
+                sampling_metadata,
+                last_hidden_states,
+                aux_hidden_states,
+                num_sampled,
+                num_rejected,
+                last_sampled,
+                next_prefill_tokens,
+            )
 
     def generate_draft(
         self,
@@ -132,12 +133,10 @@ class AscendEagleSpeculator(EagleSpeculator):
 
 
 @contextmanager
-def triton_op_wrapper():
-    """A context manager to wrap triton calls for Ascend NPUs."""
+def build_attn_metadata_wrapper():
+    """Context manager to override attention metadata building for Ascend NPUs."""
     try:
-        # TODO(Ronald1995): this is a temorary implementation.
-        # remove this when vllm supports triton dispacth for ascend npu.
-        vllm.v1.worker.gpu.sample.gumbel = ascend_gumbel_sample
+        vllm.v1.worker.gpu.spec_decode.eagle.build_attn_metadata = build_attn_metadata
         yield
     finally:
         pass
