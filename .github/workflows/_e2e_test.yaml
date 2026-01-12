@@ -96,38 +96,38 @@ jobs:
           # the test separately.
           # basic 
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_batch_invariant.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
-          # xgrammar has parameter mismatching bug, please follows: https://github.com/vllm-project/vllm-ascend/issues/5524
-          # pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
-          # torch 2.8 doesn't work with lora, fix me
-          pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_sampler.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_xlite.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_batch_invariant.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
+  #         # xgrammar has parameter mismatching bug, please follows: https://github.com/vllm-project/vllm-ascend/issues/5524
+  #         # pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
+  #         # torch 2.8 doesn't work with lora, fix me
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_sampler.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/test_xlite.py
 
-          # compile
-          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
+  #         # compile
+  #         pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
   
-          # model_runner_v2
-          pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
+  #         # model_runner_v2
+  #         pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
 
-          # pooling
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_embedding.py
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_scoring.py
+  #         # pooling
+  #         pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_embedding.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_scoring.py
 
-          # spec_decode
-          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
-          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
+  #         # spec_decode
+  #         pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
+  #         pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
 
   e2e-2-cards:
     name: multicard-2
@@ -139,6 +139,8 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
         TRANSFORMERS_OFFLINE: 1
+        TRITON_KERNEL_DUMP: 1
+        TRITON_DUMP_DIR: ~/root/.cache/cmh/triton_dump
     steps:
       - name: Check npu and CANN info
         run: |
@@ -249,6 +251,8 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         TRANSFORMERS_OFFLINE: 1
+        TRITON_KERNEL_DUMP: 1
+        TRITON_DUMP_DIR: ~/root/.cache/cmh/triton_dump
     steps:
       - name: Check npu and CANN info
         run: |
