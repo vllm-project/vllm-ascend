@@ -70,8 +70,7 @@ aisbench_cases = [
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("dp_size", DATA_PARALLELS)
 @pytest.mark.parametrize("full_graph", FULL_GRAPH)
-async def test_models(model: str, tp_size: int, dp_size: int,
-                      full_graph: bool) -> None:
+async def test_models(model: str, tp_size: int, dp_size: int, full_graph: bool) -> None:
     port = get_open_port()
     env_dict = {"HCCL_BUFFSIZE": "1024"}
     server_args = [
@@ -94,10 +93,7 @@ async def test_models(model: str, tp_size: int, dp_size: int,
         "0.9",
     ]
     if full_graph:
-        server_args += [
-            "--compilation-config",
-            '{"cudagraph_capture": [1,2,4,8,16], "cudagraph_model":"FULL_DECODE_ONLY"}'
-        ]
+        server_args += ["--compilation-config", '{"cudagraph_capture": [1,2,4,8,16], "cudagraph_model":"FULL_DECODE_ONLY"}']
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }

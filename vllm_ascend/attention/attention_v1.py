@@ -701,7 +701,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
-            encoder_decoder = (self.attn_type == AttentionType.ENCODER_DECODER)
+            encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
             if get_ascend_device_type() == AscendDeviceType.A5:
                 # TODO: Once eagle running to here, it may has error because of the 0 dim of slot_mapping.
                 # Should check if the 0 dim of slot_mapping must equal to the 0 dim of key.

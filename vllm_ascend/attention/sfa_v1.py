@@ -719,12 +719,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 need_gather_q_kv=need_gather_q_kv,
                 num_input_tokens=attn_metadata.num_input_tokens,
             )
-            q, k = self.indexer_select_pre_process(
-                x=hidden_states,
-                qr=q_c,
-                cos=cos,
-                sin=sin,
-                need_gather_q_kv=need_gather_q_kv)
+            q, k = self.indexer_select_pre_process(x=hidden_states, qr=q_c, cos=cos, sin=sin, need_gather_q_kv=need_gather_q_kv)
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
             maybe_npu_prefetch(
@@ -743,12 +738,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c.contiguous(), need_gather_q_kv)
                 kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv_no_split.contiguous(), need_gather_q_kv)
 
-            q, k = self.indexer_select_pre_process(
-                x=hidden_states,
-                qr=q_c,
-                cos=cos,
-                sin=sin,
-                need_gather_q_kv=need_gather_q_kv)
+            q, k = self.indexer_select_pre_process(x=hidden_states, qr=q_c, cos=cos, sin=sin, need_gather_q_kv=need_gather_q_kv)
 
             if has_prefill:
                 wait_for_kv_layer_from_connector(layer_name)
@@ -773,23 +763,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.enable_sfa_cp:
                 if kv_ag_handle is not None:
                     kv_ag_handle.wait()
-                for layer in (self.layer_sharding_kwargs or []):
+                for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
 
                 if kv_cache is not None:
                     assert fused_kv_no_split is not None
-                    k_pe, k_nope, k = fused_kv_no_split.split([
-                        self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim
-                    ],
-                                                              dim=-1)
+                    k_pe, k_nope, k = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim], dim=-1)
                     slot_mapping = attn_metadata.slot_mapping.view(-1, 1)
-                    torch_npu.npu_scatter_nd_update_(
-                        kv_cache[0].view(-1, k_nope.shape[-1]), slot_mapping,
-                        k_nope)
-                    torch_npu.npu_scatter_nd_update_(
-                        kv_cache[1].view(-1, k_pe.shape[-1]), slot_mapping,
-                        k_pe)
+                    torch_npu.npu_scatter_nd_update_(kv_cache[0].view(-1, k_nope.shape[-1]), slot_mapping, k_nope)
+                    torch_npu.npu_scatter_nd_update_(kv_cache[1].view(-1, k_pe.shape[-1]), slot_mapping, k_pe)
 
         topk_indices = self.indexer_select_post_process(
             x=hidden_states,
@@ -854,10 +837,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             sin = sin.view(-1, self.qk_rope_head_dim)
             q, k = rope_forward_triton(q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=True)
         else:
-            k_pe, k_nope = torch.split(
-                k,
-                [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
-                dim=-1)  # [b,s,64+64]
+            k_pe, k_nope = torch.split(k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)  # [b,s,64+64]
 
             k_pe = k_pe.unsqueeze(2)
             k_pe = torch_npu.npu_interleave_rope(k_pe, cos, sin)

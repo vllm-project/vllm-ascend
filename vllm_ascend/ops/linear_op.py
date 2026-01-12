@@ -376,8 +376,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         self.input_is_parallel = self.layer.input_is_parallel
         self.input_size_per_partition = self.layer.input_size_per_partition
         if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
-            flashcomm2_oshard_manager.register_layer(self.layer,
-                                                     prefetch_step=1)
+            flashcomm2_oshard_manager.register_layer(self.layer, prefetch_step=1)
 
 
 class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
@@ -446,13 +445,10 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
 
 
 class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
-
     def __init__(self, layer):
         super().__init__(layer)
 
-    def apply_impl(
-        self, input_: torch.Tensor
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+    def apply_impl(self, input_: torch.Tensor) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         """Column-parallel linear with FlashComm2 OShard optimization."""
 
         bias = self.bias if not self.skip_bias_add else None
@@ -461,12 +457,10 @@ class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
         assert self.quant_method is not None
 
         if enable_sp():
-            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                input_, True)
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
 
         # Trigger async broadcast before matmul to overlap communication.
-        flashcomm2_oshard_manager.trigger_broadcast_for_layer(
-            self.layer.prefix)
+        flashcomm2_oshard_manager.trigger_broadcast_for_layer(self.layer.prefix)
 
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
         if self.gather_output and self.tp_size > 1:

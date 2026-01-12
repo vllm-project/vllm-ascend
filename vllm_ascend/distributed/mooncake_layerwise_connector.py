@@ -1009,14 +1009,10 @@ class MooncakeLayerwiseConnectorWorker:
             num_replica_groups = self.tp_size // num_kv_head if self.tp_size >= num_kv_head else 1
             replica_group_idx = self.tp_rank % num_replica_groups
             req_ids = sorted(list(connector_metadata.requests.keys()))
-            selected_req_ids = [
-                req_id for i, req_id in enumerate(req_ids)
-                if i % num_replica_groups == replica_group_idx
-            ]
+            selected_req_ids = [req_id for i, req_id in enumerate(req_ids) if i % num_replica_groups == replica_group_idx]
             if selected_req_ids:
                 if self.use_mla or self.use_sparse:
-                    reshape_cache_event = attn_metadata[
-                        layer_name].reshape_cache_event
+                    reshape_cache_event = attn_metadata[layer_name].reshape_cache_event
                 else:
                     reshape_cache_event = attn_metadata.reshape_cache_event
 

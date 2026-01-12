@@ -55,19 +55,10 @@ def test_whisper(model) -> None:
     prompts = ["<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"]
     audios = [AudioAsset("mary_had_lamb").audio_and_sample_rate]
 
-    sampling_params = SamplingParams(temperature=0.2,
-                                     max_tokens=10,
-                                     stop_token_ids=None)
+    sampling_params = SamplingParams(temperature=0.2, max_tokens=10, stop_token_ids=None)
 
-    with VllmRunner(snapshot_download(model),
-                    max_model_len=448,
-                    max_num_seqs=5,
-                    dtype="bfloat16",
-                    block_size=128,
-                    gpu_memory_utilization=0.9) as runner:
-        outputs = runner.generate(prompts=prompts,
-                                  audios=audios,
-                                  sampling_params=sampling_params)
+    with VllmRunner(snapshot_download(model), max_model_len=448, max_num_seqs=5, dtype="bfloat16", block_size=128, gpu_memory_utilization=0.9) as runner:
+        outputs = runner.generate(prompts=prompts, audios=audios, sampling_params=sampling_params)
 
     assert outputs is not None, "Generated outputs should not be None."
     assert len(outputs) > 0, "Generated outputs should not be empty."

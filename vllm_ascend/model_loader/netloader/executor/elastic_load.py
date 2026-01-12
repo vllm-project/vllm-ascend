@@ -16,14 +16,9 @@
 
 import torch
 import torch_npu
-from vllm.distributed.utils import (
-    stateless_destroy_torch_distributed_process_group,
-    stateless_init_torch_distributed_process_group,
-)
 from vllm.logger import logger
 
-from .netloader_pg import (destroy_stateless_process_group,
-                           stateless_init_process_group)
+from .netloader_pg import destroy_stateless_process_group, stateless_init_process_group
 
 
 class P2PLoad:

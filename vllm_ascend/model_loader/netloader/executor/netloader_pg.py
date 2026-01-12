@@ -17,16 +17,13 @@
 import gc
 import ipaddress
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch_npu
-from torch._C._distributed_c10d import (_DEFAULT_PG_TIMEOUT,
-                                        _register_process_group,
-                                        _unregister_process_group)
+from torch._C._distributed_c10d import _DEFAULT_PG_TIMEOUT, _register_process_group, _unregister_process_group
 from torch.distributed import ProcessGroup, is_hccl_available
-from torch.distributed.distributed_c10d import (Backend, BackendConfig,
-                                                PrefixStore, _world)
+from torch.distributed.distributed_c10d import Backend, BackendConfig, PrefixStore, _world
 from torch.distributed.rendezvous import rendezvous
 from torch_npu._C._distributed_c10d import ProcessGroupHCCL
 from vllm.logger import logger
@@ -39,7 +36,7 @@ def stateless_init_process_group(
     rank: int,
     timeout: timedelta = _DEFAULT_PG_TIMEOUT,
     group_name: str = "",
-    pg_options: Optional[Any] = None,
+    pg_options: Any | None = None,
 ) -> ProcessGroup:
     """
     Initializes a stateless process group.
@@ -67,21 +64,16 @@ def stateless_init_process_group(
         raise RuntimeError("world_size must be positive")
     # Check if rank is within [0, world_size - 1]
     if not (rank >= 0 and rank <= world_size - 1):
-        raise RuntimeError(
-            "rank should be a number between 0 and ``world_size``-1")
+        raise RuntimeError("rank should be a number between 0 and ``world_size``-1")
     # Check if HCCL is available
     if not is_hccl_available():
         raise RuntimeError("HCCL is not available")
     # Check if timeout is a timedelta type
     if not isinstance(timeout, timedelta):
-        raise TypeError(
-            f"Expected timeout argument to be of type datetime.timedelta, got {timeout}"
-        )
+        raise TypeError(f"Expected timeout argument to be of type datetime.timedelta, got {timeout}")
     # Check if group_name already exists
     if group_name in _world.pg_names.values():
-        raise ValueError(
-            f"The specified group name {group_name} has already been "
-            "created, please use a different group name")
+        raise ValueError(f"The specified group name {group_name} has already been created, please use a different group name")
 
     # Function to check if an IPv6 address is valid
     def is_valid_ipv6_address(address: str) -> bool:
@@ -101,10 +93,9 @@ def stateless_init_process_group(
     # Get initialization method
     init_method = get_tcp_uri(host, port)
     # Create Backend object
-    backend = Backend('hccl')
+    backend = Backend("hccl")
     # Use rendezvous function to get store, rank, and world_size
-    store, rank, world_size = next(
-        rendezvous(init_method, rank, world_size, timeout=timeout))
+    store, rank, world_size = next(rendezvous(init_method, rank, world_size, timeout=timeout))
 
     # Set timeout for store
     store.set_timeout(timeout)
@@ -125,9 +116,7 @@ def stateless_init_process_group(
     pg._set_default_backend(Backend.backend_type_map[backend])
 
     # Check if pg_options is None or not of type ProcessGroupHCCL.Options
-    if pg_options is None or not isinstance(
-            pg_options,
-            torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options):
+    if pg_options is None or not isinstance(pg_options, torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options):
         pg_options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
     # Set attributes for pg_options
     pg_options.is_high_priority_stream = False
@@ -135,8 +124,7 @@ def stateless_init_process_group(
     pg_options.global_ranks_in_group = []
     pg_options.group_id = f"{init_method}/{group_name}/"
     # Create ProcessGroupHCCL object
-    backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size,
-                                     pg_options)
+    backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size, pg_options)
     # Set sequence number for backend_class
     backend_class._set_sequence_number_for_group()
     # Set backend_type
@@ -177,8 +165,7 @@ def destroy_stateless_process_group(pg: ProcessGroup, manual_gc: bool = False):
     _world.pg_backend_config.pop(pg, None)
     # Check if pg is in keys of _world.pg_coalesce_state
     if pg in _world.pg_coalesce_state.keys():
-        logger.warning("Some coalesced collectives haven't been launched when "
-                       "ProcessGroup is destroyed. They will be cleaned.")
+        logger.warning("Some coalesced collectives haven't been launched when ProcessGroup is destroyed. They will be cleaned.")
         del _world.pg_coalesce_state[pg]
     # Unregister the process group
     _unregister_process_group(pg.group_name)

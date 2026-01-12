@@ -340,8 +340,7 @@ class NPUModelRunner(GPUModelRunner):
         # the block_sizes in the kv cache config.
         self.input_batch = NPUInputBatch(
             max_num_reqs=self.max_num_reqs,
-            max_model_len=max(self.model_config.max_model_len,
-                              self.max_encoder_len),
+            max_model_len=max(self.model_config.max_model_len, self.max_encoder_len),
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
@@ -734,7 +733,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # _prepare_inputs may reorder the batch, so we must gather
         # multi-modal outputs after that to ensure the correct order
-        if vllm_version_is('0.13.0'):
+        if vllm_version_is("0.13.0"):
             model_kwargs = self._init_model_kwargs(num_input_tokens)
         else:
             model_kwargs = self._init_model_kwargs()
@@ -960,7 +959,8 @@ class NPUModelRunner(GPUModelRunner):
                 prefill_context_parallel_metadata=self.long_seq_metadata,
                 max_seq_len=0,
                 encoder_seq_lens=encoder_seq_lens,
-                encoder_seq_lens_cpu=encoder_seq_lens_cpu)
+                encoder_seq_lens_cpu=encoder_seq_lens_cpu,
+            )
 
             if self.speculative_config and self.pcp_size * self.dcp_size > 1:
                 # For pcp + spec decode, we flatten block_table
@@ -2563,8 +2563,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
-                max_model_len=max(self.model_config.max_model_len,
-                                  self.max_encoder_len),
+                max_model_len=max(self.model_config.max_model_len, self.max_encoder_len),
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
                 pin_memory=self.pin_memory,
@@ -2719,10 +2718,8 @@ class NPUModelRunner(GPUModelRunner):
                     continue
                 elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                     kv_cache_spec[layer_name] = CrossAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype)
+                        block_size=block_size, num_kv_heads=attn_module.num_kv_heads, head_size=attn_module.head_size, dtype=self.kv_cache_dtype
+                    )
                 else:
                     raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
 

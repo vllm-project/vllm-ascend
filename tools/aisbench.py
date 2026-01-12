@@ -95,8 +95,7 @@ class AisbenchRunner:
         self.max_out_len = aisbench_config["max_out_len"]
         self.batch_size = aisbench_config["batch_size"]
         self.request_rate = aisbench_config.get("request_rate", 0)
-        self.trust_remote_code = aisbench_config.get("trust_remote_code",
-                                                     False)
+        self.trust_remote_code = aisbench_config.get("trust_remote_code", False)
         self.temperature = aisbench_config.get("temperature")
         self.top_k = aisbench_config.get("top_k")
         self.top_p = aisbench_config.get("top_p")
