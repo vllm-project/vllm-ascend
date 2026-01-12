@@ -1,9 +1,10 @@
-import torch
-
 from typing import Optional
+
+import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
 
 @triton.heuristics(
     {"HAS_BIAS": lambda args: args["norm_bias_ptr"] is not None})
@@ -50,16 +51,16 @@ def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
         input_offsets += row_step * hidden_size
 
 
-def add_rmsnorm_bias(
-        input: torch.Tensor, residual: Optional[torch.Tensor],
-        norm_weight: torch.Tensor, norm_bias: Optional[torch.Tensor],
-        eps: float
-) -> tuple[torch.Tensor, torch.Tensor]:
+def add_rmsnorm_bias(input: torch.Tensor, residual: Optional[torch.Tensor],
+                     norm_weight: torch.Tensor,
+                     norm_bias: Optional[torch.Tensor],
+                     eps: float) -> tuple[torch.Tensor, torch.Tensor]:
     original_shape = input.shape
     is_3d = input.ndim == 3
     if is_3d:
         input_flat = input.reshape(-1, input.shape[-1])
-        residual_flat = residual.reshape(-1, residual.shape[-1]) if residual is not None else None
+        residual_flat = residual.reshape(
+            -1, residual.shape[-1]) if residual is not None else None
     else:
         input_flat = input
         residual_flat = residual
@@ -82,10 +83,10 @@ def add_rmsnorm_bias(
                                hidden_size,
                                device=input.device,
                                dtype=input.dtype)
-    add_rmsnorm_bias_kernel[(n_rows, 1, 1)](input_flat, residual_flat, norm_weight,
-                                            norm_bias,output_flat, output2_flat,
-                                            batch_size, hidden_size, eps,
-                                            BLOCK_SIZE)
+    add_rmsnorm_bias_kernel[(n_rows, 1,
+                             1)](input_flat, residual_flat, norm_weight,
+                                 norm_bias, output_flat, output2_flat,
+                                 batch_size, hidden_size, eps, BLOCK_SIZE)
 
     if is_3d:
         output = output_flat.reshape(original_shape)
