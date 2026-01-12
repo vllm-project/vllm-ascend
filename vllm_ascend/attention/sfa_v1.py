@@ -23,9 +23,8 @@ from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
-from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.config.utils import enable_sp
 from vllm_ascend.config.vllm_ascend import get_ascend_config
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer, post_process_after_loading_for_shard_weight_series,
     reach_layer_for_shard_weight_series,
