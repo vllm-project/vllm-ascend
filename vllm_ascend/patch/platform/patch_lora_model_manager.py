@@ -65,11 +65,9 @@ class  AscendLoRAModelManager:
         self.lora_config = lora_config
         self.device = device
         self.max_num_seqs = max_num_seqs
-        #isort: off
-        assert self.capacity >= self.lora_slots
+        assert self.capacity >= self.lora_slots # type:ignore
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
-        self.lora_index_to_id: list[int | None] = [None] * self.lora_slots
-        #isort: on
+        self.lora_index_to_id: list[int | None] = [None] * self.lora_slots # type:ignore
         self.vocab_size = vocab_size
         self.punica_wrapper = get_punica_wrapper(
             max_num_batched_tokens,
@@ -96,7 +94,7 @@ class  AscendLoRAModelManager:
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
         self._is_3d_moe_model = is_moe_model(self.model) and self.model.is_3d_moe_weight
-        self._create_lora_modules()
+        self._create_lora_modules() # type:ignore
 
         self.model.lora_manager = self
 

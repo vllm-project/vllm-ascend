@@ -20,7 +20,7 @@ import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_ec_connector  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
-import vllm_ascend.patch.platform.patch_lor_model_manager  # noqa
+import vllm_ascend.patch.platform.patch_lora_model_manager  # noqa
 from vllm_ascend import envs
 from vllm_ascend.utils import vllm_version_is
 
