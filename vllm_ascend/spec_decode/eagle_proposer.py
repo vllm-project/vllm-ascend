@@ -216,13 +216,8 @@ class EagleProposer(VllmEagleProposer):
                         :num_reqs * self.decode_threshold]
 
             builder = self.runner.attn_groups[0][0].get_metadata_builder()
-            # TODO: check which one should we use, ChunkedPrefill or SpecDecoding
-            if self.vllm_config.model_config.use_mla:
-                attn_metadata_eagle = builder.build_for_graph_capture(
-                    common_attn_metadata, AscendAttentionState.SpecDecoding)
-            else:
-                attn_metadata_eagle = builder.build_for_graph_capture(
-                    common_attn_metadata, AscendAttentionState.ChunkedPrefill)
+            attn_metadata_eagle = builder.build_for_graph_capture(
+                common_attn_metadata, AscendAttentionState.ChunkedPrefill)
             attn_metadata = {}
             for layer_name in self.attn_layer_names:
                 attn_metadata[layer_name] = attn_metadata_eagle
@@ -567,8 +562,7 @@ class EagleProposer(VllmEagleProposer):
                 dtype=torch.int32).to(self.device) - ori_last_token_indices - 1
             num_accept_tokens = \
                 query_lens_d.to(self.device) - num_reject_tokens
-            ori_seq_len = attn_metadata_i.seq_lens + 1
-            ori_seq_len = ori_seq_len - 1
+            ori_seq_len = attn_metadata_i.seq_lens.clone()
             mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
             # slot_mapping index base offset:
@@ -625,9 +619,6 @@ class EagleProposer(VllmEagleProposer):
         draft_token_ids_list = [draft_token_ids]
 
         last_token_indices = self.arange[:batch_size]
-        """
-        a large amount of code for pcpdcp attention metadata update
-        """
 
         input_batch_size = self.maybe_pad_for_graph(batch_size, batch_size)
 
@@ -663,13 +654,19 @@ class EagleProposer(VllmEagleProposer):
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
-            common_attn_metadata.block_table_tensor = common_attn_metadata.backup[
-                "block_table_tensor"][:input_batch_size]
+            if hasattr(common_attn_metadata.block_table_tensor, '_base'):
+                common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor._base[:input_batch_size]
+            else:
+                common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:input_batch_size]
             common_attn_metadata.num_reqs = input_batch_size
-            common_attn_metadata.seq_lens = common_attn_metadata.backup[
-                "seq_lens"][:input_batch_size]
-            common_attn_metadata.seq_lens_cpu = common_attn_metadata.backup[
-                "seq_lens_cpu"][:input_batch_size]
+            if hasattr(common_attn_metadata.seq_lens, '_base'):
+                common_attn_metadata.seq_lens = common_attn_metadata.seq_lens._base[:input_batch_size]
+            else:
+                common_attn_metadata.seq_lens = common_attn_metadata.seq_lens[:input_batch_size]
+            if hasattr(common_attn_metadata.seq_lens_cpu, '_base'):
+                common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu._base[:input_batch_size]
+            else:
+                common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:input_batch_size]
             common_attn_metadata.query_start_loc = self.arange[:
                                                                input_batch_size
                                                                + 1]
@@ -683,14 +680,8 @@ class EagleProposer(VllmEagleProposer):
         common_attn_metadata.decode_token_per_req = 1
         common_attn_metadata.attn_mask = (
             self.attn_mask_builder.get_splitfuse_attn_mask())
-        if self.vllm_config.model_config.use_mla:
-            common_attn_metadata.attn_state = AscendAttentionState.SpecDecoding
-        else:
-            common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         common_attn_metadata.num_input_tokens = input_batch_size
-        """
-        prefill_context_parallel_metadata may be important, but pcpdcp
-        """
 
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
@@ -795,9 +786,6 @@ class EagleProposer(VllmEagleProposer):
                 # padding tokens.
                 common_attn_metadata.slot_mapping[:batch_size].masked_fill_(
                     exceeds_max_model_len, PADDING_SLOT_ID)
-            """
-            a large amount of code for pcpdcp attention metadata update
-            """
 
             # Rebuild attention metadata
             attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
@@ -1057,8 +1045,7 @@ class EagleProposer(VllmEagleProposer):
             positions=common_attn_metadata.positions[token_indices],
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
-            max_seq_len=0,
-            backup=common_attn_metadata.backup)
+            max_seq_len=0)
         return spec_common_attn_metadata, token_indices
 
     def prepare_inputs_padded(
@@ -1143,8 +1130,7 @@ class EagleProposer(VllmEagleProposer):
             num_computed_tokens_cpu=common_attn_metadata.
             num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens,
-            max_seq_len=0,
-            backup=common_attn_metadata.backup)
+            max_seq_len=0)
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample
 

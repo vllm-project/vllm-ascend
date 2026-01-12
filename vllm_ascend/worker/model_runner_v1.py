@@ -973,14 +973,6 @@ class NPUModelRunner(GPUModelRunner):
                     # prepare_inputs for uniform decode mode by padding query_start_loc
                     num_reqs = num_reqs_padded
 
-            backup = {
-                "query_start_loc": self.query_start_loc.gpu,
-                "query_start_loc_cpu": self.query_start_loc.cpu,
-                "seq_lens_cpu": self.seq_lens.cpu,
-                "seq_lens": self.seq_lens.gpu,
-                "block_table_tensor": blk_table_tensor,
-            }
-
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
@@ -1003,8 +995,7 @@ class NPUModelRunner(GPUModelRunner):
                 prefill_context_parallel_metadata=self.long_seq_metadata,
                 max_seq_len=0,
                 encoder_seq_lens=encoder_seq_lens,
-                encoder_seq_lens_cpu=encoder_seq_lens_cpu,
-                backup=backup)
+                encoder_seq_lens_cpu=encoder_seq_lens_cpu)
 
             if self.speculative_config and self.pcp_size * self.dcp_size > 1:
                 # For pcp + spec decode, we flatten block_table
