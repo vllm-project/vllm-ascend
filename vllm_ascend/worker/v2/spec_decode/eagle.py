@@ -16,18 +16,23 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import vllm
+from contextlib import contextmanager
 from typing import Any
 import torch
 from vllm.v1.worker.gpu.spec_decode.eagle import EagleSpeculator
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample as ascend_gumbel_sample
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 
 class AscendEagleSpeculator(EagleSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        super().__init__(vllm_config, device)
+        with triton_op_wrapper():
+
+            super().__init__(vllm_config, device)
         # when in decode phase of eagle speculator, we need some value in
         # main model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
@@ -116,3 +121,15 @@ class AscendEagleSpeculator(EagleSpeculator):
         assert self.input_batch is not None
         seq_lens_cpu = torch.from_numpy(self.input_batch.seq_lens_np)
         return seq_lens_cpu
+
+
+@contextmanager
+def triton_op_wrapper():
+    """A context manager to wrap triton calls for Ascend NPUs."""
+    try:
+        # TODO(Ronald1995): this is a temorary implementation.
+        # remove this when vllm supports triton dispacth for ascend npu.
+        vllm.v1.worker.gpu.sample.gumbel = ascend_gumbel_sample
+        yield
+    finally:
+        pass
