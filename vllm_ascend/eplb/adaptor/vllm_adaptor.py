@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.config.vllm_ascend import get_ascend_config
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 
 

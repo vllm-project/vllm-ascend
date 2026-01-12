@@ -31,7 +31,7 @@ from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.config.vllm_ascend import get_ascend_config
 from vllm_ascend.distributed.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import (align_memory,

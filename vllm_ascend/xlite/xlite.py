@@ -27,9 +27,9 @@ from vllm.sequence import IntermediateTensors
 from xlite._C import AttnMHA, Model, ModelAttnMeta, ModelConfig, Runtime
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
+from vllm_ascend.config.vllm_ascend import get_ascend_config
 
 
 class XliteModel:

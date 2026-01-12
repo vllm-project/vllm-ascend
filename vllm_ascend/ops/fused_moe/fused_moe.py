@@ -28,8 +28,9 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
     SharedFusedMoE
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.config.utils import enable_sp
+from vllm_ascend.config.vllm_ascend import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import (get_flash_common3_context,
@@ -44,9 +45,9 @@ from vllm_ascend.quantization.w4a8_dynamic import \
     AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.w8a8_dynamic import \
     AscendW8A8DynamicFusedMoEMethod
-from vllm_ascend.utils import (AscendDeviceType, enable_sp,
-                               get_ascend_device_type, maybe_trans_nz,
-                               npu_stream_switch, shared_expert_dp_enabled,
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
+                               maybe_trans_nz, npu_stream_switch,
+                               shared_expert_dp_enabled,
                                shared_experts_calculation_stream)
 
 

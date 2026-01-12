@@ -4,7 +4,7 @@ import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.ascend_config import WeightPrefetchConfig
+from vllm_ascend.config.vllm_ascend import WeightPrefetchConfig
 from vllm_ascend.ops.linear import (AscendQKVParallelLinear,
                                     AscendRowParallelLinear)
 

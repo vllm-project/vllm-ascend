@@ -36,7 +36,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.config.vllm_ascend import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)

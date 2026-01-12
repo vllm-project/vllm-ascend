@@ -6,7 +6,7 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_tp_group,
                                              get_world_group,
                                              init_model_parallel_group)
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.config.vllm_ascend import get_ascend_config
 from vllm_ascend.utils import enable_dsa_cp, flashcomm2_enable
 
 # Currently, mc2 op need their own group coordinator.

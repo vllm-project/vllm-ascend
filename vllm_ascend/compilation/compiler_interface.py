@@ -28,7 +28,7 @@ from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.config.utils import Range
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.config.vllm_ascend import get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 

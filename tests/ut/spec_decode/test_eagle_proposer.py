@@ -5,7 +5,7 @@ import torch
 from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.config.vllm_ascend import init_ascend_config
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 

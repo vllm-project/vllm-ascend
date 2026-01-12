@@ -22,7 +22,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.config.vllm_ascend import get_ascend_config
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 
 

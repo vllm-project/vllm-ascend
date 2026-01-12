@@ -33,7 +33,7 @@ from vllm.model_executor.layers.mla import (MLAModules,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.config.vllm_ascend import get_ascend_config
 
 
 class IndexerWrapper(nn.Module):

@@ -7,7 +7,6 @@ import torch
 from vllm import config
 
 from tests.ut.base import TestBase
-from vllm_ascend import ascend_config
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.linear import (AscendMergedColumnParallelLinear,
                                     AscendReplicatedLinear,

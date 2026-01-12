@@ -26,15 +26,16 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.config.vllm_ascend import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD,
-    COMPILATION_PASS_KEY, AscendDeviceType, enable_sp, get_ascend_device_type,
-    is_vl_model, update_aclgraph_sizes, update_cudagraph_capture_sizes,
+    COMPILATION_PASS_KEY, AscendDeviceType, get_ascend_device_type,
+    update_aclgraph_sizes, update_cudagraph_capture_sizes,
     update_default_aclgraph_sizes, check_kv_extra_config)
+from vllm_ascend.config.utils import is_moe_model, is_vl_model, enable_sp
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -136,11 +137,6 @@ class NPUPlatform(Platform):
                                         'choices') and quant_action.choices:
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
-
-        from vllm_ascend.quantization.compressed_tensors.compressed_tensors import \
-            AscendCompressedTensorsConfig  # noqa: F401
-        from vllm_ascend.quantization.quant_config import \
-            AscendQuantConfig  # noqa: F401
 
         config_deprecated_logging()
 

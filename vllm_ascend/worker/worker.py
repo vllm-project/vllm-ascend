@@ -50,14 +50,16 @@ from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.config.utils import enable_sp
+from vllm_ascend.config.vllm_ascend import (get_ascend_config,
+                                            init_ascend_config)
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
-                               enable_sp, get_ascend_device_type,
+                               get_ascend_device_type,
                                register_ascend_customop, vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
