@@ -78,7 +78,8 @@ class TestAscendConfig(TestBase):
             },
             "refresh": True
         }
-        npugraph_ex_config = init_ascend_config(test_vllm_config).npugraph_ex_config
+        npugraph_ex_config = init_ascend_config(
+            test_vllm_config).npugraph_ex_config
         self.assertTrue(npugraph_ex_config.enable)
         self.assertTrue(npugraph_ex_config.enable_static_kernel)
 
