@@ -3,11 +3,12 @@ model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 2
 npu_per_node: 16
 env_common:
+  HCCL_OP_EXPANSION_MODE: AIV
   VLLM_USE_MODELSCOPE: true
-  HCCL_BUFFSIZE: 1024
+  HCCL_BUFFSIZE: 768
   SERVER_PORT: 8080
   OMP_PROC_BIND: false
-  OMP_NUM_THREADS: 10
+  OMP_NUM_THREADS: 1
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_DETERMINISTIC: True
   TASK_QUEUE_ENABLE: 1
@@ -34,10 +35,10 @@ deployment:
           --seed 1024
           --quantization ascend
           --max-num-seqs 4
-          --max-model-len 36864
+          --max-model-len 32768
           --max-num-batched-tokens 16384
           --trust-remote-code
-          --gpu-memory-utilization 0.9
+          --gpu-memory-utilization 0.85
           --enable-chunked-prefill
           --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
           --kv-transfer-config
@@ -72,10 +73,10 @@ deployment:
         --seed 1024
         --quantization ascend
         --max-num-seqs 4
-        --max-model-len 36864
+        --max-model-len 32768
         --max-num-batched-tokens 256
         --trust-remote-code
-        --gpu-memory-utilization 0.9
+        --gpu-memory-utilization 0.85
         --compilation_config '{"cudagraph_capture_sizes":[4,8,12,16],"cudagraph_mode": "FULL_DECODE_ONLY"}'
         --enable-chunked-prefill
         --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
@@ -103,7 +104,7 @@ benchmarks:
     dataset_path: vllm-ascend/gsm8k
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 32768
+    max_out_len: 24576
     batch_size: 512
     baseline: 95
     threshold: 5

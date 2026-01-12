@@ -78,7 +78,7 @@ async def test_models(model: str) -> None:
         "--gpu-memory-utilization",
         "0.65",
         "--compilation-config",
-        '{"cudagraph_capture_sizes": [32], "cudagraph_mode":"FULL_DECODE_ONLY"}',
+        '{"cudagraph_capture_sizes": [32]}',
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,

@@ -6,6 +6,9 @@ from unittest.mock import MagicMock
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
+fake_store = types.ModuleType("mooncake.store")
+fake_store.ReplicateConfig = MagicMock()  # type: ignore[attr-defined]
+sys.modules["mooncake.store"] = fake_store
 
 from vllm_ascend.distributed.kvpool.backend.mooncake_backend import (  # noqa: E402
     _convert_to_bytes, _parse_global_segment_size)

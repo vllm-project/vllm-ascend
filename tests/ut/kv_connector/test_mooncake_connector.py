@@ -1264,7 +1264,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                   tp_rank, pcp_rank, _prefill_tp_size,
                                   remote_pcp_size, remote_dcp_size,
                                   remote_port, remote_block_ids,
-                                  local_block_ids):
+                                  local_block_ids, remote_engine_id):
 
             worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
 
@@ -1275,7 +1275,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             worker.tp_rank = tp_rank
             worker.pcp_rank = pcp_rank
             worker._prefill_tp_size = _prefill_tp_size
-            worker.local_remote_block_port_mapping = None
+            worker.local_remote_block_port_mapping = {}
             worker.block_size = 16
             worker.num_key_value_heads = 1
 
@@ -1289,6 +1289,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             meta.num_external_tokens = pcp_size * dcp_size * len(
                 local_block_ids) * worker.block_size
             meta.num_prompt_blocks = pcp_size * dcp_size * len(local_block_ids)
+            meta.remote_engine_id = remote_engine_id
 
             remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = worker._get_kv_split_metadata(
                 '0', meta)
@@ -1297,14 +1298,14 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         self.assertEqual(
             get_kv_split_metadata(True, 1, 1, 8, 1, 0, 8, 1, 8, 30000, [1],
-                                  [1]),
+                                  [1], 0),
             ([[30001], [30002], [30003], [30004], [30005], [30006], [30007],
               [30000]], [[], [], [], [], [], [], [], [1]], [[], [], [], [], [],
                                                             [], [], [1]]))
 
         self.assertEqual(
             get_kv_split_metadata(False, 1, 1, 8, 1, 0, 8, 2, 8, 30000, [1],
-                                  [1]),
+                                  [1], 0),
             ([[30001], [30002], [30003], [30004], [30005], [30006], [30007],
               [30008], [30009], [30010], [30011], [30012], [30013], [30014],
               [30015], [30000]
@@ -1314,29 +1315,29 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         self.assertEqual(
             get_kv_split_metadata(True, 1, 1, 8, 1, 0, 8, 2, 2, 30000, [1],
-                                  [1]),
+                                  [1], 0),
             ([[30001], [30008], [30009], [30000]], [[], [], [], [1]
                                                     ], [[], [], [], [1]]))
 
         self.assertEqual(
             get_kv_split_metadata(False, 1, 1, 8, 1, 0, 8, 2, 2, 30000, [1],
-                                  [1]),
+                                  [1], 0),
             ([[30001], [30008], [30009], [30000]], [[], [], [], [1]
                                                     ], [[], [], [], [1]]))
 
         self.assertEqual(
             get_kv_split_metadata(True, 1, 2, 8, 1, 0, 8, 2, 2, 30000, [1],
-                                  [1]),
+                                  [1], 0),
             ([[30000], [30008]], [[1], []], [[1], []]))
 
         self.assertEqual(
             get_kv_split_metadata(False, 1, 2, 8, 1, 0, 8, 2, 2, 30000, [1],
-                                  [1]),
+                                  [1], 0),
             ([[30000], [30008]], [[1], []], [[1], []]))
 
         self.assertEqual(
             get_kv_split_metadata(True, 1, 2, 8, 0, 0, 8, 2, 2, 30000,
-                                  [1, 2, 3], [1, 2, 3, 4, 5]),
+                                  [1, 2, 3], [1, 2, 3, 4, 5], 0),
             ([[30000], [30008]], [[1, 2, 3], [4, 5]], [[1, 2, 3], [1, 2]]))
 
 
