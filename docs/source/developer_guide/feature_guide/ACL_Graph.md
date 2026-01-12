@@ -25,7 +25,7 @@ device:                  | run op1 | run op2 | run op3 | run op4 | run op5 |
 
 ## How to use ACL Graph?
 
-ACL Graph is enabled by default in V1 Engine, just need to check that `enforce_eager` is not set to `True`. More details see: [Graph Mode Guide](https://vllm-ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html)
+ACL Graph is enabled by default in V1 Engine, just need to check that `enforce_eager` is not set to `True`. More details see: [Graph Mode Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html)
 
 ## How it works?
 
