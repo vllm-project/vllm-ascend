@@ -3,11 +3,16 @@ model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 2
 npu_per_node: 8
 env_common:
+  VLLM_ASCEND_ENABLE_MLAPO: 1
+  VLLM_ASCEND_BALANCE_SCHEDULING: 1
+  HCCL_INTRA_PCIE_ENABLE: 1
+  HCCL_INTRA_ROCE_ENABLE: 0
+  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   VLLM_USE_MODELSCOPE: true
-  HCCL_BUFFSIZE: 1024
+  HCCL_BUFFSIZE: 200
   SERVER_PORT: 8080
   OMP_PROC_BIND: false
-  OMP_NUM_THREADS: 10
+  OMP_NUM_THREADS: 1
 
 
 deployment:
@@ -23,15 +28,15 @@ deployment:
       --no-enable-prefix-caching
       --max-num-seqs 16
       --tensor-parallel-size 4
-      --max-model-len 36864
-      --max-num-batched-tokens 6000
+      --max-model-len 16384
+      --max-num-batched-tokens 4096
       --enable-expert-parallel
+      --async-scheduling
       --trust-remote-code
       --quantization ascend
-      --gpu-memory-utilization 0.9
-      --enforce-eager
-      --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
-      --additional-config '{"enable_weight_nz_layout":true}'
+      --gpu-memory-utilization 0.92
+      --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
+      --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 
   -
     server_cmd: >
@@ -45,13 +50,13 @@ deployment:
       --no-enable-prefix-caching
       --max-num-seqs 16
       --tensor-parallel-size 4
-      --max-model-len 36864
-      --max-num-batched-tokens 6000
+      --max-model-len 16384
+      --max-num-batched-tokens 4096
       --enable-expert-parallel
+      --async-scheduling
       --trust-remote-code
       --quantization ascend
-      --gpu-memory-utilization 0.9
-      --enforce-eager
-      --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
-      --additional-config '{"enable_weight_nz_layout":true}'
+      --gpu-memory-utilization 0.92
+      --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
+      --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 benchmarks:
