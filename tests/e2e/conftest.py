@@ -26,7 +26,7 @@ import shlex
 import subprocess
 import sys
 import time
-from typing import Any, TypeVar, Union
+from typing import Any, TypeVar
 
 import numpy as np
 import openai
@@ -76,7 +76,7 @@ from vllm.distributed.parallel_state import (  # noqa E402
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _M = TypeVar("_M")
 
-_PromptMultiModalInput = Union[list[_M], list[list[_M]]]
+_PromptMultiModalInput = list[_M] | list[list[_M]]
 
 PromptImageInput = _PromptMultiModalInput[Image.Image]
 PromptAudioInput = _PromptMultiModalInput[tuple[np.ndarray, int]]

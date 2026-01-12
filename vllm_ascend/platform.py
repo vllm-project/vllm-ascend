@@ -137,11 +137,14 @@ class NPUPlatform(Platform):
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
-        if parser is not None:
-            quant_action = parser._option_string_actions.get("--quantization")
-            if quant_action and hasattr(quant_action, "choices") and quant_action.choices:
-                if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
-                    quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
+        if (
+            parser is not None
+            and (quant_action := parser._option_string_actions.get("--quantization"))
+            and hasattr(quant_action, "choices")
+            and quant_action.choices
+            and ASCEND_QUANTIZATION_METHOD not in quant_action.choices
+        ):
+            quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
         from vllm_ascend.quantization.quant_config import AscendQuantConfig  # noqa: F401
 
@@ -252,7 +255,8 @@ class NPUPlatform(Platform):
         elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             logger.info("PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode")
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (
-                "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
+                "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == CompilationMode.VLLM_COMPILE and "
+                "compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
             )
             compilation_config.set_splitting_ops_for_v1(
                 all2all_backend=vllm_config.parallel_config.all2all_backend,
@@ -343,9 +347,8 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        if is_vl_model(vllm_config):
-            if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0"))) or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))):
-                raise ValueError("Currently, VL models doesn't support FLASHCOMM in vllm-ascend. We will fix this in the future. Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
+        if is_vl_model(vllm_config) and (bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0"))) or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")))):
+            raise ValueError("Currently, VL models doesn't support FLASHCOMM in vllm-ascend. We will fix this in the future. Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
 
     @classmethod
     def import_kernels(cls) -> None:

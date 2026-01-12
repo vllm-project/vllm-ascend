@@ -65,10 +65,7 @@ def split_qkv_rmsnorm_rope_kernel(
         variances = tl.sum(squares, axis=1) / HEAD_DIM
         reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(Q_BLOCK_SIZE // HEAD_DIM, 1)
         normalized_values = input_values * reciprocal_std  # (Q_BLOCK_SIZE//HEAD_DIM, HEAD_DIM)
-        if BIAS:
-            normalized_values = (normalized_values * weight_values + bias_values).to(tl.bfloat16)
-        else:
-            normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
+        normalized_values = (normalized_values * weight_values + bias_values).to(tl.bfloat16) if BIAS else (normalized_values * weight_values).to(tl.bfloat16)
 
         sc_offsets = row_idx * HEAD_DIM + tl.arange(0, HEAD_DIM)
         sin = (tl.load(sin_ptr + sc_offsets)).reshape(1, HEAD_DIM)
@@ -123,10 +120,7 @@ def split_qkv_rmsnorm_rope_kernel(
         variances = tl.sum(squares, axis=1) / HEAD_DIM
         reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(KV_BLOCK_SIZE // HEAD_DIM, 1)
         normalized_values = input_values * reciprocal_std  # (KV_BLOCK_SIZE/HEAD_DIM, HEAD_DIM)
-        if BIAS:
-            normalized_values = (normalized_values * weight_values + bias_values).to(tl.bfloat16)
-        else:
-            normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
+        normalized_values = (normalized_values * weight_values + bias_values).to(tl.bfloat16) if BIAS else (normalized_values * weight_values).to(tl.bfloat16)
         sc_offsets = row_idx * HEAD_DIM + tl.arange(0, HEAD_DIM)
         sin = (tl.load(sin_ptr + sc_offsets)).reshape(1, HEAD_DIM)
         cos = (tl.load(cos_ptr + sc_offsets)).reshape(1, HEAD_DIM)

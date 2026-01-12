@@ -207,10 +207,7 @@ def _causal_conv1d_update_kernel_npu_tiled(
         w_col5 = tl.load(w_base + 5 * stride_w_width, mask=mask_w, other=0.0).to(tl.float32)
 
     # bias vector once per program
-    if HAS_BIAS:
-        acc_bias = tl.load(bias_ptr + idx_feats, mask=mask_w, other=0.0).to(tl.float32)
-    else:
-        acc_bias = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    acc_bias = tl.load(bias_ptr + idx_feats, mask=mask_w, other=0.0).to(tl.float32) if HAS_BIAS else tl.zeros((BLOCK_N,), dtype=tl.float32)
 
     # token index vector for chunked copy
     tok_vec = tl.arange(0, T_CHUNK)  # [T_CHUNK]
@@ -590,10 +587,7 @@ def causal_conv1d_update_npu(
     stride_state_indices = conv_state_indices.stride(0) if conv_state_indices is not None else 0
 
     # effective state_len exactly as original
-    if num_accepted_tokens is not None:
-        eff_state_len = width - 1 + (seqlen - 1)
-    else:
-        eff_state_len = width - 1
+    eff_state_len = width - 1 + (seqlen - 1) if num_accepted_tokens is not None else width - 1
     np2_statelen = triton.next_power_of_2(eff_state_len)
 
     # -------- tiling heuristic--------

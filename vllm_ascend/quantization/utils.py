@@ -103,7 +103,7 @@ def get_quant_method_modelslim(
         quant_type = get_linear_quant_type(quant_description, prefix, packed_modules_mapping)
     if quant_type in ASCEND_QUANTIZATION_METHOD_MAP:
         method_map = ASCEND_QUANTIZATION_METHOD_MAP[quant_type]
-        if layer_type in method_map.keys():
+        if layer_type in method_map:
             method_cls = method_map[layer_type]
             return method_cls()
         else:

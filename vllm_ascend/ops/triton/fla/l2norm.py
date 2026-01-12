@@ -35,10 +35,7 @@ def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | N
     x_shape_og = x.shape
     x = x.reshape(-1, x.shape[-1])
     # allocate output
-    if output_dtype is None:
-        y = torch.empty_like(x)
-    else:
-        y = torch.empty_like(x, dtype=output_dtype)
+    y = torch.empty_like(x) if output_dtype is None else torch.empty_like(x, dtype=output_dtype)
     assert y.stride(-1) == 1
     T, D = x.shape[0], x.shape[-1]
     # Less than 64KB per feature: enqueue fused kernel

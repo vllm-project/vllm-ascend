@@ -108,7 +108,7 @@ def _run_worker_process(
         llm = LLM(
             model=model_path,
             quantization="ascend" if "W8A8" in model_path else None,
-            enable_expert_parallel=True if "DeepSeek" in model_path else False,
+            enable_expert_parallel="DeepSeek" in model_path,
             trust_remote_code=True,
             # vllm enables async scheduling by default, remove below when vllm >= 0.14.0
             async_scheduling=False,

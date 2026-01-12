@@ -536,7 +536,7 @@ async def send_request_to_service(
             response.raise_for_status()
             return response
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))

@@ -212,16 +212,14 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
     def _get_scheme_from_parts(self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs) -> "CompressedTensorsScheme":
         act_quant_format = is_activation_quantization_format(self.quant_format)
-        if act_quant_format and input_quant is not None:
-            if self._is_static_tensor_w8a8(weight_quant, input_quant):
-                return AscendW8A8LinearMethod()
+        if act_quant_format and input_quant is not None and self._is_static_tensor_w8a8(weight_quant, input_quant):
+            return AscendW8A8LinearMethod()
 
-            if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-                return AscendW8A8DynamicLinearMethod()
+        if act_quant_format and input_quant is not None and self._is_dynamic_token_w8a8(weight_quant, input_quant):
+            return AscendW8A8DynamicLinearMethod()
 
-        if weight_quant is not None:
-            if self._is_w4a16(weight_quant):
-                return AscendW4A16FusedMoEMethod()
+        if weight_quant is not None and self._is_w4a16(weight_quant):
+            return AscendW4A16FusedMoEMethod()
 
         raise NotImplementedError("No compressed-tensors compatible scheme was found.")
 

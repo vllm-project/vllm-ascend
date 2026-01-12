@@ -364,13 +364,13 @@ def vllm_version_is(target_vllm_version: str):
         vllm_version = vllm.__version__
     try:
         return Version(vllm_version) == Version(target_vllm_version)
-    except InvalidVersion:
+    except InvalidVersion as err:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
             "is installed probably. Set the environment variable VLLM_VERSION "
             "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
-        )
+        ) from err
 
 
 def get_max_hidden_layers(hf_config) -> int:
@@ -434,10 +434,7 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
         cudagraph_capture_sizes += list(range(256, max_cudagraph_capture_size + 1, 16))
     # in newer version, vLLM use ascending order of cudagraph_capture_sizes.
     target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes)
-    if target_cudagraph_capture_sizes == vllm_config.compilation_config.cudagraph_capture_sizes:
-        return True
-
-    return False
+    return target_cudagraph_capture_sizes == vllm_config.compilation_config.cudagraph_capture_sizes
 
 
 def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
@@ -493,10 +490,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
         return
     hf_config = vllm_config.model_config.hf_text_config
-    if hasattr(hf_config, "num_hidden_layers"):
-        num_hidden_layers = hf_config.num_hidden_layers
-    else:
-        num_hidden_layers = get_max_hidden_layers(hf_config)
+    num_hidden_layers = hf_config.num_hidden_layers if hasattr(hf_config, "num_hidden_layers") else get_max_hidden_layers(hf_config)
     parallel_config = vllm_config.parallel_config
 
     # Calculate maximum supported batch sizes considering model architecture
@@ -858,11 +852,8 @@ def is_vl_model(vllm_config: VllmConfig):
     global _IS_VL_MODEL
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
         hf_config = vllm_config.model_config.hf_config.to_dict()
-        if "thinker_config" in hf_config:
-            # Qwen-Omni-thinker models
-            _IS_VL_MODEL = True
-        else:
-            _IS_VL_MODEL = "vision_config" in hf_config
+        # Qwen-Omni-thinker models
+        _IS_VL_MODEL = True if "thinker_config" in hf_config else "vision_config" in hf_config
     return _IS_VL_MODEL
 
 
@@ -1069,10 +1060,11 @@ def refresh_block_size(vllm_config):
         return
 
     # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if not model_config.hf_text_config.model_type == "qwen3_next" and cache_config.block_size != 128:
-        if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
-            logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
-            cache_config.block_size = 128
+    if (model_config.hf_text_config.model_type != "qwen3_next" and cache_config.block_size != 128) and (
+        cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill
+    ):
+        logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
+        cache_config.block_size = 128
 
 
 def dispose_layer(layer: Any):

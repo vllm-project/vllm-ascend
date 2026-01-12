@@ -354,13 +354,13 @@ async def send_request_to_service(
                 result_future.set_result(response.json()["kv_transfer_params"])
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(f"All {max_retries} attempts failed for {endpoint}.")
-                raise last_exc
+                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
+                raise last_exc from e
 
 
 async def stream_service_response_with_retry(
@@ -386,22 +386,22 @@ async def stream_service_response_with_retry(
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             if attempt < max_retries:
-                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
+                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
+                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                 raise e
         except Exception as e:
             # If any chunk has been sent, do not retry, just log and drop
             if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
+                logger.error("Streaming to client interrupted after response started: %s", e)
                 return
             else:
                 if attempt < max_retries:
-                    logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
+                    logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
                     await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 else:
-                    logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
+                    logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                     raise e
 
 
@@ -457,8 +457,10 @@ async def _handle_completions(api: str, request: Request):
                     yield chunk
             except Exception as e:
                 logger.error(
-                    f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} will be routing to the target prefiller when new request \
-                    is ready to dispatch to it"
+                    "Error during streaming from decoder %s: %s the aborted request %s will be routing to the target prefiller when new request is ready to dispatch to it",
+                    decoder.url,
+                    e,
+                    request_id,
                 )
 
             # After streaming done, release tokens
@@ -507,12 +509,12 @@ async def metaserver(request: Request):
         request_id = get_origin_request_id(api, request_id)
         req_data["kv_transfer_params"] = kv_transfer_params
         prefiller_score = proxy_state.calculate_prefill_scores(request_length)
-        logger.debug(f"Request length: {request_length}, Prefiller score: {prefiller_score}")
+        logger.debug("Request length: %s, Prefiller score: %s", request_length, prefiller_score)
 
         # Select prefiller
         prefiller_idx = proxy_state.select_prefiller(prefiller_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
-        logger.debug(f"Using prefill {prefiller.url=} {req_data=}")
+        logger.debug("Using prefill prefiller.url=%s req_data=%s", prefiller.url, req_data)
         # Send request to prefiller
         await send_request_to_service(
             prefiller.client,
@@ -527,7 +529,7 @@ async def metaserver(request: Request):
         proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
     except Exception as e:
-        logger.error(f"Post metaserver failed with: {str(e)}")
+        logger.error("Post metaserver failed with: %s", e)
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
         proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 

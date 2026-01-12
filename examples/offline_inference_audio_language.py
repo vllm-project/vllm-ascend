@@ -41,14 +41,15 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def prepare_inputs(audio_count: int, audio_path1: str, audio_path2: str):
-    use_vllm_audio_assert = True if audio_path1 == "mary_had_lamb" and audio_path2 == "winning_call" else False
-    if use_vllm_audio_assert:
-        audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
-    else:
-        audio_assets = [
+    use_vllm_audio_assert = audio_path1 == "mary_had_lamb" and audio_path2 == "winning_call"
+    audio_assets = (
+        [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
+        if use_vllm_audio_assert
+        else [
             librosa.load(audio_path1, sr=None),
             librosa.load(audio_path2, sr=None),
         ]
+    )
 
     question_per_audio_count = {
         1: "What is recited in the audio?",

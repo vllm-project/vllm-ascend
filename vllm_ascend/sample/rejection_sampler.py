@@ -121,10 +121,7 @@ def rejection_sample(
     )
     output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
 
-    if sampling_metadata.all_greedy:
-        is_greedy = None
-    else:
-        is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+    is_greedy = None if sampling_metadata.all_greedy else sampling_metadata.temperature == GREEDY_TEMPERATURE
     if HAS_TRITON:
         grid, block_size = cal_grid_and_block_size(batch_size)
     if not sampling_metadata.all_random:

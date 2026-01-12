@@ -136,10 +136,7 @@ def build_attn_state(
             attn_state = AscendAttentionState.SpecDecoding
     # Speculative decoding.
     elif np.all(num_valid_tokens == 1):
-        if vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp":
-            attn_state = AscendAttentionState.SpecDecoding
-        else:
-            attn_state = AscendAttentionState.ChunkedPrefill
+        attn_state = AscendAttentionState.SpecDecoding if vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp" else AscendAttentionState.ChunkedPrefill
     # splitfuse
     elif vllm_config.scheduler_config.enable_chunked_prefill:
         attn_state = AscendAttentionState.ChunkedPrefill
@@ -164,8 +161,7 @@ def make_attention_mask(
         return attn_mask_builder.get_attn_mask(2048, torch.bool)
 
     # TODO(Ronald1995) cosidering pcp.
-    if vllm_config.model_config.use_mla:
-        # mla prefill
-        if attn_state != AscendAttentionState.DecodeOnly:
-            return attn_mask_builder.get_mla_mask(dtype)
+    # mla prefill
+    if vllm_config.model_config.use_mla and attn_state != AscendAttentionState.DecodeOnly:
+        return attn_mask_builder.get_mla_mask(dtype)
     return attn_mask_builder.get_splitfuse_attn_mask()

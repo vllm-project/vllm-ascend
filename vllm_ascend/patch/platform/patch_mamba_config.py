@@ -28,10 +28,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     model_config = vllm_config.model_config
     parallel_config = vllm_config.parallel_config
 
-    if cache_config.cache_dtype == "auto":
-        kv_cache_dtype = model_config.dtype
-    else:
-        kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+    kv_cache_dtype = model_config.dtype if cache_config.cache_dtype == "auto" else STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
     # get attention page size (for 1 token)
     attn_page_size_1_token = FullAttentionSpec(

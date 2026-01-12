@@ -249,13 +249,12 @@ class MtpProposer(EagleProposer):
         (num_input_tokens, num_tokens_across_dp, with_prefill) = self.runner._sync_metadata_across_dp(num_input_tokens, self.runner.with_prefill)
 
         # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
-        if scheduler_output and not self.enable_shared_expert_dp:
-            max_query_len = common_attn_metadata.max_query_len
-            uniform_decode = (max_query_len in list(range(1, self.num_speculative_tokens + 2))) and (
-                scheduler_output.total_num_scheduled_tokens == self.runner.input_batch.num_reqs * (self.num_speculative_tokens + 1)
-            )
-        else:
-            uniform_decode = False
+        uniform_decode = (
+            (common_attn_metadata.max_query_len in list(range(1, self.num_speculative_tokens + 2)))
+            and (scheduler_output.total_num_scheduled_tokens == self.runner.input_batch.num_reqs * (self.num_speculative_tokens + 1))
+            if scheduler_output and not self.enable_shared_expert_dp
+            else False
+        )
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
             num_tokens=num_input_tokens,
@@ -270,10 +269,7 @@ class MtpProposer(EagleProposer):
             # and _propose.
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and aclgraph_runtime_mode == CUDAGraphMode.FULL:
-            graph_pad_size = num_input_tokens
-        else:
-            graph_pad_size = -1
+        graph_pad_size = num_input_tokens
 
         # If use fullgraph and disable_padded_drafter_batch=True, We need to
         # update the graph_pad_size in common_attn_metadata, to tell the

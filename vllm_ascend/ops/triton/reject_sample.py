@@ -174,10 +174,7 @@ def rejection_random_sample_kernel(
             for pos in range(num_draft_tokens):
                 if not rejected:
                     draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-                    if NO_DRAFT_PROBS:
-                        draft_prob = 1
-                    else:
-                        draft_prob = tl.load(draft_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
+                    draft_prob = 1 if NO_DRAFT_PROBS else tl.load(draft_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
                     target_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
                     uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
                     # NOTE(woosuk): While the draft probability should never be 0,
@@ -419,10 +416,7 @@ def rejection_random_sample_block_verify_kernel(
                 tmp_uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
                 uniform_prob = uniform_prob * tmp_uniform_prob
 
-                if NO_DRAFT_PROBS:
-                    draft_prob = 1
-                else:
-                    draft_prob = tl.load(draft_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
+                draft_prob = 1 if NO_DRAFT_PROBS else tl.load(draft_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
 
                 pi = min(pi * target_prob / draft_prob, 1.0)
                 if draft_prob > 0 and pi >= uniform_prob:

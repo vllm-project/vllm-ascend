@@ -278,10 +278,7 @@ class EagleProposer(VllmEagleProposer):
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
 
-        if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
-        else:
-            num_input_tokens = num_tokens
+        num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens) if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1] else num_tokens
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         if self.use_cuda_graph:
@@ -364,10 +361,7 @@ class EagleProposer(VllmEagleProposer):
         hidden_states = hidden_states[last_token_indices]
         last_token_indices = self.arange[:batch_size]
 
-        if self.use_cuda_graph and batch_size <= self.cudagraph_batch_sizes[-1]:
-            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
-        else:
-            input_batch_size = batch_size
+        input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size) if self.use_cuda_graph and batch_size <= self.cudagraph_batch_sizes[-1] else batch_size
 
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
@@ -416,10 +410,7 @@ class EagleProposer(VllmEagleProposer):
             # For the requests that exceed the max model length, we set the
             # TODO: sequence length to 1 to minimize their overheads in attention.
 
-            if self.attn_metadata_builder is None:
-                attn_metadata_builder = self._get_attention_metadata_builder()
-            else:
-                attn_metadata_builder = self.attn_metadata_builder
+            attn_metadata_builder = self._get_attention_metadata_builder() if self.attn_metadata_builder is None else self.attn_metadata_builder
             block_size = attn_metadata_builder.kv_cache_spec.block_size
 
             # Compute the slot mapping.

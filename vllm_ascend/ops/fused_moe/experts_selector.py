@@ -125,9 +125,7 @@ def check_npu_moe_gating_top_k(
         return False
     if top_k < 1 or top_k > (hidden_states.shape[-1] / (num_expert_group * topk_group)):
         return False
-    if topk_group * hidden_states.shape[-1] / num_expert_group < top_k:
-        return False
-    return True
+    return topk_group * hidden_states.shape[-1] / num_expert_group >= top_k
 
 
 def _native_grouped_topk(

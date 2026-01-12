@@ -208,10 +208,7 @@ def init_ascend_model_parallel(
     if get_ascend_config().layer_sharding is not None:
         global _SHARD_WEIGHT
         if flashcomm2_enable():
-            if len(flashcomm2_otp_group_ranks) == 0:
-                FC2_group_ranks = None
-            else:
-                FC2_group_ranks = torch.tensor(flashcomm2_otp_group_ranks).squeeze(0)
+            FC2_group_ranks = None if len(flashcomm2_otp_group_ranks) == 0 else torch.tensor(flashcomm2_otp_group_ranks).squeeze(0)
             _SHARD_WEIGHT = create_shard_weight_group(FC2_group_ranks)
         elif enable_dsa_cp():
             # For dsa_cp, all shard layers are replicated.

@@ -363,14 +363,11 @@ class BalanceScheduler(Scheduler):
                 effective_lookahead_tokens = 0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
 
                 # Determine if we need to allocate cross-attention blocks.
-                if self.is_encoder_decoder and request.has_encoder_inputs:
-                    # TODO(russellb): For Whisper, we know that the input is
-                    # always padded to the maximum length. If we support other
-                    # encoder-decoder models, this will need to be updated if we
-                    # want to only allocate what is needed.
-                    num_encoder_tokens = self.scheduler_config.max_num_encoder_input_tokens
-                else:
-                    num_encoder_tokens = 0
+                # TODO(russellb): For Whisper, we know that the input is
+                # always padded to the maximum length. If we support other
+                # encoder-decoder models, this will need to be updated if we
+                # want to only allocate what is needed.
+                num_encoder_tokens = self.scheduler_config.max_num_encoder_input_tokens if self.is_encoder_decoder and request.has_encoder_inputs else 0
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,

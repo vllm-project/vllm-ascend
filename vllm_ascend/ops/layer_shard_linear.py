@@ -169,11 +169,15 @@ def _create_forward_wrapper(forward: Callable, series: SeriesMetadata, layer_idx
 """
 Register linear layers into a shard storage series.
 
-In a parallel group, each device stores a distinct, non-overlapping subset of layers from the series. All layers in a series must have the same structure (are isomorphic). The weight matrix for the i-th layer is stored on device (i % n), where n is the number of devices.
+In a parallel group, each device stores a distinct, non-overlapping subset of layers from the series. All layers in a series must have the same structure (are isomorphic).
+The weight matrix for the i-th layer is stored on device (i % n), where n is the number of devices.
 
 After loading the model, you must call `post_process_after_loading_for_shard_weight_series(layer)` on any layer of this series to complete the initialization.
 
-During execution, each time a new layer is reached, you must call `reach_layer_for_shard_weight_series(layer)` for that layer to prefetch the weights. The argument `prefetch_step` is a non-negative integer k that manages asynchronous weight prefetching. Each call to `reach_layer_for_shard_weight_series(current_layer)` method will trigger an asynchronous prefetch for the weights of the k-th subsequent layer after `current_layer` within the series.
+During execution, each time a new layer is reached, you must call `reach_layer_for_shard_weight_series(layer)` for that layer to prefetch the weights.
+The argument `prefetch_step` is a non-negative integer k that manages asynchronous weight prefetching.
+Each call to `reach_layer_for_shard_weight_series(current_layer)` method will trigger an asynchronous prefetch for the weights of the k-th subsequent layer after\
+    `current_layer` within the series.
 
 Note: The layers are managed as a circular buffer. The index of the layer to prefetch is determined by the formula:
 - start_layer is the index of the first layer in the series (inclusive).

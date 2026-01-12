@@ -14,10 +14,7 @@ def forward(
     inputs_embeds,
 ):
     if get_pp_group().is_first_rank:
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
-        else:
-            hidden_states = self.embed_input_ids(input_ids)
+        hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
         residual = None
     else:
         assert intermediate_tensors is not None
@@ -32,14 +29,15 @@ def forward(
     except AttributeError:
         llama_4_scaling_config = None
     llama_4_scaling: torch.Tensor | None
-    if llama_4_scaling_config is not None:
-        llama_4_scaling = _get_llama_4_scaling(
+    llama_4_scaling = (
+        _get_llama_4_scaling(
             original_max_position_embeddings=llama_4_scaling_config["original_max_position_embeddings"],
             scaling_beta=llama_4_scaling_config["beta"],
             positions=positions,
         )
-    else:
-        llama_4_scaling = None
+        if llama_4_scaling_config is not None
+        else None
+    )
 
     for layer in islice(self.layers, self.start_layer, self.end_layer):
         hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)

@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+import contextlib
 import json
 import re
 import socket
@@ -77,10 +78,8 @@ class ElasticClient:
             except Exception as e:
                 logger.error(f"Connect to {source} fails, detail: {e}")
                 if sock is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         sock.close()
-                    except Exception:
-                        pass
                 self.s = None
                 self.ack = None
                 self.server_addr = None
@@ -114,10 +113,8 @@ class ElasticClient:
         """
         Destructor method to ensure socket is closed.
         """
-        try:
+        with contextlib.suppress(Exception):
             self.close()
-        except Exception:
-            pass
 
     def send_str(self, data_str: str) -> None:
         """
@@ -260,7 +257,8 @@ class ElasticServer:
                     logger.warning(f"int8_cache should be selected in [HBM, DRAM], but got {int8_cache}, change to no cache")
 
         logger.info(
-            f"Server {self.addr}:{self.port} starts, device id: {self.device_id}, model path: {self.model_path}, tp: {self.tp}, pp: {self.pp}, int8 params {self.original_int8.keys()} are saved to {int8_cache}"
+            f"Server {self.addr}:{self.port} starts, device id: {self.device_id}, model path: {self.model_path}, tp: {self.tp}, "
+            f"pp: {self.pp}, int8 params {self.original_int8.keys()} are saved to {int8_cache}"
         )
 
     def __del__(self):
@@ -326,9 +324,7 @@ class ElasticServer:
             if not all(k in content for k in required_keys):
                 return False
             port = content["port"]
-            if not (isinstance(port, int) or (isinstance(port, str) and port.isdigit())):
-                return False
-            return True
+            return not (isinstance(port, int) or (isinstance(port, str) and port.isdigit()))
 
         comm_name = None
         if is_valid_data(data):
@@ -346,7 +342,8 @@ class ElasticServer:
                 )
                 ack = {
                     "label": "JOIN_NACK",
-                    "content": f"Received data {(device_id, model_path, tp, pp)} does not consist with this server {(int(self.device_id), self.model_path, int(self.tp), int(self.pp))}",
+                    "content": f"Received data {(device_id, model_path, tp, pp)} does not consist with this server "
+                    f"{(int(self.device_id), self.model_path, int(self.tp), int(self.pp))}",
                 }
         else:
             logger.warning(f"Received data does not contain required fields: {data}")

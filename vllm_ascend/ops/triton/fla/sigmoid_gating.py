@@ -103,10 +103,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
-            if IS_SPEC_DECODING:
-                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
-            else:
-                i_t = 0
+            i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1 if IS_SPEC_DECODING else 0
             p_h0 = h0 + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_init_state_token
         else:
             p_h0 = h0 + bos * HV * K * V
@@ -118,10 +115,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_k = k + (bos * H + i_h) * K + o_k + H * K * i_t
         p_v = v + (bos * HV + i_hv) * V + o_v + HV * V * i_t
 
-        if IS_BETA_HEADWISE:
-            p_beta = beta + (bos * HV + i_hv) * V + o_v + HV * V * i_t
-        else:
-            p_beta = beta + bos * HV + i_hv + HV * i_t
+        p_beta = beta + (bos * HV + i_hv) * V + o_v + HV * V * i_t if IS_BETA_HEADWISE else beta + bos * HV + i_hv + HV * i_t
 
         if not IS_KDA:
             p_g = g + bos * HV + i_hv + HV * i_t
@@ -149,10 +143,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             b_h *= exp(b_gk[:, None])
         # [BV]
         b_v -= tl.sum(b_h * b_k[:, None], 0)
-        if IS_BETA_HEADWISE:
-            b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
-        else:
-            b_beta = tl.load(p_beta).to(tl.float32)
+        b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32) if IS_BETA_HEADWISE else tl.load(p_beta).to(tl.float32)
         b_v *= b_beta
         # [BK, BV]
         b_h += b_k[:, None] * b_v[None, :]
@@ -161,10 +152,11 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
-        if INPLACE_FINAL_STATE:
-            p_ht = ht + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_final_state_token
-        else:
-            p_ht = ht + (bos + i_t) * stride_final_state_token
+        p_ht = (
+            ht + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_final_state_token
+            if INPLACE_FINAL_STATE
+            else ht + (bos + i_t) * stride_final_state_token
+        )
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 

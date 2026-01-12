@@ -996,13 +996,12 @@ class NPUModelRunner(GPUModelRunner):
                 common_prefix_len = 0
                 extra_attn_metadata_args = {}
                 builder = attn_group.get_metadata_builder()
-                if isinstance(builder, GDNAttentionMetadataBuilder):
-                    if use_spec_decode:
-                        patch_torch_npu_argsort()
-                        extra_attn_metadata_args = dict(
-                            num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs],
-                            num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs],
-                        )
+                if isinstance(builder, GDNAttentionMetadataBuilder) and use_spec_decode:
+                    patch_torch_npu_argsort()
+                    extra_attn_metadata_args = dict(
+                        num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs],
+                        num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs],
+                    )
                 attn_metadata_i = builder.build(
                     common_prefix_len=common_prefix_len,
                     common_attn_metadata=common_attn_metadata,
@@ -1127,10 +1126,7 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.speculative_config and self.speculative_config.method == "mtp":
-                attn_state = AscendAttentionState.SpecDecoding
-            else:
-                attn_state = AscendAttentionState.ChunkedPrefill
+            attn_state = AscendAttentionState.SpecDecoding if self.speculative_config and self.speculative_config.method == "mtp" else AscendAttentionState.ChunkedPrefill
         # splitfuse
         elif self.scheduler_config.enable_chunked_prefill:
             attn_state = AscendAttentionState.ChunkedPrefill
@@ -1771,10 +1767,7 @@ class NPUModelRunner(GPUModelRunner):
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
         for req_idx in range(num_sampled_tokens):
-            if self.use_async_scheduling:
-                sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
-            else:
-                sampled_ids = valid_sampled_token_ids[req_idx]
+            sampled_ids = ([-1] if req_idx not in invalid_req_indices_set else None) if self.use_async_scheduling else valid_sampled_token_ids[req_idx]
 
             num_sampled_ids: int = len(sampled_ids) if sampled_ids else 0
 
@@ -1874,10 +1867,7 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state = AscendAttentionState.DecodeOnly
                 if self.speculative_config and self.speculative_config.method == "mtp":
                     # `AscendAttentionState.SpecDecoding` is only designed for mla
-                    if self.vllm_config.model_config.use_mla:
-                        attn_state = AscendAttentionState.SpecDecoding
-                    else:
-                        attn_state = AscendAttentionState.ChunkedPrefill
+                    attn_state = AscendAttentionState.SpecDecoding if self.vllm_config.model_config.use_mla else AscendAttentionState.ChunkedPrefill
 
                 common_metadata = CommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
@@ -2007,10 +1997,7 @@ class NPUModelRunner(GPUModelRunner):
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
         else:
-            if with_prefill:
-                num_reqs = num_tokens
-            else:
-                num_reqs = (num_tokens + self.decode_token_per_req - 1) // self.decode_token_per_req
+            num_reqs = num_tokens if with_prefill else (num_tokens + self.decode_token_per_req - 1) // self.decode_token_per_req
             num_reqs = min(num_reqs, max_num_reqs)
             min_tokens_per_req = num_tokens // num_reqs
             num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
@@ -2023,7 +2010,7 @@ class NPUModelRunner(GPUModelRunner):
         if not is_profile and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
-        has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
+        has_lora = bool(self.lora_config and self.compilation_config.cudagraph_specialize_lora)
         _ag_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
         num_tokens_padded = batch_descriptor.num_tokens
@@ -2860,7 +2847,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = _StreamPlaceholder
         torch.cuda.synchronize = _StreamPlaceholder
         torch.cuda.mem_get_info = _StreamPlaceholder
-        raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
+        raise RuntimeError(f"NPUModelRunner init failed, error is {e}") from e
     finally:
         # if anything goes wrong, just patch it with a placeholder
         torch.cuda.Event = _EventPlaceholder

@@ -57,15 +57,9 @@ class BlockTable:
             self.block_size = selected_kernel_size
             self.logical_block_size = selected_kernel_size
             self.blocks_per_phys_block = self.physical_block_size // self.logical_block_size
-            if self.blocks_per_phys_block > 1:
-                self.use_hybrid_blocks = True
-            else:
-                self.use_hybrid_blocks = False
+            self.use_hybrid_blocks = self.blocks_per_phys_block > 1
 
-        if self.use_hybrid_blocks:
-            logical_table_size = max_num_blocks_per_req * self.blocks_per_phys_block
-        else:
-            logical_table_size = max_num_blocks_per_req
+        logical_table_size = max_num_blocks_per_req * self.blocks_per_phys_block if self.use_hybrid_blocks else max_num_blocks_per_req
 
         duplicate_size = 1
         if self.pcp_world_size * self.dcp_world_size > 1:

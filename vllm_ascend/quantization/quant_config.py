@@ -78,7 +78,7 @@ class AscendQuantConfig(QuantizationConfig):
         # TODO(whx): remove this adaptation after adding "shared_head"
         # to prefix of DeepSeekShareHead in vLLM.
         extra_quant_dict = {}
-        for k in self.quant_description.keys():
+        for k in self.quant_description:
             if "shared_head" in k:
                 new_k = k.replace(".shared_head.", ".")
                 extra_quant_dict[new_k] = self.quant_description[k]
@@ -121,10 +121,7 @@ class AscendQuantConfig(QuantizationConfig):
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         # TODO (Levi-JQ): will be removed when QuantizationConfig.apply_vllm_mapper is implemented
         prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
-        if prefix_mapping:
-            hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix=prefix_mapping)
-            return hf_to_vllm_mapper._map_name(prefix)
-        return prefix
+        return WeightsMapper(orig_to_new_prefix=prefix_mapping)._map_name(prefix) if prefix_mapping else prefix
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
@@ -149,19 +146,23 @@ class AscendQuantConfig(QuantizationConfig):
         if prefix.startswith("language_model"):
             prefix = prefix.split(".", 1)[-1]
         if isinstance(layer, LinearBase):
-            if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
-                return AscendUnquantizedLinearMethod()
-            return AscendLinearMethod(self, prefix, self.packed_modules_mapping, layer)
-        elif isinstance(layer, Attention) and "fa_quant_type" in self.quant_description.keys() and self.quant_description["fa_quant_type"] is not None:
+            return (
+                AscendUnquantizedLinearMethod()
+                if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping)
+                else AscendLinearMethod(self, prefix, self.packed_modules_mapping, layer)
+            )
+        elif isinstance(layer, Attention) and "fa_quant_type" in self.quant_description and self.quant_description["fa_quant_type"] is not None:
             return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             return AscendFusedMoEMethod(self, prefix, self.packed_modules_mapping, layer)
         elif isinstance(layer, VocabParallelEmbedding):
-            if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
-                return UnquantizedEmbeddingMethod()
-            return AscendEmbeddingMethod(self, prefix, self.packed_modules_mapping, layer)
+            return (
+                UnquantizedEmbeddingMethod()
+                if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping)
+                else AscendEmbeddingMethod(self, prefix, self.packed_modules_mapping, layer)
+            )
         return None
 
     def is_layer_skipped_ascend(self, prefix: str, fused_mapping: Mapping[str, list[str]] = MappingProxyType({})):
@@ -412,10 +413,7 @@ class AscendLinearMethod(LinearMethodBase):
             elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
                 tp_rank = get_mlp_tp_group().rank_in_group
             elif (layer.prefix.find("o_proj") != -1 or layer.prefix.find("out_proj") != -1) and flashcomm2_enable():
-                if get_ascend_config().flashcomm2_oproj_tensor_parallel_size == 1:
-                    tp_rank = 0
-                else:
-                    tp_rank = get_flashcomm2_otp_group().rank_in_group
+                tp_rank = 0 if get_ascend_config().flashcomm2_oproj_tensor_parallel_size == 1 else get_flashcomm2_otp_group().rank_in_group
             else:
                 tp_rank = get_tensor_model_parallel_rank()
         else:

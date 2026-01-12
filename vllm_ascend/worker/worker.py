@@ -141,10 +141,7 @@ class NPUWorker(WorkerBase):
             except Exception:
                 logger.info("Skip binding cpu.")
 
-        if self.cache_config.cache_dtype == "auto":
-            self.cache_dtype = self.model_config.dtype
-        else:
-            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
+        self.cache_dtype = self.model_config.dtype if self.cache_config.cache_dtype == "auto" else STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -318,10 +315,7 @@ class NPUWorker(WorkerBase):
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise it will conflict with the all-gather operation in flashcomm1.
-            if enable_sp():
-                all_gather_group = None
-            else:
-                all_gather_group = get_tp_group()
+            all_gather_group = None if enable_sp() else get_tp_group()
             intermediate_tensors = IntermediateTensors(get_pp_group().recv_tensor_dict(all_gather_group=all_gather_group))
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
@@ -332,10 +326,7 @@ class NPUWorker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
         # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise it will conflict with the all-gather operation in flashcomm1.
-        if enable_sp():
-            all_gather_group = None
-        else:
-            all_gather_group = get_tp_group()
+        all_gather_group = None if enable_sp() else get_tp_group()
         get_pp_group().send_tensor_dict(output.tensors, all_gather_group=all_gather_group)
 
         kv_connector_output = output.kv_connector_output
