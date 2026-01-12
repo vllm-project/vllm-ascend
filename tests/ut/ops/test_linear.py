@@ -7,6 +7,7 @@ import torch
 from vllm import config
 
 from tests.ut.base import TestBase
+import vllm_ascend.config.vllm_ascend as ascend_config
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.linear import (AscendMergedColumnParallelLinear,
                                     AscendReplicatedLinear,
@@ -29,7 +30,7 @@ class BaseLinearTest(unittest.TestCase):
         self.mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
 
         self.patches = [
-            patch("vllm_ascend.ascend_config.get_ascend_config",
+            patch("vllm_ascend.config.vllm_ascend.get_ascend_config",
                   return_value=self.mock_ascend_config),
             patch("vllm_ascend.distributed.parallel_state.get_otp_group",
                   return_value=self.mock_group),
