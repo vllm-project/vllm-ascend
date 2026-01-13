@@ -42,7 +42,7 @@ enum NnopbaseHcclServerType {
     NNOPBASE_HCCL_SERVER_TYPE_END
 };
 
-extern aclnnStatus aclnnInnerDispatchFFNCombineBF16GetWorkspaceSize(const aclTensor* x, const aclTensor* weight1, const aclTensor* weight2,
+extern aclnnStatus aclnnInnerDispatchFFNCombineBF16GetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensor* weight2,
                                                          const aclTensor* expertId, const aclTensor* scale1, const aclTensor* scale2,
                                                          const aclTensor* probs,
                                                          const char* group, int64_t maxOutputSize,
