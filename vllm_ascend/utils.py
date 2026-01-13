@@ -1189,3 +1189,14 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     vllm_config = get_current_vllm_config()
     is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
     return is_prefill_instance
+
+
+def parse_layer_idx(prefix: str) -> Optional[int]:
+    pattern = r'layers\.(\d+)'
+    match = re.search(pattern, prefix)
+    if match:
+        layer_idx = int(match.group(1))
+    else:
+        layer_idx = None
+
+    return layer_idx
