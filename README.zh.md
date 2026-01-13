@@ -68,7 +68,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 vllm-ascend有主干分支和开发分支。
 
 - **main**: 主干分支，与vLLM的主干分支对应，并通过昇腾CI持续进行质量看护。
-- **vX.Y.Z-dev**: 开发分支，随vLLM部分新版本发布而创建，比如`v0.7.3-dev`是vllm-asend针对vLLM `v0.7.3`版本的开发分支。
+- **releases/vX.Y.Z**: 开发分支，随vLLM部分新版本发布而创建，比如`releases/v0.13.0`是vllm-asend针对vLLM `v0.13.0` 版本的开发分支。
 
 下面是维护中的分支：
 
