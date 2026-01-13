@@ -24,7 +24,7 @@ export PYTHONHASHSEED=0
 
 ## Example of using Mooncake as a KV Pool backend
 * Software:
-    * Check NPU network configuration:
+    * Check NPU HCCN Configuration:
 
         Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 

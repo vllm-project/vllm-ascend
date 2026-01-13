@@ -37,7 +37,7 @@ for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
 for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
 ```
 
-2. Check NPU network configuration:
+2. Check NPU HCCN Configuration:
 
 Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
@@ -48,14 +48,28 @@ cat /etc/hccn.conf
 3. Get NPU IP Addresses
 
 ```bash
-for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+# Get virtual npu ip
+for i in {0..15}; do hccn_tool -i $i -vnic -g;done
 ```
 
-4. Cross-Node PING Test
+4. Get superpodid and SDID
 
 ```bash
-# Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
-for i in {0..15}; do hccn_tool -i $i -ping -g address x.x.x.x;done
+for i in {0..15}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
+```
+
+5. Cross-Node PING Test
+
+```bash
+# Execute on the target node (replace 'x.x.x.x' with virtual npu ip address)
+for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
+```
+
+6. Check NPU TLS Configuration
+
+```bash
+# The tls settings should be consistent across all nodes
+for i in {0..15}; do hccn_tool -i $i -tls -g ; done | grep switch
 ```
 
 ::::
@@ -79,7 +93,7 @@ for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
 for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
 ```
 
-2. Check NPU network configuration:
+2. Check NPU HCCN Configuration:
 
 Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
@@ -98,6 +112,13 @@ for i in {0..7}; do hccn_tool -i $i -ip -g;done
 ```bash
 # Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
 for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
+```
+
+5. Check NPU TLS Configuration
+
+```bash
+# The tls settings should be consistent across all nodes
+for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
 ```
 
 ::::

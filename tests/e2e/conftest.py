@@ -756,6 +756,11 @@ def ilama_lora_files():
     return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
 
 
+@pytest.fixture(scope="session")
+def llama32_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/llama32-3b-text2sql-spider")
+
+
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
     return [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
