@@ -57,9 +57,8 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend import envs as envs_ascend
 from vllm_ascend.config.utils import (enable_dsa_cp, flashcomm2_enable,
-                                      matmul_allreduce_enable, mlp_tp_enable,
-                                      oproj_tp_enable,
-                                      shared_expert_dp_enabled)
+                                      matmul_allreduce_enable, shared_expert_dp_enabled)
+from vllm_ascend.config.finegrained_tp import oproj_tp_enable, mlp_tp_enable
 from vllm_ascend.config.vllm_ascend import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,

@@ -88,7 +88,8 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
-from vllm_ascend.config.utils import enable_sp, is_moe_model, lmhead_tp_enable
+from vllm_ascend.config.utils import enable_sp, is_moe_model
+from vllm_ascend.config.finegrained_tp import lmhead_tp_enable
 from vllm_ascend.config.vllm_ascend import get_ascend_config
 # yapf: enable
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor

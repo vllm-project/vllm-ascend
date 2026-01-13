@@ -30,7 +30,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, pad_vocab_size)
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.config.utils import embedding_tp_enable, lmhead_tp_enable
+from vllm_ascend.config.finegrained_tp import lmhead_tp_enable, embedding_tp_enable
 from vllm_ascend.distributed.parallel_state import (get_embed_tp_group,
                                                     get_lmhead_tp_group)
 

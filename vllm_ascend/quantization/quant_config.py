@@ -44,7 +44,8 @@ from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
-from ..config.utils import flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
+from ..config.utils import flashcomm2_enable
+from ..config.finegrained_tp import oproj_tp_enable, mlp_tp_enable
 from .utils import get_quant_method, is_mx_quant_type
 
 
