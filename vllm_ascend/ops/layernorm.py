@@ -18,11 +18,7 @@
 from typing import Optional, Tuple, Union
 
 import torch
-import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 

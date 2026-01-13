@@ -64,8 +64,9 @@ from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import (enable_dsa_cp, enable_sp, flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
-                               matmul_allreduce_enable, mlp_tp_enable, parse_layer_idx,
-                               oproj_tp_enable, shared_expert_dp_enabled)
+                               matmul_allreduce_enable, mlp_tp_enable,
+                               oproj_tp_enable, parse_layer_idx,
+                               shared_expert_dp_enabled)
 
 
 class CustomLinearOp:

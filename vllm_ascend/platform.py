@@ -359,7 +359,6 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-
     @classmethod
     def import_kernels(cls) -> None:
         # Directly importing vllm_ascend_C prevents ASCEND_RT_VISIBLE_DEVICES
