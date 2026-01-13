@@ -45,14 +45,11 @@ plugins.md029.enabled = false # ol-prefix
 
 [tool.ruff]
 # TODO: according to PEP8, there should be 80 characters per line
-line-length = 180
+line-length = 120
 # Folder to be modified
 exclude = [
-    "benchmarks/**",
-    "docs/source/**",
     "examples/**",
     "tests/**",
-    "tools/**",
     "vllm_ascend/**",
 ]
 
