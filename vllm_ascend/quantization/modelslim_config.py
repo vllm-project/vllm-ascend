@@ -243,7 +243,8 @@ def get_quant_type_for_layer(
         quant_description: Dict[str, Any],
         prefix: str,
         layer_type: str,
-        packed_modules_mapping: Optional[Dict[str, Any]] = None) -> str:
+        packed_modules_mapping: Optional[Dict[str,
+                                              Any]] = None) -> Optional[str]:
     """Determine the quantization type for a layer.
     
     Args:
@@ -285,6 +286,10 @@ def create_scheme_for_layer(
     logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
     quant_type = get_quant_type_for_layer(quant_description, prefix,
                                           layer_type, packed_modules_mapping)
+
+    if quant_type is None:
+        raise ValueError(
+            f"Could not determine quantization type for layer {prefix}.")
 
     # Use registry to get scheme class
     scheme_cls = get_scheme_class(quant_type, layer_type)

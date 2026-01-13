@@ -155,17 +155,18 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
             # Get the scheme for this layer
-            scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            linear_scheme = self._get_linear_scheme(layer=layer,
+                                                    layer_name=prefix)
 
             # Return unquantized method if no scheme found
-            if scheme is None:
+            if linear_scheme is None:
                 return UnquantizedLinearMethod()
 
             # Store scheme on layer for reference (optional, for debugging)
-            layer.scheme = scheme
+            layer.scheme = linear_scheme
             logger.info_once(
                 "Using the vLLM Ascend llmcompressor Quantization now!")
-            return AscendLinearMethod(scheme)
+            return AscendLinearMethod(linear_scheme)
 
         if isinstance(layer, FusedMoE):
             # Delayed import to avoid circular import
@@ -174,25 +175,57 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
             # Get the scheme for this layer
-            scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            moe_scheme = self._get_moe_scheme(layer=layer, layer_name=prefix)
 
             # Return unquantized method if no scheme found
-            if scheme is None:
+            if moe_scheme is None:
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
 
             # Store scheme on layer for reference (optional, for debugging)
-            layer.scheme = scheme
+            layer.scheme = moe_scheme
             logger.info_once(
                 "Using the vLLM Ascend llmcompressor Quantization now!")
-            return AscendFusedMoEMethod(scheme, layer.moe_config)
+            return AscendFusedMoEMethod(moe_scheme, layer.moe_config)
 
         return None
+
+    def _get_linear_scheme(
+            self,
+            layer: torch.nn.Module,
+            layer_name: Optional[str] = None) -> Optional[AscendLinearScheme]:
+        """Get the linear quantization scheme for a layer.
+        
+        Returns:
+            An AscendLinearScheme instance, or None if the layer
+            should use unquantized method.
+        """
+        scheme = self.get_scheme(layer=layer, layer_name=layer_name)
+        if scheme is None:
+            return None
+        # The scheme should be AscendLinearScheme for linear layers
+        return cast(AscendLinearScheme, scheme)
+
+    def _get_moe_scheme(
+            self,
+            layer: torch.nn.Module,
+            layer_name: Optional[str] = None) -> Optional[AscendMoEScheme]:
+        """Get the MoE quantization scheme for a layer.
+        
+        Returns:
+            An AscendMoEScheme instance, or None if the layer
+            should use unquantized method.
+        """
+        scheme = self.get_scheme(layer=layer, layer_name=layer_name)
+        if scheme is None:
+            return None
+        # The scheme should be AscendMoEScheme for MoE layers
+        return cast(AscendMoEScheme, scheme)
 
     def get_scheme(
         self,
         layer: torch.nn.Module,
         layer_name: Optional[str] = None
-    ) -> Optional[Union[AscendLinearScheme, AscendMoEScheme]]:
+    ) -> Optional["AscendLinearScheme | AscendMoEScheme"]:
         """Get the quantization scheme for a layer.
         
         compressed-tensors supports non uniform in the following way:

@@ -30,7 +30,8 @@ Usage:
 from typing import Any
 
 # Import base classes
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType
+from .base import (AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme,
+                   QuantType)
 # Import registry functions
 from .registry import get_scheme_class, register_scheme
 # Import all scheme classes for external access
@@ -55,6 +56,7 @@ def is_mx_quant_type(instance: Any) -> bool:
 
 __all__ = [
     # Base classes
+    "AscendAttentionScheme",
     "AscendLinearScheme",
     "AscendMoEScheme",
     "QuantType",

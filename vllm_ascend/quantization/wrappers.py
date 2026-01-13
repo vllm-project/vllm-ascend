@@ -47,7 +47,8 @@ from vllm_ascend.distributed.parallel_state import (get_flashcomm2_otp_group,
                                                     get_otp_group)
 from vllm_ascend.utils import flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
 
-from .methods import AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
+from .methods import (AscendAttentionScheme, AscendLinearScheme,
+                      AscendMoEScheme, is_mx_quant_type)
 
 
 class AscendLinearMethod(LinearMethodBase):
@@ -174,7 +175,7 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         scheme: The attention quantization scheme instance.
     """
 
-    def __init__(self, scheme: AscendLinearScheme) -> None:
+    def __init__(self, scheme: AscendAttentionScheme) -> None:
         self.quant_method = scheme
 
     def create_weights(self, layer: torch.nn.Module) -> None:
@@ -184,8 +185,7 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         self.quant_method.create_weights(layer)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if hasattr(self.quant_method, "process_weights_after_loading"):
-            self.quant_method.process_weights_after_loading(layer)
+        self.quant_method.process_weights_after_loading(layer)
 
     def apply(self, layer: torch.nn.Module, query: torch.Tensor,
               key: torch.Tensor, value: torch.Tensor, kv_cache, attn_metadata,

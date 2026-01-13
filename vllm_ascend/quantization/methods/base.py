@@ -124,6 +124,52 @@ class AscendLinearScheme(ABC):
         pass
 
 
+class AscendAttentionScheme(ABC):
+    """Base class for all attention quantization schemes.
+    
+    Subclasses must implement apply() method.
+    Other methods have default implementations.
+    """
+
+    def create_weights(self, layer: torch.nn.Module) -> None:
+        """Create weights for attention quantization.
+        
+        Args:
+            layer: The attention layer module.
+        """
+        pass
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Post-loading weight processing for attention layer.
+        
+        Args:
+            layer: The attention layer module.
+        """
+        pass
+
+    @abstractmethod
+    def apply(self, layer: torch.nn.Module, query: torch.Tensor,
+              key: torch.Tensor, value: torch.Tensor, kv_cache, attn_metadata,
+              attn_type, scale, output) -> torch.Tensor:
+        """Forward computation for attention layer.
+        
+        Args:
+            layer: The attention layer module.
+            query: Query tensor.
+            key: Key tensor.
+            value: Value tensor.
+            kv_cache: KV cache.
+            attn_metadata: Attention metadata.
+            attn_type: Attention type.
+            scale: Scale factor.
+            output: Output tensor.
+            
+        Returns:
+            Output tensor after attention computation.
+        """
+        ...
+
+
 class AscendMoEScheme(ABC):
     """Base class for all MoE quantization schemes.
     
