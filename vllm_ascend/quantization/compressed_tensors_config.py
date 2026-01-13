@@ -17,7 +17,7 @@
 #
 """LLM-Compressor (compressed_tensors) quantization configuration for Ascend."""
 
-from typing import Any, Optional, cast
+from typing import Any, Optional, Union, cast
 
 import torch
 from compressed_tensors.quantization import (QuantizationArgs,
@@ -39,6 +39,8 @@ from vllm.model_executor.models.utils import WeightsMapper
 
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
+from .methods import AscendLinearScheme, AscendMoEScheme
+
 logger = init_logger(__name__)
 
 
@@ -52,21 +54,6 @@ _remove_quantization_method()
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, Optional[dict[str,
                                                        "QuantizationArgs"]]]
-
-
-def get_quant_method_llmcompressor(layer: torch.nn.Module):
-    """Get quantization method for LLM-Compressor models.
-    
-    Args:
-        layer: The layer module with a scheme attribute.
-        
-    Returns:
-        The scheme from the layer.
-    """
-    logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
-    if layer.scheme is None:
-        raise ValueError("A scheme must be defined for each layer")
-    return layer.scheme
 
 
 @register_quantization_config(COMPRESSED_TENSORS_METHOD)
@@ -165,48 +152,49 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
-        from .modelslim_config import AscendModelSlimConfig
         from .wrappers import AscendFusedMoEMethod, AscendLinearMethod
 
         if isinstance(layer, LinearBase):
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
-            # collect schemes
-            quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            # Get the scheme for this layer
+            scheme = self.get_scheme(layer=layer, layer_name=prefix)
 
-            # choose quantization method
-            quant_method = UnquantizedLinearMethod()
-            if quant_scheme is not None:
-                layer.scheme = quant_scheme
-                ascend_quant_config = AscendModelSlimConfig(
-                    self.quant_description or {})
-                quant_method = AscendLinearMethod(ascend_quant_config, prefix,
-                                                  None, layer)
-            return quant_method
+            # Return unquantized method if no scheme found
+            if scheme is None:
+                return UnquantizedLinearMethod()
+
+            # Store scheme on layer for reference (optional, for debugging)
+            layer.scheme = scheme
+            logger.info_once(
+                "Using the vLLM Ascend llmcompressor Quantization now!")
+            return AscendLinearMethod(scheme)
+
         if isinstance(layer, FusedMoE):
             # Delayed import to avoid circular import
             from vllm_ascend.ops.fused_moe.fused_moe import \
                 AscendUnquantizedFusedMoEMethod
 
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
-            # collect schemes
-            quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            # Get the scheme for this layer
+            scheme = self.get_scheme(layer=layer, layer_name=prefix)
 
-            # choose quantization method
-            quant_method = AscendUnquantizedFusedMoEMethod(layer.moe_config)
-            if quant_scheme is not None:
-                layer.scheme = quant_scheme
-                ascend_quant_config = AscendModelSlimConfig(
-                    self.quant_description or {})
-                quant_method = AscendFusedMoEMethod(
-                    ascend_quant_config, prefix,
-                    ascend_quant_config.packed_modules_mapping, layer)
-            return quant_method
+            # Return unquantized method if no scheme found
+            if scheme is None:
+                return AscendUnquantizedFusedMoEMethod(layer.moe_config)
+
+            # Store scheme on layer for reference (optional, for debugging)
+            layer.scheme = scheme
+            logger.info_once(
+                "Using the vLLM Ascend llmcompressor Quantization now!")
+            return AscendFusedMoEMethod(scheme, layer.moe_config)
+
         return None
 
-    def get_scheme(self,
-                   layer: torch.nn.Module,
-                   layer_name: Optional[str] = None
-                   ) -> Optional["CompressedTensorsScheme"]:
+    def get_scheme(
+        self,
+        layer: torch.nn.Module,
+        layer_name: Optional[str] = None
+    ) -> Optional[Union[AscendLinearScheme, AscendMoEScheme]]:
         """Get the quantization scheme for a layer.
         
         compressed-tensors supports non uniform in the following way:
@@ -218,7 +206,11 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
         Detect whether a layer_name is found in any target and
         use the quantization scheme corresponding to the matched target
-        to select the CompressedTensorsScheme used for inference.
+        to select the appropriate Ascend scheme used for inference.
+        
+        Returns:
+            An Ascend quantization scheme instance, or None if the layer
+            should use unquantized method.
         """
 
         # Find the "target" in the compressed-tensors config
@@ -248,18 +240,25 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                                 "Falling back to UnquantizedLinearMethod")
             return None
 
-        else:
-            # Find the quant_scheme
-            scheme = self._get_scheme_from_parts(
-                weight_quant=weight_quant,
-                input_quant=input_quant,
-            )
-        return scheme
+        # Find and return the appropriate Ascend scheme
+        return self._get_scheme_from_parts(
+            weight_quant=weight_quant,
+            input_quant=input_quant,
+        )
 
     def _get_scheme_from_parts(
-            self, weight_quant: "QuantizationArgs",
-            input_quant: "QuantizationArgs") -> "CompressedTensorsScheme":
-        """Determine the appropriate scheme based on quantization args."""
+        self, weight_quant: "QuantizationArgs",
+        input_quant: "QuantizationArgs"
+    ) -> Union[AscendLinearScheme, AscendMoEScheme]:
+        """Determine the appropriate Ascend scheme based on quantization args.
+        
+        Args:
+            weight_quant: Weight quantization arguments.
+            input_quant: Input activation quantization arguments.
+            
+        Returns:
+            An instance of the appropriate Ascend quantization scheme.
+        """
         from .methods import (AscendW4A16FusedMoEMethod,
                               AscendW8A8DynamicLinearMethod,
                               AscendW8A8LinearMethod)

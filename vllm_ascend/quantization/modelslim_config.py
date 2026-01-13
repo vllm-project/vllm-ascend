@@ -239,12 +239,12 @@ def get_linear_quant_type(
     return quant_type
 
 
-def get_quant_method_modelslim(
+def get_quant_type_for_layer(
         quant_description: Dict[str, Any],
         prefix: str,
         layer_type: str,
-        packed_modules_mapping: Optional[Dict[str, Any]] = None):
-    """Get quantization method for ModelSlim models.
+        packed_modules_mapping: Optional[Dict[str, Any]] = None) -> str:
+    """Determine the quantization type for a layer.
     
     Args:
         quant_description: The quantization description dictionary.
@@ -253,23 +253,43 @@ def get_quant_method_modelslim(
         packed_modules_mapping: Mapping for packed/fused modules.
         
     Returns:
-        An instance of the appropriate quantization method class.
+        The quantization type string (e.g., "W8A8_DYNAMIC").
     """
-    logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
     if packed_modules_mapping is None:
         packed_modules_mapping = dict()
     # Attention
-    if '.attn' in prefix and 'fa_quant_type' in quant_description.keys():
-        quant_type = quant_description['fa_quant_type']
-    # Linear
-    else:
-        quant_type = get_linear_quant_type(quant_description, prefix,
-                                           packed_modules_mapping)
+    if layer_type == "attention" and 'fa_quant_type' in quant_description.keys(
+    ):
+        return quant_description['fa_quant_type']
+    # Linear / MoE
+    return get_linear_quant_type(quant_description, prefix,
+                                 packed_modules_mapping)
+
+
+def create_scheme_for_layer(
+        quant_description: Dict[str, Any],
+        prefix: str,
+        layer_type: str,
+        packed_modules_mapping: Optional[Dict[str, Any]] = None):
+    """Create a quantization scheme instance for a layer.
+    
+    Args:
+        quant_description: The quantization description dictionary.
+        prefix: The layer prefix.
+        layer_type: The type of layer ("linear", "moe", "attention").
+        packed_modules_mapping: Mapping for packed/fused modules.
+        
+    Returns:
+        An instance of the appropriate quantization scheme class.
+    """
+    logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
+    quant_type = get_quant_type_for_layer(quant_description, prefix, layer_type,
+                                          packed_modules_mapping)
 
     # Use registry to get scheme class
-    method_cls = get_scheme_class(quant_type, layer_type)
-    if method_cls is not None:
-        return method_cls()
+    scheme_cls = get_scheme_class(quant_type, layer_type)
+    if scheme_cls is not None:
+        return scheme_cls()
 
     raise NotImplementedError(
         f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}."
@@ -375,12 +395,17 @@ class AscendModelSlimConfig(QuantizationConfig):
                 from vllm_ascend.ops.linear import \
                     AscendUnquantizedLinearMethod
                 return AscendUnquantizedLinearMethod()
-            return AscendLinearMethod(self, prefix,
-                                      self.packed_modules_mapping, layer)
+            scheme = create_scheme_for_layer(self.quant_description, prefix,
+                                             "linear",
+                                             self.packed_modules_mapping)
+            return AscendLinearMethod(scheme)
         elif isinstance(layer, Attention) and \
             'fa_quant_type' in self.quant_description.keys() and \
             self.quant_description['fa_quant_type'] is not None:
-            return AscendKVCacheMethod(self, prefix)
+            scheme = create_scheme_for_layer(self.quant_description, prefix,
+                                             "attention",
+                                             self.packed_modules_mapping)
+            return AscendKVCacheMethod(scheme)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
@@ -388,14 +413,18 @@ class AscendModelSlimConfig(QuantizationConfig):
                 from vllm_ascend.ops.fused_moe.fused_moe import \
                     AscendUnquantizedFusedMoEMethod
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
-            return AscendFusedMoEMethod(self, prefix,
-                                        self.packed_modules_mapping, layer)
+            scheme = create_scheme_for_layer(self.quant_description, prefix,
+                                             "moe",
+                                             self.packed_modules_mapping)
+            return AscendFusedMoEMethod(scheme, layer.moe_config)
         elif isinstance(layer, VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
                 return UnquantizedEmbeddingMethod()
-            return AscendEmbeddingMethod(self, prefix,
-                                         self.packed_modules_mapping, layer)
+            scheme = create_scheme_for_layer(self.quant_description, prefix,
+                                             "linear",
+                                             self.packed_modules_mapping)
+            return AscendEmbeddingMethod(scheme)
         return None
 
     def is_layer_skipped_ascend(

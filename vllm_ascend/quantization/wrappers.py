@@ -15,18 +15,28 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Wrapper classes that delegate to actual quantization scheme implementations."""
+"""Wrapper classes that delegate to actual quantization scheme implementations.
 
-from typing import Any, Callable, Dict, List, Optional
+These wrapper classes (AscendLinearMethod, AscendFusedMoEMethod, etc.) implement
+the vLLM QuantizeMethodBase interface and delegate the actual quantization
+operations to scheme implementations (AscendLinearScheme, AscendMoEScheme).
+
+The wrapper classes handle:
+- Weight creation and registration
+- Parameter attribute setting
+- Tensor parallel rank handling
+- Delegation to the underlying scheme's apply() method
+"""
+
+from typing import Callable, List, Optional, Union
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizeMethodBase
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
@@ -35,64 +45,24 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
-from vllm_ascend.utils import (COMPRESSED_TENSORS_METHOD, flashcomm2_enable,
-                               mlp_tp_enable, oproj_tp_enable)
+from vllm_ascend.utils import (flashcomm2_enable, mlp_tp_enable,
+                               oproj_tp_enable)
 
-from .methods import is_mx_quant_type
-
-
-def get_quant_method(quant_description: Dict[str, Any],
-                     prefix: str,
-                     layer_type: str,
-                     packed_modules_mapping: Optional[Dict[str, Any]] = None,
-                     layer: Optional[torch.nn.Module] = None):
-    """Get the appropriate quantization method for a layer.
-    
-    This is the routing function that dispatches to either ModelSlim or
-    LLM-Compressor implementations based on the quant_description.
-    
-    Args:
-        quant_description: The quantization description dictionary.
-        prefix: The layer prefix.
-        layer_type: The type of layer ("linear", "moe", "attention").
-        packed_modules_mapping: Mapping for packed/fused modules.
-        layer: The layer module (optional).
-        
-    Returns:
-        An instance of the appropriate quantization method class.
-    """
-    if quant_description.get("quant_method") == COMPRESSED_TENSORS_METHOD:
-        from .compressed_tensors_config import get_quant_method_llmcompressor
-        return get_quant_method_llmcompressor(layer)
-
-    from .modelslim_config import get_quant_method_modelslim
-    return get_quant_method_modelslim(quant_description, prefix, layer_type,
-                                      packed_modules_mapping)
+from .methods import AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
 
 
 class AscendLinearMethod(LinearMethodBase):
     """Linear method for Ascend quantization.
 
-    This wrapper class delegates to the actual quantization scheme implementation
-    based on the quant_config and prefix.
+    This wrapper class delegates to the actual quantization scheme implementation.
+    The scheme is determined by the Config class and passed directly to this wrapper.
 
     Args:
-        quant_config: The Ascend quantization config.
-        prefix: The layer prefix for determining quantization type.
-        packed_modules_mapping: Mapping for packed/fused modules.
-        layer: The layer module (optional).
+        scheme: The quantization scheme instance (e.g., AscendW8A8DynamicLinearMethod).
     """
 
-    def __init__(self,
-                 quant_config: "QuantizeMethodBase",
-                 prefix: str,
-                 packed_modules_mapping: Optional[Dict[str, Any]],
-                 layer: Optional[torch.nn.Module] = None) -> None:
-        self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix,
-                                             "linear",
-                                             packed_modules_mapping,
-                                             layer=layer)
+    def __init__(self, scheme: AscendLinearScheme) -> None:
+        self.quant_method = scheme
 
     def create_weights(
         self,
@@ -199,15 +169,14 @@ class AscendLinearMethod(LinearMethodBase):
 class AscendKVCacheMethod(BaseKVCacheMethod):
     """KVCache method for Ascend quantization.
 
+    This wrapper class delegates to the actual attention quantization scheme.
+
     Args:
-        quant_config: The Ascend quantization config.
-        prefix: The layer prefix.
+        scheme: The attention quantization scheme instance.
     """
 
-    def __init__(self, quant_config: "QuantizeMethodBase",
-                 prefix: str) -> None:
-        self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix, "attention")
+    def __init__(self, scheme: AscendLinearScheme) -> None:
+        self.quant_method = scheme
 
     def create_weights(self, layer: torch.nn.Module) -> None:
         # Different from linear method, there are no weight processing/slicing
@@ -229,22 +198,17 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
 class AscendFusedMoEMethod(FusedMoEMethodBase):
     """FusedMoE method for Ascend quantization.
 
+    This wrapper class delegates to the actual MoE quantization scheme.
+
     Args:
-        quant_config: The Ascend quantization config.
-        prefix: The layer prefix.
-        packed_modules_mapping: Mapping for packed/fused modules.
-        layer: The layer module.
+        scheme: The MoE quantization scheme instance.
+        moe_config: The FusedMoE configuration.
     """
 
-    def __init__(self, quant_config: "QuantizeMethodBase", prefix: str,
-                 packed_modules_mapping: Optional[Dict[str, Any]],
-                 layer: torch.nn.Module):
-        super().__init__(layer.moe_config)
-        self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix,
-                                             "moe",
-                                             packed_modules_mapping,
-                                             layer=layer)
+    def __init__(self, scheme: AscendMoEScheme,
+                 moe_config: FusedMoEConfig) -> None:
+        super().__init__(moe_config)
+        self.quant_method = scheme
 
     def create_weights(
         self,
@@ -331,17 +295,8 @@ class AscendEmbeddingMethod(AscendLinearMethod):
     for clarity when used with VocabParallelEmbedding layers.
 
     Args:
-        quant_config: The Ascend quantization config.
-        prefix: The layer prefix.
-        packed_modules_mapping: Mapping for packed/fused modules.
-        layer: The layer module.
+        scheme: The quantization scheme instance.
     """
 
-    def __init__(self, quant_config: "QuantizeMethodBase", prefix: str,
-                 packed_modules_mapping: Optional[Dict[str, Any]],
-                 layer: torch.nn.Module) -> None:
-        self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix,
-                                             "linear",
-                                             packed_modules_mapping,
-                                             layer=layer)
+    def __init__(self, scheme: AscendLinearScheme) -> None:
+        self.quant_method = scheme
