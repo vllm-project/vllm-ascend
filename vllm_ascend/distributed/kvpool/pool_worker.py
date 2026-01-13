@@ -87,7 +87,7 @@ class KVPoolWorker:
             self.put_step = 1
 
         self.metadata = KeyMetadata(
-            model_config.model.split('/')[-1],
+            model_config.model.rstrip('/').split('/')[-1],
             self.head_or_tp_rank,
             self.pcp_rank,
             self.dcp_rank,
