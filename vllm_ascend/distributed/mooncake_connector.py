@@ -1606,7 +1606,7 @@ class MooncakeConnectorWorker:
                         all_task_done=(i == self.tp_num_need_pulls *
                                        self._prefill_pp_size - 1))
 
-        for req_id, meta in metadata.reqs_in_batch:
+        for req_id in metadata.reqs_in_batch:
             if self.kv_send_thread is not None:
                 self.kv_send_thread.task_tracker.add_req_to_process(req_id)
             if self.kv_recv_thread is not None:
