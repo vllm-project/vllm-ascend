@@ -50,7 +50,7 @@ def test_qwen3_moe_w8a8_dynamic_llm_compressor():
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-30B-A3B-quantized.w8a8"),
+            snapshot_download("vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w8a8"),
             tensor_parallel_size=2,
             max_model_len=4096,
             gpu_memory_utilization=0.8,
