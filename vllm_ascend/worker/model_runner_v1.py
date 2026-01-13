@@ -128,6 +128,9 @@ if get_ascend_device_type() == AscendDeviceType._310P:
     torch_npu.npu.set_compile_mode(jit_compile=False)
 
 
+SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
+
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
@@ -1916,7 +1919,7 @@ class NPUModelRunner(GPUModelRunner):
 
             attn_metadata = {}
 
-            seq_lens = max_query_len
+            seq_lens = SEQ_LEN_WITH_MAX_PA_WORKSPACE if force_attention else max_query_len
             self.seq_lens.np[:num_reqs] = seq_lens
             self.seq_lens.np[num_reqs:] = 0
             self.seq_lens.copy_to_gpu()
