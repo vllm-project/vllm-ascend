@@ -1017,6 +1017,13 @@ def flashcomm2_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
+def o_shard_enable() -> bool:
+    layer_sharding = get_ascend_config().layer_sharding
+    if layer_sharding is None:
+        return False
+    return "o_proj" in layer_sharding
+
+
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -1119,11 +1126,6 @@ def dispose_layer(layer: Any):
             dispose_tensor(attr_value)
 
 
-def replace_layer(original_layer: Any, new_layer: Any):
-    original_layer.__class__ = new_layer.__class__
-    original_layer.__dict__ = new_layer.__dict__
-
-
 def check_kv_extra_config(vllm_config):
 
     def _check(name: str, config: dict):
@@ -1166,17 +1168,24 @@ def singleton(cls):
     return get_instance
 
 
-@lru_cache(maxsize=1)
-def get_current_model_config():
-    from vllm.config import get_current_vllm_config
-    vllm_config = get_current_vllm_config()
-    return vllm_config.model_config
-
-
 #TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32. and subsequent updates will introduce new interfaces. --zzhx1
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
     from vllm.config import get_current_vllm_config
     vllm_config = get_current_vllm_config()
-    is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
-    return is_ds_v32 and enable_sp()
+    is_ds_v32 = hasattr(
+        vllm_config.model_config, "hf_text_config") and hasattr(
+            vllm_config.model_config.hf_text_config, "index_topk")
+    if is_ds_v32 and enable_sp():
+        return True
+    return False
+
+
+@lru_cache(maxsize=1)
+def enable_dsa_cp_with_layer_shard() -> bool:
+    if not enable_dsa_cp():
+        return False
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
+    return is_prefill_instance

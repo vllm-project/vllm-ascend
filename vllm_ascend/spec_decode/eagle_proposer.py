@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from contextlib import nullcontext
 from typing import Optional
 
 import numpy as np
@@ -7,7 +8,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import (get_pp_group, get_world_group,
+                                             init_model_parallel_group,
+                                             patch_tensor_parallel_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -93,6 +96,27 @@ class EagleProposer(VllmEagleProposer):
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config,
                                   "index_topk")
+        # NOTE:
+        # `draft_tensor_parallel_size` does not take effect for Eagle:
+        # the draft model uses the same TP size as the target model in practice.
+        # so we applied this patch to set tp=1 of draft model separately.
+        # Due to verification of `_verify_and_get_draft_tp` in vllm,
+        # the value of `draft_tensor_parallel_size` here will either be 1 separately
+        # or the same as target model.
+        # TODO(zhaomingyu13): If we want to adapt to the case where draft model tp
+        # is not 1 and differs from target model, this part should be rewritten.
+        if (vllm_config.parallel_config.tensor_parallel_size
+                != self.speculative_config.draft_tensor_parallel_size):
+            tp_group = init_model_parallel_group(
+                [[get_world_group().rank]],
+                get_world_group().rank,
+                torch.distributed.get_backend(get_world_group().device_group),
+                use_message_queue_broadcaster=True,
+                group_name="tp",
+            )
+            self.tp_group_context = patch_tensor_parallel_group(tp_group)
+        else:
+            self.tp_group_context = nullcontext()
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(
@@ -749,13 +773,6 @@ class EagleProposer(VllmEagleProposer):
             num_reqs = common_attn_metadata.num_reqs
             device = valid_sampled_tokens_count.device
 
-            if num_reqs != spec_decode_metadata.cu_num_draft_tokens.shape[0]:
-                # TODO: This is a serious issue and should be taken care of ASAP
-                # In short, why input_batch.num_reqs != attn_metadata.num_reqs?
-                # Previously in #4963, we modified `query_start_loc`, but this
-                # problem remains unsolved.
-                num_reqs = spec_decode_metadata.cu_num_draft_tokens.shape[0]
-
             token_indices_to_sample = torch.empty((num_reqs, ),
                                                   dtype=torch.int32,
                                                   device=device)
@@ -787,9 +804,9 @@ class EagleProposer(VllmEagleProposer):
                 torch.zeros_like(num_draft_tokens_gpu),
             )
 
-            query_start_loc = common_attn_metadata.query_start_loc[
-                1:1 + num_rejected_tokens_gpu.shape[0]]
-            token_indices_to_sample = query_start_loc - 1 - num_rejected_tokens_gpu
+            token_indices_to_sample = (
+                common_attn_metadata.query_start_loc[1:] - 1 -
+                num_rejected_tokens_gpu)
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
@@ -807,7 +824,8 @@ class EagleProposer(VllmEagleProposer):
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
-            num_actual_tokens=total_num_tokens,
+            num_actual_tokens=common_attn_metadata.num_actual_tokens
+            if self.pcp_size > 1 else total_num_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
             max_query_len=new_query_len_per_req.max().item(),
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,

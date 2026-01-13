@@ -45,7 +45,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, flashcomm2_enable,
                                mlp_tp_enable, oproj_tp_enable)
 
-from .utils import get_quant_method
+from .utils import get_quant_method, is_mx_quant_type
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -117,6 +117,18 @@ class AscendQuantConfig(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_text_config.model_type
+
+        if model_type in ["minimax", "minimax_m2"]:
+            prefix = prefix.replace("mlp", "block_sparse_moe")
+
+            #To adapt to minimax, modify the prefix of the model layer name
+            parts = prefix.split('.')
+            if "experts" in parts and len(parts) > 2:
+                exp_idx = parts.index("experts")
+                if exp_idx + 1 < len(parts) and parts[exp_idx + 1].isdigit():
+                    parts = parts[:exp_idx + 1]
+                    prefix = ".".join(parts)
+
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
@@ -173,7 +185,15 @@ class AscendQuantConfig(QuantizationConfig):
                         "are quantized. All shards of fused layers "
                         "to have the same precision.")
         else:
-            is_skipped = self.quant_description[prefix + '.weight'] == "FLOAT"
+            # NOTE: In GLM4.6, the MTP draft model shares the same LM head weigthts
+            # with the main model. Therefore, before `load_weights()` runs, some parameter
+            # names may not include the expected prefix and may appear only with the
+            # ".head" suffix. This can trigger a load-time error, so here we replace the
+            # key with "lm_head.weight".
+            key = prefix + '.weight'
+            if key not in self.quant_description and ".head" in prefix:
+                key = 'lm_head.weight'
+            is_skipped = self.quant_description[key] == "FLOAT"
 
         assert is_skipped is not None
         return is_skipped
@@ -304,6 +324,14 @@ packed_modules_model_mapping = {
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
+    "minimax_m2": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"]
+    }
 }
 
 
@@ -393,7 +421,8 @@ class AscendLinearMethod(LinearMethodBase):
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
-            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
+            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name \
+                or is_mx_quant_type(self.quant_method):
                 setattr(param, "input_dim", 1)
                 param.input_dim = 1
 
