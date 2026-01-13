@@ -102,6 +102,7 @@ from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
+from vllm_ascend.spec_decode.medusa_proposer import MedusaProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_moe_model,
@@ -364,7 +365,8 @@ class NPUModelRunner(GPUModelRunner):
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
-                                     SuffixDecodingProposer]] = None
+                                     SuffixDecodingProposer,
+                                     MedusaProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -1285,10 +1287,15 @@ class NPUModelRunner(GPUModelRunner):
         hidden_states: torch.Tensor,
         attn_metadata: dict[str, Any],
         aux_hidden_states: torch.Tensor = None,
+        sample_hidden_states: torch.Tensor = None
     ) -> Optional[list[list[int]]]:
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
+        elif isinstance(self.drafter, MedusaProposer):
+            draft_token_ids = self.drafter.generate_token_ids(
+                valid_sampled_token_ids, sampling_metadata,
+                spec_decode_metadata, sample_hidden_states)
         else:
             if self.speculative_config.method in ("suffix", "ngram"):
                 draft_token_ids = self.drafter.generate_token_ids(
@@ -1660,16 +1667,10 @@ class NPUModelRunner(GPUModelRunner):
         def propose_draft_token_ids(sampled_token_ids):
             assert self.spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
-                sampled_token_ids,
-                self.input_batch.sampling_metadata,
-                scheduler_output,
-                spec_decode_metadata,
-                positions,
-                scheduler_output.total_num_scheduled_tokens,
-                hidden_states,
-                attn_metadata,
-                aux_hidden_states,
-            )
+                sampled_token_ids, self.input_batch.sampling_metadata,
+                scheduler_output, spec_decode_metadata, positions,
+                scheduler_output.total_num_scheduled_tokens, hidden_states,
+                attn_metadata, aux_hidden_states, sample_hidden_states)
 
         (
             logprobs_lists,
