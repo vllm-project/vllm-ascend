@@ -12,6 +12,7 @@ if 'torch_npu._inductor' not in sys.modules:
 from vllm_ascend.attention.sfa_v1 import (AscendSFABackend, AscendSFAImpl,
                                           AscendSFAMetadata,
                                           AscendSFAMetadataBuilder)
+from vllm_ascend.utils import enable_dsa_cp
 
 
 class TestAscendSFABackend(TestBase):
@@ -82,6 +83,27 @@ class TestAscendSFAMetadata(TestBase):
 
 
 class TestAscendSFAMetadataBuilder(TestBase):
+
+    def setUp(self):
+        self.mock_cfg = MagicMock()
+
+        self.mock_cfg.parallel_config = MagicMock()
+        self.mock_cfg.parallel_config.tensor_parallel_size = 1
+        self.mock_cfg.parallel_config.prefill_context_parallel_size = 1
+        self.mock_cfg.parallel_config.decode_context_parallel_size = 1
+
+        self.mock_cfg.compilation_config = MagicMock()
+        self.mock_cfg.compilation_config.pass_config = MagicMock()
+        self.mock_cfg.compilation_config.pass_config.enable_sp = False
+
+        self.mock_cfg.speculative_config.num_speculative_tokens = 0
+
+        self.patcher = patch("vllm.config.get_current_vllm_config",
+                             return_value=self.mock_cfg)
+        self.patcher.start()
+
+        if hasattr(enable_dsa_cp, "cache_clear"):
+            enable_dsa_cp.cache_clear()
 
     def test_ascend_sfa_metadata_builder_default(self):
         kv_cache_spec = MagicMock()
