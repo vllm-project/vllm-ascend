@@ -754,18 +754,18 @@ at::Tensor& dispatch_ffn_combine(
 
 at::Tensor& dispatch_ffn_combine_bf16(
     const at::Tensor& x,
-    const at::Tensor& weight1,
-    const at::Tensor& weight2,
+    const at::TensorList& weight1,
+    const at::TensorList& weight2,
     const at::Tensor& expert_idx,
-    const at::Tensor& scale1,
-    const at::Tensor& scale2,
+    const at::TensorList& scale1,
+    const at::TensorList& scale2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
     at::Tensor& out
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
-    EXEC_NPU_CMD(aclnnDispatchFFNCombineBF16,
+    EXEC_NPU_CMD(aclnnDispatchFFNCombine,
                  x,
                  weight1,
                  weight2,
@@ -1417,8 +1417,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 
     ops.def(
-        "dispatch_ffn_combine_bf16(Tensor x, Tensor weight1, Tensor weight2, Tensor expert_idx,"
-        "                     Tensor scale1, Tensor scale2, Tensor probs, str group,"
+        "dispatch_ffn_combine_bf16(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
+        "                     Tensor[] scale1, Tensor[] scale2, Tensor probs, str group,"
         "                     int max_output_size, Tensor! out) -> Tensor"
     );
     ops.impl("dispatch_ffn_combine_bf16", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine_bf16);

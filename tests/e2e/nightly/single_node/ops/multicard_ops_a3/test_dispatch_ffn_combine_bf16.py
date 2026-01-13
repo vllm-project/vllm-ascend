@@ -100,10 +100,10 @@ class TestDisptachFFNCombine:
         torch_npu.npu.config.allow_internal_format = True
         x = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
         weight1 = self.generate_random_tensor((e, k, n),
-                                              dtype=torch.int8).npu()
+                                              dtype=torch.bfloat16).npu()
         weight1 = torch_npu.npu_format_cast(weight1, 29)
         weight2 = self.generate_random_tensor((e, k2, n2),
-                                              dtype=torch.int8).npu()
+                                              dtype=torch.bfloat16).npu()
         weight2 = torch_npu.npu_format_cast(weight2, 29)
 
         expert_idx = torch.randint(0,
@@ -127,7 +127,7 @@ class TestDisptachFFNCombine:
 
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
 
-        torch.ops._C_ascend.dispatch_ffn_combine(
+        torch.ops._C_ascend.dispatch_ffn_combine_bf16(
             x=x,
             weight1=weight1_nz_npu,
             weight2=weight2_nz_npu,
@@ -154,10 +154,10 @@ class TestDisptachFFNCombine:
         torch_npu.npu.config.allow_internal_format = True
         x = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
         weight1 = self.generate_random_tensor((e, k, n),
-                                              dtype=torch.int8).npu()
+                                              dtype=torch.bfloat16).npu()
         weight1 = torch_npu.npu_format_cast(weight1, 29)
         weight2 = self.generate_random_tensor((e, k2, n2),
-                                              dtype=torch.int8).npu()
+                                              dtype=torch.bfloat16).npu()
         weight2 = torch_npu.npu_format_cast(weight2, 29)
 
         expert_idx = torch.randint(0,
@@ -178,7 +178,7 @@ class TestDisptachFFNCombine:
 
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
 
-        torch.ops._C_ascend.dispatch_ffn_combine(
+        torch.ops._C_ascend.dispatch_ffn_combine_bf16(
             x=x,
             weight1=weight1_nz_npu,
             weight2=weight2_nz_npu,
