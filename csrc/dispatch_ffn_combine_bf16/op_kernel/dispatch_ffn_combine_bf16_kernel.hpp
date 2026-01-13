@@ -30,6 +30,7 @@
 #include "utils/hccl_shmem.hpp"
 #include "utils/const_args.hpp"
 #include "utils/layout3d.hpp"
+#include "utils/get_tensor_addr.hpp"
 
 #include "moe_init_routing_v2/moe_init_routing_v2_tiling.h"
 #include "moe_init_routing_v2/moe_init_routing_v2.cpp"
@@ -80,19 +81,20 @@ public:
         __gm__ ElementA *ptrA;
         LayoutA layoutA;
         LayoutA layoutA2;
-        __gm__ ElementB *ptrB1;
+        GM_ADDR ptrB1;
         LayoutB layoutB1;
-        __gm__ ElementB *ptrB2;
+        GM_ADDR ptrB2;
         LayoutB layoutB2;
-        __gm__ ElementScale *ptrScale1;
+        GM_ADDR ptrScale1;
         LayoutScale layoutScale1;
-        __gm__ ElementScale *ptrScale2;
+        GM_ADDR ptrScale2;
         LayoutScale layoutScale2;
         __gm__ ElementD2 *ptrOutput;
         LayoutD1 layoutD1;
         LayoutD2 layoutD2;
         GM_ADDR ptrWorkspace;
         int32_t EP;
+        int32_t listLen;
         int32_t expertPerRank;
         uint32_t maxOutputSize;
         uint32_t rank;
@@ -123,7 +125,7 @@ public:
         CATLASS_HOST_DEVICE
         Params(
             GemmCoord problemShape_,
-            uint32_t EP_, uint32_t expertPerRank_, uint32_t maxOutputSize_,
+            uint32_t EP_, uint32_t listLen_, uint32_t expertPerRank_, uint32_t maxOutputSize_,
             uint32_t rank_, uint32_t rankSize_, int64_t topK_,
             uint64_t initRoutingQuantTilingKey_, uint32_t epilogueCoreNum_, uint32_t epilogueGranularity_,
             GM_ADDR ptrA_, LayoutA layoutA_, LayoutA layoutA2_,
@@ -139,15 +141,15 @@ public:
             optiling::MoeInitRoutingV2TilingData moeInitRoutingQuantV2TilingData_,
             GM_ADDR symmetricPtr_ = nullptr
         ) : problemShape(problemShape_),
-            EP(EP_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
+            EP(EP_), listLen(listLen_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
             rank(rank_), rankSize(rankSize_), topK(topK_),
             initRoutingQuantTilingKey(initRoutingQuantTilingKey_),
             epilogueCoreNum(epilogueCoreNum_), epilogueGranularity(epilogueGranularity_),
             ptrA(reinterpret_cast<__gm__ ElementA *>(ptrA_)), layoutA(layoutA_), layoutA2(layoutA2_),
-            ptrB1(reinterpret_cast<__gm__ ElementB *>(ptrB1_)), layoutB1(layoutB1_),
-            ptrB2(reinterpret_cast<__gm__ ElementB *>(ptrB2_)), layoutB2(layoutB2_),
-            ptrScale1(reinterpret_cast<__gm__ ElementScale *>(ptrScale1_)), layoutScale1(layoutScale1_),
-            ptrScale2(reinterpret_cast<__gm__ ElementScale *>(ptrScale2_)), layoutScale2(layoutScale2_),
+            ptrB1(ptrB1_), layoutB1(layoutB1_),
+            ptrB2(ptrB2_), layoutB2(layoutB2_),
+            ptrScale1(ptrScale1_), layoutScale1(layoutScale1_),
+            ptrScale2(ptrScale2_), layoutScale2(layoutScale2_),
             ptrOutput(reinterpret_cast<__gm__ ElementD2 *>(ptrOutput_)), layoutD1(layoutD1_), layoutD2(layoutD2_),
             expertIdx(expertIdx_), moeInitRoutingQuantV2Scale(moeInitRoutingQuantV2Scale_),
             moeInitRoutingQuantV2Offset(moeInitRoutingQuantV2Offset_),
@@ -224,11 +226,9 @@ private:
         cumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrcumsumMM));
 
         gmA.SetGlobalBuffer(reinterpret_cast<__gm__ ElementA *>(workspaceInfo.ptrA));
-        gmS.SetGlobalBuffer(params.ptrScale1);
         gmC.SetGlobalBuffer(reinterpret_cast<__gm__ ElementC *>(workspaceInfo.ptrC));
 
         gmPermutedToken.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD1 *>(workspaceInfo.ptrPermutedToken));
-        gmS2.SetGlobalBuffer(params.ptrScale2);
         gmC2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementC *>(workspaceInfo.ptrC2));
 
         gmPerTokenScale1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementPerTokenScale *>(workspaceInfo.ptrPerTokenScale));
@@ -511,6 +511,18 @@ CATLASS_DEVICE
         AicSyncAll();
         int64_t preCurrentmSum = 0;
         int32_t syncLoopIdx = -1;
+
+        constexpr uint32_t MAX_EXPERTS_PER_RANK = 32;
+        __gm__ ElementB* weight1Array[MAX_EXPERTS_PER_RANK];
+        __gm__ ElementScale * scale1Array[MAX_EXPERTS_PER_RANK];
+
+        int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
+        for (uint32_t loopIdx = 0; loopIdx < loopCount; ++loopIdx) {
+            weight1Array[loopIdx] = reinterpret_cast<__gm__ ElementB*>(GetTensorAddr<int8_t>(loopIdx, params.ptrB1));
+            scale1Array[loopIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(loopIdx, params.ptrScale1));
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
             if (preCurrentmSum >= params.maxOutputSize) {
@@ -519,7 +531,13 @@ CATLASS_DEVICE
                 currentM = params.maxOutputSize - preCurrentmSum;
             }
             AscendC::GlobalTensor<ElementB> gmB1;
-            gmB1.SetGlobalBuffer(params.ptrB1);
+            AscendC::GlobalTensor<ElementScale> gmS;
+            int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
+            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight1Array[arrayGroupIdx]));
+            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale1Array[arrayGroupIdx]));
+
+            AscendC::PipeBarrier<PIPE_ALL>();
+
             if (currentM <= L1TileShape::M) {
                 gmB1.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
             }
@@ -580,7 +598,9 @@ CATLASS_DEVICE
 
             preCurrentmSum += currentM;
             gmGroupOffsetA += inGroupProblemShape.m() * inGroupProblemShape.k();
-            gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
+            if (params.listLen == 1) {
+                gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
+            }
             gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
             startCoreIdx = (startCoreIdx  + coreLoops) % coreNum;
         }
@@ -614,6 +634,17 @@ CATLASS_DEVICE
         if (params.epilogueGranularity < params.expertPerRank) {
             lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
         }
+
+        constexpr uint32_t MAX_EXPERTS_PER_RANK = 8;
+        __gm__ ElementB* weight2Array[MAX_EXPERTS_PER_RANK];
+        __gm__ ElementScale * scale2Array[MAX_EXPERTS_PER_RANK];
+        int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
+        for (uint32_t loopIdx = 0; loopIdx < loopCount; ++loopIdx) {
+            weight2Array[loopIdx] = reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(loopIdx, params.ptrB2));
+            scale2Array[loopIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(loopIdx, params.ptrScale2));
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
             if (preCurrentmSum >= params.maxOutputSize) {
@@ -622,7 +653,12 @@ CATLASS_DEVICE
                 currentM = params.maxOutputSize - preCurrentmSum;
             }
             AscendC::GlobalTensor<ElementB> gmB2;
-            gmB2.SetGlobalBuffer(params.ptrB2);
+            AscendC::GlobalTensor<ElementScale> gmS2;
+            AscendC::PipeBarrier<PIPE_ALL>();
+            int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
+            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight2Array[arrayGroupIdx]));
+            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale2Array[arrayGroupIdx]));
+
             if (currentM <= L1TileShape::M) {
                 gmB2.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
             }
@@ -682,7 +718,9 @@ CATLASS_DEVICE
             }
             preCurrentmSum += currentM;
             gmGroupOffsetA += inGroupProblemShape.m() * inGroupProblemShape.k();
-            gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
+            if (params.listLen == 1) {
+                gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
+            }
             gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
 
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
