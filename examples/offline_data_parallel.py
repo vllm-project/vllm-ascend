@@ -61,12 +61,12 @@ from time import sleep
 
 import torch
 from vllm import LLM, SamplingParams
-from vllm.distributed.parallel_state import (  # noqa E402
-    destroy_distributed_environment, destroy_model_parallel)
+from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel  # noqa E402
 from vllm.utils.network_utils import get_open_port
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 
 def parse_args():
     import argparse
@@ -78,43 +78,18 @@ def parse_args():
         default="ibm-research/PowerMoE-3b",
         help="Model name or path",
     )
-    parser.add_argument("--dp-size",
-                        type=int,
-                        default=2,
-                        help="Data parallel size")
-    parser.add_argument("--tp-size",
-                        type=int,
-                        default=1,
-                        help="Tensor parallel size")
-    parser.add_argument("--node-size",
-                        type=int,
-                        default=1,
-                        help="Total number of nodes")
-    parser.add_argument("--node-rank",
-                        type=int,
-                        default=0,
-                        help="Rank of the current node")
-    parser.add_argument("--master-addr",
-                        type=str,
-                        default="",
-                        help="Master node IP address")
-    parser.add_argument("--master-port",
-                        type=int,
-                        default=0,
-                        help="Master node port")
-    parser.add_argument("--enforce-eager",
-                        action="store_true",
-                        help="Enforce eager mode execution.")
-    parser.add_argument("--trust-remote-code",
-                        action="store_true",
-                        help="Trust remote code.")
-    parser.add_argument("--enable-expert-parallel",
-                        action="store_true",
-                        help="Enable expert parallel, used in MOE models.")
-    parser.add_argument("--quantization",
-                        type=str,
-                        default="",
-                        help="Use quantization models")
+    parser.add_argument("--dp-size", type=int, default=2, help="Data parallel size")
+    parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size")
+    parser.add_argument("--node-size", type=int, default=1, help="Total number of nodes")
+    parser.add_argument("--node-rank", type=int, default=0, help="Rank of the current node")
+    parser.add_argument("--master-addr", type=str, default="", help="Master node IP address")
+    parser.add_argument("--master-port", type=int, default=0, help="Master node port")
+    parser.add_argument("--enforce-eager", action="store_true", help="Enforce eager mode execution.")
+    parser.add_argument("--trust-remote-code", action="store_true", help="Trust remote code.")
+    parser.add_argument(
+        "--enable-expert-parallel", action="store_true", help="Enable expert parallel, used in MOE models."
+    )
+    parser.add_argument("--quantization", type=str, default="", help="Use quantization models")
     return parser.parse_args()
 
 
@@ -126,6 +101,7 @@ def cleanup_env_and_memory():
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
 
 def main(
     model,
@@ -168,7 +144,7 @@ def main(
     def start(rank):
         return rank * floor + min(rank, remainder)
 
-    prompts = prompts[start(global_dp_rank):start(global_dp_rank + 1)]
+    prompts = prompts[start(global_dp_rank) : start(global_dp_rank + 1)]
     if len(prompts) == 0:
         # if any rank has no prompts to process,
         # we need to set a placeholder prompt
@@ -179,9 +155,7 @@ def main(
     # since we are doing data parallel, every rank can have different
     # sampling params. here we set different max_tokens for different
     # ranks for demonstration.
-    sampling_params = SamplingParams(temperature=0.8,
-                                     top_p=0.95,
-                                     max_tokens=[16, 20][global_dp_rank % 2])
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=[16, 20][global_dp_rank % 2])
 
     # Create an LLM.
     llm = LLM(
@@ -200,13 +174,13 @@ def main(
             break
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"DP rank {global_dp_rank}, Prompt: {prompt!r}, "
-              f"Generated text: {generated_text!r}")
+        print(f"DP rank {global_dp_rank}, Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     # Give engines time to pause their processing loops before exiting.
     sleep(5)
     del llm
     cleanup_env_and_memory()
+
 
 if __name__ == "__main__":
     args = parse_args()
@@ -231,8 +205,7 @@ if __name__ == "__main__":
     from multiprocessing import Process
 
     procs = []
-    for local_dp_rank, global_dp_rank in enumerate(
-            range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)):
+    for local_dp_rank, global_dp_rank in enumerate(range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)):
         proc = Process(
             target=main,
             args=(
@@ -255,9 +228,7 @@ if __name__ == "__main__":
     for proc in procs:
         proc.join(timeout=900)
         if proc.exitcode is None:
-            print(
-                f"Killing process {proc.pid} that didn't stop within 15 minutes."
-            )
+            print(f"Killing process {proc.pid} that didn't stop within 15 minutes.")
             proc.kill()
             exit_code = 1
         elif proc.exitcode:

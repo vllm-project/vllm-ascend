@@ -17,19 +17,20 @@
 # Adapted from vllm-project/vllm/examples/offline_inference/audio_language.py
 #
 """
-This example shows how to use vLLM for running offline inference 
+This example shows how to use vLLM for running offline inference
 with the correct prompt format on audio language models.
 
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 
-import os
 import argparse
+import os
 
 from vllm.assets.audio import AudioAsset
+
 try:
-    import librosa # type: ignore
+    import librosa  # type: ignore
 except ImportError:
     raise Exception("Can't import librosa, please ensure it's installed")
 
@@ -40,7 +41,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def prepare_inputs(audio_count: int, audio_path1: str, audio_path2: str):
-    use_vllm_audio_assert = True if audio_path1 == "mary_had_lamb" and audio_path2 == "winning_call" else False
+    use_vllm_audio_assert = audio_path1 == "mary_had_lamb" and audio_path2 == "winning_call"
     if use_vllm_audio_assert:
         audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
     else:
@@ -48,22 +49,22 @@ def prepare_inputs(audio_count: int, audio_path1: str, audio_path2: str):
 
     question_per_audio_count = {
         1: "What is recited in the audio?",
-        2: "What sport and what nursery rhyme are referenced?"
+        2: "What sport and what nursery rhyme are referenced?",
     }
 
-    audio_in_prompt = "".join([
-        f"Audio {idx+1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n"
-        for idx in range(audio_count)
-    ])
+    audio_in_prompt = "".join([f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)])
     question = question_per_audio_count[audio_count]
-    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-              "<|im_start|>user\n"
-              f"{audio_in_prompt}{question}<|im_end|>\n"
-              "<|im_start|>assistant\n")
+    prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_in_prompt}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
 
     mm_data = {
-        "audio":
-        audio_assets if not use_vllm_audio_assert else [asset.audio_and_sample_rate for asset in audio_assets[:audio_count]]
+        "audio": audio_assets
+        if not use_vllm_audio_assert
+        else [asset.audio_and_sample_rate for asset in audio_assets[:audio_count]]
     }
 
     # Merge text prompt and audio data into inputs
@@ -76,17 +77,17 @@ def main(audio_count: int, audio_path1: str, audio_path2: str):
     # lower-end GPUs.
     # Unless specified, these settings have been tested to work on a single L4.
     # `limit_mm_per_prompt`: the max num items for each modality per prompt.
-    llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
-              max_model_len=4096,
-              max_num_seqs=5,
-              limit_mm_per_prompt={"audio": audio_count},
-              enforce_eager=True)
+    llm = LLM(
+        model="Qwen/Qwen2-Audio-7B-Instruct",
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
 
     inputs = prepare_inputs(audio_count, audio_path1, audio_path2)
 
-    sampling_params = SamplingParams(temperature=0.2,
-                                     max_tokens=64,
-                                     stop_token_ids=None)
+    sampling_params = SamplingParams(temperature=0.2, max_tokens=64, stop_token_ids=None)
 
     outputs = llm.generate(inputs, sampling_params=sampling_params)
 
@@ -96,7 +97,9 @@ def main(audio_count: int, audio_path1: str, audio_path2: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Arguments of rank table generator", )
+    parser = argparse.ArgumentParser(
+        description="Arguments of rank table generator",
+    )
     parser.add_argument("--audio-path1", type=str, default="mary_had_lamb")
     parser.add_argument("--audio-path2", type=str, default="winning_call")
     args = parser.parse_args()
