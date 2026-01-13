@@ -33,6 +33,11 @@ class TestAscendAttentionCPImpl(TestBase):
         self.layer_no_quant.layer_name = "test_layer"
         self.layer_no_quant._k_scale_float = 1.0
         self.layer_no_quant._v_scale_float = 1.0
+        self.mock_vllm_config = MagicMock()
+        self.config_patcher = patch(
+            'vllm_ascend.attention.attention_v1.get_current_vllm_config',
+            return_value=self.mock_vllm_config)
+        self.config_patcher.start()
 
         self.impl = AscendAttentionCPImpl(
             num_heads=8,

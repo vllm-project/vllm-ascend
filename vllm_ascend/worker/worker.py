@@ -121,11 +121,12 @@ class NPUWorker(WorkerBase):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
 
-        if self.model_config.trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils.import_utils import init_cached_hf_modules
+        if vllm_version_is('0.13.0'):
+            if self.model_config.trust_remote_code:
+                # note: lazy import to avoid importing torch before initializing
+                from vllm.utils.import_utils import init_cached_hf_modules
 
-            init_cached_hf_modules()
+                init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
