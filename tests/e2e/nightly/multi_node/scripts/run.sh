@@ -167,8 +167,8 @@ run_tests_with_log() {
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            print_failure "Some tests failed, please check the error stack above for details.\
-            If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
+            print_failure "Some tests failed, please check the error stack above for details. \
+If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
         fi
     fi
 }
