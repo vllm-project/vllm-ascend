@@ -118,6 +118,7 @@ class KVCacheTaskTracker:
     def add_not_transfer_request(self, request_id: str):
         with self.done_task_lock:
             self.finished_requests.add(request_id)
+            self.reqs_to_process.discard(request_id)
 
     def update_done_task_count(self, request_id: str):
         with self.done_task_lock:
@@ -982,7 +983,8 @@ class MooncakeConnectorScheduler:
             "num_external_tokens=%s, kv_transfer_params=%s",
             num_external_tokens, params)
 
-        if params.get("do_remote_decode"):
+        if params is not None and (params.get("do_remote_prefill", False)
+                                   or params.get("do_remote_decode", False)):
             self._reqs_in_batch.add(request.request_id)
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
@@ -1027,6 +1029,7 @@ class MooncakeConnectorScheduler:
         meta.requests_to_send = self._reqs_need_send
         self._reqs_need_send = {}
         meta.reqs_in_batch = self._reqs_in_batch
+        self._reqs_in_batch = set()
 
         return meta
 
