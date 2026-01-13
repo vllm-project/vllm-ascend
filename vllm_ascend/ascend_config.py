@@ -172,7 +172,7 @@ class AscendCompilationConfig:
     def __init__(self,
                  fuse_norm_quant: bool = True,
                  fuse_qknorm_rope: bool = False,
-                 fuse_allreduce_rms: bool = True,
+                 fuse_allreduce_rms: bool = False,
                  **kwargs):
         """
         Initialize the configuration.
@@ -182,6 +182,8 @@ class AscendCompilationConfig:
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: False
+            fuse_allreduce_rms (bool): Whether to enable allreduce and addrmsnorm fusion optimization.
                 Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
