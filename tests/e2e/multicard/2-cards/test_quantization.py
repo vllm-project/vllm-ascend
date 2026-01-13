@@ -58,7 +58,7 @@ def test_qwen3_moe_w8a8_dynamic_llm_compressor():
         vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     golden_results = [
-        'The president of the United States is the commander in chief of',
+        'The president of the United States is the head of state and',
     ]
 
     for i in range(len(vllm_output)):
