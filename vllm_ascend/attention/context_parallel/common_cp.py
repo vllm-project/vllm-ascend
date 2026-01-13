@@ -11,6 +11,12 @@ from vllm.distributed import (get_dcp_group,
 
 @dataclass
 class AscendPCPMetadata:
+    """
+    Metadata for Prefill Context Parallelism (PCP) on Ascend devices.
+
+    Stores index tensors and sequence lengths for routing attention
+    computations across PCP ranks during long sequence processing.
+    """
     q_head_idx: torch.Tensor = None
     q_tail_idx: torch.Tensor = None
     kv_with_q_head_nomask_idx: torch.Tensor = None
@@ -26,7 +32,11 @@ class AscendPCPMetadata:
 
 @dataclass
 class CPChunkedContextMetadata:
-    # New for MLA (compared to FlashAttention)
+    """
+    Metadata for chunked context handling in Context Parallelism (CP).
+
+    Extends chunked prefill with per-rank chunk information for PCP/DCP.
+    """
     # For handling chunked prefill
     cu_seq_lens: torch.Tensor
     starts: torch.Tensor
@@ -46,9 +56,11 @@ class CPChunkedContextMetadata:
 
 @dataclass
 class AscendMetadataForPrefill:
+    """ Prefill-specific metadata for Ascend attention with Context Parallelism."""
 
     @dataclass
     class ChunkedContextMetadata:
+        """Metadata for chunked context processing within prefill phase."""
         actual_chunk_seq_lengths: torch.Tensor
         actual_seq_lengths_kv: torch.Tensor
         starts: torch.Tensor
@@ -69,7 +81,7 @@ class AscendMetadataForPrefill:
 
 @dataclass
 class AscendMetadataForDecode:
-    """ Decode Specific Metadata for Ascend"""
+    """ Decode-specific metadata for Ascend attention with Context Parallelism."""
     num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
     batch_seq_mask: torch.Tensor = None
     block_tables: torch.Tensor = None
