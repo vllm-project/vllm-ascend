@@ -68,7 +68,7 @@ We welcome and value any contributions and collaborations:
 vllm-ascend has main branch and dev branch.
 
 - **main**: main branch，corresponds to the vLLM main branch, and is continuously monitored for quality through Ascend CI.
-- **vX.Y.Z-dev**: development branch, created with part of new releases of vLLM. For example, `v0.7.3-dev` is the dev branch for vLLM `v0.7.3` version.
+- **releases/vX.Y.Z**: development branch, created with part of new releases of vLLM. For example, `releases/v0.13.0` is the dev branch for vLLM `v0.13.0` version.
 
 Below is maintained branches:
 
@@ -79,6 +79,7 @@ Below is maintained branches:
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version, only bug fix is allowed and no new release tag any more. |
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version |
 | v0.11.0-dev | Maintained | CI commitment for vLLM 0.11.0 version |
+| releases/v0.13.0 | Maintained | CI commitment for vLLM 0.13.0 version |
 | rfc/feature-name | Maintained | [Feature branches](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#feature-branches) for collaboration |
 
 Please refer to [Versioning policy](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html) for more details.
