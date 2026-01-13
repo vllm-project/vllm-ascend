@@ -20,13 +20,19 @@ def mock_add_rms_norm(x, residual, weight, eps):
     return 2 * x, None, 2 * residual
 
 
+def mock_maybe_chunk_residual_impl(x, residual):
+    return residual
+
+
 @pytest.mark.parametrize("is_310p", [True, False])
 @pytest.mark.parametrize("residual",
                          [None, torch.randn(4, 8, dtype=torch.float32)])
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
 @patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
-def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
-                         dummy_tensor):
+@patch("torch_npu.npu_maybe_chunk_residual",
+       side_effect=mock_maybe_chunk_residual_impl)
+def test_RMSNorm_forward(mock_maybe_chunk_residual_impl, mock_add_rmsnorm,
+                         mock_rmsnorm, is_310p, residual, dummy_tensor):
 
     with patch("vllm_ascend.utils.get_ascend_device_type",
                return_value=AscendDeviceType._310P
