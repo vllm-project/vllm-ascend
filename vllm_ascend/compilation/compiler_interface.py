@@ -109,7 +109,8 @@ def npugraph_ex_compile(
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
 
     if not graph_returns_tuple(graph):
-        return make_graph_return_tuple(graph, example_inputs, npugraph_ex), None
+        return make_graph_return_tuple(graph, example_inputs,
+                                       npugraph_ex), None
 
     return npugraph_ex(graph, example_inputs), None
 
