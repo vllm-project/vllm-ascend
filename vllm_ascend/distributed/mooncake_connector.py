@@ -765,6 +765,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.requests: dict[str, ReqMeta] = {}
         self.requests_to_send: dict[str, float] = {}
+        self.reqs_in_batch: set[str] = set()
 
     def add_new_req(
         self,
@@ -928,6 +929,7 @@ class MooncakeConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int], int]] = {}
         self._reqs_need_send: dict[str, float] = {}
+        self._reqs_in_batch: set[str] = set()
 
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
@@ -976,6 +978,8 @@ class MooncakeConnectorScheduler:
             "num_external_tokens=%s, kv_transfer_params=%s",
             num_external_tokens, params)
 
+        if params.get("do_remote_decode"):
+            self._reqs_in_batch.add(request.request_id)
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
@@ -1018,6 +1022,7 @@ class MooncakeConnectorScheduler:
         self._reqs_need_recv.clear()
         meta.requests_to_send = self._reqs_need_send
         self._reqs_need_send = {}
+        meta.reqs_in_batch = self._reqs_in_batch
 
         return meta
 
@@ -1598,7 +1603,7 @@ class MooncakeConnectorWorker:
                                        self._prefill_pp_size - 1))
 
         if self.kv_send_thread is not None:
-            for req_id, meta in metadata.requests.items():
+            for req_id, meta in metadata.reqs_in_batch:
                 self.kv_send_thread.task_tracker.add_req_to_process(req_id)
 
         if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
