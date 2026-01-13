@@ -46,7 +46,8 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15 
+          apt-get -y install gcc g++ cmake libnuma-dev clang
+          clang -v
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -164,7 +165,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15 
+          apt-get -y install gcc g++ cmake libnuma-dev clang 
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -277,7 +278,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15 
+          apt-get -y install gcc g++ cmake libnuma-dev clang
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
