@@ -22,7 +22,6 @@ from torchvision.transforms.v2 import functional
 
 class AscendQwen3VLMoeForConditionalGeneration(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        print("entering the loop")
         super(Qwen3VLForConditionalGeneration, self).__init__()
         config: Qwen3VLMoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -81,14 +80,12 @@ class AscendQwen3VLMoeForConditionalGeneration(nn.Module):
             self.deepstack_input_embeds = None
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
-        print("new-modify")
         self.image_post_process_config(config.vision_config, vllm_config.model_config)
 
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
     def image_post_process_config(self, vision_config, model_config):
-        print("entering the loop")
         processor = MULTIMODAL_REGISTRY.create_processor(model_config)
         self.channel = vision_config.in_channels
         self.patch_size = vision_config.patch_size
