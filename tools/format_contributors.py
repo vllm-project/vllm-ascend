@@ -20,9 +20,7 @@ import re
 import sys
 from datetime import datetime
 
-p = re.compile(
-    r'@(?P<user>[A-Za-z0-9-_]+)[^\`]*\`(?P<sha>[0-9a-fA-F]+)\`\s*[-–—]\s*(?P<date>.+)$'
-)
+p = re.compile(r"@(?P<user>[A-Za-z0-9-_]+)[^\`]*\`(?P<sha>[0-9a-fA-F]+)\`\s*[-–—]\s*(?P<date>.+)$")
 
 
 def parse_lines(lines):
@@ -34,9 +32,9 @@ def parse_lines(lines):
         m = p.search(ln)
         if not m:
             continue
-        user = m.group('user')
-        sha = m.group('sha')
-        datestr = m.group('date').strip()
+        user = m.group("user")
+        sha = m.group("sha")
+        datestr = m.group("date").strip()
         try:
             dt = datetime.fromisoformat(datestr)
         except Exception:
@@ -51,27 +49,17 @@ def parse_lines(lines):
 
 def main():
     ap = argparse.ArgumentParser(
-        description=
-        "Format and sort contributor lines by date (newest first). Outputs markdown table by default."
+        description="Format and sort contributor lines by date (newest first). Outputs markdown table by default."
     )
     ap.add_argument(
-        'file',
-        nargs='?',
-        help=
-        'input file (default stdin), output from collect_user_first_contribution.sh'
+        "file", nargs="?", help="input file (default stdin), output from collect_user_first_contribution.sh"
     )
-    ap.add_argument(
-        '--start',
-        type=int,
-        default=1,
-        help='minimum number for table (oldest row will have this number)')
-    ap.add_argument('--repo',
-                    default='vllm-project/vllm-ascend',
-                    help='repo used for commit links')
+    ap.add_argument("--start", type=int, default=1, help="minimum number for table (oldest row will have this number)")
+    ap.add_argument("--repo", default="vllm-project/vllm-ascend", help="repo used for commit links")
     args = ap.parse_args()
 
     if args.file:
-        with open(args.file, 'r', encoding='utf-8') as f:
+        with open(args.file, encoding="utf-8") as f:
             lines = f.readlines()
     else:
         lines = sys.stdin.readlines()
@@ -88,9 +76,9 @@ def main():
     for dt, user, sha, datestr in items:
         short = sha[:7]
         date_short = dt.strftime("%Y/%m/%d")
-        print(
-            f"| {n} | [@{user}](https://github.com/{user}) | {date_short} | [{short}](https://github.com/{args.repo}/commit/{sha}) |"
-        )
+        user_url = f"https://github.com/{user}"
+        commit_url = f"https://github.com/{args.repo}/commit/{sha}"
+        print(f"| {n} | [@{user}]({user_url}) | {date_short} | [{short}]({commit_url}) |")
         n -= 1
 
 
