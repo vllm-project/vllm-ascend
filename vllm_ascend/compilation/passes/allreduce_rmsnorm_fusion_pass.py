@@ -27,7 +27,10 @@ from vllm.logger import logger
 
 
 class MiddleLayerMatmulAllReduceAddRMSNormPattern:
-
+    """
+    recognizing the Matmul+AllReduce+AddRMSNorm computation pattern
+    AllReduce is optimized in the fusion operator to a two-stage communication of ReduceScatter+AllGather
+    """
     def __init__(self, vllm_config, eps=1e-6):
         self.vllm_config = vllm_config
         self.eps = eps
