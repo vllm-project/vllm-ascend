@@ -12,6 +12,7 @@ Each vLLM Ascend release is versioned as `v[major].[minor].[micro][rcN][.postN]`
 - **Post releases**: Typically issued **on demand** to address minor errors in a final release. Different from [PEP-440 post release note](https://peps.python.org/pep-0440/#post-releases) convention, these versions include actual bug fixes, as the final release version must strictly align with the vLLM final release format (`v[major].[minor].[micro]`). Any post version must be published as a patch version of the final release.
 
 For example:
+
 - `v0.7.x`: first final release to match the vLLM `v0.7.x` version.
 - `v0.7.3rc1`: first pre version of vLLM Ascend.
 - `v0.7.3.post1`: post release for the `v0.7.3` release if it has some minor errors.
@@ -49,6 +50,7 @@ If you're using v0.7.3, don't forget to install [mindie-turbo](https://pypi.org/
 :::
 
 For main branch of vLLM Ascend, we usually make it compatible with the latest vLLM release and a newer commit hash of vLLM. Please note that this table is usually updated. Please check it regularly.
+
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
 |-------------|--------------|------------------|-------------|--------------------|
 |     main    | bde38c11df0ea066a740efe9b77fff5418be45df, v0.13.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
@@ -94,6 +96,7 @@ vLLM Ascend includes two branches: main and dev.
 Commits should typically be merged into the main branch first, and only then backported to the dev branch, to reduce maintenance costs as much as possible.
 
 ### Maintenance branch and EOL
+
 The table below lists branch states.
 
 | Branch            | Time Frame                       | Summary                                                   |
@@ -121,7 +124,8 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State       | RFC Link                             | Scheduled Merge Time | Mentor |
 |------------|--------------|---------------------------------------|------------|--------|
-|rfc/long_seq_optimization|Maintained|https://github.com/vllm-project/vllm/issues/22693|930|wangxiyuan|
+|rfc/long_seq_optimization|Maintained|<https://github.com/vllm-project/vllm/issues/22693>|930|wangxiyuan|
+
 - Branch: The feature branch should be created with a prefix `rfc/` followed by the feature name, such as `rfc/feature-name`.
 - State: The state of the feature branch is `Maintained` until it is merged into the main branch or deleted.
 - RFC Link: The feature branch should be created with a corresponding RFC issue. The creation of a feature branch requires an RFC and approval from at least two maintainers.
@@ -131,11 +135,13 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 ### Backward compatibility
 
 For main branch, vLLM Ascend should works with vLLM main branch and latest 1 or 2 releases. To ensure backward compatibility, do as follows:
+
 - Both main branch and target vLLM release, such as the vLLM main branch and vLLM 0.8.4, are tested by Ascend E2E CI.
 - To make sure that code changes are compatible with the latest 1 or 2 vLLM releases, vLLM Ascend introduces a version check mechanism inside the code. It checks the version of the installed vLLM package first to decide which code logic to use. If users hit the `InvalidVersion` error, it may indicate that they have installed a dev or editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use.
 - Document changes should be compatible with the latest 1 or 2 vLLM releases. Notes should be added if there are any breaking changes.
 
 ## Document branch policy
+
 To reduce maintenance costs, **all branch documentation content should remain consistent, and version differences can be controlled via variables in [docs/source/conf.py](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/conf.py)**. While this is not a simple task, it is a principle we should strive to follow.
 
 | Version | Purpose | Code Branch |
@@ -151,6 +157,7 @@ Notes:
 - `version` documentation: keep updating the `releases/vX.Y.Z` branch documentation to fix doc bugs.
 
 ## Software dependency management
+
 - `torch-npu`: Ascend Extension for PyTorch (torch-npu) releases a stable version to [PyPi](https://pypi.org/project/torch-npu)
   every 3 months, a development version (aka the POC version) every month, and a nightly version every day.
   The PyPi stable version **CAN** be used in vLLM Ascend final version, the monthly dev version **ONLY CAN** be used in

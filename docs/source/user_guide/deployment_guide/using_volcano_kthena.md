@@ -9,11 +9,11 @@ This guide shows how to run **prefill–decode (PD) disaggregation** on Huawei A
 Large language model inference naturally splits into two phases:
 
 - **Prefill**
-  - Processes input tokens and builds the key–value (KV) cache.
-  - Batch‑friendly, high throughput, well suited to parallel NPU execution.
+    - Processes input tokens and builds the key–value (KV) cache.
+    - Batch‑friendly, high throughput, well suited to parallel NPU execution.
 - **Decode**
-  - Consumes the KV cache to generate output tokens.
-  - Latency‑sensitive, memory‑intensive, more sequential.
+    - Consumes the KV cache to generate output tokens.
+    - Latency‑sensitive, memory‑intensive, more sequential.
 
 From the client’s perspective, this still looks like a single Chat / Completions endpoint.
 
@@ -43,7 +43,7 @@ This section uses the `deepseek-ai/DeepSeek-V2-Lite` example, but you can swap i
 
 ### 2.2 Deploy Prefill-Decode Disaggregated DeepSeek-V2-Lite on Kubernetes
 
-A concrete example is provided in Kthena as https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/prefill-decode-disaggregation.yaml
+A concrete example is provided in Kthena as <https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/prefill-decode-disaggregation.yaml>
 
 Deploy it with below command:
 

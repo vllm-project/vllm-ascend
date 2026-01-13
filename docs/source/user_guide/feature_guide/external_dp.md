@@ -13,7 +13,8 @@ The functionality of [external DP](https://docs.vllm.ai/en/latest/serving/data_p
 
 This tutorial will introduce the usage of them.
 
-### Prerequisites:
+### Prerequisites
+
 - Python 3.10+
 - Install dependencies needed by load-balance proxy server:
 
@@ -22,6 +23,7 @@ pip install fastapi httpx uvicorn
 ```
 
 ## Starting Exeternal DP Servers
+
 First you need to have at least two vLLM servers running in data parallel. These can be mock servers or actual vLLM servers. Note that this proxy also works with only one vLLM server running, but will fall back to direct request forwarding which is meaningless.
 
 You can start external vLLM dp servers one-by-one manually or using the launch script in `examples/external_online_dp`. For scenarios of large dp size across multi nodes, we recommend using our launch script for convenience.
@@ -35,6 +37,7 @@ vllm serve --host 0.0.0.0 --port 8101 --data-parallel-size 2 --data-parallel-ran
 ```
 
 ### Use Launch Script
+
 Firstly, you need to modify the `examples/external_online_dp/run_dp_template.sh` according to your vLLM configuration. Then you can use `examples/external_online_dp/launch_online_dp.py` to launch multiple vLLM instances in one command each node. It will internally call `examples/external_online_dp/run_dp_template.sh` for each DP rank with proper DP-related parameters.
 
 An example of running external DP in one single node:
@@ -61,9 +64,11 @@ python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-s
 ```
 
 ## Starting Load-balance Proxy Server
+
 After all vLLM DP instances are launched, you can now launch the load-balance proxy server which serves as entrypoint for coming requests and load balance them between vLLM DP instances.
 
 The proxy server has following features:
+
 - Load balances requests to multiple vLLM servers based on request length.
 - Supports OpenAI-compatible `/v1/completions` and `/v1/chat/completions` endpoints.
 - Streams responses from backend servers to clients.

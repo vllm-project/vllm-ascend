@@ -14,9 +14,12 @@ Expert balancing for MoE models in LLM serving is essential for optimal performa
 
 ## Support Scenarios
 
-### Models:
+### Models
+
 DeepseekV3/V3.1/R1、Qwen3-MOE
-### MOE QuantType:
+
+### MOE QuantType
+
 W8A8-dynamic
 
 ## How to Use EPLB
@@ -37,6 +40,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 ```
 
 ### Static EPLB
+
 #### Initial Setup (Record Expert Map)
 
 We need to add environment variable `export EXPERT_MAP_RECORD="true"` to record expert map.Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
@@ -54,6 +58,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 ```
 
 #### Subsequent Deployments (Use Recorded Map)
+
 Load the pre-recorded expert map for consistent performance. This avoids recalculating distributions at runtime.
 
 ```shell
@@ -66,6 +71,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 ```
 
 ## Critical Considerations
+
 1. Parameter Tuning:
    - num_iterations_eplb_update: Higher values (e.g., 400+) for stable workloads; lower values (e.g., 100-200) for fluctuating traffic.
    - num_wait_worker_iterations: Should be ≥ 30 to avoid premature balancing during startup.

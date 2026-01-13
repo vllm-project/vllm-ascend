@@ -116,7 +116,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
 
 - Step 1. Install LWS CRD resources
 
-    See https://lws.sigs.k8s.io/docs/installation/ Which can be used as a reference
+    See <https://lws.sigs.k8s.io/docs/installation/> Which can be used as a reference
 
 - Step 2. Deploy the following yaml file `lws.yaml` as what you want
 
@@ -318,14 +318,14 @@ Since our script is Kubernetes-friendly, we need to actively pass in some cluste
     `cluster_hosts: ["xxx.xxx.xxx.188", "xxx.xxx.xxx.212"]`
 
 - Step 2. Install develop environment
-  - Install vllm-ascend develop packages on every cluster host
+    - Install vllm-ascend develop packages on every cluster host
 
       ``` bash
       cd /vllm-workspace/vllm-ascend
       python3 -m pip install -r requirements-dev.txt
       ```
 
-  - Install AISBench on the first host(leader node) in cluster_hosts
+    - Install AISBench on the first host(leader node) in cluster_hosts
 
       ``` bash
       export AIS_BENCH_TAG="v3.0-20250930-master"

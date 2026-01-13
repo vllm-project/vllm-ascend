@@ -38,6 +38,7 @@ But in reality, graph mode is not that simple.
 Due to graph can only replay the ops captured before, without doing tiling and checking graph input, we need to ensure the consistency of the graph input, but we know that model input's shape depends on the request scheduled by Scheduler, we can't ensure the consistency.
 
 Obviously, we can solve this problem by capturing the biggest shape and padding all of the model input to it. But it will bring a lot of redundant computing and make performance worse. So we can capture multiple graphs with different shape, and pad the model input to the nearest graph, which will greatly reduce redundant computing. But when `max_num_batched_tokens` is very large, the number of graphs that need to be captured will also become very large. But we know that when intensor's shape is large, the computing time will be very long, and graph mode is not necessary in this case. So all of things we need to do is:
+
 1. Set a threshold;
 2. When `num_scheduled_tokens` is bigger than the threshold, use `eager_mode`;
 3. Capture multiple graphs within a range below the threshold;

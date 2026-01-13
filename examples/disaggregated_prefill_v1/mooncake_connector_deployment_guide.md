@@ -2,17 +2,17 @@
 
 ## Environmental Dependencies
 
- * Software:
-     * Python >= 3.10, < 3.12
-     * CANN == 8.3.rc2
-     * PyTorch == 2.8.0, torch-npu == 2.8.0
-     * vLLM (same version as vllm-ascend)
-     * mooncake-transfer-engine reference documentation: https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md
+* Software:
+    * Python >= 3.10, < 3.12
+    * CANN == 8.3.rc2
+    * PyTorch == 2.8.0, torch-npu == 2.8.0
+    * vLLM (same version as vllm-ascend)
+    * mooncake-transfer-engine reference documentation: <https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md>
 
 The vllm version must be the same as the main branch of vllm-ascend, for example, 2025/07/30. The version is
 
- * vllm: v0.10.1
- * vllm-ascend: v0.10.1rc1
+* vllm: v0.10.1
+* vllm-ascend: v0.10.1rc1
 
 ## run
 
@@ -137,7 +137,7 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   }'
 ```
 
-### 3. Start proxy_server. ###
+### 3. Start proxy_server ###
 
 ```
 cd /vllm-ascend/examples/disaggregate_prefill_v1/

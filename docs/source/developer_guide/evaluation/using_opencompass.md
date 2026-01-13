@@ -1,4 +1,5 @@
 # Using OpenCompass
+
 This document guides you to conduct accuracy testing using [OpenCompass](https://github.com/open-compass/opencompass).
 
 ## 1. Online Server
@@ -53,6 +54,7 @@ curl http://localhost:8000/v1/completions \
 ```
 
 ## 2. Run C-Eval using OpenCompass for accuracy testing
+
 Install OpenCompass and configure the environment variables in the container:
 
 ```bash

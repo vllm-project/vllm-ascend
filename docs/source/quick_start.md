@@ -3,6 +3,7 @@
 ## Prerequisites
 
 ### Supported Devices
+
 - Atlas A2 training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
