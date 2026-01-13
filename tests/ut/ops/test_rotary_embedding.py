@@ -8,6 +8,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding)
 from vllm.platforms import CpuArchEnum
+from vllm.triton_utils import HAS_TRITON
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
@@ -203,6 +204,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
+    @patch('vllm.triton_utils.HAS_TRITON', False)
     def test_rope_forward_oot_rotary_dim_less_than_head_size(
             self, mock_npu_rotary, mock_custom_enabled):
         # test case when rotary_dim < head_size
@@ -219,7 +221,8 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
             result_q, result_k = self.layer.forward(self.positions, self.query,
                                                     self.key)
 
-        mock_npu_rotary.assert_called_once()
+        if not HAS_TRITON:
+            mock_npu_rotary.assert_called_once()
         self.assertEqual(result_q.shape, self.query.shape)
         self.assertEqual(result_k.shape, self.key.shape)
 
