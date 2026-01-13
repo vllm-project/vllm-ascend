@@ -18,6 +18,7 @@ All the arguments that can be set by users are:
 7. `--vllm-start-port`: Starting port of vLLM serving instances, default 9000
 
 An example of running external DP in one single node:
+
 ```(python)
 cd examples/external_online_dp
 # running DP4 TP4 in a node with 16 NPUs
@@ -25,6 +26,7 @@ python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-s
 ```
 
 An example of running external DP in two nodes:
+
 ```(python)
 cd examples/external_online_dp
 # running DP4 TP4 in two nodes with 8 NPUs each
