@@ -6,6 +6,7 @@ from vllm.config import ParallelConfig
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kvpool.backend.backend import Backend
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 class MmcDirect(Enum):
@@ -26,10 +27,28 @@ class MemcacheBackend(Backend):
                 "https://gitee.com/ascend/memfabric_hybrid "  # noqa: E501
                 "to run vLLM with MemcacheConnector.") from e
         try:
-            self.rank = parallel_config.rank
-            self.store = DistributedObjectStore()
-            res = self.store.init(self.rank)
-            assert res == 0
+            soc_version = get_ascend_device_type()
+            if soc_version in {AscendDeviceType.A2}:
+                import torch
+                from vllm.distributed import get_world_group
+                tmp_tensor = torch.zeros(1, device="npu")
+                output_tensor_list = [
+                    torch.empty_like(tmp_tensor)
+                    for _ in range(torch.distributed.get_world_size())
+                ]
+                torch.distributed.all_gather(
+                    output_tensor_list,
+                    tmp_tensor,
+                    group=get_world_group().device_group)
+                self.rank = parallel_config.rank
+                self.store = DistributedObjectStore()
+                res = self.store.init(self.rank)
+                assert res == 0
+            else:
+                self.rank = parallel_config.rank
+                self.store = DistributedObjectStore()
+                res = self.store.init(self.rank)
+                assert res == 0
         except ValueError as e:
             logger.error("Configuration loading failed: %s", e)
             raise
@@ -43,7 +62,12 @@ class MemcacheBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
-        pass
+        soc_version = get_ascend_device_type()
+        if soc_version in {AscendDeviceType.A2}:
+            for ptr, size in zip(ptrs, sizes):
+                self.store.register_buffer(ptr, size)
+        else:
+            pass
 
     def exists(self, keys: list[str]) -> list[int]:
         return self.store.batch_is_exist(keys)

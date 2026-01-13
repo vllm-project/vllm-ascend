@@ -84,8 +84,11 @@ class AscendMLABackend(AttentionBackend):
 
 @dataclass
 class ChunkedContextMetadata:
-    # New for MLA (compared to FlashAttention)
-    # For handling chunked prefill
+    """
+    Metadata for chunked context handling in MLA attention.
+
+    Manages sequence boundaries and workspace for chunked prefill processing.
+    """
     cu_seq_lens: torch.Tensor
     starts: torch.Tensor
     seq_tot: list[int]
@@ -116,7 +119,8 @@ class AscendMLAPrefillMetadata:
 
 @dataclass
 class AscendMLADecodeMetadata:
-    # Input positions for rotrary embeddings since for MLA the rotary
+    """ Decode-specific metadata for Ascend MLA attention."""
+    # Input positions for rotary embeddings since for MLA the rotary
     # position embeddings are applied inside the attention backend
     input_positions: torch.Tensor
     block_table: torch.Tensor

@@ -115,17 +115,6 @@ class NPUWorker(WorkerBase):
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
 
-        # binding cpu
-        if get_ascend_config().enable_cpu_binding:
-            try:
-                bind_cpus(self.local_rank, ratio=1.0)
-            except RuntimeError as e:
-                logger.error(f"{e} in {self.local_rank}")
-            except ValueError as e:
-                logger.error(f"{e} in {self.local_rank}")
-            except Exception:
-                logger.info("Skip binding cpu.")
-
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
@@ -238,6 +227,15 @@ class NPUWorker(WorkerBase):
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
         init_device_properties_triton()
+
+        # binding cpu
+        if get_ascend_config().enable_cpu_binding:
+            try:
+                bind_cpus(self.local_rank)
+            except Exception as e:
+                logger.warning(
+                    f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu."
+                )
         return device
 
     def init_device(self):

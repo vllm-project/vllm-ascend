@@ -13,10 +13,16 @@ spec:
         labels:
           role: leader
       spec:
+        schedulerName: volcano
+        tolerations:
+          - key: "instance"
+            operator: "Equal"
+            value: "vllm"
+            effect: "NoSchedule"
         containers:
           - name: vllm-leader
             imagePullPolicy: Always
-            image: {{ image | default("swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3") }}
+            image: {{ image | default("swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2") }}
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
@@ -59,16 +65,22 @@ spec:
             sizeLimit: 15Gi
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: nv-action-vllm-benchmarks-v2
+            claimName: vllm-project-hk001
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
     workerTemplate:
       spec:
+        schedulerName: volcano
+        tolerations:
+          - key: "instance"
+            operator: "Equal"
+            value: "vllm"
+            effect: "NoSchedule"
         containers:
           - name: vllm-worker
             imagePullPolicy: Always
-            image: {{ image | default("swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3") }}
+            image: {{ image | default("swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2") }}
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
@@ -104,7 +116,7 @@ spec:
             sizeLimit: 15Gi
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: nv-action-vllm-benchmarks-v2
+            claimName: vllm-project-hk001
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
