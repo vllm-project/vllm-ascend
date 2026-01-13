@@ -125,6 +125,10 @@ class KVCacheTaskTracker:
                 self.finished_requests.add(request_id)
                 self.reqs_to_process.discard(request_id)
                 self.delayed_free_requests.pop(request_id, None)
+            else:
+                logger.error(
+                    "MooncakeConnector finish req not in reqs to process.If it is a P node, this request may have been force freed."
+                )
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -1602,9 +1606,11 @@ class MooncakeConnectorWorker:
                         all_task_done=(i == self.tp_num_need_pulls *
                                        self._prefill_pp_size - 1))
 
-        if self.kv_send_thread is not None:
-            for req_id, meta in metadata.reqs_in_batch:
+        for req_id, meta in metadata.reqs_in_batch:
+            if self.kv_send_thread is not None:
                 self.kv_send_thread.task_tracker.add_req_to_process(req_id)
+            if self.kv_recv_thread is not None:
+                self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
 
         if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
             for req_id, delay_start_time in metadata.requests_to_send.items():
