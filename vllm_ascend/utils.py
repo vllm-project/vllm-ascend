@@ -21,6 +21,7 @@ import atexit
 import functools
 import math
 import os
+import re
 from contextlib import contextmanager, nullcontext
 from enum import Enum
 from functools import lru_cache
