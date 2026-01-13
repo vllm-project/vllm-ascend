@@ -224,6 +224,7 @@ jobs:
           # This test is broken, fix me
           #pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_shared_expert_dp.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_single_request_aclgraph.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_sp_pass.py
 
       - name: Run vllm-project/vllm-ascend test (non triton)
         if: ${{ inputs.type == 'full' }}

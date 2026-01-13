@@ -49,6 +49,7 @@ from vllm_ascend.utils import (
     update_cudagraph_capture_sizes,
     update_default_aclgraph_sizes,
     is_310p,
+    enable_flash_comm_v1,
 )
 
 if TYPE_CHECKING:
@@ -391,15 +392,21 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        if is_vl_model(vllm_config):
-            if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0"))) or bool(
-                int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))
-            ):
-                raise ValueError(
-                    "Currently, VL models doesn't support "
-                    "FLASHCOMM in vllm-ascend. We will fix this in the future. "
-                    "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0."
-                )
+        if is_vl_model(vllm_config) and enable_flash_comm_v1():
+            raise ValueError("""Flash Comm V1 is not supported for VL models. \
+                Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
+                For optimal performance with VL models, we recommend enabling Sequence Parallelism \
+                via --compilation-config '{"pass_config": {"enable_sp": true}}'.""")
+
+        if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config):
+                from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_threshold
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(get_sp_threshold(vllm_config))
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = \
+                    new_compile_ranges_split_points
+                logger.debug("set compile_ranges_split_points to "
+                            "{new_compile_ranges_split_points} for sequence parallelism")
 
         # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
         # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
@@ -413,9 +420,9 @@ class NPUPlatform(Platform):
             # NOTE: `max_split_size_mb` or `garbage_collection_threshold` cannot
             # be enabled together with `expandable_segments=True`.
             if (
-                "expandable_segments" not in npu_alloc_configs
-                and "max_split_size_mb" not in npu_alloc_configs
-                and "garbage_collection_threshold" not in npu_alloc_configs
+                    "expandable_segments" not in npu_alloc_configs
+                    and "max_split_size_mb" not in npu_alloc_configs
+                    and "garbage_collection_threshold" not in npu_alloc_configs
             ):
                 npu_alloc_configs += ",expandable_segments:True"
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
