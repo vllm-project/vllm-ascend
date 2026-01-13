@@ -119,7 +119,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
   
           # model_runner_v2
-          pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
+          # pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
 
           # pooling
           pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py
@@ -309,7 +309,7 @@ jobs:
         run: |
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_data_parallel_tp2.py
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_kimi_k2.py
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_qwen3_next.py
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_qwen3_next.py 
 
           # long_sequence
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py

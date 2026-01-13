@@ -29,6 +29,23 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
 class TestTokenDispatcherWithMC2(TestBase):
 
     def setUp(self):
+        self.config_patcher = patch(
+            'vllm_ascend.ops.fused_moe.token_dispatcher.get_current_vllm_config'
+        )
+        self.mock_get_config = self.config_patcher.start()
+
+        mock_config = MagicMock()
+
+        mock_config.scheduler_config.max_num_seqs = 256
+        mock_config.scheduler_config.decode_max_num_seqs = 256
+
+        mock_config.compilation_config.custom_ops = ["all"]
+
+        mock_config.speculative_config = None
+
+        mock_config.parallel_config.tensor_parallel_size = 1
+
+        self.mock_get_config.return_value = mock_config
         self.mc2_group = MagicMock()
         self.mc2_group.device_group.return_value._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_123"
         self.mc2_group.rank_in_group = 0

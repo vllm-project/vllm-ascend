@@ -6,7 +6,6 @@ import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
@@ -39,11 +38,16 @@ from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, maybe_trans_nz,
-                               weak_ref_tensors)
+                               vllm_version_is, weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+else:
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 BUILD_METADATA_STEP_PREFILL = 0
