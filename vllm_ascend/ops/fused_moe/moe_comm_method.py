@@ -300,6 +300,11 @@ class FusedMC2CommImpl(MoECommMethod):
 
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), \
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
+
+        # Apply log2phy if needed
+        if log2phy is not None:
+            topk_ids = log2phy[topk_ids]
+
         group_list_type = None
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
@@ -331,7 +336,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 group_ep=self.token_dispatcher.moe_all_to_all_group_name,
                 ep_rank_size=self.token_dispatcher.ep_world_size,
                 ep_rank_id=self.token_dispatcher.ep_rank_id,
-                moe_expert_num=len(expert_map),
+                moe_expert_num=self.moe_config.num_experts,
                 global_bs=self.token_dispatcher.fused_global_bs)
         else:
             raise ValueError(
