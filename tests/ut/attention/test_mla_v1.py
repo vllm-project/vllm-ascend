@@ -22,6 +22,23 @@ from vllm_ascend.utils import vllm_version_is
 
 class TestAscendMLABackend(TestBase):
 
+    def setUp(self):
+        self.mock_config = MagicMock()
+
+        mock_parallel_config = MagicMock()
+        mock_parallel_config.prefill_context_parallel_size = 1
+        mock_parallel_config.decode_context_parallel_size = 1
+
+        self.mock_config.parallel_config = mock_parallel_config
+
+        self.utils_patcher = patch(
+            'vllm_ascend.attention.utils.get_current_vllm_config',
+            return_value=self.mock_config)
+        self.utils_patcher.start()
+
+        from vllm_ascend.attention.utils import enable_cp
+        enable_cp.cache_clear()
+
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
 
