@@ -98,7 +98,6 @@ cd examples/quantization/llm-compressor
 python3 w8a8_int8_dynamic_moe.py
 ```
 
-
 For more content, refer to the [official examples](https://github.com/vllm-project/llm-compressor/tree/main/examples).
 
 Currently supported quantization types by LLM-Compressor: `W8A8` and `W8A8_DYNAMIC`.

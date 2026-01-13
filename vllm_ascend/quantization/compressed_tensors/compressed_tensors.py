@@ -202,7 +202,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 )
             layer.scheme = quant_scheme
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
-            
+
             ascend_quant_config = AscendQuantConfig(self.quant_description
                                                     or {})
             return AscendFusedMoEMethod(ascend_quant_config, prefix,
@@ -249,7 +249,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 format=format,
             )
         return scheme
-    
+
     def get_scheme_dict(
         self,
         layer: torch.nn.Module,
