@@ -730,7 +730,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+<<<<<<< HEAD
     def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata, output: torch.Tensor):
+=======
+    def _forward_fia_slidingwindow(self, query: torch.Tensor,
+                                   attn_metadata: AscendMetadata,
+                                   output: torch.Tensor):
+>>>>>>> 70b17645 (refactor(attention): Fix the condition judgment for sliding window attention calculation and add checks for sinks.)
         batch_size = attn_metadata.seq_lens.shape[0]
         block_size = 128
         query = query.view(batch_size, 1, self.num_heads * self.head_size)
@@ -753,8 +759,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             scale=self.scale,
             block_table=attn_metadata.block_tables,
             actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
+<<<<<<< HEAD
             actual_seq_lengths_kv=attn_metadata.seq_lens,
         )
+=======
+            actual_seq_lengths_kv=attn_metadata.seq_lens)
+>>>>>>> 70b17645 (refactor(attention): Fix the condition judgment for sliding window attention calculation and add checks for sinks.)
 
         attn_output = attn_output.view(batch_size, self.num_heads, self.head_size)
         output[:batch_size] = attn_output[:batch_size]
