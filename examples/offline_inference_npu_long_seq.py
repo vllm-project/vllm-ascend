@@ -1,6 +1,6 @@
+import argparse
 import os
 import time
-import argparse
 
 from vllm import LLM, SamplingParams
 
@@ -11,14 +11,14 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--input_len', type=int, default=1024)
-    parser.add_argument('--output_len', type=int, default=128)
-    parser.add_argument('--bs', type=int, default=1)
-    parser.add_argument('--model_path', type=str, default="deepseek-ai/DeepSeek-V2-Lite")
-    parser.add_argument('--tp', type=int, default=2)
-    parser.add_argument('--pcp', type=int, default=2)
-    parser.add_argument('--dcp', type=int, default=1)
-    parser.add_argument('--iter_times', type=int, default=1)
+    parser.add_argument("--input_len", type=int, default=1024)
+    parser.add_argument("--output_len", type=int, default=128)
+    parser.add_argument("--bs", type=int, default=1)
+    parser.add_argument("--model_path", type=str, default="deepseek-ai/DeepSeek-V2-Lite")
+    parser.add_argument("--tp", type=int, default=2)
+    parser.add_argument("--pcp", type=int, default=2)
+    parser.add_argument("--dcp", type=int, default=1)
+    parser.add_argument("--iter_times", type=int, default=1)
 
     args = parser.parse_args()
 
@@ -26,10 +26,10 @@ if __name__ == "__main__":
         "The capital of France is",
         "Hello, my name is Tom, I am",
         "The president of United States is",
-        "AI future is"
+        "AI future is",
     ]
 
-    sampling_params = SamplingParams(temperature = 0.8, top_p = 0.95, max_tokens=args.output_len)
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=args.output_len)
     llm = LLM(
         model=args.model_path,
         trust_remote_code=True,
@@ -44,7 +44,7 @@ if __name__ == "__main__":
         max_model_len=1024,
         max_num_seqs=1,
         block_size=128,
-        gpu_memory_utilization=0.9
+        gpu_memory_utilization=0.9,
     )
 
     t0 = time.time()
