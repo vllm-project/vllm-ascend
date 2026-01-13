@@ -125,7 +125,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         token_len = req_meta.token_len_chunk
         block_ids = req_meta.block_ids
         req_id = req_meta.req_id
-        is_last_chunk = req_meta.is_last_chunk
         current_event = req_meta.current_event
         starts = []
         ends = []
@@ -142,15 +141,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
             keys = keys[self.tp_rank % self.put_step::self.put_step]
 
         if not keys:
-            if is_last_chunk:
-                self.set_finished_request(req_id)
+            with self.done_task_lock:
+                self.stored_requests[req_id] -= 1
             return
 
         skip_block_num = self.lookup(keys)
 
         if skip_block_num == len(keys):
-            if is_last_chunk:
-                self.set_finished_request(req_id)
+            with self.done_task_lock:
+                self.stored_requests[req_id] -= 1
             return
 
         starts = starts[skip_block_num:]
@@ -208,6 +207,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                          name="KVCacheStoreRecvingThread")
 
     def _handle_request(self, req_meta: ReqMeta):
+        token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
         mask_num = (
             req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
@@ -216,7 +216,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         size_list = []
         key_list = []
         for start, end, key in self.token_database.process_tokens(
-                req_meta.token_len_chunk, req_meta.block_hashes, mask_num):
+                token_len, req_meta.block_hashes, mask_num):
             addr, size, _ = self.token_database.prepare_value(
                 start, end, req_meta.block_ids)
             key_list.append(key.to_string())
