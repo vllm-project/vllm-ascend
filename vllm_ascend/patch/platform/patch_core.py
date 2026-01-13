@@ -1,3 +1,4 @@
+import os
 import signal
 
 from vllm.config import ParallelConfig
@@ -7,12 +8,16 @@ from vllm.transformers_utils.config import \
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 
+from vllm_ascend import envs
+from vllm_ascend.utils import vllm_version_is
+
 
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
 
-    from vllm.distributed.device_communicators.shm_broadcast import \
-        MessageQueue  # noqa
+    if os.getenv("SHM_BARRIER", "true").lower() in ("true", "1"):
+        from vllm.distributed.device_communicators.shm_broadcast import \
+            MessageQueue  # noqa
 
     # Signal handler used for graceful termination.
     # SystemExit exception is only raised once to allow this and worker
@@ -41,7 +46,13 @@ def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
             # Set data parallel rank for this engine process.
             parallel_config.data_parallel_rank = dp_rank
             parallel_config.data_parallel_rank_local = local_dp_rank
-            engine_core = DPEngineCoreProc(*args, **kwargs)
+            if envs.VLLM_ASCEND_BALANCE_SCHEDULING and vllm_version_is(
+                    "0.13.0"):
+                from vllm_ascend.patch.platform.patch_balance_schedule import \
+                    BalanceDPEngineCoreProc
+                engine_core = BalanceDPEngineCoreProc(*args, **kwargs)
+            else:
+                engine_core = DPEngineCoreProc(*args, **kwargs)
         else:
             set_process_title("EngineCore")
             decorate_logs()
