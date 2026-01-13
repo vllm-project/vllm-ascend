@@ -17,7 +17,6 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
-from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.spec_decode.ngram_proposer import NgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import SuffixDecodingProposer
 
@@ -25,10 +24,8 @@ from vllm_ascend.spec_decode.suffix_proposer import SuffixDecodingProposer
 def get_spec_decode_method(method, vllm_config, device, runner):
     if method == "ngram":
         return NgramProposer(vllm_config, device, runner)
-    elif method in ("eagle", "eagle3"):
+    elif method in ("eagle", "eagle3", "mtp"):
         return EagleProposer(vllm_config, device, runner)
-    elif method == "mtp":
-        return MtpProposer(vllm_config, device, runner)
     elif method == 'suffix':
         return SuffixDecodingProposer(vllm_config, device, runner)
     else:
