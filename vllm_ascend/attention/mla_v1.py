@@ -759,6 +759,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.speculative_config = self.vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
+        print(f'AscendMLAImpl ====================================== self.enable_mlapo:{self.enable_mlapo}====================')
 
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         self.layer_sharding_kwargs = []
@@ -831,11 +832,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                     getattr(self.fused_qkv_a_proj.quant_method, 'quant_method',
                             None), AscendW8A8LinearMethod):
                 self.enable_mlapo = False
+                print(f'AscendMLAImpl process_weights_after_loading enable_mlapo set to False ====================================== self.enable_mlapo:{self.enable_mlapo}========')
                 logger.warning_once(
                     "Currently mlapo only supports W8A8 quantization in MLA scenario."
                     "Some layers in your model are not quantized with W8A8,"
                     "thus mlapo is disabled for these layers.")
         if self.enable_mlapo:
+            print(f'AscendMLAImpl process_weights_after_loading ====================================== self.enable_mlapo:{self.enable_mlapo}========')
             self._process_weights_for_fused_mlapo(act_dtype)
         else:
             # if mlapo, W_UK_T can't trans nz
