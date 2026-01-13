@@ -15,11 +15,7 @@ from tests.e2e.model_utils import check_outputs_equal
 MODEL = "Qwen/Qwen3-0.6B"
 MTP_MODEL = "wemaster/deepseek_mtp_main_random_bf16"
 
-first_prompt = (
-    "The following numbers of the sequence "
-    + ", ".join(str(i) for i in range(10))
-    + " are:"
-)
+first_prompt = "The following numbers of the sequence " + ", ".join(str(i) for i in range(10)) + " are:"
 example_prompts = [
     "Hello, my name is",
     "The president of the United States is",
@@ -110,9 +106,7 @@ def run_tests(
             outputs.append(test_results)
 
     baseline_config, baseline_tests, _ = outputs[0]
-    _, _, baseline_acceptances = next(
-        (o for o in outputs if o[2] is not None), (None, None, None)
-    )
+    _, _, baseline_acceptances = next((o for o in outputs if o[2] is not None), (None, None, None))
 
     print(f"BASELINE: config=[{baseline_config}], accept_rates={baseline_acceptances}")
 
@@ -139,29 +133,16 @@ def run_tests(
                     name_1=f"config=[{test_config}], params={params}",
                 )
 
-                if (
-                    base_acceptance_rate is not None
-                    and test_acceptance_rate is not None
-                ):
+                if base_acceptance_rate is not None and test_acceptance_rate is not None:
                     if "spec_mml=None" in test_config:
-                        assert (
-                            test_acceptance_rate > base_acceptance_rate
-                            or test_acceptance_rate
-                            == pytest.approx(base_acceptance_rate, rel=5e-2)
-                        )
+                        assert test_acceptance_rate > base_acceptance_rate or test_acceptance_rate == pytest.approx(base_acceptance_rate, rel=5e-2)
                     else:
                         # Currently the reported acceptance rate is expected to be
                         # lower when we sometimes skip drafting altogether.
                         assert test_acceptance_rate > 0.1
-                print(
-                    f"PASSED: config=[{test_config}], params={params}"
-                    f" accept_rate={test_acceptance_rate}"
-                )
+                print(f"PASSED: config=[{test_config}], params={params} accept_rate={test_acceptance_rate}")
             except AssertionError as e:
-                print(
-                    f"FAILED: config=[{test_config}], params={params}"
-                    f" accept_rate={test_acceptance_rate}"
-                )
+                print(f"FAILED: config=[{test_config}], params={params} accept_rate={test_acceptance_rate}")
                 if failure is None:
                     failure = e
 
@@ -183,9 +164,7 @@ def run_test(
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
         # Force preemptions
-        dict(num_gpu_blocks_override=2)
-        if test_preemption
-        else dict(gpu_memory_utilization=0.9)
+        dict(num_gpu_blocks_override=2) if test_preemption else dict(gpu_memory_utilization=0.9)
     )
     spec_mml = (spec_config or {}).get("max_model_len")
     test_config = (
@@ -229,9 +208,7 @@ def run_test(
                 print(f"ACCEPTANCE RATE {acceptance_rate}")
 
             if test_preemption:
-                preemptions = _get_count(
-                    metrics_before, metrics_after, "vllm:num_preemptions"
-                )
+                preemptions = _get_count(metrics_before, metrics_after, "vllm:num_preemptions")
                 assert preemptions > 0, "preemption test had no preemptions"
 
     if len(results) > 1:

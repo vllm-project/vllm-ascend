@@ -17,7 +17,7 @@
 # limitations under the License.
 #
 import json
-from typing import Any, Dict
+from typing import Any
 
 import jsonschema
 import pytest
@@ -71,7 +71,7 @@ def sample_json_schema():
 
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema):
-    runner_kwargs: Dict[str, Any] = {}
+    runner_kwargs: dict[str, Any] = {}
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=500,
@@ -83,10 +83,7 @@ def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema
         "structured_outputs_config": {"backend": guided_decoding_backend},
     }
     with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
-        prompts = [
-            f"Give an example JSON for an employee profile "
-            f"that fits this schema: {sample_json_schema}"
-        ] * 2
+        prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
         inputs = vllm_model.get_inputs(prompts)
         outputs = vllm_model.model.generate(inputs, sampling_params=sampling_params)
 
@@ -108,7 +105,7 @@ def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema
 def test_guided_regex(guided_decoding_backend: str, sample_regex):
     if guided_decoding_backend == "outlines":
         pytest.skip("Outlines doesn't support regex-based guided decoding.")
-    runner_kwargs: Dict[str, Any] = {}
+    runner_kwargs: dict[str, Any] = {}
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,

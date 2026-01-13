@@ -84,7 +84,6 @@ import argparse
 import asyncio
 import functools
 import heapq
-import json
 import os
 import sys
 import uuid

@@ -11,9 +11,7 @@ class TestDynamicEplb:
         current_expert_table = np.array([[[0, 1], [1, 0]]])
         expert_workload = np.array([[[2, 3], [4, 1]]])
         num_original_expert = 2
-        result = DynamicEplb.add_redundant(
-            current_expert_table, expert_workload, num_original_expert
-        )
+        result = DynamicEplb.add_redundant(current_expert_table, expert_workload, num_original_expert)
         expected = np.array([[2 + 1, 3 + 4]])
         assert np.array_equal(result, expected)
 
@@ -34,9 +32,7 @@ class TestDynamicEplb:
 
     def test_compute_balanced_pack_redundancy_normal(self):
         origin_weights = [(0, 10), (1, 20)]
-        result, boxes = DynamicEplb.compute_balanced_pack_redundancy(
-            origin_weights, 2, 1
-        )
+        result, boxes = DynamicEplb.compute_balanced_pack_redundancy(origin_weights, 2, 1)
         assert isinstance(result, list) and len(result) == 2
 
     def test_compute_balanced_pack_redundancy_card0(self):
@@ -56,9 +52,7 @@ class TestDynamicEplb:
 
     def test_original_compute_balanced_pack_redundancy(self):
         origin_weights = [(0, 5), (1, 10)]
-        result, boxes = DynamicEplb.original_compute_balanced_pack_redundancy(
-            origin_weights, 2, 1
-        )
+        result, boxes = DynamicEplb.original_compute_balanced_pack_redundancy(origin_weights, 2, 1)
         assert isinstance(result, list) and len(result) == 2
 
     def test_rebalance_experts_normal(self):
@@ -77,11 +71,8 @@ class TestDynamicEplb:
         # case1: num_original_expert != expert_num
         expert_table = np.array([[[0, 1], [1, 0]]])
         workload = np.array([[[2, 3], [4, 1]]])
-        with patch.object(
-            DynamicEplb, "add_redundant", return_value=np.array([[1, 2, 3]])
-        ):
-            with pytest.raises(ValueError):
-                policy.rebalance_experts(expert_table, workload)
+        with patch.object(DynamicEplb, "add_redundant", return_value=np.array([[1, 2, 3]])), pytest.raises(ValueError):
+            policy.rebalance_experts(expert_table, workload)
 
         # case2: num_npus <= 0
         expert_table_zero = np.array([[]])  # 1 layer, 0 NPU, 0 experts
@@ -92,6 +83,5 @@ class TestDynamicEplb:
         # case3: num_npus < num_redundancy_expert
         expert_table_small = np.array([[[0, 0]]])  # 1 layer, 1 NPU, 2 experts
         workload_small = np.array([[[1, 1]]])
-        with patch.object(DynamicEplb, "get_redundant_num", return_value=2):
-            with pytest.raises(ValueError):
-                policy.rebalance_experts(expert_table_small, workload_small)
+        with patch.object(DynamicEplb, "get_redundant_num", return_value=2), pytest.raises(ValueError):
+            policy.rebalance_experts(expert_table_small, workload_small)

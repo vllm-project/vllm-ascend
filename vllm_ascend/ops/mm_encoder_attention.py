@@ -96,11 +96,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         # q, k, v: [b, s, head, head_dim] -> [b * s, head, head_dim]
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
 
-        enable_pad = (
-            envs_ascend.USE_OPTIMIZED_MODEL
-            and self.head_size > MIN_PAD_SIZE
-            and self.head_size < MAX_PAD_SIZE
-        )
+        enable_pad = envs_ascend.USE_OPTIMIZED_MODEL and self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
 
         if enable_pad:
             origin_shape = q.shape[-1]
@@ -113,9 +109,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         context_layer = torch.empty_like(q)
 
         if cu_seqlens is None:
-            cu_seqlens = torch.arange(
-                0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device
-            )
+            cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device)
 
         cu_seqlens = torch.diff(cu_seqlens).to("cpu")
 
@@ -135,11 +129,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             context_layer = context_layer[..., :origin_shape]
 
         if is_reshaped:
-            context_layer = einops.rearrange(
-                context_layer, "(b s) h d -> b s h d", b=bsz
-            ).contiguous()
+            context_layer = einops.rearrange(context_layer, "(b s) h d -> b s h d", b=bsz).contiguous()
         else:
-            context_layer = einops.rearrange(
-                context_layer, "(b s) h d -> b s (h d)", b=bsz
-            ).contiguous()
+            context_layer = einops.rearrange(context_layer, "(b s) h d -> b s (h d)", b=bsz).contiguous()
         return context_layer

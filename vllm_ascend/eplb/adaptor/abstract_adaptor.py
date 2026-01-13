@@ -36,7 +36,5 @@ class EplbAdaptor:
         raise NotImplementedError
 
     @abstractmethod
-    def do_update_expert_weight(
-        self, layer_id: Any, local_expert_to_replace: Any, buffer_tensor_id: Any
-    ) -> Any:
+    def do_update_expert_weight(self, layer_id: Any, local_expert_to_replace: Any, buffer_tensor_id: Any) -> Any:
         raise NotImplementedError

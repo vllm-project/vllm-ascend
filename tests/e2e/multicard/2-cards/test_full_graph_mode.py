@@ -56,15 +56,11 @@ def test_qwen3_moe_full_decode_only_tp2():
 
     vllm_fullgraph_outputs_list = []
     for output in vllm_fullgraph_outputs:
-        vllm_fullgraph_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text)
-        )
+        vllm_fullgraph_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
     vllm_eager_outputs_list = []
     for output in vllm_eager_outputs:
-        vllm_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text)
-        )
+        vllm_eager_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs_list,
@@ -106,15 +102,11 @@ def test_qwen3_moe_full_graph_tp2():
 
     vllm_fullgraph_outputs_list = []
     for output in vllm_fullgraph_outputs:
-        vllm_fullgraph_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text)
-        )
+        vllm_fullgraph_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
     vllm_eager_outputs_list = []
     for output in vllm_eager_outputs:
-        vllm_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text)
-        )
+        vllm_eager_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs_list,

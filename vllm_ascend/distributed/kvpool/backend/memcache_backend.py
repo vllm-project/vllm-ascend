@@ -33,13 +33,8 @@ class MemcacheBackend(Backend):
                 from vllm.distributed import get_world_group
 
                 tmp_tensor = torch.zeros(1, device="npu")
-                output_tensor_list = [
-                    torch.empty_like(tmp_tensor)
-                    for _ in range(torch.distributed.get_world_size())
-                ]
-                torch.distributed.all_gather(
-                    output_tensor_list, tmp_tensor, group=get_world_group().device_group
-                )
+                output_tensor_list = [torch.empty_like(tmp_tensor) for _ in range(torch.distributed.get_world_size())]
+                torch.distributed.all_gather(output_tensor_list, tmp_tensor, group=get_world_group().device_group)
                 self.rank = parallel_config.rank
                 self.store = DistributedObjectStore()
                 res = self.store.init(self.rank)
@@ -73,9 +68,7 @@ class MemcacheBackend(Backend):
 
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         try:
-            res = self.store.batch_get_into_layers(
-                key, addr, size, MmcDirect.COPY_G2L.value
-            )
+            res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
             for value in res:
                 if value != 0:
                     logger.error(f"Failed to get key {key},res:{res}")
@@ -84,9 +77,7 @@ class MemcacheBackend(Backend):
 
     def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         try:
-            res = self.store.batch_put_from_layers(
-                key, addr, size, MmcDirect.COPY_L2G.value
-            )
+            res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             for value in res:
                 if value != 0:
                     logger.error(f"Failed to get key {key},res:{res}")

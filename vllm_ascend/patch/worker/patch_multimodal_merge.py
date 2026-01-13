@@ -48,16 +48,11 @@ def _merge_multimodal_embeddings(
 
         if flattened.shape[0] != num_expected_tokens:
             expr = _embedding_count_expression(multimodal_embeddings)
-            raise ValueError(
-                f"Attempted to assign {expr} = {flattened.shape[0]} "
-                f"multimodal tokens to {num_expected_tokens} placeholders"
-            ) from e
+            raise ValueError(f"Attempted to assign {expr} = {flattened.shape[0]} multimodal tokens to {num_expected_tokens} placeholders") from e
         else:
             raise ValueError("Error during masked scatter operation") from e
 
     return inputs_embeds
 
 
-vllm.model_executor.models.utils._merge_multimodal_embeddings = (
-    _merge_multimodal_embeddings
-)
+vllm.model_executor.models.utils._merge_multimodal_embeddings = _merge_multimodal_embeddings

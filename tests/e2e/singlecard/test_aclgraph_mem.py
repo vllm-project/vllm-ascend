@@ -55,9 +55,7 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
 
     original_capture = NPUModelRunner.capture_model
 
-    with patch.object(
-        NPUModelRunner, "capture_model", new=capture_model_wrapper(original_capture)
-    ):
+    with patch.object(NPUModelRunner, "capture_model", new=capture_model_wrapper(original_capture)):
         prompts = [
             "Hello, my name is",
             "The president of the United States is",
@@ -66,9 +64,7 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
         ]
         sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
         if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
-            vllm_model = VllmRunner(
-                snapshot_download(model), max_model_len=1024, quantization="ascend"
-            )
+            vllm_model = VllmRunner(snapshot_download(model), max_model_len=1024, quantization="ascend")
         else:
             vllm_model = VllmRunner(snapshot_download(model))
         _ = vllm_model.generate(prompts, sampling_params)
@@ -93,8 +89,6 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
     max_capture_mem_gib = baseline_capture_mem * capture_mem_tolerance
     max_mem_expected = max_capture_mem_gib * (1024**3)
     assert mem_used_by_capture < max_mem_expected, (
-        f"capture_model used more memory than expected. "
-        f"Used: {mem_used_by_capture / (1024**3):.2f} GiB, "
-        f"Expected: < {max_capture_mem_gib:.2f} GiB"
+        f"capture_model used more memory than expected. Used: {mem_used_by_capture / (1024**3):.2f} GiB, Expected: < {max_capture_mem_gib:.2f} GiB"
     )
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"

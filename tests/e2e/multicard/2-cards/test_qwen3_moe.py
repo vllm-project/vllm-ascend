@@ -94,9 +94,7 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
         compilation_config,
     ]
     env_dict = {"HCCL_BUFFSIZE": "1024"}
-    with RemoteOpenAIServer(
-        model, server_args, server_port=port, auto_port=False, env_dict=env_dict
-    ) as server:
+    with RemoteOpenAIServer(model, server_args, server_port=port, auto_port=False, env_dict=env_dict) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,
@@ -119,9 +117,7 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
         "num_redundant_experts": 2,
     }
     server_args.extend(["--additional-config", json.dumps(additional_config)])
-    with RemoteOpenAIServer(
-        model, server_args, server_port=port, auto_port=False, env_dict=env_dict
-    ) as server:
+    with RemoteOpenAIServer(model, server_args, server_port=port, auto_port=False, env_dict=env_dict) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,
@@ -132,6 +128,4 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
             n=1,
         )
         eplb_choices: list[openai.types.CompletionChoice] = batch.choices
-    assert gt_choices[0].text == eplb_choices[0].text, (
-        f"{gt_choices[0].text=} \n {eplb_choices[0].text=}"
-    )
+    assert gt_choices[0].text == eplb_choices[0].text, f"{gt_choices[0].text=} \n {eplb_choices[0].text=}"

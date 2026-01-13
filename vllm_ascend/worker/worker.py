@@ -20,7 +20,6 @@
 import copy
 import gc
 from types import NoneType
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -86,12 +85,8 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
     ["torch.npu.current_stream"],
     TorchInGraphFunctionVariable,
 )  # noqa: E402
-torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = (
-    TorchInGraphFunctionVariable  # noqa: E402
-)
-torch._dynamo.trace_rules.torch_name_rule_map.append(
-    torch_non_c_binding_in_graph_functions_npu
-)  # noqa: E402
+torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
+torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
 
 
 class NPUWorker(WorkerBase):
@@ -164,9 +159,7 @@ class NPUWorker(WorkerBase):
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
-            self._sleep_saved_buffers = {
-                name: buffer.cpu().clone() for name, buffer in model.named_buffers()
-            }
+            self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
@@ -179,12 +172,9 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes,
         )
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
-            raise ValueError(
-                "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0."
-            )
+            raise ValueError("FRACTAL_NZ mode is enabled. This may cause model parameter precision issues in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0.")
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
@@ -228,18 +218,13 @@ class NPUWorker(WorkerBase):
         if (
             self.parallel_config.data_parallel_size > 1
             and self.parallel_config.data_parallel_size_local > 0
-            and self.parallel_config.distributed_executor_backend
-            not in ["ray", "external_launcher"]
+            and self.parallel_config.distributed_executor_backend not in ["ray", "external_launcher"]
             and self.vllm_config.parallel_config.data_parallel_backend != "ray"
             and self.vllm_config.parallel_config.nnodes_within_dp == 1
         ):
-            visible_device_count = (
-                torch.npu.device_count() if torch.npu.is_available() else 0
-            )
+            visible_device_count = torch.npu.device_count() if torch.npu.is_available() else 0
             assert self.parallel_config.local_world_size <= visible_device_count, (
-                f"local_world_size ({self.parallel_config.local_world_size}) must "
-                f"be less than or equal to the number of visible devices "
-                f"({visible_device_count})."
+                f"local_world_size ({self.parallel_config.local_world_size}) must be less than or equal to the number of visible devices ({visible_device_count})."
             )
 
         self.init_npu_memory = torch.npu.mem_get_info()[0]
@@ -255,9 +240,7 @@ class NPUWorker(WorkerBase):
             try:
                 bind_cpus(self.local_rank)
             except Exception as e:
-                logger.warning(
-                    f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu."
-                )
+                logger.warning(f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu.")
         return device
 
     def init_device(self):
@@ -270,9 +253,7 @@ class NPUWorker(WorkerBase):
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
-            logger.warning(
-                "npu model runner v2 is in developing, some features doesn't work for now."
-            )
+            logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
             from vllm_ascend.worker.v2.model_runner import (
                 NPUModelRunner as NPUModelRunnerV2,
             )
@@ -311,22 +292,14 @@ class NPUWorker(WorkerBase):
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
         torch.npu.empty_cache()
-        torch_allocated_bytes = torch_npu.npu.memory_stats()[
-            "allocated_bytes.all.current"
-        ]
-        total_allocated_bytes = (
-            torch_npu.npu.mem_get_info()[1] - torch_npu.npu.mem_get_info()[0]
-        )
+        torch_allocated_bytes = torch_npu.npu.memory_stats()["allocated_bytes.all.current"]
+        total_allocated_bytes = torch_npu.npu.mem_get_info()[1] - torch_npu.npu.mem_get_info()[0]
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
-        available_kv_cache_memory = int(
-            total_npu_memory * self.cache_config.gpu_memory_utilization - peak_memory
-        )
+        available_kv_cache_memory = int(total_npu_memory * self.cache_config.gpu_memory_utilization - peak_memory)
         available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
-        logger.info(
-            f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
-        )
+        logger.info(f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}")
         return available_kv_cache_memory
 
     def execute_model(
@@ -345,9 +318,7 @@ class NPUWorker(WorkerBase):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
-            intermediate_tensors = IntermediateTensors(
-                get_pp_group().recv_tensor_dict(all_gather_group=all_gather_group)
-            )
+            intermediate_tensors = IntermediateTensors(get_pp_group().recv_tensor_dict(all_gather_group=all_gather_group))
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
@@ -355,18 +326,13 @@ class NPUWorker(WorkerBase):
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
-        assert (
-            parallel_config.distributed_executor_backend != ("external_launcher")
-            and not get_pp_group().is_last_rank
-        )
+        assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
         # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise it will conflict with the all-gather operation in flashcomm1.
         if enable_sp():
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
-        get_pp_group().send_tensor_dict(
-            output.tensors, all_gather_group=all_gather_group
-        )
+        get_pp_group().send_tensor_dict(output.tensors, all_gather_group=all_gather_group)
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
@@ -374,27 +340,20 @@ class NPUWorker(WorkerBase):
 
         # In case of PP with kv transfer, we need to pass through the
         # kv_connector_output
-        if (
-            not kv_connector_output.finished_sending
-            and not kv_connector_output.finished_recving
-        ):
+        if not kv_connector_output.finished_sending and not kv_connector_output.finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
         return output
 
     @torch.inference_mode()
-    def sample_tokens(
-        self, grammar_output: "GrammarOutput"
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+    def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
-            assert allocator.get_current_usage() == 0, (
-                "Sleep mode can only be used for one instance per process."
-            )
+            assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
             context = allocator.use_memory_pool(tag="weights")
         else:
             from contextlib import nullcontext
@@ -447,7 +406,7 @@ class NPUWorker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
-    def get_kv_connector_handshake_metadata(self) -> Optional[dict]:
+    def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
         if not has_kv_transfer_group():
             return None
@@ -496,9 +455,7 @@ class NPUWorker(WorkerBase):
         return self.model_runner.pin_lora(lora_id)
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(
-            num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True
-        )
+        self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
@@ -525,9 +482,7 @@ class NPUWorker(WorkerBase):
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs_vllm.VLLM_TORCH_PROFILER_DIR:
             if envs_ascend.MSMONITOR_USE_DAEMON:
-                raise RuntimeError(
-                    "MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time."
-                )
+                raise RuntimeError("MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time.")
             torch_profiler_trace_dir = envs_vllm.VLLM_TORCH_PROFILER_DIR
             logger.info(
                 "Profiling enabled. Traces will be saved to: %s",
@@ -555,9 +510,7 @@ class NPUWorker(WorkerBase):
                 profile_memory=envs_vllm.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
                 with_modules=False,
                 experimental_config=experimental_config,
-                on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir
-                ),
+                on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(torch_profiler_trace_dir),
             )
         else:
             return None
@@ -568,5 +521,5 @@ class NPUWorker(WorkerBase):
     def get_supported_tasks(self) -> "tuple[SupportedTask, ...]":
         return self.model_runner.get_supported_tasks()
 
-    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()

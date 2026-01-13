@@ -49,9 +49,7 @@ def prepare_inputs_padded_kernel(
             other=0,
         )
 
-        num_draft_tokens = tl.where(
-            has_prev, cu_draft_curr - cu_draft_prev, cu_draft_curr
-        )
+        num_draft_tokens = tl.where(has_prev, cu_draft_curr - cu_draft_prev, cu_draft_curr)
 
         valid_count = tl.load(valid_sampled_tokens_count_ptr + offsets, mask=mask)
         num_rejected = num_draft_tokens + 1 - valid_count

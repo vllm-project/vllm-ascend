@@ -3,7 +3,6 @@
 
 import logging
 from collections import deque
-from typing import Dict
 
 import numpy as np
 import torch
@@ -45,9 +44,7 @@ def compute_piece_counts(X, P, stage_weights):
             secv = unit[i, idx2]
             alt = X[i, idx1] / (pieces[idx1] + 1)
             delta = origin - (alt if alt > secv else secv)
-            deltas[idx1] += (
-                delta * stage_weights[i] if np.any(delta) != 0 else stage_weights[i]
-            )
+            deltas[idx1] += delta * stage_weights[i] if np.any(delta) != 0 else stage_weights[i]
 
         max_idx = np.argmax(deltas)
         pieces[max_idx] += 1
@@ -186,9 +183,7 @@ def slice_values(X, pieces):
 
 
 @njit
-def group_based_adaptive_bloating_kernel(
-    X, P, M, simulated_pieces, simulated_deployment, stage_weights
-):
+def group_based_adaptive_bloating_kernel(X, P, M, simulated_pieces, simulated_deployment, stage_weights):
     n_stage, N = X.shape
     num_group = P // M
 
@@ -207,9 +202,7 @@ def group_based_adaptive_bloating_kernel(
     flat_deployment = simulated_deployment.reshape(-1)
     simulated_load = np.zeros(M, dtype=np.float32)
     for i in range(flat_deployment.shape[0]):
-        simulated_load[i // (flat_deployment.shape[0] // M)] += unit_load[
-            flat_deployment[i]
-        ]
+        simulated_load[i // (flat_deployment.shape[0] // M)] += unit_load[flat_deployment[i]]
 
     slice_vals = slice_values(X_all, simulated_pieces)
     sorted_slices = np.sort(slice_vals)[::-1]
@@ -231,9 +224,7 @@ def group_based_adaptive_bloating_kernel(
     slices_used_per_group = np.zeros(num_group, dtype=np.int32)
     slices_used_per_group[0] = group_boundary_indices[0]
     for i in range(1, num_group):
-        slices_used_per_group[i] = (
-            group_boundary_indices[i] - group_boundary_indices[i - 1]
-        )
+        slices_used_per_group[i] = group_boundary_indices[i] - group_boundary_indices[i - 1]
     slices_used_per_group = M - slices_used_per_group
 
     loads = np.zeros(M, dtype=np.float32)
@@ -387,23 +378,13 @@ def auto_fix_new_placement(old_placement, new_placement):
 class FlashLB(EplbPolicy):
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
-        self.par_history: Dict[int, float] = {}
-        self.hotness_window: Dict[int, deque[float]] = {}
-        self.max_stage_window = (
-            config.max_stage_window if hasattr(config, "max_stage_window") else 1
-        )
-        self.buffer_expert_layer_num = (
-            config.buffer_expert_layer_num
-            if hasattr(config, "buffer_expert_layer_num")
-            else 58
-        )
-        self.threshold_ratio = (
-            config.threshold_ratio if hasattr(config, "threshold_ratio") else 0
-        )
+        self.par_history: dict[int, float] = {}
+        self.hotness_window: dict[int, deque[float]] = {}
+        self.max_stage_window = config.max_stage_window if hasattr(config, "max_stage_window") else 1
+        self.buffer_expert_layer_num = config.buffer_expert_layer_num if hasattr(config, "buffer_expert_layer_num") else 58
+        self.threshold_ratio = config.threshold_ratio if hasattr(config, "threshold_ratio") else 0
 
-    def compute_expert_hotness(
-        self, num_of_expert: int, deployment: np.ndarray, rank_load: np.ndarray
-    ):
+    def compute_expert_hotness(self, num_of_expert: int, deployment: np.ndarray, rank_load: np.ndarray):
         hotness = np.zeros(num_of_expert, dtype=rank_load.dtype)
         deployment_flat = deployment.ravel()
         rank_load_flat = rank_load.ravel()
@@ -415,18 +396,14 @@ class FlashLB(EplbPolicy):
         if np.any(deployment < 0):
             raise ValueError("Deployment table contains negative values.")
         counts = np.bincount(deployment.reshape(-1), minlength=N)
-        unit_hotness = np.divide(
-            hotness, counts, out=np.zeros_like(hotness, dtype=float), where=counts != 0
-        )
+        unit_hotness = np.divide(hotness, counts, out=np.zeros_like(hotness, dtype=float), where=counts != 0)
         stage_par = np.zeros(n_stage)
         for i in range(n_stage):
             stage_load = unit_hotness[i][deployment].sum(-1)
             stage_par[i] = stage_load.max() / stage_load.mean()
         return stage_par.mean()
 
-    def group_based_adaptive_bloating(
-        self, X, P, M, stage_weights=None, recorsive=False
-    ):
+    def group_based_adaptive_bloating(self, X, P, M, stage_weights=None, recorsive=False):
         n_stage, N = X.shape
         if stage_weights is None:
             stage_weights = np.ones(n_stage, dtype=np.float32)
@@ -435,9 +412,7 @@ class FlashLB(EplbPolicy):
             (
                 simulated_deployment,
                 simulated_pieces,
-            ) = self.group_based_adaptive_bloating(
-                X, P, M, stage_weights, recorsive=False
-            )
+            ) = self.group_based_adaptive_bloating(X, P, M, stage_weights, recorsive=False)
         else:
             simulated_pieces = compute_piece_counts(X, P, stage_weights)
             simulated_deployment = jsq_placement(X, simulated_pieces, M, stage_weights)
@@ -454,9 +429,7 @@ class FlashLB(EplbPolicy):
         deployment = jsq_placement(X, pieces, M, stage_weights)
 
         X_all = X.sum(0)
-        unit_load = np.divide(
-            X_all, pieces, out=np.zeros_like(X_all, dtype=float), where=pieces != 0
-        )
+        unit_load = np.divide(X_all, pieces, out=np.zeros_like(X_all, dtype=float), where=pieces != 0)
         load = unit_load[deployment].sum(-1)
 
         sim_unit_load = X_all / simulated_pieces
@@ -505,9 +478,7 @@ class FlashLB(EplbPolicy):
         for layer in range(num_layer):
             if layer not in self.hotness_window:
                 self.hotness_window[layer] = deque(maxlen=self.max_stage_window)
-            hotness = self.compute_expert_hotness(
-                num_expert, deployment[layer], rank_load[layer]
-            )
+            hotness = self.compute_expert_hotness(num_expert, deployment[layer], rank_load[layer])
             self.hotness_window[layer].append(hotness)
 
     def compress_by_avg_pooling_fast_nd(self, arr, m):
@@ -525,9 +496,7 @@ class FlashLB(EplbPolicy):
         expert_workload += 1
         num_layer = expert_workload.shape[0]
         num_expert = np.unique(current_expert_table[0].reshape(-1)).shape[0]
-        self.register_hotness(
-            current_deployment, expert_workload, num_layer, num_expert
-        )
+        self.register_hotness(current_deployment, expert_workload, num_layer, num_expert)
 
         new_deployment = current_deployment.copy()
 
@@ -538,9 +507,7 @@ class FlashLB(EplbPolicy):
         for i, layer in enumerate(layers_need_update):
             hotness = np.array(self.hotness_window[layer])
             if hotness.shape[0] > self.max_stage_window:
-                hotness = self.compress_by_avg_pooling_fast_nd(
-                    hotness, self.max_stage_window
-                )
+                hotness = self.compress_by_avg_pooling_fast_nd(hotness, self.max_stage_window)
 
             (
                 new_deployment[layer],
@@ -550,9 +517,7 @@ class FlashLB(EplbPolicy):
 
         priority = new_par / current_par
         priority_idx = np.argsort(priority)
-        priority_idx = priority_idx[priority[priority_idx] < 1][
-            : self.buffer_expert_layer_num
-        ]
+        priority_idx = priority_idx[priority[priority_idx] < 1][: self.buffer_expert_layer_num]
 
         if np.all(expert_workload == 1):
             for _, layer in enumerate(layers_need_update):
@@ -566,16 +531,12 @@ class FlashLB(EplbPolicy):
         layers_need_update = priority_idx
         deployment = current_deployment
         for layer in layers_need_update:
-            deployment[layer] = auto_fix_new_placement(
-                current_deployment[layer], new_deployment[layer]
-            )
+            deployment[layer] = auto_fix_new_placement(current_deployment[layer], new_deployment[layer])
 
         return change, layers_need_update, deployment
 
 
-def generate_layered_experts(
-    num_layers=58, layer_shape=(32, 9), expert_min=0, expert_max=255
-):
+def generate_layered_experts(num_layers=58, layer_shape=(32, 9), expert_min=0, expert_max=255):
     """
     Generate expert deployment matrix meeting the following conditions:
     - Total of num_layers layers
@@ -592,31 +553,20 @@ def generate_layered_experts(
     """
     # 1. Basic parameter calculation
     expert_num = expert_max - expert_min + 1  # Total number of experts: 256 (0~255)
-    layer_total = (
-        layer_shape[0] * layer_shape[1]
-    )  # Total elements in a single layer: 32*9=288
-    extra_slots = (
-        layer_total - expert_num
-    )  # Number of random positions to fill per layer: 288-256=32
+    layer_total = layer_shape[0] * layer_shape[1]  # Total elements in a single layer: 32*9=288
+    extra_slots = layer_total - expert_num  # Number of random positions to fill per layer: 288-256=32
 
     # 2. Verify feasibility (total elements must be ≥ number of experts to cover all experts)
-    assert layer_total >= expert_num, (
-        f"Number of elements in a single layer {layer_total} < number of experts {expert_num}, "
-        "cannot cover all experts"
-    )
+    assert layer_total >= expert_num, f"Number of elements in a single layer {layer_total} < number of experts {expert_num}, cannot cover all experts"
 
     # 3. Generate layers one by one
     layers = []
     for _ in range(num_layers):
         # 3.1 Generate "complete expert sequence" (ensure each expert from 0 to 255 is included)
-        full_experts = torch.arange(
-            expert_min, expert_max + 1, dtype=torch.int64
-        )  # shape (256,)
+        full_experts = torch.arange(expert_min, expert_max + 1, dtype=torch.int64)  # shape (256,)
 
         # 3.2 Generate "supplementary random experts" (fill remaining 32 positions, randomly selected from 0~255)
-        extra_experts = torch.randint(
-            expert_min, expert_max + 1, size=(extra_slots,), dtype=torch.int64
-        )  # shape (32,)
+        extra_experts = torch.randint(expert_min, expert_max + 1, size=(extra_slots,), dtype=torch.int64)  # shape (32,)
 
         # 3.3 Concatenate and shuffle (ensure random distribution of experts in each layer)
         layer_flat = torch.cat([full_experts, extra_experts], dim=0)  # shape (288,)

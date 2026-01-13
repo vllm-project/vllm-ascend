@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import json
 import os
@@ -122,7 +121,7 @@ def deepseek_deploy(workload, num_redundancy_expert, num_groups, num_nodes,
         new_value = workload[layer_idx].reshape(num_gpus, -1)
         row_sum = np.sum(new_value, axis=1)
         original_weights.append(row_sum.max())
-        average_weights.append((np.sum(workload[layer_idx]) / num_gpus))
+        average_weights.append(np.sum(workload[layer_idx]) / num_gpus)
 
         opt_workload = np.zeros((num_original_expert + num_redundancy_expert),
                                 dtype=np.float64)

@@ -87,12 +87,8 @@ def _triton_rope(
 
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
         cos_mask = cos_offsets < (rope_dim // 2)
-        cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(
-            tl.float32
-        )
-        sin_row = tl.load(sin_start_ptr + cos_offsets, mask=cos_mask, other=0).to(
-            tl.float32
-        )
+        cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+        sin_row = tl.load(sin_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
 
         # ####################################################################
         # Load the left and right half of q and k for the current
@@ -100,34 +96,16 @@ def _triton_rope(
         # ####################################################################
         # left half of the head
         if IS_NEOX_STYLE:
-            first_half_q_offsets = (
-                tl.arange(0, pad_n_qh)[:, None] * hd
-                + tl.arange(0, pad_rope_dim // 2)[None, :]
-            )
-            first_half_k_offsets = (
-                tl.arange(0, pad_n_kh)[:, None] * hd
-                + tl.arange(0, pad_rope_dim // 2)[None, :]
-            )
+            first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + tl.arange(0, pad_rope_dim // 2)[None, :]
+            first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(0, pad_rope_dim // 2)[None, :]
         else:
-            first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + (
-                2 * tl.arange(0, pad_rope_dim // 2)[None, :]
-            )
-            first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + (
-                2 * tl.arange(0, pad_rope_dim // 2)[None, :]
-            )
+            first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + (2 * tl.arange(0, pad_rope_dim // 2)[None, :])
+            first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + (2 * tl.arange(0, pad_rope_dim // 2)[None, :])
 
-        first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (
-            tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2)
-        )
-        first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (
-            tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2)
-        )
-        q_tile_1 = tl.load(
-            q_start_ptr + first_half_q_offsets, mask=first_q_mask, other=0
-        ).to(sin_row.dtype)
-        k_tile_1 = tl.load(
-            k_start_ptr + first_half_k_offsets, mask=first_k_mask, other=0
-        ).to(sin_row.dtype)
+        first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+        first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+        q_tile_1 = tl.load(q_start_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(sin_row.dtype)
+        k_tile_1 = tl.load(k_start_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(sin_row.dtype)
 
         # right half of the head
         if IS_NEOX_STYLE:
@@ -138,12 +116,8 @@ def _triton_rope(
             second_half_k_offsets = first_half_k_offsets + 1
         second_q_mask = first_q_mask
         second_k_mask = first_k_mask
-        q_tile_2 = tl.load(
-            q_start_ptr + second_half_q_offsets, mask=second_q_mask, other=0
-        ).to(sin_row.dtype)
-        k_tile_2 = tl.load(
-            k_start_ptr + second_half_k_offsets, mask=second_k_mask, other=0
-        ).to(sin_row.dtype)
+        q_tile_2 = tl.load(q_start_ptr + second_half_q_offsets, mask=second_q_mask, other=0).to(sin_row.dtype)
+        k_tile_2 = tl.load(k_start_ptr + second_half_k_offsets, mask=second_k_mask, other=0).to(sin_row.dtype)
 
         # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
         new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row

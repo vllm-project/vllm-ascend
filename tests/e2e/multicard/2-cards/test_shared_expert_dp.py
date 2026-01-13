@@ -59,27 +59,19 @@ def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(model: str) -> None:
             "enable_shared_expert_dp": True,
         },
     ) as runner:
-        shared_expert_dp_aclgraph_outputs = runner.model.generate(
-            prompts, sampling_params
-        )
+        shared_expert_dp_aclgraph_outputs = runner.model.generate(prompts, sampling_params)
 
     vllm_eager_outputs_list = []
     for output in vllm_eager_outputs:
-        vllm_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text)
-        )
+        vllm_eager_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
     shared_expert_dp_eager_outputs_list = []
     for output in shared_expert_dp_eager_outputs:
-        shared_expert_dp_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text)
-        )
+        shared_expert_dp_eager_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
     shared_expert_dp_aclgraph_outputs_list = []
     for output in shared_expert_dp_aclgraph_outputs:
-        shared_expert_dp_aclgraph_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text)
-        )
+        shared_expert_dp_aclgraph_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs_list,

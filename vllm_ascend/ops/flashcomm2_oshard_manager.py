@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any
 
 from vllm.model_executor.models.utils import extract_layer_index
 
@@ -29,7 +29,7 @@ class Flashcomm2OShardManager:
     """
 
     def __init__(self):
-        self._shard_layers: Dict[int, Any] = {}
+        self._shard_layers: dict[int, Any] = {}
 
     def flashcomm2_oshard_enable(self):
         return flashcomm2_enable() and o_shard_enable()
@@ -61,7 +61,7 @@ class Flashcomm2OShardManager:
                 prefetch_step=prefetch_step,
             )
 
-    def get_layer(self, layer_idx: int) -> Optional[Any]:
+    def get_layer(self, layer_idx: int) -> Any | None:
         """Safely retrieves a registered layer by its index.
 
         Args:

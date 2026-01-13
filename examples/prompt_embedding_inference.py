@@ -1,8 +1,7 @@
 import os
 
 import torch
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          PreTrainedTokenizer)
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
 from vllm import LLM
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"

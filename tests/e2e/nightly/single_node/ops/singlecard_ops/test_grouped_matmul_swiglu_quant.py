@@ -19,9 +19,7 @@ def x_int8_to_x_int4(x: torch.Tensor):
     return x_int4
 
 
-def custom_mm(
-    x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor, m: int
-):
+def custom_mm(x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor, m: int):
     """
     Performing Quantized GMM (General Matrix Multiplication) Operation
     Parameters:
@@ -44,20 +42,12 @@ def custom_mm(
         x_grouped = x.view(-1, k_group, per_group_ele).transpose(0, 1)
         weight_grouped = weight.view(k_group, per_group_ele, n)
 
-        c_temp = torch.bmm(
-            x_grouped.to(torch.int32), weight_grouped.to(torch.int32)
-        ).to(torch.float16)
+        c_temp = torch.bmm(x_grouped.to(torch.int32), weight_grouped.to(torch.int32)).to(torch.float16)
         for k_idx in range(k_group):
-            mm_out += (
-                c_temp[k_idx] * weight_scale[k_idx].view(1, -1).to(torch.float16)
-            ).to(torch.float16)
+            mm_out += (c_temp[k_idx] * weight_scale[k_idx].view(1, -1).to(torch.float16)).to(torch.float16)
     # perChannel scenario
-    elif len(weight_scale.shape) == 1 or (
-        len(weight_scale.shape) == 2 and weight_scale.shape[0] == 1
-    ):
-        c_temp = torch.matmul(x.to(torch.int32), weight.to(torch.int32)).to(
-            torch.float32
-        )
+    elif len(weight_scale.shape) == 1 or (len(weight_scale.shape) == 2 and weight_scale.shape[0] == 1):
+        c_temp = torch.matmul(x.to(torch.int32), weight.to(torch.int32)).to(torch.float32)
         mm_out = c_temp * weight_scale.view(1, -1).to(torch.float16)
     return mm_out.to(torch.float32)
 
@@ -109,20 +99,14 @@ def gmm_swiglu_quant_golden_a8_w4(
                 temp_v,
             )
             mm_num_concat = (mm_out[::2] * 16 + mm_out[1::2]) + bias[i].view(1, -1)
-            per_token_quant = mm_num_concat * per_token_scale[
-                start_idx // 2 : (start_idx + temp_v) // 2
-            ].view(-1, 1)
+            per_token_quant = mm_num_concat * per_token_scale[start_idx // 2 : (start_idx + temp_v) // 2].view(-1, 1)
             swiglu, gate = per_token_quant.chunk(2, dim=-1)
             temp = swiglu * torch.sigmoid(swiglu)
             temp = temp * gate
             max_value = torch.max(torch.abs(temp), dim=-1).values
             quant_scale_output_temp = 127 / max_value
-            quant_output[start_idx // 2 : (start_idx + temp_v) // 2] = torch.round(
-                temp * quant_scale_output_temp.reshape(temp_v // 2, 1)
-            ).to(torch.int8)
-            quant_scale_output[start_idx // 2 : (start_idx + temp_v) // 2] = (
-                1 / quant_scale_output_temp
-            )
+            quant_output[start_idx // 2 : (start_idx + temp_v) // 2] = torch.round(temp * quant_scale_output_temp.reshape(temp_v // 2, 1)).to(torch.int8)
+            quant_scale_output[start_idx // 2 : (start_idx + temp_v) // 2] = 1 / quant_scale_output_temp
         start_idx += temp_v
     return quant_output, quant_scale_output
 
@@ -149,9 +133,7 @@ def test_grouped_matmul_swiglu_quant_kernel():
     x = torch.randint(-5, 5, (M, K), dtype=torch.int8).npu()
     weight_ori = torch.randint(-5, 5, (E, K, N), dtype=torch.int8)
     weight_nz = torch_npu.npu_format_cast(weight_ori.npu().to(torch.float32), 29)
-    pack_weight = torch_npu.npu_quantize(
-        weight_nz, torch.tensor([1.0], device="npu"), None, torch.quint4x2, -1, False
-    )
+    pack_weight = torch_npu.npu_quantize(weight_nz, torch.tensor([1.0], device="npu"), None, torch.quint4x2, -1, False)
 
     weight_scale = torch.randn(E, 1, N)
     scale_np = weight_scale.cpu().numpy()
@@ -179,9 +161,7 @@ def test_grouped_matmul_swiglu_quant_kernel():
         x_scale=pertoken_scale,
     )
     torch.testing.assert_close(output_golden, output.cpu(), atol=1, rtol=0.005)
-    torch.testing.assert_close(
-        output_scale_golden, output_scale.cpu(), atol=1, rtol=0.005
-    )
+    torch.testing.assert_close(output_scale_golden, output_scale.cpu(), atol=1, rtol=0.005)
 
     gc.collect()
     torch.npu.empty_cache()

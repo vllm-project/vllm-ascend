@@ -1,5 +1,3 @@
-from typing import Dict, Set
-
 import numpy as np
 import pytest
 
@@ -62,9 +60,7 @@ def test_calculate_initial_imbalance(policy):
 
 def test_compute_redundant_assignments(policy):
     base_experts = [(0, 10), (1, 5)]
-    redundant, sorted_weights = policy.compute_redundant_assignments(
-        base_experts, num_redundant_experts=2, num_experts=2
-    )
+    redundant, sorted_weights = policy.compute_redundant_assignments(base_experts, num_redundant_experts=2, num_experts=2)
     assert len(redundant) == 2
     assert len(sorted_weights) == 2
 
@@ -80,12 +76,8 @@ def test_prepare_expert_list():
 def test_non_redundant_expert_information():
     origin_deployment = np.array([[0, 1]])
     updated_weights = [(0, 10), (1, 5)]
-    rendun_pos: Dict[int, Set[int]] = {0: set()}
-    assignments, weights, loads, counts = (
-        DynamicEplbV2.non_redundant_expert_information(
-            origin_deployment, updated_weights, rendun_pos
-        )
-    )
+    rendun_pos: dict[int, set[int]] = {0: set()}
+    assignments, weights, loads, counts = DynamicEplbV2.non_redundant_expert_information(origin_deployment, updated_weights, rendun_pos)
     assert assignments[0] == [0, 1]
     assert loads[0] == 15
 
@@ -93,9 +85,7 @@ def test_non_redundant_expert_information():
 def test_recomputing_initial_weight(policy):
     layer_workloads = [10, 5]
     device_assignments = [[0, 1]]
-    cur_layer_workload, num_all_experts = policy.recomputing_initial_weight(
-        layer_workloads, device_assignments
-    )
+    cur_layer_workload, num_all_experts = policy.recomputing_initial_weight(layer_workloads, device_assignments)
     assert cur_layer_workload[0] == 10
     assert num_all_experts[0] == 1
 

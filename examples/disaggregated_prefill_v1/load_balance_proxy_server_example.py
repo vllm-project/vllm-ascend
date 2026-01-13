@@ -125,7 +125,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, List, Tuple, Dict
+from typing import Any, Dict, List, Tuple
 
 import httpx
 from fastapi import FastAPI, Request
@@ -790,7 +790,12 @@ async def _handle_completions(api: str, request: Request):
                         yield chunk
             except Exception as e:
                 logger.error(
-                    f"Error during streaming from decoder {instance_info.decoder.url}: {str(e)} the aborted request {instance_info.request_id} will be routing to the target prefiller when new request is ready to dispatch to it"
+                    "Error during streaming from decoder %s: %s "
+                    "the aborted request %s will be routing to the target prefiller "
+                    "when new request is ready to dispatch to it",
+                    instance_info.decoder.url,
+                    str(e),
+                    instance_info.request_id,
                 )
                 proxy_state.abort_prefiller_request(
                     instance_info.prefiller_idx, instance_info.request_id)

@@ -20,8 +20,7 @@
 import functools
 import os
 import signal
-from collections.abc import Sequence
-from typing import Callable
+from collections.abc import Callable, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -67,9 +66,7 @@ def fork_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
             os.killpg(pgid, signal.SIGTERM)
             # restore the signal handler
             signal.signal(signal.SIGTERM, old_signal_handler)
-            assert _exitcode == 0, (
-                f"function {f} failed when called with args {args} and kwargs {kwargs}"
-            )
+            assert _exitcode == 0, f"function {f} failed when called with args {args} and kwargs {kwargs}"
 
     return wrapper
 
@@ -91,22 +88,11 @@ def check_embeddings_close(
 ) -> None:
     assert len(embeddings_0_lst) == len(embeddings_1_lst)
 
-    for prompt_idx, (embeddings_0, embeddings_1) in enumerate(
-        zip(embeddings_0_lst, embeddings_1_lst)
-    ):
-        assert len(embeddings_0) == len(embeddings_1), (
-            f"Length mismatch: {len(embeddings_0)} vs. {len(embeddings_1)}"
-        )
+    for prompt_idx, (embeddings_0, embeddings_1) in enumerate(zip(embeddings_0_lst, embeddings_1_lst)):
+        assert len(embeddings_0) == len(embeddings_1), f"Length mismatch: {len(embeddings_0)} vs. {len(embeddings_1)}"
 
-        sim = F.cosine_similarity(
-            torch.tensor(embeddings_0), torch.tensor(embeddings_1), dim=0
-        )
+        sim = F.cosine_similarity(torch.tensor(embeddings_0), torch.tensor(embeddings_1), dim=0)
 
-        fail_msg = (
-            f"Test{prompt_idx}:"
-            f"\nCosine similarity: \t{sim:.4f}"
-            f"\n{name_0}:\t{embeddings_0[:16]!r}"
-            f"\n{name_1}:\t{embeddings_1[:16]!r}"
-        )
+        fail_msg = f"Test{prompt_idx}:\nCosine similarity: \t{sim:.4f}\n{name_0}:\t{embeddings_0[:16]!r}\n{name_1}:\t{embeddings_1[:16]!r}"
 
         assert sim >= 1 - tol, fail_msg

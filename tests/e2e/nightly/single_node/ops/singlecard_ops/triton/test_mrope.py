@@ -1,5 +1,4 @@
 import gc
-from typing import List
 
 import pytest
 import torch
@@ -20,9 +19,7 @@ DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
 
 
-def pytorch_forward_native(
-    q, k, cos, sin, mrope_section, head_size, rotary_dim, mrope_interleaved
-):
+def pytorch_forward_native(q, k, cos, sin, mrope_section, head_size, rotary_dim, mrope_interleaved):
     """PyTorch-native implementation equivalent to forward()."""
 
     num_tokens = q.shape[0]
@@ -100,9 +97,7 @@ def pytorch_forward_native(
     return q_result, k_result
 
 
-def create_test_data(
-    num_tokens, n_q_head, n_kv_head, rotary_dim, head_size, device, dtype
-):
+def create_test_data(num_tokens, n_q_head, n_kv_head, rotary_dim, head_size, device, dtype):
     q = torch.randn(num_tokens, n_q_head * head_size, dtype=dtype, device=device)
     k = torch.randn(num_tokens, n_kv_head * head_size, dtype=dtype, device=device)
 
@@ -127,7 +122,7 @@ def create_test_data(
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_mrotary_embedding_triton_kernel(
-    mrope_section: List[int],
+    mrope_section: list[int],
     num_tokens: int,
     num_q_heads: int,
     num_k_heads: int,
@@ -155,13 +150,9 @@ def test_mrotary_embedding_triton_kernel(
 
     q_gold, k_gold = q_trt.clone(), k_trt.clone()
 
-    q_trt, k_trt = triton_mrope(
-        q_trt, k_trt, cos, sin, mrope_section, head_size, rotary_dim, True
-    )
+    q_trt, k_trt = triton_mrope(q_trt, k_trt, cos, sin, mrope_section, head_size, rotary_dim, True)
 
-    q_gold, k_gold = pytorch_forward_native(
-        q_gold, k_gold, cos, sin, mrope_section, head_size, rotary_dim, True
-    )
+    q_gold, k_gold = pytorch_forward_native(q_gold, k_gold, cos, sin, mrope_section, head_size, rotary_dim, True)
     atol = DEFAULT_ATOL
     rtol = DEFAULT_RTOL
     if dtype == torch.bfloat16:

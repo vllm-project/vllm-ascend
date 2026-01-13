@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import os
 import random
-from typing import Any, Union
+from typing import Any
 
 import pytest
 from transformers import AutoTokenizer
@@ -143,9 +143,7 @@ def test_suffix_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     """
-    with VllmRunner(
-        model_name, max_model_len=1024, cudagraph_capture_sizes=[1, 2, 4, 8]
-    ) as ref_llm:
+    with VllmRunner(model_name, max_model_len=1024, cudagraph_capture_sizes=[1, 2, 4, 8]) as ref_llm:
         ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
 
     with VllmRunner(
@@ -230,12 +228,10 @@ def test_suffix_acceptance(
 def test_eagle_logprobs(
     model_name: str,
     use_eagle3: bool,
-    draft_tensor_parallel_size: Union[None, int],
+    draft_tensor_parallel_size: None | int,
 ):
     prompt = {"role": "user", "content": "Hello world " * 10}
-    sampling_params = SamplingParams(
-        temperature=0, logprobs=1, max_tokens=10, ignore_eos=False
-    )
+    sampling_params = SamplingParams(temperature=0, logprobs=1, max_tokens=10, ignore_eos=False)
 
     ref_llm = LLM(model=model_name, max_model_len=2048)
     ref_outputs = ref_llm.chat([prompt], sampling_params)
@@ -272,9 +268,7 @@ def test_eagle_logprobs(
                 spec_logprobs.append(logprobs[token_id])
 
     for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
-        assert math.isclose(
-            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1
-        )
+        assert math.isclose(ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1)
         assert ref_logprob.rank == spec_logprob.rank
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
@@ -287,7 +281,7 @@ def test_eagle_logprobs(
 def test_llama_qwen_eagle_acceptance(
     method: str,
     num_speculative_tokens: int,
-    draft_tensor_parallel_size: Union[None, int],
+    draft_tensor_parallel_size: None | int,
     disable_padded_drafter_batch: bool,
     async_scheduling: bool,
 ):
@@ -372,10 +366,7 @@ def test_llama_qwen_eagle_acceptance(
             for pos in range(len(metric.values)):
                 num_accepted_tokens_per_pos[pos] += metric.values[pos]
 
-    acceptance_per_pos = [
-        num_accepted_tokens / num_drafts
-        for num_accepted_tokens in num_accepted_tokens_per_pos
-    ]
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
     golden = BASELINES[method]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
@@ -481,10 +472,7 @@ def test_eagle3_sp_acceptance(
             for pos in range(len(metric.values)):
                 num_accepted_tokens_per_pos[pos] += metric.values[pos]
 
-    acceptance_per_pos = [
-        num_accepted_tokens / num_drafts
-        for num_accepted_tokens in num_accepted_tokens_per_pos
-    ]
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
     golden = BASELINES_SP[method]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))

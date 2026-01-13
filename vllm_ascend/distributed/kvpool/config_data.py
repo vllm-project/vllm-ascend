@@ -1,5 +1,6 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Optional
 
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -50,7 +51,7 @@ class PoolKey:
             f"@pp_rank:{self.key_metadata.pp_rank}@{self.chunk_hash}"
         )
 
-    def split_layers(self, num_layers: int) -> List["LayerPoolKey"]:
+    def split_layers(self, num_layers: int) -> list["LayerPoolKey"]:
         """Split the key into multiple keys for each layer"""
         keys = []
         for layer_id in range(num_layers):
@@ -96,7 +97,7 @@ class ChunkedTokenDatabase:
         metadata: KeyMetadata,
         block_size: int,
         use_mla: bool,
-        partitions: Optional[List[int]],
+        partitions: list[int] | None,
     ):
         self.metadata = metadata
         self.block_size = block_size
@@ -105,7 +106,7 @@ class ChunkedTokenDatabase:
         self.block_len: list[int] = []
         self.partitions = partitions
 
-    def _make_key_by_hash(self, chunk_hash: str, layer_id: Optional[int] = None):
+    def _make_key_by_hash(self, chunk_hash: str, layer_id: int | None = None):
         assert self.metadata is not None
         return PoolKey(
             self.metadata,
@@ -131,29 +132,17 @@ class ChunkedTokenDatabase:
             size_list.append(length)
         return addr_list, size_list, block_id
 
-    def prepare_value_layer(
-        self, start: int, end: int, block_ids: list[int], layer_id: int
-    ):
+    def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         block_id = block_ids[start // self.block_size]
         if self.use_mla:
-            addr_k = (
-                self.kv_caches_base_addr[layer_id * 2] + block_id * self.block_len[0]
-            )
-            addr_v = (
-                self.kv_caches_base_addr[layer_id * 2 + 1]
-                + block_id * self.block_len[1]
-            )
+            addr_k = self.kv_caches_base_addr[layer_id * 2] + block_id * self.block_len[0]
+            addr_v = self.kv_caches_base_addr[layer_id * 2 + 1] + block_id * self.block_len[1]
             length_k = int(self.block_len[0] / self.block_size * (end - start))
             length_v = int(self.block_len[1] / self.block_size * (end - start))
             size_list = [length_k, length_v]
         else:
-            addr_k = (
-                self.kv_caches_base_addr[layer_id * 2] + block_id * self.block_len[0]
-            )
-            addr_v = (
-                self.kv_caches_base_addr[layer_id * 2 + 1]
-                + block_id * self.block_len[0]
-            )
+            addr_k = self.kv_caches_base_addr[layer_id * 2] + block_id * self.block_len[0]
+            addr_v = self.kv_caches_base_addr[layer_id * 2 + 1] + block_id * self.block_len[0]
             length = int(self.block_len[0] / self.block_size * (end - start))
             size_list = [length, length]
         addr_list = [addr_k, addr_v]
@@ -162,9 +151,9 @@ class ChunkedTokenDatabase:
     def process_tokens(
         self,
         token_len: int,
-        block_hashes: Union[list[BlockHash], list[str]],
+        block_hashes: list[BlockHash] | list[str],
         mask_num: int = 0,
-    ) -> Iterable[Tuple[int, int, PoolKey]]:
+    ) -> Iterable[tuple[int, int, PoolKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
@@ -215,11 +204,7 @@ class ChunkedTokenDatabase:
             start = 0
             for j, part in enumerate(self.partitions):
                 # part * 2 because addr and size contain both k and v
-                end = (
-                    len(addr_list)
-                    if j == len(self.partitions) - 1
-                    else start + part * 2
-                )
+                end = len(addr_list) if j == len(self.partitions) - 1 else start + part * 2
                 new_str = key[i].replace(  # type: ignore[attr-defined]
                     "@pp_rank:0", f"@pp_rank:{j}", 1
                 )
@@ -290,7 +275,7 @@ class RequestTracker:
 
     def update(
         self,
-        new_block_ids: Union[tuple[list[int], ...], list[int]],
+        new_block_ids: tuple[list[int], ...] | list[int],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
@@ -318,22 +303,22 @@ class ReqMeta:
 
     block_hashes: list[BlockHash]
 
-    can_save: Optional[bool] = None
+    can_save: bool | None = None
     # load_spec
-    load_spec: Optional[LoadSpec] = None
+    load_spec: LoadSpec | None = None
 
-    is_last_chunk: Optional[bool] = None
+    is_last_chunk: bool | None = None
 
-    current_event: Optional[torch.npu.Event] = None
+    current_event: torch.npu.Event | None = None
 
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
         block_size: int,
-        load_spec: Optional[LoadSpec] = None,
-        skip_save: Optional[bool] = False,
-        block_hashes: list[BlockHash] = [],
-        is_last_chunk: Optional[bool] = None,
+        load_spec: LoadSpec | None = None,
+        skip_save: bool | None = False,
+        block_hashes: list[BlockHash] | None = None,
+        is_last_chunk: bool | None = None,
         discard_partial_chunks: bool = True,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
@@ -349,23 +334,18 @@ class ReqMeta:
             the request metadata if we need to perform load/save
             operations, None otherwise.
         """
+        if block_hashes is None:
+            block_hashes = []
+
         input_token_len = tracker.token_len
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
-        chunk_boundary = (
-            cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
-            if discard_partial_chunks
-            else 0
-        )
+        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size if discard_partial_chunks else 0
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
-        num_tokens_to_save = (
-            (input_token_len // block_size * block_size)
-            if discard_partial_chunks
-            else input_token_len
-        )
+        num_tokens_to_save = (input_token_len // block_size * block_size) if discard_partial_chunks else input_token_len
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
         if skip_save and load_spec is None:
@@ -385,9 +365,7 @@ class ReqMeta:
         else:
             # Do not load if not in `can_load` state
             load_spec = None
-        logger.debug(
-            f"request:{tracker.req_id}, meta save spec:{not skip_save}, meta load spec:{load_spec}"
-        )
+        logger.debug(f"request:{tracker.req_id}, meta save spec:{not skip_save}, meta load spec:{load_spec}")
         return ReqMeta(
             req_id=tracker.req_id,
             token_len_chunk=num_tokens_to_save,
@@ -416,10 +394,10 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 @dataclass
 class LasyerMultiBlockReqMeta:
     req_id: str
-    keys: List[LayerPoolKey]
-    starts: List[int]
+    keys: list[LayerPoolKey]
+    starts: list[int]
     ends: list[int]
     block_ids: list[int]
     layer_id: int
-    is_last_chunk: Optional[bool] = True
-    current_event: Optional[torch.npu.Event] = None
+    is_last_chunk: bool | None = True
+    current_event: torch.npu.Event | None = None

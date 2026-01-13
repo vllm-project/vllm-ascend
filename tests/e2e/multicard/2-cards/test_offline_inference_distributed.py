@@ -128,9 +128,7 @@ def test_deepseek_w4a8_accuracy_tp2(model):
 
     vllm_quant_outputs_list = []
     for output in vllm_quant_outputs:
-        vllm_quant_outputs_list.append(
-            ([output.outputs[0].index], output.outputs[0].text)
-        )
+        vllm_quant_outputs_list.append(([output.outputs[0].index], output.outputs[0].text))
     vllm_answer_list = []
     vllm_answer_list = [([0], answer) for answer in vllm_ds_w4a8_answers]
 

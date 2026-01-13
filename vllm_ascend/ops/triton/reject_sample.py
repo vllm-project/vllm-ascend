@@ -107,9 +107,7 @@ def rejection_greedy_sample_triton(
         is_greedy = tl.load(is_greedy_ptr + offset, mask=mask, other=0)
         is_greedy_mask = mask & (is_greedy != 0)
 
-    start_idx = tl.where(
-        offset == 0, 0, tl.load(cu_num_draft_tokens_ptr + offset - 1, is_greedy_mask)
-    )
+    start_idx = tl.where(offset == 0, 0, tl.load(cu_num_draft_tokens_ptr + offset - 1, is_greedy_mask))
     end_idx = tl.load(cu_num_draft_tokens_ptr + offset, is_greedy_mask)
     num_draft_tokens = end_idx - start_idx
 
@@ -163,9 +161,7 @@ def rejection_random_sample_kernel(
     mask = offsets < vec_len
     is_greedy = tl.load(is_greedy_ptr + offsets, mask, other=1)
     not_greedy_mask = is_greedy == 0
-    start_idxs = tl.where(
-        offsets == 0, 0, tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask)
-    )
+    start_idxs = tl.where(offsets == 0, 0, tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask))
     end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets, not_greedy_mask)
     n_num_draft_tokens = end_idxs - start_idxs
     for req_i in range(BLOCK_SIZE):
@@ -181,16 +177,8 @@ def rejection_random_sample_kernel(
                     if NO_DRAFT_PROBS:
                         draft_prob = 1
                     else:
-                        draft_prob = tl.load(
-                            draft_probs_ptr
-                            + (start_idx + pos) * vocab_size
-                            + draft_token_id
-                        )
-                    target_prob = tl.load(
-                        target_probs_ptr
-                        + (start_idx + pos) * vocab_size
-                        + draft_token_id
-                    )
+                        draft_prob = tl.load(draft_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
+                    target_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
                     uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
                     # NOTE(woosuk): While the draft probability should never be 0,
                     # we check it to avoid NaNs. If it happens to be 0, we reject.
@@ -209,9 +197,7 @@ def rejection_random_sample_kernel(
                 # If all tokens are accepted, append the bonus token.
                 bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
                 tl.store(
-                    output_token_ids_ptr
-                    + req_idx * (max_spec_len + 1)
-                    + num_draft_tokens,
+                    output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
                     bonus_token_id,
                 )
 
@@ -231,9 +217,7 @@ def expand_kernel(
     offset = req_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     len_mask = offset < vec_len
 
-    start_idx = tl.where(
-        offset == 0, 0, tl.load(cu_num_tokens_ptr + offset - 1, len_mask)
-    )
+    start_idx = tl.where(offset == 0, 0, tl.load(cu_num_tokens_ptr + offset - 1, len_mask))
     end_idx = tl.load(cu_num_tokens_ptr + offset, len_mask)
     num_tokens = end_idx - start_idx
 
@@ -245,9 +229,7 @@ def expand_kernel(
         start_idx1 = tl.get_element(start_idx, (i,))
         src_val1 = tl.get_element(src_val, (i,))
         offset1 = tl.arange(0, MAX_NUM_TOKENS)
-        tl.store(
-            output_ptr + start_idx1 + offset1, src_val1, mask=offset1 < num_tokens1
-        )
+        tl.store(output_ptr + start_idx1 + offset1, src_val1, mask=offset1 < num_tokens1)
 
 
 @triton.jit
@@ -278,9 +260,7 @@ def sample_recovered_tokens_kernel(
     global_max_p = -1.0
     if NO_DRAFT_PROBS:
         draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-        orig_prob = tl.load(
-            target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id
-        )
+        orig_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
         # Temporarily zero out the probability of the draft token.
         # This is essentially the same as target_prob - draft_prob, except that
         # n-gram does not have draft_prob. We regard it as 1.
@@ -381,9 +361,7 @@ def rejection_greedy_sample_with_triton(
         )
 
 
-def expand_triton(
-    batch_size, expanded_x, x, cu_num_tokens, replace_from, replace_to, max_num_tokens
-):
+def expand_triton(batch_size, expanded_x, x, cu_num_tokens, replace_from, replace_to, max_num_tokens):
     vec_len = batch_size
     grid, block_size = cal_grid_and_block_size(batch_size)
 
@@ -421,9 +399,7 @@ def rejection_random_sample_block_verify_kernel(
     mask = offsets < vec_len
     is_greedy = tl.load(is_greedy_ptr + offsets, mask, other=1)
     not_greedy_mask = is_greedy == 0
-    start_idxs = tl.where(
-        offsets == 0, 0, tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask)
-    )
+    start_idxs = tl.where(offsets == 0, 0, tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask))
     end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets, not_greedy_mask)
     n_num_draft_tokens = end_idxs - start_idxs
     for req_i in range(BLOCK_SIZE):
@@ -439,20 +415,14 @@ def rejection_random_sample_block_verify_kernel(
 
             for pos in range(num_draft_tokens):
                 draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-                target_prob = tl.load(
-                    target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id
-                )
+                target_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
                 tmp_uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
                 uniform_prob = uniform_prob * tmp_uniform_prob
 
                 if NO_DRAFT_PROBS:
                     draft_prob = 1
                 else:
-                    draft_prob = tl.load(
-                        draft_probs_ptr
-                        + (start_idx + pos) * vocab_size
-                        + draft_token_id
-                    )
+                    draft_prob = tl.load(draft_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
 
                 pi = min(pi * target_prob / draft_prob, 1.0)
                 if draft_prob > 0 and pi >= uniform_prob:
@@ -470,21 +440,14 @@ def rejection_random_sample_block_verify_kernel(
                     )
 
             if rejected:
-                recovered_token_id = tl.load(
-                    recovered_token_ids_ptr + start_idx + last_accepted_token_pos + 1
-                )
+                recovered_token_id = tl.load(recovered_token_ids_ptr + start_idx + last_accepted_token_pos + 1)
                 tl.store(
-                    output_token_ids_ptr
-                    + req_idx * (max_spec_len + 1)
-                    + last_accepted_token_pos
-                    + 1,
+                    output_token_ids_ptr + req_idx * (max_spec_len + 1) + last_accepted_token_pos + 1,
                     recovered_token_id,
                 )
             else:
                 bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
                 tl.store(
-                    output_token_ids_ptr
-                    + req_idx * (max_spec_len + 1)
-                    + num_draft_tokens,
+                    output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
                     bonus_token_id,
                 )

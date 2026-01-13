@@ -43,9 +43,7 @@ class AscendSampler(Sampler):
         if sampling_metadata.min_p is not None:
             apply_min_p(logits, sampling_metadata.min_p)
         # Apply top_k and/or top_p. This might return a new tensor.
-        logits = apply_top_k_top_p(
-            logits, sampling_metadata.top_k, sampling_metadata.top_p
-        )
+        logits = apply_top_k_top_p(logits, sampling_metadata.top_k, sampling_metadata.top_p)
 
         sampled = gumbel_sample(
             logits,

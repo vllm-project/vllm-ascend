@@ -41,9 +41,7 @@ def _swiglu_quant_kernel(
         x_offsets = row_idx * TOTAL_COLS + tl.arange(0, TOTAL_COLS)
         cur_x = tl.load(x_ptr + x_offsets)
         x1 = tl.extract_slice(cur_x, offsets=(0,), sizes=(HALF_COLS,), strides=(1,))
-        x2 = tl.extract_slice(
-            cur_x, offsets=(HALF_COLS,), sizes=(HALF_COLS,), strides=(1,)
-        )
+        x2 = tl.extract_slice(cur_x, offsets=(HALF_COLS,), sizes=(HALF_COLS,), strides=(1,))
         out = x1 * tl.sigmoid(x1) * x2
 
         # quant
@@ -52,19 +50,13 @@ def _swiglu_quant_kernel(
             # store scale
             tl.store(scale_ptr + row_idx, scale.to(scale_ptr.dtype.element_ty))
             for col_blk_idx in range(0, HALF_COLS, COL_BLOCK_SIZE):
-                tmp_out = tl.extract_slice(
-                    out, offsets=(col_blk_idx,), sizes=(COL_BLOCK_SIZE,), strides=(1,)
-                )
+                tmp_out = tl.extract_slice(out, offsets=(col_blk_idx,), sizes=(COL_BLOCK_SIZE,), strides=(1,))
                 tmp_out = (tmp_out.to(tl.float32) / scale).to(x_ptr.dtype.element_ty)
                 tmp_out = tmp_out.cast(tl.int8, overflow_mode="saturate")
 
-                o_offsets = (
-                    row_idx * HALF_COLS + col_blk_idx + tl.arange(0, COL_BLOCK_SIZE)
-                )
+                o_offsets = row_idx * HALF_COLS + col_blk_idx + tl.arange(0, COL_BLOCK_SIZE)
                 mask = (col_blk_idx + tl.arange(0, COL_BLOCK_SIZE)) < HALF_COLS
-                tl.store(
-                    out_ptr + o_offsets, tmp_out.to(out_ptr.dtype.element_ty), mask=mask
-                )
+                tl.store(out_ptr + o_offsets, tmp_out.to(out_ptr.dtype.element_ty), mask=mask)
         else:
             # store out
             o_offsets = row_idx * HALF_COLS + tl.arange(0, HALF_COLS)
@@ -86,9 +78,7 @@ def swiglu_quant(x, group_list, group_list_type, need_quant=True):
     elif group_list.dtype == torch.int32:
         num_experts_algin = (num_experts + 15) // 16 * 16
     else:
-        raise ValueError(
-            f"group_list dtype must be torch.int32 or torch.int64, but got {group_list.dtype}"
-        )
+        raise ValueError(f"group_list dtype must be torch.int32 or torch.int64, but got {group_list.dtype}")
 
     num_vectorcore = get_vectorcore_num()
     _swiglu_quant_kernel[(num_vectorcore,)](

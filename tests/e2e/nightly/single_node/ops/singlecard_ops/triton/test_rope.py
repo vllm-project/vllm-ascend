@@ -32,9 +32,7 @@ def rotate_gptj(x: torch.Tensor) -> torch.Tensor:
     return x.flatten(-2)
 
 
-def _rope_pytorch_native(
-    query, key, cos, sin, rope_dim, is_neox_style
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+def _rope_pytorch_native(query, key, cos, sin, rope_dim, is_neox_style) -> tuple[torch.Tensor, torch.Tensor | None]:
     """PyTorch-native implementation equivalent to forward()."""
     assert key is not None
     orig_dtype = query.dtype
@@ -99,19 +97,11 @@ def test_rotary_embedding_triton_kernel(
     k_gold = torch.randn(num_tokens, num_k_heads, head_size, dtype=dtype, device=device)
     q_trt.copy_(q_gold)
     k_trt.copy_(k_gold)
-    q_trt, k_trt = rope_forward_triton(
-        q_trt, k_trt, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style
-    )
-    q_gold, k_gold = _rope_pytorch_native(
-        q_gold, k_gold, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style
-    )
+    q_trt, k_trt = rope_forward_triton(q_trt, k_trt, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style)
+    q_gold, k_gold = _rope_pytorch_native(q_gold, k_gold, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style)
     # Compare the results.
-    torch.testing.assert_close(
-        q_trt.view(q_gold.size()), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
-    )
-    torch.testing.assert_close(
-        k_trt.view(k_gold.size()), k_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
-    )
+    torch.testing.assert_close(q_trt.view(q_gold.size()), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(k_trt.view(k_gold.size()), k_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

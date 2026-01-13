@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 import math
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import torch
 import torch_npu
@@ -26,9 +26,7 @@ KRONECKER_QUANT_MAX_BATCH_SIZE = 32768
 def pack_int4_weights(weight_tensor: torch.Tensor) -> torch.Tensor:
     original_device = weight_tensor.device
     weight_tensor_npu = weight_tensor.npu()
-    weight_int4_packed = torch_npu.npu_convert_weight_to_int4pack(
-        weight_tensor_npu.to(torch.int32), inner_k_tiles=1
-    )
+    weight_int4_packed = torch_npu.npu_convert_weight_to_int4pack(weight_tensor_npu.to(torch.int32), inner_k_tiles=1)
     return weight_int4_packed.to(original_device)
 
 
@@ -53,19 +51,12 @@ def batched_kronecker_quant(
     left_trans: torch.Tensor,
     right_trans: torch.Tensor,
     clip_ratio: float,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     batch_tokens = x.shape[0]
     if batch_tokens <= KRONECKER_QUANT_MAX_BATCH_SIZE:
-        return torch_npu.npu_kronecker_quant(
-            x, left_trans, right_trans, clip_ratio=clip_ratio, dst_dtype=torch.int32
-        )
+        return torch_npu.npu_kronecker_quant(x, left_trans, right_trans, clip_ratio=clip_ratio, dst_dtype=torch.int32)
     x_chunks = torch.split(x, KRONECKER_QUANT_MAX_BATCH_SIZE, dim=0)
-    processed_chunks = [
-        torch_npu.npu_kronecker_quant(
-            chunk, left_trans, right_trans, clip_ratio=clip_ratio, dst_dtype=torch.int32
-        )
-        for chunk in x_chunks
-    ]
+    processed_chunks = [torch_npu.npu_kronecker_quant(chunk, left_trans, right_trans, clip_ratio=clip_ratio, dst_dtype=torch.int32) for chunk in x_chunks]
     quantized_list, scale_list = zip(*processed_chunks)
     x_quantized_int4 = torch.cat(quantized_list, dim=0)
     activation_scale = torch.cat(scale_list, dim=0)
@@ -87,29 +78,19 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
         self.sym = True
 
     @staticmethod
-    def get_weight(
-        input_size: int, output_size: int, params_dtype: torch.dtype
-    ) -> Dict[str, Any]:
+    def get_weight(input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         if input_size % 8 != 0:
-            raise ValueError(
-                f"input_size ({input_size}) must be divisible by 8 for int4 packing"
-            )
+            raise ValueError(f"input_size ({input_size}) must be divisible by 8 for int4 packing")
         AscendW4A4FlatQuantDynamicLinearMethod.input_size = input_size
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict
 
     @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pertensor_param(params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {}
-        left_trans_dim, right_trans_dim = get_decompose_dim(
-            AscendW4A4FlatQuantDynamicLinearMethod.input_size
-        )
-        params_dict["left_trans"] = torch.empty(
-            left_trans_dim, left_trans_dim, dtype=params_dtype
-        )
-        params_dict["right_trans"] = torch.empty(
-            right_trans_dim, right_trans_dim, dtype=params_dtype
-        )
+        left_trans_dim, right_trans_dim = get_decompose_dim(AscendW4A4FlatQuantDynamicLinearMethod.input_size)
+        params_dict["left_trans"] = torch.empty(left_trans_dim, left_trans_dim, dtype=params_dtype)
+        params_dict["right_trans"] = torch.empty(right_trans_dim, right_trans_dim, dtype=params_dtype)
         params_dict["clip_ratio"] = torch.empty(1, dtype=torch.float32)
         return params_dict
 
@@ -117,7 +98,7 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
     def get_perchannel_param(
         output_size: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(output_size, 1, dtype=torch.float32)
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=torch.float32)
@@ -128,16 +109,16 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
-        layer_type: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        layer_type: str | None = None,
+    ) -> dict[str, Any]:
         return {}
 
     @staticmethod
     def apply(
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-        tp_rank: Optional[int] = 0,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
     ) -> torch.Tensor:
         original_dtype = x.dtype
         input_shape = x.shape
@@ -145,16 +126,11 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
         left_dim = layer.left_trans.shape[0]
         right_dim = layer.right_trans.shape[0]
         if left_dim * right_dim != in_features:
-            raise ValueError(
-                f"FlatQuant transform matrices dimension mismatch: "
-                f"left_dim({left_dim}) * right_dim({right_dim}) != in_features({in_features})"
-            )
+            raise ValueError(f"FlatQuant transform matrices dimension mismatch: left_dim({left_dim}) * right_dim({right_dim}) != in_features({in_features})")
         left_trans_matched = layer.left_trans.to(original_dtype)
         right_trans_matched = layer.right_trans.to(original_dtype)
         x_reshaped = x.view(-1, left_dim, right_dim)
-        x_quantized_int4, activation_scale = batched_kronecker_quant(
-            x_reshaped, left_trans_matched, right_trans_matched, layer.aclnn_clip_ratio
-        )
+        x_quantized_int4, activation_scale = batched_kronecker_quant(x_reshaped, left_trans_matched, right_trans_matched, layer.aclnn_clip_ratio)
         x_quantized_reshaped = x_quantized_int4.view(-1, left_dim * right_dim // 8)
         pertoken_scale = activation_scale.view(-1).to(torch.float32)
         output = torch_npu.npu_quant_matmul(
@@ -173,9 +149,7 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
     def process_weights_after_loading(self, layer):
         # NOTE: Currently, w4a4 can't support weight nz
         weight_packed = pack_int4_weights(layer.weight.data)
-        layer.register_parameter(
-            "weight_packed", torch.nn.Parameter(weight_packed, requires_grad=False)
-        )
+        layer.register_parameter("weight_packed", torch.nn.Parameter(weight_packed, requires_grad=False))
         del layer.weight
         layer.weight_scale.data = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.to(torch.float32)

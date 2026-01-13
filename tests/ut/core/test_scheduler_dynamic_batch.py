@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -47,9 +47,9 @@ MAX_NUM_SEQS = 16
 def create_requests(
     num_requests: int,
     num_tokens: int = 10,
-    mm_positions: Optional[list[PlaceholderRange]] = None,
+    mm_positions: list[PlaceholderRange] | None = None,
     max_tokens: int = 16,
-    stop_token_ids: Optional[list[int]] = None,
+    stop_token_ids: list[int] | None = None,
     block_size: int = 3,
     hash_fn=sha256,
 ):
@@ -144,11 +144,7 @@ class TestSchedulerDynamicBatch(TestBase):
         model_config.hf_text_config = MagicMock()
         model_config.hf_text_config.is_encoder_decoder = False
         # Cache config, optionally force APC
-        kwargs_cache: Dict[str, Any] = (
-            {}
-            if ENABLE_PREFIX_CACHING is None
-            else {"enable_prefix_caching": ENABLE_PREFIX_CACHING}
-        )
+        kwargs_cache: dict[str, Any] = {} if ENABLE_PREFIX_CACHING is None else {"enable_prefix_caching": ENABLE_PREFIX_CACHING}
         cache_config = CacheConfig(
             block_size=block_size,
             gpu_memory_utilization=0.9,
@@ -167,11 +163,9 @@ class TestSchedulerDynamicBatch(TestBase):
             else None
         )
 
-        speculative_config: Optional[SpeculativeConfig] = None
+        speculative_config: SpeculativeConfig | None = None
         if NUM_SPECULATIVE_TOKENS is not None:
-            speculative_config = SpeculativeConfig(
-                model="ngram", num_speculative_tokens=NUM_SPECULATIVE_TOKENS
-            )
+            speculative_config = SpeculativeConfig(model="ngram", num_speculative_tokens=NUM_SPECULATIVE_TOKENS)
 
         vllm_config = VllmConfig(
             scheduler_config=scheduler_config,
@@ -184,11 +178,7 @@ class TestSchedulerDynamicBatch(TestBase):
         kv_cache_config = KVCacheConfig(
             num_blocks=10000,  # A large number of blocks to hold all requests
             kv_cache_tensors=[],
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    ["layer"], FullAttentionSpec(block_size, 1, 1, torch.float32, False)
-                )
-            ],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], FullAttentionSpec(block_size, 1, 1, torch.float32, False))],
         )
         kv_cache_config.hash_block_size = block_size
         cache_config.num_gpu_blocks = 10000
@@ -223,9 +213,7 @@ class TestSchedulerDynamicBatch(TestBase):
             scheduler.add_request(request)
 
         for i, request in enumerate(requests):
-            scheduler.finish_requests(
-                request.request_id, RequestStatus.FINISHED_ABORTED
-            )
+            scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
             self.assertNotIn(request.request_id, scheduler.requests)
             self.assertEqual(len(scheduler.waiting), 9 - i)
 
@@ -236,12 +224,8 @@ class TestSchedulerDynamicBatch(TestBase):
             scheduler.add_request(request)
 
         for i, request in enumerate(requests):
-            scheduler.finish_requests(
-                request.request_id, RequestStatus.FINISHED_STOPPED
-            )
-            self.assertEqual(
-                scheduler.get_num_unfinished_requests(), len(requests) - i - 1
-            )
+            scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
+            self.assertEqual(scheduler.get_num_unfinished_requests(), len(requests) - i - 1)
 
     def test_schedule(self):
         """Test scheduling.
@@ -381,9 +365,7 @@ class TestSchedulerDynamicBatch(TestBase):
         # Test case 2: Stop on custom stop token
         NUM_SPECULATIVE_TOKENS = 2
         scheduler = self.create_scheduler()
-        requests = create_requests(
-            num_requests=2, max_tokens=10, stop_token_ids=[42, 43]
-        )
+        requests = create_requests(num_requests=2, max_tokens=10, stop_token_ids=[42, 43])
         for req in requests:
             req.num_computed_tokens = req.num_tokens
             scheduler.requests[req.request_id] = req
@@ -529,17 +511,13 @@ class TestSchedulerDynamicBatch(TestBase):
             scheduler.add_request(requests[0])
             scheduler_output0 = scheduler.schedule()
             self.assertEqual(len(scheduler_output0.scheduled_new_reqs), 1)
-            self.assertEqual(
-                scheduler_output0.num_scheduled_tokens[requests[0].request_id], 512
-            )
+            self.assertEqual(scheduler_output0.num_scheduled_tokens[requests[0].request_id], 512)
 
             # The first request is still running, so only schedule the second request.
             scheduler.add_request(requests[1])
             scheduler_output1 = scheduler.schedule()
             self.assertEqual(len(scheduler_output1.scheduled_new_reqs), 1)
-            self.assertEqual(
-                scheduler_output1.num_scheduled_tokens[requests[1].request_id], 512
-            )
+            self.assertEqual(scheduler_output1.num_scheduled_tokens[requests[1].request_id], 512)
 
             # Model output of the first request.
             model_runner_output = ModelRunnerOutput(
@@ -576,7 +554,7 @@ class TestSchedulerDynamicBatch(TestBase):
         1. Speculated tokens get scheduled correctly
         2. Spec decoding stats properly count number of draft and accepted tokens
         """
-        spec_tokens_list: List[List[List[int]]] = [
+        spec_tokens_list: list[list[list[int]]] = [
             [[1, 2, 3]],
             [[1, 2, 3]],
             [[1, 2], [3]],
@@ -584,7 +562,7 @@ class TestSchedulerDynamicBatch(TestBase):
             [[]],
             [[1, 2, 3], [4, 5, 6]],
         ]
-        output_tokens_list: List[List[List[int]]] = [
+        output_tokens_list: list[list[list[int]]] = [
             [[1, 2, 3, 4]],
             [[1, 5]],
             [[1, 2, 5], [3, 4]],
@@ -592,7 +570,7 @@ class TestSchedulerDynamicBatch(TestBase):
             [[5]],
             [[1, 2, 7], [4, 8]],
         ]
-        expected_list: List[Tuple[int, int, int, List[int]]] = [
+        expected_list: list[tuple[int, int, int, list[int]]] = [
             (1, 3, 3, [1, 1, 1]),
             (1, 3, 1, [1, 0, 0]),
             (2, 3, 3, [2, 1]),
@@ -636,9 +614,7 @@ class TestSchedulerDynamicBatch(TestBase):
             )
             draft_token_ids = DraftTokenIds(req_ids, spec_tokens)
 
-            engine_core_outputs = scheduler.update_from_output(
-                output, model_runner_output
-            )
+            engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
             scheduler.update_draft_token_ids(draft_token_ids)
 
             for i in range(len(requests)):
@@ -648,15 +624,10 @@ class TestSchedulerDynamicBatch(TestBase):
                 # The prompt token and the sampled token
                 self.assertEqual(running_req.num_tokens, 2)
                 # The prompt token, the sampled token, and the speculated tokens
-                self.assertEqual(
-                    running_req.num_tokens_with_spec, 2 + len(spec_tokens[i])
-                )
+                self.assertEqual(running_req.num_tokens_with_spec, 2 + len(spec_tokens[i]))
 
             # No draft or accepted tokens counted yet
-            self.assertTrue(
-                not engine_core_outputs
-                or (engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None)
-            )
+            self.assertTrue(not engine_core_outputs or (engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None))
 
             # Schedule the speculated tokens for validation
             output = scheduler.schedule()
@@ -668,9 +639,7 @@ class TestSchedulerDynamicBatch(TestBase):
             )
             for i in range(len(requests)):
                 req_id = requests[i].request_id
-                self.assertEqual(
-                    output.num_scheduled_tokens[req_id], 1 + len(spec_tokens[i])
-                )
+                self.assertEqual(output.num_scheduled_tokens[req_id], 1 + len(spec_tokens[i]))
                 if spec_tokens[i]:
                     self.assertEqual(
                         len(output.scheduled_spec_decode_tokens[req_id]),
@@ -688,13 +657,9 @@ class TestSchedulerDynamicBatch(TestBase):
                 pooler_output=[],
             )
 
-            engine_core_outputs = scheduler.update_from_output(
-                output, model_runner_output
-            )
+            engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
-            scheduler_stats = (
-                engine_core_outputs[0].scheduler_stats if engine_core_outputs else None
-            )
+            scheduler_stats = engine_core_outputs[0].scheduler_stats if engine_core_outputs else None
             if expected[0] == 0:
                 self.assertIsNone(scheduler_stats.spec_decoding_stats)
             else:
@@ -720,27 +685,15 @@ class TestSchedulerDynamicBatch(TestBase):
 
         # KVCache Manager.
         self.assertEqual(
-            len(
-                scheduler.kv_cache_manager.coordinator.single_type_managers[
-                    0
-                ].req_to_blocks
-            ),
+            len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks),
             0,
         )
         self.assertEqual(
-            len(
-                scheduler.kv_cache_manager.coordinator.single_type_managers[
-                    0
-                ].num_cached_block
-            ),
+            len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].num_cached_block),
             0,
         )
-        num_free_blocks = (
-            scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
-        )
-        self.assertEqual(
-            num_free_blocks, scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1
-        )
+        num_free_blocks = scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
+        self.assertEqual(num_free_blocks, scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
 
         # NOTE(rob): just the ref count on blocks will be 0. The hash
         # value, etc will remain since we lazily evict for prefix cache.
@@ -753,9 +706,7 @@ class TestSchedulerDynamicBatch(TestBase):
         NUM_REQUESTS = 5
         NUM_TOKENS = 10
         MAX_TOKENS = 10
-        requests = create_requests(
-            num_requests=NUM_REQUESTS, num_tokens=NUM_TOKENS, max_tokens=MAX_TOKENS
-        )
+        requests = create_requests(num_requests=NUM_REQUESTS, num_tokens=NUM_TOKENS, max_tokens=MAX_TOKENS)
 
         # Add each request.
         for request in requests:

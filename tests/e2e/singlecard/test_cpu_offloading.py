@@ -107,20 +107,13 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber):
 
 def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
     sampling_params = SamplingParams(max_tokens=1)
-    cpu_block_size = (
-        llm.llm_engine.vllm_config.kv_transfer_config.kv_connector_extra_config[
-            "block_size"
-        ]
-    )
+    cpu_block_size = llm.llm_engine.vllm_config.kv_transfer_config.kv_connector_extra_config["block_size"]
 
     subscriber.get_new_cpu_stored_events()
 
     # prepend prompt to be cpu block aligned
     prompt = "Let's count to 10. One, two, three, four,"
-    while (
-        len(llm.generate(prompt, use_tqdm=False)[0].prompt_token_ids) % cpu_block_size
-        != 0
-    ):
+    while len(llm.generate(prompt, use_tqdm=False)[0].prompt_token_ids) % cpu_block_size != 0:
         prompt = ". " + prompt
 
     assert subscriber.get_new_cpu_stored_events()
@@ -128,10 +121,7 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
     test_count = 100
     success_count = 0
     for i in range(test_count):
-        if (
-            llm.generate(prompt, sampling_params, use_tqdm=False)[0].outputs[0].text
-            == " five"
-        ):
+        if llm.generate(prompt, sampling_params, use_tqdm=False)[0].outputs[0].text == " five":
             success_count += 1
 
     assert success_count >= 0.5 * test_count

@@ -59,9 +59,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # block size to multiple of 16, so let's suggest a value
     # that would work (note: FA is currently not compatible
     # with mamba layers, use FlashInfer instead).
-    attn_block_size = block_alignment_bytes * cdiv(
-        mamba_page_size, block_alignment_bytes * attn_page_size_1_token
-    )
+    attn_block_size = block_alignment_bytes * cdiv(mamba_page_size, block_alignment_bytes * attn_page_size_1_token)
 
     # override attention block size if either (a) the
     # user has not set it or (b) the user has set it
@@ -69,8 +67,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     if cache_config.block_size is None or cache_config.block_size < attn_block_size:
         cache_config.block_size = attn_block_size
         logger.info(
-            "Setting attention block size to %d tokens "
-            "to ensure that attention page size is >= mamba page size.",
+            "Setting attention block size to %d tokens to ensure that attention page size is >= mamba page size.",
             attn_block_size,
         )
 
@@ -84,16 +81,11 @@ def verify_and_update_config(cls, vllm_config) -> None:
         return
 
     # pad mamba page size to exactly match attention
-    if (
-        cache_config.mamba_page_size_padded is None
-        or cache_config.mamba_page_size_padded != attn_page_size
-    ):
+    if cache_config.mamba_page_size_padded is None or cache_config.mamba_page_size_padded != attn_page_size:
         cache_config.mamba_page_size_padded = attn_page_size
         mamba_padding_pct = 100 * (attn_page_size - mamba_page_size) / mamba_page_size
         logger.info(
-            "Padding mamba page size by %.2f%% to ensure "
-            "that mamba page size and attention page size are "
-            "exactly equal.",
+            "Padding mamba page size by %.2f%% to ensure that mamba page size and attention page size are exactly equal.",
             mamba_padding_pct,
         )
 

@@ -18,14 +18,10 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
-        self.assertEqual(
-            AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl
-        )
+        self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
 
     def test_get_builder_cls(self):
-        self.assertEqual(
-            AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder
-        )
+        self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     def test_get_kv_cache_shape_not_310p(self, mock_soc_version):
@@ -61,9 +57,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         self.mock_device = "cpu:0"
         torch.Tensor.pin_memory = lambda x: x  # noqa
-        self.builder = AscendAttentionMetadataBuilder(
-            None, None, self.mock_vllm_config, self.mock_device
-        )
+        self.builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
 
     def test_reorder_batch(self):
         mock_input_batch = MagicMock()
@@ -112,9 +106,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.attn_metadata = MagicMock()
         self.attn_metadata.return_value = "1"
 
-        self.layer_no_quant = MagicMock(
-            spec=["layer_name", "_k_scale_float", "_v_scale_float"]
-        )
+        self.layer_no_quant = MagicMock(spec=["layer_name", "_k_scale_float", "_v_scale_float"])
         self.layer_no_quant.layer_name = "test_layer"
         self.layer_no_quant._k_scale_float = 1.0
         self.layer_no_quant._v_scale_float = 1.0
@@ -287,9 +279,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_prefills = 0
         layer = self.layer_no_quant
         mock_fused_infer_attention_score.return_value = (torch.ones(10, 8, 64), 1)
-        output = self.impl_swa.forward(
-            layer, query, key, value, kv_cache, metadata, output
-        )
+        output = self.impl_swa.forward(layer, query, key, value, kv_cache, metadata, output)
         print(output.shape)
         mock_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8, 64)
@@ -330,9 +320,7 @@ class TestAscendAttentionBackendImpl(TestBase):
             torch.ones(10, 8, 64),
         )
 
-        output = self.impl_swa.forward(
-            layer, query, key, value, kv_cache, metadata, output
-        )
+        output = self.impl_swa.forward(layer, query, key, value, kv_cache, metadata, output)
 
         mock_paged_attention.assert_not_called()
         mock_fused_infer_attention_score.assert_called_once()

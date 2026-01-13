@@ -44,9 +44,7 @@ class TestUnpackFromInt32(TestBase):
 class TestPackToInt32(TestBase):
     @patch("vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack")
     def test_pack_to_int32_int8(self, mock_npu_convert_weight_to_int4pack):
-        mock_npu_convert_weight_to_int4pack.return_value = torch.zeros(
-            (2, 4), dtype=torch.int32
-        )
+        mock_npu_convert_weight_to_int4pack.return_value = torch.zeros((2, 4), dtype=torch.int32)
 
         weight = torch.zeros((2, 8, 16), dtype=torch.int8)
         result = pack_to_int32(weight)
@@ -120,9 +118,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         self.assertFalse(self.quant_method.dynamic_eplb)
 
     def test_get_weight(self):
-        param_dict = self.quant_method.get_weight(
-            self.experts, self.input_size, self.output_size, torch.bfloat16
-        )
+        param_dict = self.quant_method.get_weight(self.experts, self.input_size, self.output_size, torch.bfloat16)
 
         self.assertEqual(param_dict["w13_weight_packed"].dtype, torch.int32)
         expected_w13_shape = (
@@ -141,9 +137,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         self.assertEqual(param_dict["w2_weight_packed"].shape, expected_w2_shape)
 
     def test_get_dynamic_quant_param(self):
-        param_dict = self.quant_method.get_dynamic_quant_param(
-            self.experts, self.input_size, self.output_size, torch.bfloat16
-        )
+        param_dict = self.quant_method.get_dynamic_quant_param(self.experts, self.input_size, self.output_size, torch.bfloat16)
 
         self.assertEqual(param_dict["w13_weight_scale"].dtype, torch.bfloat16)
         expected_w13_scale_shape = (
@@ -168,9 +162,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         self.assertEqual(param_dict["w2_weight_shape"].shape, (self.experts, 2))
 
         self.assertEqual(param_dict["w13_weight_offset"].dtype, torch.bfloat16)
-        self.assertEqual(
-            param_dict["w13_weight_offset"].shape, expected_w13_scale_shape
-        )
+        self.assertEqual(param_dict["w13_weight_offset"].shape, expected_w13_scale_shape)
 
         self.assertEqual(param_dict["w2_weight_offset"].dtype, torch.bfloat16)
         self.assertEqual(param_dict["w2_weight_offset"].shape, expected_w2_scale_shape)
@@ -190,12 +182,8 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
             self.input_size // self.quant_method.pack_factor,
         )
 
-        layer.w13_weight_packed = torch.nn.Parameter(
-            torch.randint(-100, 100, w13_shape, dtype=torch.int32), requires_grad=False
-        )
-        layer.w2_weight_packed = torch.nn.Parameter(
-            torch.randint(-100, 100, w2_shape, dtype=torch.int32), requires_grad=False
-        )
+        layer.w13_weight_packed = torch.nn.Parameter(torch.randint(-100, 100, w13_shape, dtype=torch.int32), requires_grad=False)
+        layer.w2_weight_packed = torch.nn.Parameter(torch.randint(-100, 100, w2_shape, dtype=torch.int32), requires_grad=False)
 
         w13_scale_shape = (
             self.experts,
@@ -208,19 +196,11 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
             self.input_size // self.group_size,
         )
 
-        layer.w13_weight_scale = torch.nn.Parameter(
-            torch.ones(w13_scale_shape, dtype=torch.bfloat16), requires_grad=False
-        )
-        layer.w2_weight_scale = torch.nn.Parameter(
-            torch.ones(w2_scale_shape, dtype=torch.bfloat16), requires_grad=False
-        )
+        layer.w13_weight_scale = torch.nn.Parameter(torch.ones(w13_scale_shape, dtype=torch.bfloat16), requires_grad=False)
+        layer.w2_weight_scale = torch.nn.Parameter(torch.ones(w2_scale_shape, dtype=torch.bfloat16), requires_grad=False)
 
-        layer.w13_weight_offset = torch.nn.Parameter(
-            torch.zeros(w13_scale_shape, dtype=torch.bfloat16), requires_grad=False
-        )
-        layer.w2_weight_offset = torch.nn.Parameter(
-            torch.zeros(w2_scale_shape, dtype=torch.bfloat16), requires_grad=False
-        )
+        layer.w13_weight_offset = torch.nn.Parameter(torch.zeros(w13_scale_shape, dtype=torch.bfloat16), requires_grad=False)
+        layer.w2_weight_offset = torch.nn.Parameter(torch.zeros(w2_scale_shape, dtype=torch.bfloat16), requires_grad=False)
 
         layer.w13_weight_shape = torch.nn.Parameter(
             torch.tensor(
@@ -230,18 +210,14 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
             requires_grad=False,
         )
         layer.w2_weight_shape = torch.nn.Parameter(
-            torch.tensor(
-                [[self.output_size, self.input_size]] * self.experts, dtype=torch.int32
-            ),
+            torch.tensor([[self.output_size, self.input_size]] * self.experts, dtype=torch.int32),
             requires_grad=False,
         )
 
         return layer
 
     @patch("vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack")
-    def test_process_weights_after_loading_with_transpose(
-        self, mock_npu_convert_weight_to_int4pack
-    ):
+    def test_process_weights_after_loading_with_transpose(self, mock_npu_convert_weight_to_int4pack):
         def mock_convert_weight(weight):
             new_shape = list(weight.shape)
             new_shape[-1] = new_shape[-1] // 8

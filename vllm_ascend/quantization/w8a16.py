@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 import torch_npu
@@ -34,19 +34,19 @@ class AscendW8A16LinearMethod:
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype = torch.bfloat16,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict
 
     @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pertensor_param(params_dtype: torch.dtype) -> dict[str, Any]:
         return {}
 
     @staticmethod
     def get_perchannel_param(
         output_size: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(output_size, 1, dtype=params_dtype)
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
@@ -57,16 +57,16 @@ class AscendW8A16LinearMethod:
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
-        layer_type: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        layer_type: str | None = None,
+    ) -> dict[str, Any]:
         return {}
 
     @staticmethod
     def apply(
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-        tp_rank: Optional[int] = 0,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
     ) -> torch.Tensor:
         output = torch_npu.npu_weight_quant_batchmatmul(
             x=x,

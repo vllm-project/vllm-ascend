@@ -63,7 +63,5 @@ def test_vl_model_with_samples(model: str, dtype: str) -> None:
         enforce_eager=True,
         compilation_config={"custom_ops": ["none", "+rms_norm", "+rotary_embedding"]},
     ) as vllm_model:
-        sampling_params = SamplingParams(
-            max_tokens=100, top_p=0.95, top_k=50, temperature=0.6
-        )
+        sampling_params = SamplingParams(max_tokens=100, top_p=0.95, top_k=50, temperature=0.6)
         vllm_model.generate(example_prompts, sampling_params)

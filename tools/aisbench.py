@@ -29,12 +29,8 @@ import pandas as pd
 from modelscope import snapshot_download  # type: ignore
 
 BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("./benchmark"))
-DATASET_CONF_DIR = os.path.join(
-    BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "datasets"
-)
-REQUEST_CONF_DIR = os.path.join(
-    BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "models", "vllm_api"
-)
+DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "datasets")
+REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "models", "vllm_api")
 DATASET_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "datasets")
 
 
@@ -72,9 +68,7 @@ class AisbenchRunner:
             if self.num_prompts:
                 aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
         print(f"running aisbench cmd: {' '.join(aisbench_cmd)}")
-        self.proc: subprocess.Popen = subprocess.Popen(
-            aisbench_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
+        self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def __init__(
         self,
@@ -87,15 +81,11 @@ class AisbenchRunner:
         self.model = model
         self.dataset_path = aisbench_config.get("dataset_path_local")
         if not self.dataset_path:
-            self.dataset_path = maybe_download_from_modelscope(
-                aisbench_config["dataset_path"], repo_type="dataset"
-            )
+            self.dataset_path = maybe_download_from_modelscope(aisbench_config["dataset_path"], repo_type="dataset")
         self.model_path = aisbench_config.get("model_path")
         if not self.model_path:
             self.model_path = maybe_download_from_modelscope(model)
-        assert self.dataset_path is not None and self.model_path is not None, (
-            f"Failed to download dataset or model: dataset={self.dataset_path}, model={self.model_path}"
-        )
+        assert self.dataset_path is not None and self.model_path is not None, f"Failed to download dataset or model: dataset={self.dataset_path}, model={self.model_path}"
         self.port = port
         self.host_ip = host_ip
         self.task_type = aisbench_config["case_type"]
@@ -140,9 +130,7 @@ class AisbenchRunner:
             with open(conf_path, "r", encoding="utf-8") as f:
                 content = f.read()
             content = re.sub(r"path=.*", f'path="{self.dataset_path}",', content)
-            conf_path_new = os.path.join(
-                DATASET_CONF_DIR, f"{self.dataset_conf}_custom.py"
-            )
+            conf_path_new = os.path.join(DATASET_CONF_DIR, f"{self.dataset_conf}_custom.py")
             with open(conf_path_new, "w", encoding="utf-8") as f:
                 f.write(content)
 
@@ -153,9 +141,7 @@ class AisbenchRunner:
         content = re.sub(r"model=.*", f'model="{self.model}",', content)
         content = re.sub(r"host_port.*", f"host_port = {self.port},", content)
         content = re.sub(r"host_ip.*", f'host_ip = "{self.host_ip}",', content)
-        content = re.sub(
-            r"max_out_len.*", f"max_out_len = {self.max_out_len},", content
-        )
+        content = re.sub(r"max_out_len.*", f"max_out_len = {self.max_out_len},", content)
         content = re.sub(r"batch_size.*", f"batch_size = {self.batch_size},", content)
         content = re.sub(
             r"trust_remote_code=.*",
@@ -167,9 +153,7 @@ class AisbenchRunner:
         content = content.replace("repetition_penalty", "#repetition_penalty")
         if self.task_type == "performance":
             content = re.sub(r"path=.*", f'path="{self.model_path}",', content)
-            content = re.sub(
-                r"request_rate.*", f"request_rate = {self.request_rate},", content
-            )
+            content = re.sub(r"request_rate.*", f"request_rate = {self.request_rate},", content)
             content = re.sub(
                 r"temperature.*",
                 "temperature = 0,\n            ignore_eos = True,",
@@ -183,9 +167,7 @@ class AisbenchRunner:
                 content,
             )
         if self.temperature:
-            content = re.sub(
-                r"temperature.*", f"temperature = {self.temperature},", content
-            )
+            content = re.sub(r"temperature.*", f"temperature = {self.temperature},", content)
         if self.top_p:
             content = re.sub(r"#?top_p.*", f"top_p = {self.top_p},", content)
         if self.top_k:
@@ -239,9 +221,7 @@ class AisbenchRunner:
                 raise RuntimeError(error_msg) from None
 
     def _get_result_performance(self):
-        result_dir = re.search(
-            r"Performance Result files locate in (.*)", self.result_line
-        ).group(1)[:-1]
+        result_dir = re.search(r"Performance Result files locate in (.*)", self.result_line).group(1)[:-1]
         dataset_type = self.dataset_conf.split("/")[0]
         result_csv_file = os.path.join(result_dir, f"{dataset_type}dataset.csv")
         result_json_file = os.path.join(result_dir, f"{dataset_type}dataset.json")
@@ -258,46 +238,37 @@ class AisbenchRunner:
 
     def _performance_verify(self):
         self._get_result_performance()
-        output_throughput = self.result_json["Output Token Throughput"][
-            "total"
-        ].replace("token/s", "")
-        assert float(output_throughput) >= self.threshold * self.baseline, (
-            f"Performance verification failed. The current Output Token Throughput is {output_throughput} token/s, which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
+        output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
+        min_throughput = self.threshold * self.baseline
+        assert float(output_throughput) >= min_throughput, (
+            "Performance verification failed. The current Output Token Throughput is "
+            f"{output_throughput} token/s, which is not greater than or equal to "
+            f"{self.threshold} * baseline {self.baseline}."
         )
 
     def _accuracy_verify(self):
         self._get_result_accuracy()
         acc_value = self.result
-        assert (
-            self.baseline - self.threshold
-            <= acc_value
-            <= self.baseline + self.threshold
-        ), (
+        assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, (
             f"Accuracy verification failed. The accuracy of {self.dataset_path} is {acc_value}, which is not within {self.threshold} relative to baseline {self.baseline}."
         )
 
 
-def run_aisbench_cases(
-    model, port, aisbench_cases, server_args="", host_ip="localhost"
-):
+def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="localhost"):
     aisbench_results = []
     aisbench_errors = []
     for aisbench_case in aisbench_cases:
         if not aisbench_case:
             continue
         try:
-            with AisbenchRunner(
-                model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case
-            ) as aisbench:
+            with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
                 aisbench_results.append(aisbench.result)
         except Exception as e:
             aisbench_results.append("")
             aisbench_errors.append([aisbench_case, e])
             print(e)
     for failed_case, error_info in aisbench_errors:
-        error_msg = (
-            f"The following aisbench case failed: {failed_case}, reason is {error_info}"
-        )
+        error_msg = f"The following aisbench case failed: {failed_case}, reason is {error_info}"
         if server_args:
             error_msg += f"\nserver_args are {server_args}"
         logging.error(error_msg)

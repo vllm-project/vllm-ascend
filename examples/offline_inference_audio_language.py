@@ -24,12 +24,13 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 
-import os
 import argparse
+import os
 
 from vllm.assets.audio import AudioAsset
+
 try:
-    import librosa # type: ignore
+    import librosa  # type: ignore
 except ImportError:
     raise Exception("Can't import librosa, please ensure it's installed")
 
@@ -40,7 +41,8 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def prepare_inputs(audio_count: int, audio_path1: str, audio_path2: str):
-    use_vllm_audio_assert = True if audio_path1 == "mary_had_lamb" and audio_path2 == "winning_call" else False
+    use_vllm_audio_assert = bool(audio_path1 == "mary_had_lamb"
+                                and audio_path2 == "winning_call")
     if use_vllm_audio_assert:
         audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
     else:

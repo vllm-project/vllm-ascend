@@ -1,3 +1,4 @@
+import contextlib
 import gc
 import os
 import sys
@@ -32,24 +33,20 @@ BASE_KWARGS = {
 }
 
 
+@contextlib.contextmanager
 def redirect_output(log_file_path):
     log_path = Path(LOG_NAME) / log_file_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(LOG_NAME + "/" + log_file_path, "w")
-    os.dup2(f.fileno(), sys.stdout.fileno())
-    os.dup2(f.fileno(), sys.stderr.fileno())
-    return f
+    with open(LOG_NAME + "/" + log_file_path, "w", encoding="utf-8") as f:
+        os.dup2(f.fileno(), sys.stdout.fileno())
+        os.dup2(f.fileno(), sys.stderr.fileno())
+        yield
 
 
 def permute_weight(w: torch.Tensor, tile_n):
     *dims, n = w.shape
     order = list(range(len(dims))) + [-2, -3, -1]
-    return (
-        w.reshape(*dims, 2, n // tile_n, tile_n // 2)
-        .permute(order)
-        .reshape(*dims, n)
-        .contiguous()
-    )
+    return w.reshape(*dims, 2, n // tile_n, tile_n // 2).permute(order).reshape(*dims, n).contiguous()
 
 
 def output_to_file(rank_id):
@@ -83,9 +80,7 @@ class DecodeMoeOps(torch.nn.Module):
         self.global_rank_id = global_rank_id
         self.shared_expert_rank_num = shared_expert_rank_num
         is_shared_expert = global_rank_id < shared_expert_rank_num
-        moe_expert_num_per_rank = moe_expert_num // (
-            ep_world_size - shared_expert_rank_num
-        )
+        moe_expert_num_per_rank = moe_expert_num // (ep_world_size - shared_expert_rank_num)
         self.local_expert_num = 1 if is_shared_expert else moe_expert_num_per_rank
         self.ep_recv_count_size = self.local_expert_num * ep_world_size
         self.dynamic_eplb = dynamic_eplb
@@ -96,51 +91,27 @@ class DecodeMoeOps(torch.nn.Module):
                 self.moe_intermediate_size * 2,
             ]
         )
-        self.gmm1_weight_scale = torch.empty(
-            [self.local_expert_num, self.moe_intermediate_size * 2]
-        )
-        self.gmm2_weight = torch.empty(
-            [self.local_expert_num, self.moe_intermediate_size, self.token_hidden_size]
-        )
-        self.gmm2_weight_scale = torch.empty(
-            [self.local_expert_num, self.token_hidden_size]
-        )
-        self._process_weights_after_loading(
-            gmm1_weight, gmm1_weight_scale, gmm2_weight, gmm2_weight_scale
-        )
+        self.gmm1_weight_scale = torch.empty([self.local_expert_num, self.moe_intermediate_size * 2])
+        self.gmm2_weight = torch.empty([self.local_expert_num, self.moe_intermediate_size, self.token_hidden_size])
+        self.gmm2_weight_scale = torch.empty([self.local_expert_num, self.token_hidden_size])
+        self._process_weights_after_loading(gmm1_weight, gmm1_weight_scale, gmm2_weight, gmm2_weight_scale)
 
-    def _process_weights_after_loading(
-        self, gmm1_weight, gmm1_weight_scale, gmm2_weight, gmm2_weight_scale
-    ):
-        gmm1_weight = torch_npu.npu_format_cast(
-            gmm1_weight, torch_npu.Format.FRACTAL_NZ
-        )
-        gmm2_weight = torch_npu.npu_format_cast(
-            gmm2_weight, torch_npu.Format.FRACTAL_NZ
-        )
+    def _process_weights_after_loading(self, gmm1_weight, gmm1_weight_scale, gmm2_weight, gmm2_weight_scale):
+        gmm1_weight = torch_npu.npu_format_cast(gmm1_weight, torch_npu.Format.FRACTAL_NZ)
+        gmm2_weight = torch_npu.npu_format_cast(gmm2_weight, torch_npu.Format.FRACTAL_NZ)
         self.gmm1_weight = torch.nn.Parameter(gmm1_weight, requires_grad=False)
-        self.gmm1_weight_scale = torch.nn.Parameter(
-            gmm1_weight_scale, requires_grad=False
-        )
+        self.gmm1_weight_scale = torch.nn.Parameter(gmm1_weight_scale, requires_grad=False)
         self.gmm2_weight = torch.nn.Parameter(gmm2_weight, requires_grad=False)
-        self.gmm2_weight_scale = torch.nn.Parameter(
-            gmm2_weight_scale, requires_grad=False
-        )
+        self.gmm2_weight_scale = torch.nn.Parameter(gmm2_weight_scale, requires_grad=False)
 
-        self.gmm1_weight_scale_fp32 = torch.nn.Parameter(
-            gmm1_weight_scale.float(), requires_grad=False
-        )
-        self.gmm2_weight_scale_fp32 = torch.nn.Parameter(
-            gmm2_weight_scale.float(), requires_grad=False
-        )
+        self.gmm1_weight_scale_fp32 = torch.nn.Parameter(gmm1_weight_scale.float(), requires_grad=False)
+        self.gmm2_weight_scale_fp32 = torch.nn.Parameter(gmm2_weight_scale.float(), requires_grad=False)
 
     def _apply_ops(self, x, expert_ids, smooth_scales, expert_scales, x_active_mask):
         raise NotImplementedError("To be implemented in subclass")
 
     def forward(self, x, expert_ids, smooth_scales, expert_scales, x_active_mask):
-        return self._apply_ops(
-            x, expert_ids, smooth_scales, expert_scales, x_active_mask
-        )
+        return self._apply_ops(x, expert_ids, smooth_scales, expert_scales, x_active_mask)
 
 
 class SmallOps(DecodeMoeOps):
@@ -318,27 +289,17 @@ class FusionOp(DecodeMoeOps):
         )
         return output
 
-    def _process_weights_after_loading(
-        self, gmm1_weight, gmm1_weight_scale, gmm2_weight, gmm2_weight_scale
-    ):
-        gmm1_weight = torch_npu.npu_format_cast(
-            gmm1_weight, torch_npu.Format.FRACTAL_NZ
-        )
-        gmm2_weight = torch_npu.npu_format_cast(
-            gmm2_weight, torch_npu.Format.FRACTAL_NZ
-        )
+    def _process_weights_after_loading(self, gmm1_weight, gmm1_weight_scale, gmm2_weight, gmm2_weight_scale):
+        gmm1_weight = torch_npu.npu_format_cast(gmm1_weight, torch_npu.Format.FRACTAL_NZ)
+        gmm2_weight = torch_npu.npu_format_cast(gmm2_weight, torch_npu.Format.FRACTAL_NZ)
         gmm1_weight_scale = gmm1_weight_scale.float()
         gmm2_weight_scale = gmm2_weight_scale.float()
 
         if self.dynamic_eplb:
             self.gmm1_weight = [weight.clone() for weight in gmm1_weight.unbind(dim=0)]
-            self.gmm1_weight_scale_fp32 = [
-                weight.clone() for weight in gmm1_weight_scale.unbind(dim=0)
-            ]
+            self.gmm1_weight_scale_fp32 = [weight.clone() for weight in gmm1_weight_scale.unbind(dim=0)]
             self.gmm2_weight = [weight.clone() for weight in gmm2_weight.unbind(dim=0)]
-            self.gmm2_weight_scale_fp32 = [
-                weight.clone() for weight in gmm2_weight_scale.unbind(dim=0)
-            ]
+            self.gmm2_weight_scale_fp32 = [weight.clone() for weight in gmm2_weight_scale.unbind(dim=0)]
         else:
             self.gmm1_weight = [gmm1_weight.clone()]
             self.gmm1_weight_scale_fp32 = [gmm1_weight_scale.clone()]
@@ -361,11 +322,7 @@ def generate_datas(
 ):
     is_shared_expert = global_rank_id < shared_expert_rank_num
     moe_expert_num_per_rank = moe_expert_num // (ep_world_size - shared_expert_rank_num)
-    actual_bs = int(
-        torch.randint(2 if with_mc2_mask else 1, batch_size, [1]).item()
-        if enable_dynamic_bs
-        else batch_size
-    )
+    actual_bs = int(torch.randint(2 if with_mc2_mask else 1, batch_size, [1]).item() if enable_dynamic_bs else batch_size)
     local_expert_num = 1 if is_shared_expert else moe_expert_num_per_rank
     gmm1_input_dim = token_hidden_size
     gmm1_output_dim = moe_intermediate_size * 2
@@ -382,35 +339,17 @@ def generate_datas(
     )
     expert_ids = expert_ids % moe_expert_num
     if is_shared_expert:
-        gmm1_weight = (
-            torch.ones([local_expert_num, gmm1_input_dim, gmm1_output_dim]).to(
-                torch.int8
-            )
-            * 4
-        )
-        gmm2_weight = (
-            torch.ones([local_expert_num, gmm2_input_dim, gmm2_output_dim]).to(
-                torch.int8
-            )
-            * 4
-        )
+        gmm1_weight = torch.ones([local_expert_num, gmm1_input_dim, gmm1_output_dim]).to(torch.int8) * 4
+        gmm2_weight = torch.ones([local_expert_num, gmm2_input_dim, gmm2_output_dim]).to(torch.int8) * 4
         gmm1_weight[:, :, ::2] = gmm1_weight[:, :, ::2] * -1
         gmm2_weight[:, :, ::2] = gmm2_weight[:, :, ::2] * -1
         gmm1_weight_scale = torch.ones([local_expert_num, gmm1_output_dim]) * 0.0015
         gmm2_weight_scale = torch.ones([local_expert_num, gmm2_output_dim]) * 0.0015
     else:
-        gmm1_weight = torch.randint(
-            -16, 16, [local_expert_num, gmm1_input_dim, gmm1_output_dim]
-        ).to(torch.int8)
-        gmm2_weight = torch.randint(
-            -16, 16, [local_expert_num, gmm2_input_dim, gmm2_output_dim]
-        ).to(torch.int8)
-        gmm1_weight_scale = (
-            torch.rand([local_expert_num, gmm1_output_dim]) * 0.003 + 0.0015
-        )
-        gmm2_weight_scale = (
-            torch.rand([local_expert_num, gmm2_output_dim]) * 0.003 + 0.0015
-        )
+        gmm1_weight = torch.randint(-16, 16, [local_expert_num, gmm1_input_dim, gmm1_output_dim]).to(torch.int8)
+        gmm2_weight = torch.randint(-16, 16, [local_expert_num, gmm2_input_dim, gmm2_output_dim]).to(torch.int8)
+        gmm1_weight_scale = torch.rand([local_expert_num, gmm1_output_dim]) * 0.003 + 0.0015
+        gmm2_weight_scale = torch.rand([local_expert_num, gmm2_output_dim]) * 0.003 + 0.0015
     expert_scales = torch.rand(actual_bs, top_k)
     if test_bfloat16:
         x = x.bfloat16()
@@ -423,9 +362,7 @@ def generate_datas(
     valid_token_num = actual_bs
     if with_mc2_mask:
         valid_token_num = int(torch.randint(1, actual_bs, [1]).item())
-        x_active_mask = torch.cat(
-            (torch.ones(valid_token_num), torch.zeros(actual_bs - valid_token_num))
-        ).bool()
+        x_active_mask = torch.cat((torch.ones(valid_token_num), torch.zeros(actual_bs - valid_token_num))).bool()
     return (
         (x, expert_ids, smooth_sales, expert_scales, x_active_mask),
         (gmm1_weight, gmm1_weight_scale, gmm2_weight, gmm2_weight_scale),
@@ -449,64 +386,53 @@ def run_once(
     with_mc2_mask=False,
     dynamic_eplb=False,
 ):
-    log_file = (
-        redirect_output(f"local_rank_{local_rank_id}.log")
-        if output_to_file(local_rank_id)
-        else None
-    )
-    global_rank_id = local_rank_id  # 单机
-    device_id = local_rank_id % 16
-    torch_npu.npu.set_device(device_id)
+    ctx = redirect_output(f"local_rank_{local_rank_id}.log") if output_to_file(local_rank_id) else contextlib.nullcontext()
+    with ctx:
+        global_rank_id = local_rank_id  # 单机
+        device_id = local_rank_id % 16
+        torch_npu.npu.set_device(device_id)
 
-    # 初始化分布式环境
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = "29500"  # 端口号随意
-    dist.init_process_group(
-        backend="hccl", rank=local_rank_id, world_size=ep_world_size
-    )
-    ep_ranks_list = list(np.arange(0, ep_world_size))
-    ep_group = dist.new_group(backend="hccl", ranks=ep_ranks_list)
-    ep_group_small = dist.new_group(backend="hccl", ranks=ep_ranks_list)
+        # 初始化分布式环境
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = "29500"  # 端口号随意
+        dist.init_process_group(backend="hccl", rank=local_rank_id, world_size=ep_world_size)
+        ep_ranks_list = list(np.arange(0, ep_world_size))
+        ep_group = dist.new_group(backend="hccl", ranks=ep_ranks_list)
+        ep_group_small = dist.new_group(backend="hccl", ranks=ep_ranks_list)
 
-    ep_hcomm_info_fused = ep_group._get_backend(torch.device("npu")).get_hccl_comm_name(
-        local_rank_id
-    )
-    ep_hcomm_info_small = ep_group_small._get_backend(
-        torch.device("npu")
-    ).get_hccl_comm_name(local_rank_id)
-    torch_npu.npu.synchronize(device_id)
+        ep_hcomm_info_fused = ep_group._get_backend(torch.device("npu")).get_hccl_comm_name(local_rank_id)
+        ep_hcomm_info_small = ep_group_small._get_backend(torch.device("npu")).get_hccl_comm_name(local_rank_id)
+        torch_npu.npu.synchronize(device_id)
 
-    parameter = (
-        batch_size,
-        token_hidden_size,
-        moe_intermediate_size,
-        ep_world_size,
-        moe_expert_num,
-        global_rank_id,
-        shared_expert_rank_num,
-    )
-    input_datas, weight_datas, actual_bs, valid_token_num = generate_datas(
-        *parameter, top_k, test_bfloat16, enable_dynamic_bs, with_mc2_mask
-    )
-    input_datas = [data.npu() if data is not None else None for data in input_datas]
-    weight_datas = [data.npu() if data is not None else None for data in weight_datas]
-    small_ops = SmallOps(
-        *weight_datas, ep_hcomm_info_small, *parameter, dynamic_eplb
-    ).npu()  # type: ignore
-    fused_ops = FusionOp(
-        *weight_datas, ep_hcomm_info_fused, *parameter, dynamic_eplb
-    ).npu()  # type: ignore
-    if test_graph:
-        config = torchair.CompilerConfig()
-        config.mode = "reduce-overhead"
-        npu_backend = torchair.get_npu_backend(compiler_config=config)
-        fused_ops = torch.compile(fused_ops, backend=npu_backend)
-    small_op_token_output, small_op_count_output = small_ops(*input_datas)
-    fused_op_token_output, fused_op_count_output = fused_ops(*input_datas)
-    torch_npu.npu.synchronize(device_id)
-    dist.destroy_process_group()
-    if log_file is not None:
-        log_file.close()
+        parameter = (
+            batch_size,
+            token_hidden_size,
+            moe_intermediate_size,
+            ep_world_size,
+            moe_expert_num,
+            global_rank_id,
+            shared_expert_rank_num,
+        )
+        input_datas, weight_datas, actual_bs, valid_token_num = generate_datas(
+            *parameter,
+            top_k,
+            test_bfloat16,
+            enable_dynamic_bs,
+            with_mc2_mask,
+        )
+        input_datas = [data.npu() if data is not None else None for data in input_datas]
+        weight_datas = [data.npu() if data is not None else None for data in weight_datas]
+        small_ops = SmallOps(*weight_datas, ep_hcomm_info_small, *parameter, dynamic_eplb).npu()  # type: ignore
+        fused_ops = FusionOp(*weight_datas, ep_hcomm_info_fused, *parameter, dynamic_eplb).npu()  # type: ignore
+        if test_graph:
+            config = torchair.CompilerConfig()
+            config.mode = "reduce-overhead"
+            npu_backend = torchair.get_npu_backend(compiler_config=config)
+            fused_ops = torch.compile(fused_ops, backend=npu_backend)
+        small_op_token_output, small_op_count_output = small_ops(*input_datas)
+        fused_op_token_output, fused_op_count_output = fused_ops(*input_datas)
+        torch_npu.npu.synchronize(device_id)
+        dist.destroy_process_group()
 
     torch.testing.assert_close(
         small_op_token_output[0:valid_token_num].cpu(),

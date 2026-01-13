@@ -46,9 +46,7 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.device_type, "npu")
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
-        self.assertEqual(
-            NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES"
-        )
+        self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(
             NPUPlatform.supported_quantization,
@@ -60,9 +58,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
-    def test_pre_register_and_update_with_parser(
-        self, mock_quant_config, mock_adapt_patch
-    ):
+    def test_pre_register_and_update_with_parser(self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_action = MagicMock()
         mock_action.choices = ["awq", "gptq"]
@@ -77,18 +73,14 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
-    def test_pre_register_and_update_without_parser(
-        self, mock_quant_config, mock_adapt_patch
-    ):
+    def test_pre_register_and_update_without_parser(self, mock_quant_config, mock_adapt_patch):
         self.platform.pre_register_and_update(None)
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
-    def test_pre_register_and_update_with_parser_no_quant_action(
-        self, mock_quant_config, mock_adapt_patch
-    ):
+    def test_pre_register_and_update_with_parser_no_quant_action(self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_parser._option_string_actions = {}
 
@@ -98,9 +90,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
-    def test_pre_register_and_update_with_existing_ascend_quant(
-        self, mock_quant_config, mock_adapt_patch
-    ):
+    def test_pre_register_and_update_with_existing_ascend_quant(self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_action = MagicMock()
         mock_action.choices = ["awq", ASCEND_QUANTIZATION_METHOD]
@@ -132,12 +122,8 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.update_aclgraph_sizes")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("os.environ", {})
-    @patch(
-        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
-    )
-    def test_check_and_update_config_basic_config_update(
-        self, mock_init_recompute, mock_soc_version, mock_update_acl, mock_init_ascend
-    ):
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_basic_config_update(self, mock_init_recompute, mock_soc_version, mock_update_acl, mock_init_ascend):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.enable_expert_parallel = False
@@ -162,12 +148,8 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
-    )
-    def test_check_and_update_config_no_model_config_warning(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version
-    ):
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_no_model_config_warning(self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config = None
@@ -186,12 +168,8 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
-    )
-    def test_check_and_update_config_enforce_eager_mode(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version
-    ):
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_enforce_eager_mode(self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = True
@@ -206,9 +184,7 @@ class TestNPUPlatform(TestBase):
 
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
-        self.assertTrue(
-            "Compilation disabled, using eager mode by default" in cm.output[0]
-        )
+        self.assertTrue("Compilation disabled, using eager mode by default" in cm.output[0])
 
         self.assertEqual(
             vllm_config.compilation_config.mode,
@@ -223,9 +199,7 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.utils.update_default_aclgraph_sizes")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
-    )
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_unsupported_compilation_level(
         self,
         mock_init_recompute,
@@ -261,14 +235,10 @@ class TestNPUPlatform(TestBase):
                 CUDAGraphMode.NONE,
             )
 
-    @pytest.mark.skip(
-        "Revert me when vllm support setting cudagraph_mode on oot platform"
-    )
+    @pytest.mark.skip("Revert me when vllm support setting cudagraph_mode on oot platform")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    def test_check_and_update_config_unsupported_cudagraph_mode(
-        self, mock_init_ascend, mock_soc_version
-    ):
+    def test_check_and_update_config_unsupported_cudagraph_mode(self, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = False
@@ -279,10 +249,7 @@ class TestNPUPlatform(TestBase):
 
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
-            self.assertTrue(
-                "cudagraph_mode is not support on NPU. falling back to NONE"
-                in cm.output[0]
-            )
+            self.assertTrue("cudagraph_mode is not support on NPU. falling back to NONE" in cm.output[0])
 
             self.assertEqual(
                 vllm_config.compilation_config.mode,
@@ -295,12 +262,8 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
-    )
-    def test_check_and_update_config_cache_config_block_size(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version
-    ):
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_cache_config_block_size(self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.cache_config.block_size = None
@@ -321,12 +284,8 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
-    )
-    def test_check_and_update_config_v1_worker_class_selection(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version
-    ):
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_v1_worker_class_selection(self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.worker_cls = "auto"
@@ -357,15 +316,9 @@ class TestNPUPlatform(TestBase):
         )
 
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P
-    )
-    @patch(
-        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
-    )
-    def test_check_and_update_config_310p_no_custom_ops(
-        self, mock_init_recompute, mock_soc_version, mock_init_ascend
-    ):
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P)
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_310p_no_custom_ops(self, mock_init_recompute, mock_soc_version, mock_init_ascend):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.compilation_config.custom_ops = []
@@ -404,9 +357,7 @@ class TestNPUPlatform(TestBase):
             use_sparse=False,
         )
         result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
-        self.assertEqual(
-            result, "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
-        )
+        self.assertEqual(result, "vllm_ascend.attention.attention_v1.AscendAttentionBackend")
 
     def test_get_punica_wrapper(self):
         result = self.platform.get_punica_wrapper()
@@ -415,9 +366,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.max_memory_allocated")
-    def test_get_current_memory_usage_with_specific_device(
-        self, mock_max_memory, mock_reset_stats
-    ):
+    def test_get_current_memory_usage_with_specific_device(self, mock_max_memory, mock_reset_stats):
         max_memory_allocated_result = 1024.0
         mock_max_memory.return_value = max_memory_allocated_result
         test_device = torch.device("npu:0")
@@ -429,9 +378,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.max_memory_allocated")
-    def test_get_current_memory_usage_with_default_device(
-        self, mock_max_memory, mock_reset_stats
-    ):
+    def test_get_current_memory_usage_with_default_device(self, mock_max_memory, mock_reset_stats):
         max_memory_allocated_result = 1024.0
         mock_max_memory.return_value = max_memory_allocated_result
 
@@ -441,13 +388,9 @@ class TestNPUPlatform(TestBase):
         mock_max_memory.assert_called_once_with(None)
         self.assertEqual(result, max_memory_allocated_result)
 
-    @patch(
-        "torch.npu.reset_peak_memory_stats", side_effect=RuntimeError("Device error")
-    )
+    @patch("torch.npu.reset_peak_memory_stats", side_effect=RuntimeError("Device error"))
     @patch("torch.npu.max_memory_allocated")
-    def test_get_current_memory_usage_when_reset_stats_fails(
-        self, mock_max_memory, mock_reset_stats
-    ):
+    def test_get_current_memory_usage_when_reset_stats_fails(self, mock_max_memory, mock_reset_stats):
         with self.assertRaises(RuntimeError):
             self.platform.get_current_memory_usage()
         mock_reset_stats.assert_called_once()
@@ -458,9 +401,7 @@ class TestNPUPlatform(TestBase):
         "torch.npu.max_memory_allocated",
         side_effect=RuntimeError("Memory query failed"),
     )
-    def test_get_current_memory_usage_when_query_fails(
-        self, mock_max_memory, mock_reset_stats
-    ):
+    def test_get_current_memory_usage_when_query_fails(self, mock_max_memory, mock_reset_stats):
         with self.assertRaises(RuntimeError):
             self.platform.get_current_memory_usage()
         mock_reset_stats.assert_called_once()

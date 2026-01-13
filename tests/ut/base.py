@@ -27,7 +27,7 @@ class TestBase(unittest.TestCase):
         adapt_patch()
         register_ascend_customop()
         super().setUp()
-        super(TestBase, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
 
 class PytestBase:

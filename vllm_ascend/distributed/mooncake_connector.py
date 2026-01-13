@@ -9,11 +9,11 @@ import random
 import struct
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, OrderedDict, Tuple
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import numpy as np
@@ -222,11 +222,7 @@ class KVCacheSendingThread(threading.Thread):
             # to have a unique port. This hack to keeps us moving. We will
             # switch when moving to etcd or where we have a single ZMQ socket in
             # the scheduler.
-            device_index = (
-                self.pp_rank * self.tp_size
-                + self.tp_rank
-                + self.pcp_rank * self.prefill_tp_size
-            )
+            device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
             handshake_port = self.side_channel_port + device_index
             path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
             logger.info("Starting listening on path: %s", path)
@@ -234,17 +230,13 @@ class KVCacheSendingThread(threading.Thread):
                 self.ready_event.set()
                 self.run_busy_loop(sock)
         except Exception as e:
-            logger.error(
-                "Mooncake KVCacheSendingThread exception: %s", e, exc_info=True
-            )
+            logger.error("Mooncake KVCacheSendingThread exception: %s", e, exc_info=True)
 
     def run_busy_loop(self, sock: zmq.Socket):  # type: ignore
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(self.metadata)
         size_in_bytes = len(encoded_data)
-        logger.debug(
-            "Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes)
-        )
+        logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
         decoder = msgspec.msgpack.Decoder(type=tuple)
         while True:
@@ -271,16 +263,9 @@ class KVCacheSendingThread(threading.Thread):
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
-                        device_index = (
-                            self.pp_rank * self.tp_size
-                            + self.tp_rank
-                            + self.pcp_rank * self.prefill_tp_size
-                        )
+                        device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
                         handshake_port = self.side_channel_port + device_index
-                        if (
-                            self.port_send_num[request_id]
-                            >= remote_port_send_num[handshake_port]
-                        ):
+                        if self.port_send_num[request_id] >= remote_port_send_num[handshake_port]:
                             self.task_tracker.update_done_task_count(request_id)
                             del self.port_send_num[request_id]
                     else:
@@ -289,9 +274,7 @@ class KVCacheSendingThread(threading.Thread):
                     while True:
                         try:
                             # Send ACK to the sender.
-                            sock.send_multipart(
-                                (identity, b"", b"ACK"), flags=zmq.NOBLOCK
-                            )  # type: ignore
+                            sock.send_multipart((identity, b"", b"ACK"), flags=zmq.NOBLOCK)  # type: ignore
                             break
                         except zmq.Again:  # type: ignore
                             # If the socket is not ready, retry sending.
@@ -321,7 +304,7 @@ class KVCacheRecvingThread(threading.Thread):
         ready_event: threading.Event,
         vllm_config: VllmConfig,
         kv_caches: dict[str, Any],
-        prefill_pp_layer_partition: Optional[str] = None,
+        prefill_pp_layer_partition: str | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
@@ -335,9 +318,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         self.kv_caches = kv_caches
         self.kv_caches_base_addr: dict[str, dict[int, list[int]]] = SizedDict()
-        self.kv_caches_base_addr[local_engine_id][local_handshake_port] = (
-            local_kv_caches_base_addr
-        )
+        self.kv_caches_base_addr[local_engine_id][local_handshake_port] = local_kv_caches_base_addr
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
         self.block_len = block_len
         # TODO(jianzs): find a better way to detect MLA.
@@ -364,12 +345,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.model_config = self.vllm_config.model_config
         self.block_size = self.vllm_config.cache_config.block_size
         self.num_layers = self.model_config.hf_text_config.num_hidden_layers
-        self.pp_layer_indices = {
-            rank: get_prefill_pp_indices(
-                self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition
-            )
-            for rank in range(self._prefill_pp_size)
-        }
+        self.pp_layer_indices = {rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition) for rank in range(self._prefill_pp_size)}
         if not is_vl_model(vllm_config):
             if self.use_mla:
                 self.k_head_dim = self.model_config.hf_text_config.kv_lora_rank
@@ -379,8 +355,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self.k_head_dim = self.model_config.hf_text_config.head_dim
                 self.v_head_dim = self.model_config.hf_text_config.head_dim
                 self.num_kv_heads = max(
-                    self.model_config.hf_text_config.num_key_value_heads
-                    // self.tp_size,
+                    self.model_config.hf_text_config.num_key_value_heads // self.tp_size,
                     1,
                 )
         self.proc_not_transfer_request: dict[str, bool] = {}
@@ -395,10 +370,12 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port: int,
         offset: int,
         tp_num_need_pulls: int,
-        remote_port_send_num: dict[int, int] = {},
+        remote_port_send_num: dict[int, int] | None = None,
         all_task_done: bool = False,
     ):
         """Add a new request to the queue for processing."""
+        if remote_port_send_num is None:
+            remote_port_send_num = {}
         logger.debug(f"Adding request {request_id} to the queue.")
         self.request_queue.put(
             {
@@ -462,29 +439,18 @@ class KVCacheRecvingThread(threading.Thread):
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
             # remote host.
-            self._send_done_recv_signal(
-                request_id, remote_host, remote_handshake_port, remote_port_send_num
-            )
-            self._send_done_signal_to_free_remote_port(
-                request_id, remote_host, remote_port_send_num
-            )
+            self._send_done_recv_signal(request_id, remote_host, remote_handshake_port, remote_port_send_num)
+            self._send_done_signal_to_free_remote_port(request_id, remote_host, remote_port_send_num)
 
-    def _send_done_signal_to_free_remote_port(
-        self, request_id, remote_host, remote_port_send_num
-    ):
-        if (
-            self.side_channel_port != self.local_handshake_port
-            or not remote_port_send_num
-        ):
+    def _send_done_signal_to_free_remote_port(self, request_id, remote_host, remote_port_send_num):
+        if self.side_channel_port != self.local_handshake_port or not remote_port_send_num:
             return
         if request_id not in self.proc_not_transfer_request:
             self.proc_not_transfer_request[request_id] = True
         if self.proc_not_transfer_request[request_id]:
-            for remote_port in remote_port_send_num.keys():
+            for remote_port in remote_port_send_num:
                 if remote_port_send_num[remote_port] == 0:
-                    self._send_done_recv_signal(
-                        request_id, remote_host, remote_port, remote_port_send_num
-                    )
+                    self._send_done_recv_signal(request_id, remote_host, remote_port, remote_port_send_num)
             self.proc_not_transfer_request[request_id] = False
 
     def _transfer_kv_cache(self, req_meta: dict[str, Any]):
@@ -510,16 +476,11 @@ class KVCacheRecvingThread(threading.Thread):
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
         # Check if we have the remote metadata cached.
-        if (
-            remote_engine_id not in self.kv_caches_base_addr
-            or remote_handshake_port not in self.kv_caches_base_addr[remote_engine_id]
-        ):
+        if remote_engine_id not in self.kv_caches_base_addr or remote_handshake_port not in self.kv_caches_base_addr[remote_engine_id]:
             self._get_remote_metadata(remote_host, remote_handshake_port)
 
         if tp_num_need_pulls == 1:
-            grouped_remote_block_ids, grouped_local_block_ids = (
-                group_concurrent_contiguous(remote_block_ids, local_block_ids)
-            )
+            grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(remote_block_ids, local_block_ids)
         else:
             remote_block_ids = list(map(lambda x: [x], remote_block_ids))
             local_block_ids = list(map(lambda x: [x], local_block_ids))
@@ -532,43 +493,28 @@ class KVCacheRecvingThread(threading.Thread):
         # Due to GQA, different KV heads are distributed across different ranks, so there are offsets
         # indicating which KV head to pull
         global_offset = offset  # Global offset of request across all ranks
-        prefill_pp_rank = (
-            offset // tp_num_need_pulls
-        )  # PP rank where current request resides
+        prefill_pp_rank = offset // tp_num_need_pulls  # PP rank where current request resides
         inner_offset = offset % tp_num_need_pulls  # Offset within each PP stage
 
-        remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][
-            remote_handshake_port
-        ]
+        remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
         first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
         # support MTP layer kv transfer
         if self.vllm_config.speculative_config is not None:
             # all MTP layer use the same kv cache layer, so only need to transfer once
             if prefill_pp_rank == self._prefill_pp_size - 1:
                 end_layer_index = end_layer_index + 1
-        num_cache_per_layer = len(
-            list(self.kv_caches.values())[0]
-        )  # Number of KV caches per layer
-        local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][
-            self.local_handshake_port
-        ][
-            first_layer_index * num_cache_per_layer : end_layer_index
-            * num_cache_per_layer
+        num_cache_per_layer = len(list(self.kv_caches.values())[0])  # Number of KV caches per layer
+        local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][
+            first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
         ]
-        logger.debug(
-            f"transfer kv cache first_layer_index:{first_layer_index} , end_layer_index:{end_layer_index}"
-        )
-        remote_transfer_port = self.remote_te_port[remote_engine_id][
-            remote_handshake_port
-        ]
+        logger.debug(f"transfer kv cache first_layer_index:{first_layer_index} , end_layer_index:{end_layer_index}")
+        remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         num_blocks = len(local_block_ids)
         session_id = f"{remote_host}:{remote_transfer_port}"
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
-        for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
-            zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
-        ):
+        for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)):
             if self.use_mla:
                 block_len = self.block_len[k % 2]
             elif self.use_sparse:
@@ -576,34 +522,23 @@ class KVCacheRecvingThread(threading.Thread):
             else:
                 block_len = self.block_len[0]
             inner_block_len = block_len // tp_num_need_pulls
-            for remote_block_id, local_block_id in zip(
-                grouped_remote_block_ids, grouped_local_block_ids
-            ):
-                src = (
-                    src_layer_base_addr
-                    + local_block_id[0] * block_len
-                    + inner_offset * inner_block_len
-                )
+            for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
+                src = src_layer_base_addr + local_block_id[0] * block_len + inner_offset * inner_block_len
                 dst = dst_layer_base_addr + remote_block_id[0] * inner_block_len
                 length = inner_block_len * len(local_block_id)
                 src_list.append(src)
                 dst_list.append(dst)
                 length_list.append(length)
 
-        ret = self.engine.batch_transfer_sync_read(
-            session_id, src_list, dst_list, length_list
-        )
+        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
-            logger.error(
-                "Mooncake transfer failed for request %s", req_meta["request_id"]
-            )
+            logger.error("Mooncake transfer failed for request %s", req_meta["request_id"])
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
         logger.info(
-            "KV cache transfer for request %s took %.2f ms (%d groups,"
-            " %d blocks). local_ip %s local_device_id %s remote_session_id %s",
+            "KV cache transfer for request %s took %.2f ms (%d groups, %d blocks). local_ip %s local_device_id %s remote_session_id %s",
             request_id,
             req_transfer_elapsed,
             num_transfer_groups,
@@ -615,9 +550,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         # Determine if the current position is the offset position at the end of
         # the KV transmission.
-        is_kv_transfer_end = (
-            global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
-        )
+        is_kv_transfer_end = global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
         need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
         if need_nz_cache or need_cat_cache:
@@ -641,9 +574,7 @@ class KVCacheRecvingThread(threading.Thread):
         device = k_cache.device
 
         flat_block_ids = [item for sublist in block_ids for item in sublist]
-        block_ids_tensor = torch.tensor(
-            flat_block_ids, dtype=torch.int32, device=device
-        )
+        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
         num_blocks = len(flat_block_ids)
         num_tokens = num_blocks * self.block_size
 
@@ -653,21 +584,12 @@ class KVCacheRecvingThread(threading.Thread):
         seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
 
         # Initialize buffers
-        k_buffer = torch.empty(
-            (num_tokens, self.num_kv_heads, self.k_head_dim), dtype=dtype, device=device
-        )
-        v_buffer = torch.empty(
-            (num_tokens, self.num_kv_heads, self.v_head_dim), dtype=dtype, device=device
-        )
+        k_buffer = torch.empty((num_tokens, self.num_kv_heads, self.k_head_dim), dtype=dtype, device=device)
+        v_buffer = torch.empty((num_tokens, self.num_kv_heads, self.v_head_dim), dtype=dtype, device=device)
 
         # Create slot mapping for reshape operations
-        block_offsets = torch.arange(
-            0, self.block_size, dtype=torch.int32, device=device
-        )
-        slot_mapping = (
-            block_offsets.reshape((1, self.block_size))
-            + block_ids_tensor.reshape((num_blocks, 1)) * self.block_size
-        ).flatten()
+        block_offsets = torch.arange(0, self.block_size, dtype=torch.int32, device=device)
+        slot_mapping = (block_offsets.reshape((1, self.block_size)) + block_ids_tensor.reshape((num_blocks, 1)) * self.block_size).flatten()
 
         # FIXME: Right now, if we skip synchronization at this point, the system
         # will crash in GQA scenarios. However, we still haven't identified the
@@ -698,9 +620,7 @@ class KVCacheRecvingThread(threading.Thread):
                     slot_mapping,
                 )
             if need_nz_cache:
-                self._nz_kv_cache(
-                    k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping
-                )
+                self._nz_kv_cache(k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping)
         # Clean up buffers
         del k_buffer, v_buffer
 
@@ -733,9 +653,7 @@ class KVCacheRecvingThread(threading.Thread):
             slot_indices=slot_mapping,
         )
 
-    def _nz_kv_cache(
-        self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping
-    ):
+    def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping):
         nz_fmt_last_dim = 16
         k_cache_layer = k_cache_layer.view(
             -1,
@@ -749,31 +667,20 @@ class KVCacheRecvingThread(threading.Thread):
             self.block_size,
             nz_fmt_last_dim,
         )
-        torch_npu.npu_scatter_pa_kv_cache(
-            k_buffer, v_buffer, k_cache_layer, v_cache_layer, slot_mapping
-        )
+        torch_npu.npu_scatter_pa_kv_cache(k_buffer, v_buffer, k_cache_layer, v_cache_layer, slot_mapping)
 
-    def _get_remote_metadata(
-        self, remote_host: str, remote_handshake_port: int
-    ) -> None:
+    def _get_remote_metadata(self, remote_host: str, remote_handshake_port: int) -> None:
         """Get the metadata from the remote host."""
-        sock: Optional[zmq.Socket] = None  # type: ignore
+        sock: zmq.Socket | None = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")))
             metadata_bytes = ensure_zmq_recv(sock, self.remote_poller)
             agent_meta = self.decoder.decode(metadata_bytes)
             engine_id = agent_meta.engine_id
-            assert engine_id != self.local_engine_id, (
-                f"Conflict engine id {engine_id} with local engine id "
-                f"{self.local_engine_id}."
-            )
-            self.kv_caches_base_addr[engine_id][remote_handshake_port] = (
-                agent_meta.kv_caches_base_addr
-            )
-            self.remote_te_port[engine_id][remote_handshake_port] = (
-                agent_meta.te_rpc_port
-            )
+            assert engine_id != self.local_engine_id, f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
+            self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
+            self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -796,17 +703,13 @@ class KVCacheRecvingThread(threading.Thread):
             remote_host,
             remote_handshake_port,
         )
-        sock: Optional[zmq.Socket] = None  # type: ignore
+        sock: zmq.Socket | None = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
-            data_bytes = self.encoder.encode(
-                (DONE_RECVING_MSG, request_id, remote_port_send_num)
-            )
+            data_bytes = self.encoder.encode((DONE_RECVING_MSG, request_id, remote_port_send_num))
             ensure_zmq_send(sock, data_bytes)
             resp = ensure_zmq_recv(sock, self.remote_poller, timeout=self.timeout)
-            logger.debug(
-                f"Received response for request {request_id}: {resp.decode('utf-8')}"
-            )
+            logger.debug(f"Received response for request {request_id}: {resp.decode('utf-8')}")
             if resp != b"ACK":
                 logger.error(
                     "Failed to receive ACK for request %s from %s:%d",
@@ -814,16 +717,12 @@ class KVCacheRecvingThread(threading.Thread):
                     remote_host,
                     remote_handshake_port,
                 )
-                raise RuntimeError(
-                    f"Failed to receive ACK, resp: {resp.decode('utf-8')}"
-                )
+                raise RuntimeError(f"Failed to receive ACK, resp: {resp.decode('utf-8')}")
         except RuntimeError as e:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
                 sock = None
-                logger.warning(
-                    f"Unexpected error occurred in socket, {e}, closing the original channel"
-                )
+                logger.warning(f"Unexpected error occurred in socket, {e}, closing the original channel")
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -833,9 +732,7 @@ class KVCacheRecvingThread(threading.Thread):
                     remote_handshake_port,
                 )
 
-    def _get_remote_socket(
-        self, remote_host: str, remote_handshake_port: int
-    ) -> zmq.Socket:  # type: ignore
+    def _get_remote_socket(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore
         """Get a socket to the remote host."""
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
         with self.remote_sockets_lock:
@@ -889,9 +786,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
             remote_pcp_size=kv_transfer_params.get("remote_pcp_size", 1),
             remote_dcp_size=kv_transfer_params.get("remote_dcp_size", 1),
-            remote_multi_nodes_meta_mapping=kv_transfer_params.get(
-                "remote_multi_nodes_meta_mapping", {}
-            ),
+            remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
         )
 
@@ -901,42 +796,30 @@ class MooncakeConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: Optional[KVCacheConfig] = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler: Optional[MooncakeConnectorScheduler] = (
-                MooncakeConnectorScheduler(vllm_config, str(self.engine_id))
-            )
-            self.connector_worker: Optional[MooncakeConnectorWorker] = None
+            self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(vllm_config, str(self.engine_id))
+            self.connector_worker: MooncakeConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = MooncakeConnectorWorker(
-                vllm_config, str(self.engine_id)
-            )
+            self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id))
 
     ############################################################
     # Scheduler Side Methods
     ############################################################
 
-    def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
-    ) -> tuple[int, bool]:
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.get_num_new_matched_tokens(
-            request, num_computed_tokens
-        )
+        return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
-    def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
-    ):
+    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.update_state_after_alloc(
-            request, blocks, num_external_tokens
-        )
+        return self.connector_scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
     def build_connector_meta(
         self,
@@ -949,7 +832,7 @@ class MooncakeConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -1001,9 +884,7 @@ class MooncakeConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.xfer_handshake_metadata
 
-    def set_xfer_handshake_metadata(
-        self, metadata: dict[int, KVConnectorHandshakeMetadata]
-    ) -> None:
+    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
         """
         Set the KV connector handshake metadata for this connector.
 
@@ -1030,19 +911,13 @@ class MooncakeConnectorScheduler:
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.max_device_id = (
-            vllm_config.parallel_config.tensor_parallel_size
-            * vllm_config.parallel_config.data_parallel_size
-            * self.pcp_size
-            * vllm_config.parallel_config.pipeline_parallel_size
+            vllm_config.parallel_config.tensor_parallel_size * vllm_config.parallel_config.data_parallel_size * self.pcp_size * vllm_config.parallel_config.pipeline_parallel_size
         )
 
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
-            * vllm_config.parallel_config.tensor_parallel_size
-            * vllm_config.parallel_config.pipeline_parallel_size
-            * self.pcp_size
+            + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size * vllm_config.parallel_config.pipeline_parallel_size * self.pcp_size
         )
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
@@ -1053,9 +928,7 @@ class MooncakeConnectorScheduler:
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
 
-    def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
-    ) -> tuple[int, bool]:
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
         asynchronously relative to engine execution.
@@ -1073,8 +946,7 @@ class MooncakeConnectorScheduler:
 
         params = request.kv_transfer_params
         logger.debug(
-            "MooncakeConnector get_num_new_matched_tokens: "
-            "num_computed_tokens=%s, kv_transfer_params=%s",
+            "MooncakeConnector get_num_new_matched_tokens: num_computed_tokens=%s, kv_transfer_params=%s",
             num_computed_tokens,
             params,
         )
@@ -1089,28 +961,18 @@ class MooncakeConnectorScheduler:
         # No remote prefill for this request.
         return 0, False
 
-    def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
-    ):
+    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         params = request.kv_transfer_params
         logger.debug(
-            "MooncakeConnector update_state_after_alloc: "
-            "num_external_tokens=%s, kv_transfer_params=%s",
+            "MooncakeConnector update_state_after_alloc: num_external_tokens=%s, kv_transfer_params=%s",
             num_external_tokens,
             params,
         )
 
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
-                if all(
-                    p in params
-                    for p in ("remote_engine_id", "remote_host", "remote_port")
-                ):
-                    local_block_ids = (
-                        blocks.get_unhashed_block_ids()
-                        if num_external_tokens > 0
-                        else []
-                    )
+                if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port")):
+                    local_block_ids = blocks.get_unhashed_block_ids() if num_external_tokens > 0 else []
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (
                         request,
@@ -1119,8 +981,7 @@ class MooncakeConnectorScheduler:
                     )
                 else:
                     logger.warning(
-                        "Got invalid KVTransferParams: %s. This "
-                        "request will not utilize KVTransfer",
+                        "Got invalid KVTransferParams: %s. This request will not utilize KVTransfer",
                         params,
                     )
             else:
@@ -1162,7 +1023,7 @@ class MooncakeConnectorScheduler:
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
@@ -1170,17 +1031,12 @@ class MooncakeConnectorScheduler:
 
         params = request.kv_transfer_params
         logger.debug(
-            "MooncakeConnector request_finished, request_status=%s, "
-            "kv_transfer_params=%s",
+            "MooncakeConnector request_finished, request_status=%s, kv_transfer_params=%s",
             request.status,
             params,
         )
 
-        if (
-            params is None
-            or not params.get("do_remote_decode")
-            or request.status != RequestStatus.FINISHED_LENGTH_CAPPED
-        ):
+        if params is None or not params.get("do_remote_decode") or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             return False, None
 
         computed_block_ids = block_ids
@@ -1209,9 +1065,7 @@ class MooncakeConnectorScheduler:
             num_prompt_blocks=num_prompt_blocks,
         )
 
-    def set_xfer_handshake_metadata(
-        self, metadata: dict[int, KVConnectorHandshakeMetadata]
-    ) -> None:
+    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
         """
         Set the KV connector handshake metadata for this connector.
 
@@ -1232,10 +1086,7 @@ class MooncakeConnectorWorker:
         self._get_prefill_decode_size(vllm_config)
         os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
         if self._prefill_tp_size < self._decode_tp_size:
-            raise ValueError(
-                f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
-                f" or equal to the decode_tp_size: {self._decode_tp_size}"
-            )
+            raise ValueError(f"prefill_tp_size: {self._prefill_tp_size} must be greater than or equal to the decode_tp_size: {self._decode_tp_size}")
 
         # Metadata.
         self.vllm_config = vllm_config
@@ -1252,40 +1103,29 @@ class MooncakeConnectorWorker:
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
         # Assert that pp_size and pcp_size cannot both be greater than 1
-        assert not (self.pp_size > 1 and self.pcp_size > 1), (
-            "pp and pcp cannot open in same time"
-        )
+        assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = (
-            get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
-        )
+        self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.num_key_value_heads = (
-            self.vllm_config.model_config.hf_text_config.num_key_value_heads
-        )
+        self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
 
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
-            * vllm_config.parallel_config.tensor_parallel_size
-            * vllm_config.parallel_config.pipeline_parallel_size
-            * self.pcp_size
+            + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size * vllm_config.parallel_config.pipeline_parallel_size * self.pcp_size
         )
         device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-        self.engine = global_te.get_transfer_engine(
-            self.side_channel_host, device_name=None
-        )
+        self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
-        self.kv_send_thread: Optional[KVCacheSendingThread] = None
-        self.kv_recv_thread: Optional[KVCacheRecvingThread] = None
+        self.kv_send_thread: KVCacheSendingThread | None = None
+        self.kv_recv_thread: KVCacheRecvingThread | None = None
 
         # Handshake metadata of this worker
         self.xfer_handshake_metadata: MooncakeAgentMetadata | None = None
@@ -1297,40 +1137,32 @@ class MooncakeConnectorWorker:
             self.tp_num_need_pulls = 1
         else:
             num_d_block_heads = max(1, self.num_key_value_heads // self.tp_size)
-            num_p_block_heads = max(
-                1, self.num_key_value_heads // self._prefill_tp_size
-            )
+            num_p_block_heads = max(1, self.num_key_value_heads // self._prefill_tp_size)
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
-        self.local_remote_block_port_mapping: dict[str, Optional[List[List[int]]]] = {}
+        self.local_remote_block_port_mapping: dict[str, list[list[int]] | None] = {}
         self.remote_port_send_num: dict[str, dict[int, int]] = {}
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
-        prefill_parallel_config: dict[str, Any] = (
-            vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
-        )
+        prefill_parallel_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
 
-        assert "tp_size" in prefill_parallel_config.keys()
+        assert "tp_size" in prefill_parallel_config
         self._prefill_tp_size = prefill_parallel_config["tp_size"]
 
-        assert "dp_size" in prefill_parallel_config.keys()
+        assert "dp_size" in prefill_parallel_config
         self._prefill_dp_size = prefill_parallel_config["dp_size"]
         # get prefill pp size from extra config
         self._prefill_pp_size = prefill_parallel_config.get("pp_size", 1)
         # get decode tp and dp size from extra config
-        decode_parallel_config: dict[str, Any] = (
-            vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
-        )
-        assert "tp_size" in decode_parallel_config.keys()
+        decode_parallel_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
+        assert "tp_size" in decode_parallel_config
         self._decode_tp_size = decode_parallel_config["tp_size"]
-        assert "dp_size" in decode_parallel_config.keys()
+        assert "dp_size" in decode_parallel_config
         self._decode_dp_size = decode_parallel_config["dp_size"]
         # get prefill pp size from extra config
         self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
         assert self._decode_pp_size == 1, "decode pp size must be 1"
-        self._prefill_pp_layer_partition = prefill_parallel_config.get(
-            "pp_layer_partition", None
-        )
+        self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
@@ -1339,10 +1171,7 @@ class MooncakeConnectorWorker:
         first_kv_cache = first_kv_cache_tuple[0]
 
         # TODO(tms): Find a more robust way to detect and handle MLA
-        self.use_mla = (
-            first_kv_cache_tuple[0].size(-1) != first_kv_cache_tuple[1].size(-1)
-            and len(first_kv_cache_tuple) == 2
-        )
+        self.use_mla = first_kv_cache_tuple[0].size(-1) != first_kv_cache_tuple[1].size(-1) and len(first_kv_cache_tuple) == 2
         self.use_sparse = len(first_kv_cache_tuple) == 3
         if self.use_mla:
             # MLA case.[num_block, block_size, 1, hidden_dim]
@@ -1383,9 +1212,7 @@ class MooncakeConnectorWorker:
             # torchair:[num_block, block_size, num_head*hidden_dim]
             self.num_blocks = first_kv_cache.shape[0]
             kv_elem_size = first_kv_cache.element_size()
-            block_rank = (
-                len(first_kv_cache.shape) - 1
-            )  # [block_size, kv_heads, head_dim] or [block_size, kv_heads*head_dim]
+            block_rank = len(first_kv_cache.shape) - 1  # [block_size, kv_heads, head_dim] or [block_size, kv_heads*head_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
             self.block_len = [kv_elem_size * math.prod(block_shape)]
             logger.info("num_blocks: %s, block_shape: %s", self.num_blocks, block_shape)
@@ -1417,11 +1244,7 @@ class MooncakeConnectorWorker:
                     ptrs.append(base_addr)
                     lengths.append(region_len)
             else:
-                cache_list = (
-                    [cache_or_caches]
-                    if self.use_mla or self.use_sparse
-                    else cache_or_caches
-                )
+                cache_list = [cache_or_caches] if self.use_mla or self.use_sparse else cache_or_caches
                 for cache in cache_list:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[0]
@@ -1473,11 +1296,7 @@ class MooncakeConnectorWorker:
             self.kv_recv_thread.start()
 
         start_wait_time = time.time()
-        thread = (
-            self.kv_send_thread
-            if self.kv_role == "kv_producer"
-            else self.kv_recv_thread
-        )
+        thread = self.kv_send_thread if self.kv_role == "kv_producer" else self.kv_recv_thread
         assert thread is not None
         while not ready_event.is_set():
             if not thread.is_alive():
@@ -1516,14 +1335,9 @@ class MooncakeConnectorWorker:
         In cp/dcp scenario, kv_cache may be split, so we need to pull multiple blocks from multiple remote P node.
         Use this function to calculate remote port and remote block number of each remote P node that we need to pull.
         """
-        if (
-            meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size
-            == 1
-        ):
+        if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
             choosen_rank_list = self._get_remote_rank(req_id)
-            remote_handshake_port_list = [
-                [x + meta.remote_port for x in choosen_rank_list]
-            ]
+            remote_handshake_port_list = [[x + meta.remote_port for x in choosen_rank_list]]
             local_block_ids_list, remote_block_ids_list = (
                 [meta.local_block_ids],
                 [meta.remote_block_ids],
@@ -1535,16 +1349,10 @@ class MooncakeConnectorWorker:
             )
 
         def context_parallel_parameters_check():
-            assert (meta.remote_pcp_size * meta.remote_dcp_size) % (
-                self.pcp_size * self.dcp_size
-            ) == 0
+            assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
             if not self.use_mla:
-                p_node_heads_per_rank = math.ceil(
-                    self.num_key_value_heads / self._prefill_tp_size
-                )
-                d_node_heads_per_rank = math.ceil(
-                    self.num_key_value_heads / self.tp_size
-                )
+                p_node_heads_per_rank = math.ceil(self.num_key_value_heads / self._prefill_tp_size)
+                d_node_heads_per_rank = math.ceil(self.num_key_value_heads / self.tp_size)
                 assert d_node_heads_per_rank % p_node_heads_per_rank == 0
 
         def get_kv_head_groups(tp_size):
@@ -1556,10 +1364,7 @@ class MooncakeConnectorWorker:
             if self.num_key_value_heads // tp_size >= 1:
                 kv_head_groups = []
                 for tp_rank in range(tp_size):
-                    kv_head_ids = [
-                        head_idx + tp_rank * (self.num_key_value_heads // tp_size)
-                        for head_idx in range(self.num_key_value_heads // tp_size)
-                    ]
+                    kv_head_ids = [head_idx + tp_rank * (self.num_key_value_heads // tp_size) for head_idx in range(self.num_key_value_heads // tp_size)]
                     kv_head_groups.append(tuple(kv_head_ids))
                 return kv_head_groups
             if tp_size // self.num_key_value_heads > 1:
@@ -1579,9 +1384,7 @@ class MooncakeConnectorWorker:
                     cp_group_meta[kv_head_group] = {}
                     cp_group_meta[kv_head_group]["cp_groups"] = []
                     cp_group_meta[kv_head_group]["select_cp_groups_id"] = 0
-                kv_head_group_offset = (
-                    tp_size // len(kv_head_groups) * kv_head_group_idx
-                )
+                kv_head_group_offset = tp_size // len(kv_head_groups) * kv_head_group_idx
                 for dcp_repeat_idx in range(dcp_repeat_num):
                     # len(cp_group) == pcp_size * dcp_size
                     cp_group = []
@@ -1589,13 +1392,7 @@ class MooncakeConnectorWorker:
                     for pcp_rank in range(pcp_size):
                         pcp_rank_offset = tp_size * pcp_rank
                         for dcp_rank in range(dcp_size):
-                            cp_group.append(
-                                dcp_rank
-                                + port_base
-                                + pcp_rank_offset
-                                + dcp_repeat_offset
-                                + kv_head_group_offset
-                            )
+                            cp_group.append(dcp_rank + port_base + pcp_rank_offset + dcp_repeat_offset + kv_head_group_offset)
                     cp_group_meta[kv_head_group]["cp_groups"].append(cp_group)
 
             return cp_group_meta
@@ -1608,12 +1405,10 @@ class MooncakeConnectorWorker:
                 meta.remote_dcp_size,
                 meta.remote_port,
             )
-            d_node_cp_group_meta = get_cp_group_meta(
-                self.tp_size, self.pcp_size, self.dcp_size, self.side_channel_port
-            )
+            d_node_cp_group_meta = get_cp_group_meta(self.tp_size, self.pcp_size, self.dcp_size, self.side_channel_port)
             local_remote_block_port_mappings: dict[int, list[list[int]]] = {}
-            for d_node_head_key in d_node_cp_group_meta.keys():
-                for p_node_head_key in p_node_cp_group_meta.keys():
+            for d_node_head_key in d_node_cp_group_meta:
+                for p_node_head_key in p_node_cp_group_meta:
                     if not set(p_node_head_key).issubset(set(d_node_head_key)):
                         continue
                     d_node_head_group = d_node_cp_group_meta[d_node_head_key]
@@ -1622,11 +1417,7 @@ class MooncakeConnectorWorker:
                         select_cp_groups_id = p_node_head_group["select_cp_groups_id"]
                         p_cp_groups = p_node_head_group["cp_groups"]
                         p_cp_group = p_cp_groups[select_cp_groups_id]
-                        p_node_head_group["select_cp_groups_id"] = (
-                            select_cp_groups_id + 1
-                            if select_cp_groups_id + 1 < len(p_cp_groups)
-                            else 0
-                        )
+                        p_node_head_group["select_cp_groups_id"] = select_cp_groups_id + 1 if select_cp_groups_id + 1 < len(p_cp_groups) else 0
                         for d_idx, d_port in enumerate(d_cp_group):
                             if d_port not in local_remote_block_port_mappings:
                                 local_remote_block_port_mappings[d_port] = []
@@ -1634,13 +1425,10 @@ class MooncakeConnectorWorker:
                             for p_idx, p_port in enumerate(p_cp_group):
                                 if p_idx % len(d_cp_group) == d_idx:
                                     p_port_remote_list.append(p_port)
-                            local_remote_block_port_mappings[d_port].append(
-                                p_port_remote_list
-                            )
+                            local_remote_block_port_mappings[d_port].append(p_port_remote_list)
 
             logger.info(
-                "p_node_cp_group_meta is:: %s. d_node_cp_group_meta is:: %s. "
-                "local_remote_block_port_mappings is:: %s. ",
+                "p_node_cp_group_meta is:: %s. d_node_cp_group_meta is:: %s. local_remote_block_port_mappings is:: %s. ",
                 p_node_cp_group_meta,
                 d_node_cp_group_meta,
                 local_remote_block_port_mappings,
@@ -1652,7 +1440,7 @@ class MooncakeConnectorWorker:
             remote_port_send_num: dict[int, int] = {}
             for port in range(self._prefill_tp_size * meta.remote_pcp_size):
                 remote_port_send_num[meta.remote_port + port] = 0
-            for local_port in local_remote_block_port_mappings.keys():
+            for local_port in local_remote_block_port_mappings:
                 remote_port_head_list = local_remote_block_port_mappings[local_port]
                 for remote_port_list in remote_port_head_list:
                     for remote_port in remote_port_list:
@@ -1663,33 +1451,20 @@ class MooncakeConnectorWorker:
             self.local_remote_block_port_mapping[meta.remote_engine_id] = None
         if self.local_remote_block_port_mapping[meta.remote_engine_id] is None:
             local_remote_block_port_mappings = get_local_remote_block_port_mappings()
-            self.local_remote_block_port_mapping[meta.remote_engine_id] = (
-                local_remote_block_port_mappings[self.handshake_port]
-            )
-            self.remote_port_send_num[meta.remote_engine_id] = get_remote_port_send_num(
-                local_remote_block_port_mappings
-            )
+            self.local_remote_block_port_mapping[meta.remote_engine_id] = local_remote_block_port_mappings[self.handshake_port]
+            self.remote_port_send_num[meta.remote_engine_id] = get_remote_port_send_num(local_remote_block_port_mappings)
 
-        local_remote_block_port_mapping = copy.deepcopy(
-            self.local_remote_block_port_mapping[meta.remote_engine_id]
-        )
+        local_remote_block_port_mapping = copy.deepcopy(self.local_remote_block_port_mapping[meta.remote_engine_id])
 
         num_external_blocks = math.ceil(meta.num_external_tokens / self.block_size)
 
-        assert math.ceil(num_external_blocks / (self.pcp_size * self.dcp_size)) == len(
-            meta.local_block_ids
-        ), (
-            f"num_external_blocks({num_external_blocks}), cp_size({self.pcp_size * self.dcp_size}), "
-            f"local_block_ids_len ({len(meta.local_block_ids)})"
+        assert math.ceil(num_external_blocks / (self.pcp_size * self.dcp_size)) == len(meta.local_block_ids), (
+            f"num_external_blocks({num_external_blocks}), cp_size({self.pcp_size * self.dcp_size}), local_block_ids_len ({len(meta.local_block_ids)})"
         )
-        assert meta.num_prompt_blocks >= num_external_blocks, (
-            f"meta.num_prompt_blocks({meta.num_prompt_blocks}), num_external_blocks({num_external_blocks})"
-        )
+        assert meta.num_prompt_blocks >= num_external_blocks, f"meta.num_prompt_blocks({meta.num_prompt_blocks}), num_external_blocks({num_external_blocks})"
 
         remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
-        remote_block_nums_all = [
-            meta.num_prompt_blocks // remote_cp_size
-        ] * remote_cp_size
+        remote_block_nums_all = [meta.num_prompt_blocks // remote_cp_size] * remote_cp_size
         num_remain_blocks = meta.num_prompt_blocks % remote_cp_size
         for i in range(num_remain_blocks):
             remote_block_nums_all[i] += 1
@@ -1697,10 +1472,7 @@ class MooncakeConnectorWorker:
 
         # Considering prefix cache, the remote_block_nums_all should be revised
         num_prefix_cached_blocks = meta.num_prompt_blocks - num_external_blocks
-        remote_block_nums_all = [
-            num - num_prefix_cached_blocks // remote_cp_size
-            for num in remote_block_nums_all
-        ]
+        remote_block_nums_all = [num - num_prefix_cached_blocks // remote_cp_size for num in remote_block_nums_all]
         num_remain_blocks = num_prefix_cached_blocks % remote_cp_size
         for i in range(num_remain_blocks):
             remote_block_nums_all[i] -= 1
@@ -1743,11 +1515,7 @@ class MooncakeConnectorWorker:
         for remote_kv_id in range(len(remote_handshake_port_list)):
             num_blocks_to_pull = remote_block_nums[remote_kv_id]
             remote_block_ids_list.append(meta.remote_block_ids[:num_blocks_to_pull])
-            local_block_ids_list.append(
-                meta.local_block_ids[
-                    local_block_offset : local_block_offset + num_blocks_to_pull
-                ]
-            )
+            local_block_ids_list.append(meta.local_block_ids[local_block_offset : local_block_offset + num_blocks_to_pull])
             local_block_offset += num_blocks_to_pull
 
         assert self.tp_num_need_pulls == len(remote_handshake_port_list[0]), (
@@ -1760,8 +1528,7 @@ class MooncakeConnectorWorker:
         """Start loading KV blocks from remote engine."""
         for req_id, meta in metadata.requests.items():
             logger.debug(
-                "start_load_kv for request %s from remote engine %s. "
-                "Num local_block_ids: %s. Num remote_block_ids: %s. ",
+                "start_load_kv for request %s from remote engine %s. Num local_block_ids: %s. Num remote_block_ids: %s. ",
                 req_id,
                 meta.remote_engine_id,
                 len(meta.local_block_ids),
@@ -1777,14 +1544,12 @@ class MooncakeConnectorWorker:
                 for pcp_dcp_rank in range(len(remote_handshake_port_list)):
                     for i in range(self.tp_num_need_pulls):
                         assert self.kv_recv_thread is not None
-                        remote_host, remote_engine_id = (
-                            self._get_remote_host_info_by_port(
-                                meta.remote_port,
-                                remote_handshake_port_list[pcp_dcp_rank][i],
-                                meta.remote_host,
-                                meta.remote_engine_id,
-                                meta.remote_multi_nodes_meta_mapping,
-                            )
+                        remote_host, remote_engine_id = self._get_remote_host_info_by_port(
+                            meta.remote_port,
+                            remote_handshake_port_list[pcp_dcp_rank][i],
+                            meta.remote_host,
+                            meta.remote_engine_id,
+                            meta.remote_multi_nodes_meta_mapping,
                         )
                         self.kv_recv_thread.add_request(
                             request_id=req_id,
@@ -1792,24 +1557,15 @@ class MooncakeConnectorWorker:
                             remote_block_ids=remote_block_ids_list[pcp_dcp_rank],
                             remote_engine_id=remote_engine_id,
                             remote_host=remote_host,
-                            remote_handshake_port=remote_handshake_port_list[
-                                pcp_dcp_rank
-                            ][i],
+                            remote_handshake_port=remote_handshake_port_list[pcp_dcp_rank][i],
                             offset=i,
                             tp_num_need_pulls=self.tp_num_need_pulls,
-                            remote_port_send_num=self.remote_port_send_num[
-                                meta.remote_engine_id
-                            ],
-                            all_task_done=(
-                                pcp_dcp_rank == len(remote_handshake_port_list) - 1
-                                and i == self.tp_num_need_pulls - 1
-                            ),
+                            remote_port_send_num=self.remote_port_send_num[meta.remote_engine_id],
+                            all_task_done=(pcp_dcp_rank == len(remote_handshake_port_list) - 1 and i == self.tp_num_need_pulls - 1),
                         )
             else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
                 choosen_rank_list = self._get_remote_rank(req_id)
-                remote_handshake_port_list = [
-                    [x + meta.remote_port] for x in choosen_rank_list
-                ]
+                remote_handshake_port_list = [[x + meta.remote_port] for x in choosen_rank_list]
                 for i in range(self.tp_num_need_pulls * self._prefill_pp_size):
                     assert self.kv_recv_thread is not None
                     remote_host, remote_engine_id = self._get_remote_host_info_by_port(
@@ -1828,9 +1584,7 @@ class MooncakeConnectorWorker:
                         remote_handshake_port=remote_handshake_port_list[i][0],
                         offset=i,
                         tp_num_need_pulls=self.tp_num_need_pulls,
-                        all_task_done=(
-                            i == self.tp_num_need_pulls * self._prefill_pp_size - 1
-                        ),
+                        all_task_done=(i == self.tp_num_need_pulls * self._prefill_pp_size - 1),
                     )
 
         if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
@@ -1853,37 +1607,25 @@ class MooncakeConnectorWorker:
         remote_multi_nodes_meta_mapping: dict,
     ):
         rank = str(remote_handshake_port - base_port)
-        if (
-            remote_multi_nodes_meta_mapping is None
-            or remote_multi_nodes_meta_mapping.get(rank, None) is None
-        ):
+        if remote_multi_nodes_meta_mapping is None or remote_multi_nodes_meta_mapping.get(rank) is None:
             return remote_host, remote_engine_id
         info = remote_multi_nodes_meta_mapping[rank]
         return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
 
-    def _prefill_get_remote_rank(self, req_id: str) -> List[int]:
+    def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
         return sum(self._get_remote_ranks_for_req(req_id), [])
 
-    def _get_remote_rank(self, req_id: str) -> List[int]:
+    def _get_remote_rank(self, req_id: str) -> list[int]:
         return self._get_remote_ranks_for_req(req_id)[self.tp_rank]
 
-    def _get_remote_tp_ranks(
-        self, tp_ori_data: np.ndarray, rand_group_index: list[int], num_groups: int
-    ) -> List[List[int]]:
+    def _get_remote_tp_ranks(self, tp_ori_data: np.ndarray, rand_group_index: list[int], num_groups: int) -> list[list[int]]:
         # random split prefill tp list
         tp_sampled_nums = []
-        if (
-            self._prefill_tp_size > self.num_key_value_heads
-            or self.vllm_config.model_config.is_deepseek_mla
-            or self.use_sparse
-        ):
+        if self._prefill_tp_size > self.num_key_value_heads or self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
             tp_ori_data = tp_ori_data.reshape(-1, num_groups)
             choosen_group = tp_ori_data[:, [rand_group_index]]
             flattened = choosen_group.reshape(-1).tolist()
-            tp_sampled_nums = [
-                flattened[i : i + self.tp_num_need_pulls]
-                for i in range(0, len(flattened), self.tp_num_need_pulls)
-            ]
+            tp_sampled_nums = [flattened[i : i + self.tp_num_need_pulls] for i in range(0, len(flattened), self.tp_num_need_pulls)]
         # non-random split
         else:
             group_size = self._prefill_tp_size // self._decode_tp_size
@@ -1892,16 +1634,13 @@ class MooncakeConnectorWorker:
                 tp_sampled_nums.append(slice.tolist())
         return tp_sampled_nums
 
-    def _get_remote_ranks_for_req(self, req_id: str) -> List[List[int]]:
+    def _get_remote_ranks_for_req(self, req_id: str) -> list[list[int]]:
         # Divide the ports according to the TP within the PP
         sampled_nums = []
         if self._prefill_tp_size == self._decode_tp_size:
             sampled_nums = list(
                 map(
-                    lambda tp: [
-                        tp + pp * self._prefill_tp_size
-                        for pp in range(self._prefill_pp_size)
-                    ],
+                    lambda tp: [tp + pp * self._prefill_tp_size for pp in range(self._prefill_pp_size)],
                     range(self._prefill_tp_size),
                 )
             )
@@ -1916,16 +1655,9 @@ class MooncakeConnectorWorker:
         rand = random.Random(seed)
         # random split prefill tp list
         ori_data = ori_data.reshape(self._prefill_pp_size, -1)
-        num_groups = max(
-            1, len(ori_data[0]) // num_kv_head
-        )  # The number of redundant copies for each KV head within the PP stage
-        rand_group_index = rand.sample(
-            range(num_groups), (max(self._decode_tp_size // num_kv_head, 1))
-        )  # random choose a group
-        all_results = [
-            self._get_remote_tp_ranks(ori_data[pp_index], rand_group_index, num_groups)
-            for pp_index in range(self._prefill_pp_size)
-        ]
+        num_groups = max(1, len(ori_data[0]) // num_kv_head)  # The number of redundant copies for each KV head within the PP stage
+        rand_group_index = rand.sample(range(num_groups), (max(self._decode_tp_size // num_kv_head, 1)))  # random choose a group
+        all_results = [self._get_remote_tp_ranks(ori_data[pp_index], rand_group_index, num_groups) for pp_index in range(self._prefill_pp_size)]
         for group_index in range(len(all_results[0])):
             group = []
             for pp_index in range(self._prefill_pp_size):
@@ -1941,20 +1673,16 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignor
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
-    ctx: Optional[zmq.Context] = None  # type: ignore
+    ctx: zmq.Context | None = None  # type: ignore
     try:
         ctx = zmq.Context()  # type: ignore
-        yield make_zmq_socket(
-            ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER
-        )  # type: ignore
+        yield make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER)  # type: ignore
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
 
 
-def group_concurrent_contiguous(
-    src: List[int], dst: List[int]
-) -> Tuple[List[npt.NDArray[np.int64]], List[npt.NDArray[np.int64]]]:
+def group_concurrent_contiguous(src: list[int], dst: list[int]) -> tuple[list[npt.NDArray[np.int64]], list[npt.NDArray[np.int64]]]:
     """Vectorised NumPy implementation."""
     src_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
     dst_indices: npt.NDArray[np.int64] = np.array(dst, dtype=np.int64)
@@ -1995,15 +1723,11 @@ def ensure_zmq_send(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning(
-                    f"Send failed: {e}, retrying... ({retries_left} attempts left)"
-                )
+                logger.warning(f"Send failed: {e}, retrying... ({retries_left} attempts left)")
                 time.sleep(0.1)
             else:
                 logger.error(f"Send failed after all retries: {e}")
-                raise RuntimeError(
-                    f"Failed to send data after {max_retries} retries: {e}"
-                )
+                raise RuntimeError(f"Failed to send data after {max_retries} retries: {e}")
 
 
 def ensure_zmq_recv(
@@ -2023,15 +1747,11 @@ def ensure_zmq_recv(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning(
-                    f"Receive failed: {e}, retrying... ({retries_left} attempts left)"
-                )
+                logger.warning(f"Receive failed: {e}, retrying... ({retries_left} attempts left)")
                 time.sleep(0.1)
             else:
                 logger.error(f"Receive failed after all retries: {e}")
-                raise RuntimeError(
-                    f"Failed to receive data after {max_retries} retries: {e}"
-                )
+                raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
 
 
 # decode node should know pp_partition_layer in prefill node,
@@ -2041,7 +1761,7 @@ def get_prefill_pp_indices(
     num_hidden_layers: int,
     pp_rank: int,
     pp_size: int,
-    partition_list_str: Optional[str] = None,
+    partition_list_str: str | None = None,
 ) -> tuple[int, int]:
     if partition_list_str is None:
         return get_pp_indices(num_hidden_layers, pp_rank, pp_size)
@@ -2049,9 +1769,7 @@ def get_prefill_pp_indices(
         try:
             partitions = [int(layer) for layer in partition_list_str.split(",")]
         except ValueError as err:
-            raise ValueError(
-                "Invalid partition string: {}".format(partition_list_str)
-            ) from err
+            raise ValueError("Invalid partition string: {}".format(partition_list_str)) from err
         if len(partitions) != pp_size:
             raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
         if sum(partitions) != num_hidden_layers:

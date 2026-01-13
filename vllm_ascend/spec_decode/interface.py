@@ -1,5 +1,4 @@
 import enum
-from typing import Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -17,9 +16,7 @@ class SpecDcodeType(enum.Enum):
 
 
 class Proposer:
-    def __init__(
-        self, vllm_config: VllmConfig, device: torch.device = None, runner=None
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device = None, runner=None):
         pass
 
     def load_model(self, model):
@@ -33,7 +30,7 @@ class Proposer:
         with_prefill: bool = False,
         in_graph_capturing: bool = False,
         num_reqs: int = 0,
-        num_tokens_across_dp: Optional[torch.Tensor] = None,
+        num_tokens_across_dp: torch.Tensor | None = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor=None,
     ):

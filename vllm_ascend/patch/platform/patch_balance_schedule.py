@@ -47,15 +47,10 @@ class BalanceScheduler(Scheduler):
             log_stats,
         )
         # Balance scheduling.
-        self.balance_queue = [
-            torch.tensor([0], dtype=torch.int, device="cpu")
-            for _ in range(self.vllm_config.parallel_config.data_parallel_size)
-        ]
+        self.balance_queue = [torch.tensor([0], dtype=torch.int, device="cpu") for _ in range(self.vllm_config.parallel_config.data_parallel_size)]
 
     def balance_gather(self, dp_group):
-        running_tensor = torch.tensor(
-            [len(self.running)], dtype=torch.int, device="cpu"
-        )
+        running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
         dist.all_gather(self.balance_queue, running_tensor, group=dp_group)
 
     def schedule(self) -> SchedulerOutput:
@@ -98,8 +93,7 @@ class BalanceScheduler(Scheduler):
                 # count, we subtract (num_output_placeholders - 1) to remove any draft
                 # tokens, so that we can be sure no further steps are needed even if
                 # they are all rejected.
-                and request.num_computed_tokens + 2 - request.num_output_placeholders
-                >= request.num_prompt_tokens + request.max_tokens
+                and request.num_computed_tokens + 2 - request.num_output_placeholders >= request.num_prompt_tokens + request.max_tokens
             ):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
@@ -107,20 +101,14 @@ class BalanceScheduler(Scheduler):
                 req_index += 1
                 continue
 
-            num_new_tokens = (
-                request.num_tokens_with_spec
-                + request.num_output_placeholders
-                - request.num_computed_tokens
-            )
+            num_new_tokens = request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
-            num_new_tokens = min(
-                num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
-            )
+            num_new_tokens = min(num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens)
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -179,24 +167,15 @@ class BalanceScheduler(Scheduler):
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             scheduled_running_reqs.remove(preempted_req)
-                            token_budget += num_scheduled_tokens[
-                                preempted_req.request_id
-                            ]
+                            token_budget += num_scheduled_tokens[preempted_req.request_id]
                             req_to_new_blocks.pop(preempted_req.request_id)
                             num_scheduled_tokens.pop(preempted_req.request_id)
-                            scheduled_spec_decode_tokens.pop(
-                                preempted_req.request_id, None
-                            )
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req.request_id, None
-                            )
+                            scheduled_spec_decode_tokens.pop(preempted_req.request_id, None)
+                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req.request_id, None)
                             if preempted_encoder_inputs:
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
-                                    for i in preempted_encoder_inputs
-                                )
+                                num_embeds_to_restore = sum(preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs)
                                 encoder_compute_budget += num_embeds_to_restore
                             req_index -= 1
                     else:
@@ -221,27 +200,18 @@ class BalanceScheduler(Scheduler):
 
             # Speculative decode related.
             if request.spec_token_ids:
-                num_scheduled_spec_tokens = (
-                    num_new_tokens
-                    + request.num_computed_tokens
-                    - request.num_tokens
-                    - request.num_output_placeholders
-                )
+                num_scheduled_spec_tokens = num_new_tokens + request.num_computed_tokens - request.num_tokens - request.num_output_placeholders
                 if num_scheduled_spec_tokens > 0:
                     # Trim spec_token_ids list to num_scheduled_spec_tokens.
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
-                    scheduled_spec_decode_tokens[request.request_id] = (
-                        request.spec_token_ids
-                    )
+                    scheduled_spec_decode_tokens[request.request_id] = request.spec_token_ids
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.
                 request.spec_token_ids = []
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
-                scheduled_encoder_inputs[request.request_id] = (
-                    encoder_inputs_to_schedule
-                )
+                scheduled_encoder_inputs[request.request_id] = encoder_inputs_to_schedule
                 # Allocate the encoder cache.
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
@@ -255,11 +225,7 @@ class BalanceScheduler(Scheduler):
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
         if self.lora_config:
-            scheduled_loras = set(
-                req.lora_request.lora_int_id
-                for req in scheduled_running_reqs
-                if req.lora_request and req.lora_request.lora_int_id > 0
-            )
+            scheduled_loras = set(req.lora_request.lora_int_id for req in scheduled_running_reqs if req.lora_request and req.lora_request.lora_int_id > 0)
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Use a temporary RequestQueue to collect requests that need to be
@@ -272,10 +238,7 @@ class BalanceScheduler(Scheduler):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                balance_flag = (
-                    max(t.item() for t in self.balance_queue)
-                    == self.max_num_running_reqs
-                )
+                balance_flag = max(t.item() for t in self.balance_queue) == self.max_num_running_reqs
                 if balance_flag:
                     break
 
@@ -308,14 +271,7 @@ class BalanceScheduler(Scheduler):
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
-                if (
-                    self.lora_config
-                    and request.lora_request
-                    and (
-                        len(scheduled_loras) == self.lora_config.max_loras
-                        and request.lora_request.lora_int_id not in scheduled_loras
-                    )
-                ):
+                if self.lora_config and request.lora_request and (len(scheduled_loras) == self.lora_config.max_loras and request.lora_request.lora_int_id not in scheduled_loras):
                     # Scheduling would exceed max_loras, skip.
                     self.waiting.pop_request()
                     skipped_waiting_requests.prepend_request(request)
@@ -327,17 +283,11 @@ class BalanceScheduler(Scheduler):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = (
-                        self.kv_cache_manager.get_computed_blocks(request)
-                    )
+                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
-                                request, num_new_local_computed_tokens
-                            )
-                        )
+                        ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(request, num_new_local_computed_tokens)
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
@@ -351,9 +301,7 @@ class BalanceScheduler(Scheduler):
                         num_external_computed_tokens = ext_tokens
 
                     # Total computed tokens (local + external).
-                    num_computed_tokens = (
-                        num_new_local_computed_tokens + num_external_computed_tokens
-                    )
+                    num_computed_tokens = num_new_local_computed_tokens + num_external_computed_tokens
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -381,10 +329,7 @@ class BalanceScheduler(Scheduler):
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
-                    if (
-                        not self.scheduler_config.enable_chunked_prefill
-                        and num_new_tokens > token_budget
-                    ):
+                    if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > token_budget:
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
@@ -415,9 +360,7 @@ class BalanceScheduler(Scheduler):
                 # extra block gets allocated which
                 # creates a mismatch between the number
                 # of local and remote blocks.
-                effective_lookahead_tokens = (
-                    0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
-                )
+                effective_lookahead_tokens = 0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
 
                 # Determine if we need to allocate cross-attention blocks.
                 if self.is_encoder_decoder and request.has_encoder_inputs:
@@ -425,9 +368,7 @@ class BalanceScheduler(Scheduler):
                     # always padded to the maximum length. If we support other
                     # encoder-decoder models, this will need to be updated if we
                     # want to only allocate what is needed.
-                    num_encoder_tokens = (
-                        self.scheduler_config.max_num_encoder_input_tokens
-                    )
+                    num_encoder_tokens = self.scheduler_config.max_num_encoder_input_tokens
                 else:
                     num_encoder_tokens = 0
 
@@ -470,9 +411,7 @@ class BalanceScheduler(Scheduler):
 
                 self.running.append(request)
                 if self.log_stats:
-                    request.record_event(
-                        EngineCoreEventType.SCHEDULED, scheduled_timestamp
-                    )
+                    request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -482,9 +421,7 @@ class BalanceScheduler(Scheduler):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_blocks[request.request_id] = (
-                    self.kv_cache_manager.get_blocks(request.request_id)
-                )
+                req_to_new_blocks[request.request_id] = self.kv_cache_manager.get_blocks(request.request_id)
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -494,9 +431,7 @@ class BalanceScheduler(Scheduler):
                     request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
-                    scheduled_encoder_inputs[request.request_id] = (
-                        encoder_inputs_to_schedule
-                    )
+                    scheduled_encoder_inputs[request.request_id] = encoder_inputs_to_schedule
                     # Allocate the encoder cache.
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
@@ -520,9 +455,7 @@ class BalanceScheduler(Scheduler):
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
-        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
-            scheduled_running_reqs
-        ) <= len(self.running)
+        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
@@ -530,11 +463,7 @@ class BalanceScheduler(Scheduler):
         with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
             if self.running:
                 any_request = self.running[0]
-                num_common_prefix_blocks = (
-                    self.kv_cache_manager.get_num_common_prefix_blocks(
-                        any_request.request_id
-                    )
-                )
+                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request.request_id)
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
@@ -549,12 +478,7 @@ class BalanceScheduler(Scheduler):
                 for req in scheduled_new_reqs
             ]
         else:
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req, req_to_new_blocks[req.request_id].get_block_ids()
-                )
-                for req in scheduled_new_reqs
-            ]
+            new_reqs_data = [NewRequestData.from_request(req, req_to_new_blocks[req.request_id].get_block_ids()) for req in scheduled_new_reqs]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
@@ -591,16 +515,12 @@ class BalanceScheduler(Scheduler):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta: KVConnectorMetadata = self.connector.build_connector_meta(
-                scheduler_output
-            )
+            meta: KVConnectorMetadata = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
         # Build the connector meta for ECConnector
         if self.ec_connector is not None:
-            ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(
-                scheduler_output
-            )
+            ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(scheduler_output)
             scheduler_output.ec_connector_metadata = ec_meta
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
@@ -632,17 +552,13 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
                 self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
-            self.engines_running = self._has_global_unfinished_reqs(
-                local_unfinished_reqs
-            )
+            self.engines_running = self._has_global_unfinished_reqs(local_unfinished_reqs)
             self.scheduler.balance_gather(self.dp_group)
 
             if not self.engines_running:
                 if self.dp_rank == 0 or not self.has_coordinator:
                     # Notify client that we are pausing the loop.
-                    logger.debug(
-                        "Wave %d finished, pausing engine loop.", self.current_wave
-                    )
+                    logger.debug("Wave %d finished, pausing engine loop.", self.current_wave)
                     # In the coordinator case, dp rank 0 sends updates to the
                     # coordinator. Otherwise (offline spmd case), each rank
                     # sends the update to its colocated front-end process.

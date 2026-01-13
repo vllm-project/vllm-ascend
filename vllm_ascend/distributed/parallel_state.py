@@ -1,5 +1,3 @@
-from typing import Optional
-
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
@@ -13,23 +11,23 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_dsa_cp, flashcomm2_enable
 
 # Currently, mc2 op need their own group coordinator.
-_MC2: Optional[GroupCoordinator] = None
+_MC2: GroupCoordinator | None = None
 
 # Module specific tensor parallel groups
-_MLP_TP: Optional[GroupCoordinator] = None
-_OTP: Optional[GroupCoordinator] = None
-_LMTP: Optional[GroupCoordinator] = None
-_EMBED_TP: Optional[GroupCoordinator] = None
+_MLP_TP: GroupCoordinator | None = None
+_OTP: GroupCoordinator | None = None
+_LMTP: GroupCoordinator | None = None
+_EMBED_TP: GroupCoordinator | None = None
 
 # flashcomm specific groups
-_FLASHCOMM2_OTP: Optional[GroupCoordinator] = None
-_FLASHCOMM2_ODP: Optional[GroupCoordinator] = None
-_FC3_QUANT_X: Optional[GroupCoordinator] = None
+_FLASHCOMM2_OTP: GroupCoordinator | None = None
+_FLASHCOMM2_ODP: GroupCoordinator | None = None
+_FC3_QUANT_X: GroupCoordinator | None = None
 
 # shard_weight across rank groups
-_SHARD_WEIGHT: Optional[GroupCoordinator] = None
+_SHARD_WEIGHT: GroupCoordinator | None = None
 
-_P_TP: Optional[GroupCoordinator] = None
+_P_TP: GroupCoordinator | None = None
 
 
 def init_ascend_model_parallel(
@@ -63,29 +61,18 @@ def init_ascend_model_parallel(
     pd_tp_ratio = get_ascend_config().pd_tp_ratio
     pd_head_ratio = get_ascend_config().pd_head_ratio
     global _P_TP
-    assert _P_TP is None, (
-        "distributed prefill tensor parallel group is already initialized"
-    )
+    assert _P_TP is None, "distributed prefill tensor parallel group is already initialized"
     prefill_tensor_model_parallel_size = pd_tp_ratio
     # divide alltoall groups
-    if (
-        pd_head_ratio > 1
-        and get_current_vllm_config().kv_transfer_config.is_kv_producer
-    ):
+    if pd_head_ratio > 1 and get_current_vllm_config().kv_transfer_config.is_kv_producer:
         num_head_replica = get_ascend_config().num_head_replica
         remote_tp_size = global_tp_size // pd_tp_ratio
         if num_head_replica <= 1:
-            group_ranks = all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(
-                0
-            )
+            group_ranks = all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(0)
         else:
-            group_ranks = all_ranks.clone().view(
-                global_dp_size, -1, num_head_replica
-            )  # [DP_size, num_head, num_head_replica]
+            group_ranks = all_ranks.clone().view(global_dp_size, -1, num_head_replica)  # [DP_size, num_head, num_head_replica]
             group_ranks = group_ranks.permute(0, 2, 1)
-            group_ranks = group_ranks.reshape(
-                -1, group_ranks.size(-1)
-            )  # [DP_size * num_head_replica, num_head]
+            group_ranks = group_ranks.reshape(-1, group_ranks.size(-1))  # [DP_size * num_head_replica, num_head]
             alltoall_group_size = group_ranks.size(-1) // remote_tp_size
             group_ranks = group_ranks.unsqueeze(-1).view(
                 global_dp_size, num_head_replica, -1, alltoall_group_size
@@ -93,20 +80,14 @@ def init_ascend_model_parallel(
             group_ranks = group_ranks.reshape(-1, alltoall_group_size).unbind(0)
         group_ranks = [x.tolist() for x in group_ranks]
         local_rank = get_world_group().local_rank
-        num = next(
-            (i for i, ranks in enumerate(group_ranks) if local_rank in ranks), None
-        )
-        _P_TP = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name=f"p_tp_{num}"
-        )
+        num = next((i for i, ranks in enumerate(group_ranks) if local_rank in ranks), None)
+        _P_TP = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name=f"p_tp_{num}")
 
     global _MC2
     group_ranks = all_ranks.unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
 
-    _MC2 = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="mc2"
-    )
+    _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
 
     # Initialize fine-grained TP process groups on Ascend for four components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
@@ -119,18 +100,14 @@ def init_ascend_model_parallel(
         if group_size is None:
             return None
         if group_size not in _group_cache:
-            rank_grid = torch.arange(world_size).reshape(
-                global_pp_size, global_dp_size, global_tp_size
-            )
+            rank_grid = torch.arange(world_size).reshape(global_pp_size, global_dp_size, global_tp_size)
             num_chunks = global_dp_size // group_size
             group_ranks = []
             for pp_idx in range(global_pp_size):
                 stage_ranks = rank_grid[pp_idx]  # (dp, tp)
                 for chunk in range(num_chunks):
                     for tp_idx in range(global_tp_size):
-                        group = stage_ranks[
-                            chunk * group_size : (chunk + 1) * group_size, tp_idx
-                        ].tolist()
+                        group = stage_ranks[chunk * group_size : (chunk + 1) * group_size, tp_idx].tolist()
                         group_ranks.append(group)
             pg = init_model_parallel_group(
                 group_ranks,
@@ -143,12 +120,8 @@ def init_ascend_model_parallel(
         return _group_cache[group_size]
 
     otp_size = get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size
-    lmhead_tp_size = (
-        get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size
-    )
-    embedding_tp_size = (
-        get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size
-    )
+    lmhead_tp_size = get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size
+    embedding_tp_size = get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size
     mlp_tp_size = get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size
 
     global _OTP, _LMTP, _EMBED_TP, _MLP_TP
@@ -166,9 +139,7 @@ def init_ascend_model_parallel(
     flashcomm2_otp_group_ranks = []
     if flashcomm2_enable():
         flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
-        num_fc2_oproj_tensor_parallel_groups: int = (
-            global_tp_size // flashcomm2_otp_size
-        )
+        num_fc2_oproj_tensor_parallel_groups: int = global_tp_size // flashcomm2_otp_size
         global _FLASHCOMM2_OTP
         global _FLASHCOMM2_ODP
 
@@ -176,14 +147,10 @@ def init_ascend_model_parallel(
         _FLASHCOMM2_ODP = get_tp_group()
 
         if flashcomm2_otp_size > 1:
-            odp_group_ranks: list[list[int]] = [
-                [] for _ in range(flashcomm2_otp_size * global_dp_size * global_pp_size)
-            ]
+            odp_group_ranks: list[list[int]] = [[] for _ in range(flashcomm2_otp_size * global_dp_size * global_pp_size)]
             for dp_group_index in range(global_dp_size):
                 for pp_group_index in range(global_pp_size):
-                    dp_pp_serial_index = (
-                        dp_group_index * global_pp_size + pp_group_index
-                    )
+                    dp_pp_serial_index = dp_group_index * global_pp_size + pp_group_index
                     tp_base_rank = dp_pp_serial_index * global_tp_size
                     odp_base_index = dp_pp_serial_index * flashcomm2_otp_size
 
@@ -228,9 +195,7 @@ def init_ascend_model_parallel(
             # combine standard tp group and non-standard tp group to build  shard_weight comm_group
             module_tp_tanspose_ranks = module_tp_group_ranks.transpose(0, 1)
             G = world_size // (global_pp_size * module_tp_group_ranks.size(1))
-            shard_weight_group_ranks = torch.stack(
-                [t.view(global_pp_size, G) for t in module_tp_tanspose_ranks], dim=1
-            )
+            shard_weight_group_ranks = torch.stack([t.view(global_pp_size, G) for t in module_tp_tanspose_ranks], dim=1)
             group_ranks = shard_weight_group_ranks.view(-1, G).tolist()
         return init_model_parallel_group(
             group_ranks,
@@ -260,9 +225,7 @@ def init_ascend_model_parallel(
         global _FC3_QUANT_X
         group_ranks = all_ranks.unbind(0)
         group_ranks = [x.tolist() for x in group_ranks]
-        _FC3_QUANT_X = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x"
-        )
+        _FC3_QUANT_X = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x")
 
 
 def model_parallel_initialized():
@@ -299,23 +262,17 @@ def get_flashcomm2_otp_group() -> GroupCoordinator:
 
 
 def get_flashcomm2_odp_group() -> GroupCoordinator:
-    assert _FLASHCOMM2_ODP is not None, (
-        "output data parallel group for flashcomm2 is not initialized"
-    )
+    assert _FLASHCOMM2_ODP is not None, "output data parallel group for flashcomm2 is not initialized"
     return _FLASHCOMM2_ODP
 
 
 def get_shard_weight_group() -> GroupCoordinator:
-    assert _SHARD_WEIGHT is not None, (
-        "output shard weight parallel group for flashcomm2 is not initialized"
-    )
+    assert _SHARD_WEIGHT is not None, "output shard weight parallel group for flashcomm2 is not initialized"
     return _SHARD_WEIGHT
 
 
 def get_p_tp_group() -> GroupCoordinator:
-    assert _P_TP is not None, (
-        "distributed prefill tensor parallel group is not initialized"
-    )
+    assert _P_TP is not None, "distributed prefill tensor parallel group is not initialized"
     return _P_TP
 
 
@@ -356,18 +313,12 @@ def destroy_ascend_model_parallel():
     _P_TP = None
 
     global _FLASHCOMM2_OTP
-    if (
-        _FLASHCOMM2_OTP
-        and get_ascend_config().flashcomm2_oproj_tensor_parallel_size != 1
-    ):
+    if _FLASHCOMM2_OTP and get_ascend_config().flashcomm2_oproj_tensor_parallel_size != 1:
         _FLASHCOMM2_OTP.destroy()
         _FLASHCOMM2_OTP = None
 
     global _FLASHCOMM2_ODP
-    if (
-        _FLASHCOMM2_ODP
-        and get_ascend_config().flashcomm2_oproj_tensor_parallel_size != 1
-    ):
+    if _FLASHCOMM2_ODP and get_ascend_config().flashcomm2_oproj_tensor_parallel_size != 1:
         _FLASHCOMM2_ODP.destroy()
         _FLASHCOMM2_ODP = None
 

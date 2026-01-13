@@ -30,6 +30,4 @@ class AscendECExampleConnector(ECExampleConnector):
             logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
 
 
-vllm.distributed.ec_transfer.ec_connector.example_connector.ECExampleConnector = (
-    AscendECExampleConnector
-)
+vllm.distributed.ec_transfer.ec_connector.example_connector.ECExampleConnector = AscendECExampleConnector

@@ -16,7 +16,6 @@
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -58,7 +57,7 @@ class PrepareAndFinalize(ABC):
                                      sizes, ranks, and communication settings.
     """
 
-    quant_stream: Optional[torch.npu.Stream] = None
+    quant_stream: torch.npu.Stream | None = None
 
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
@@ -75,9 +74,7 @@ class PrepareAndFinalize(ABC):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Prepare tensors before MoE computation. May involve:
           - Padding to align communication boundaries
@@ -104,7 +101,7 @@ class PrepareAndFinalize(ABC):
         self,
         hidden_states: torch.Tensor,
         reduce_results: bool,
-        context_metadata: Optional[dict] = None,
+        context_metadata: dict | None = None,
     ) -> torch.Tensor:
         """
         Finalize MoE output. May involve:
@@ -146,9 +143,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Preparation steps:
           1. Pad hidden_states and router_logits to next multiple of TP size.
@@ -173,12 +168,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
             if self.tp_size > 1:
-                split_hidden_states = torch.tensor_split(
-                    hidden_states, self.tp_size, dim=0
-                )
-                split_router_logits = torch.tensor_split(
-                    router_logits, self.tp_size, dim=0
-                )
+                split_hidden_states = torch.tensor_split(hidden_states, self.tp_size, dim=0)
+                split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
 
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
@@ -191,7 +182,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         self,
         hidden_states: torch.Tensor,
         reduce_results: bool,
-        context_metadata: Optional[dict] = None,
+        context_metadata: dict | None = None,
     ) -> torch.Tensor:
         """
         Finalization steps:
@@ -247,9 +238,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Preparation steps:
           1. Fetch `mc2_mask` and target padding length from forward context.
@@ -284,12 +273,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
 
             # Slice across TP ranks
             if self.tp_size > 1 and not self.enable_shared_expert_dp:
-                split_hidden_states = torch.tensor_split(
-                    hidden_states, self.tp_size, dim=0
-                )
-                split_router_logits = torch.tensor_split(
-                    router_logits, self.tp_size, dim=0
-                )
+                split_hidden_states = torch.tensor_split(hidden_states, self.tp_size, dim=0)
+                split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
 
@@ -327,9 +312,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Preparation steps:
           AllGather hidden_states and router_logits to form global tensors.
@@ -340,18 +323,14 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if enable_sp():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
-        return self._prepare_with_dp_group(
-            hidden_states, router_logits, enable_shared_expert_dp, replace_allreduce
-        )
+        return self._prepare_with_dp_group(hidden_states, router_logits, enable_shared_expert_dp, replace_allreduce)
 
     def _prepare_with_ep_group(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         quant_type=QuantType.NONE,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
@@ -359,22 +338,14 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self.multistream_overlap_gate:
             assert PrepareAndFinalize.quant_stream is not None
             PrepareAndFinalize.quant_stream.wait_stream(torch.npu.current_stream())
-            with npu_stream_switch(
-                PrepareAndFinalize.quant_stream, enabled=self.multistream_overlap_gate
-            ):
+            with npu_stream_switch(PrepareAndFinalize.quant_stream, enabled=self.multistream_overlap_gate):
                 hidden_states = fc3_all_gather_and_maybe_unpad_impl(hidden_states)
         else:
-            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                hidden_states, True, True
-            )
-            router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                router_logits, True, True
-            )
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True, True)
+            router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits, True, True)
 
         if pertoken_scale is not None:
-            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                pertoken_scale, True, True
-            )
+            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(pertoken_scale, True, True)
 
         if self.multistream_overlap_gate:
             torch.npu.current_stream().wait_stream(PrepareAndFinalize.quant_stream)
@@ -391,9 +362,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Preparation steps:
           1. Fetch max token count across DP group from forward context.
@@ -434,7 +403,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         self,
         hidden_states: torch.Tensor,
         reduce_results: bool,
-        context_metadata: Optional[dict] = None,
+        context_metadata: dict | None = None,
     ) -> torch.Tensor:
         """
         Finalization steps:
@@ -462,9 +431,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         return hidden_states
 
-    def _finalize_with_dp_group(
-        self, hidden_states: torch.Tensor, reduce_results: bool
-    ) -> torch.Tensor:
+    def _finalize_with_dp_group(self, hidden_states: torch.Tensor, reduce_results: bool) -> torch.Tensor:
         """
         Finalization steps:
           1. If DP > 1 and not shared expert, reduce-scatter output across DP group.

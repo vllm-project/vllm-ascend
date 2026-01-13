@@ -1,14 +1,12 @@
 import os
+
 import torch
-
+from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme, QuantizationStrategy, QuantizationType
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, Qwen2VLForConditionalGeneration, Qwen2_5_VLForConditionalGeneration, \
-    AutoTokenizer, AutoProcessor, AutoConfig, AutoImageProcessor
-
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
 from llmcompressor.modifiers.quantization import GPTQModifier, QuantizationModifier
-from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme, QuantizationType, QuantizationStrategy
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 W8A8_W_cha_A_ten_static_symmetric = {
     "group_0": QuantizationScheme(

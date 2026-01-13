@@ -112,9 +112,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
             layer.shard_indices.added_vocab_end_index = 40
 
             # Mock the quantization method
-            layer.quant_method.embedding = MagicMock(
-                side_effect=lambda _, x: torch.randn(x.shape[0], self.embedding_dim)
-            )
+            layer.quant_method.embedding = MagicMock(side_effect=lambda _, x: torch.randn(x.shape[0], self.embedding_dim))
             return layer
 
     def test_get_masked_input_and_mask(self):
@@ -149,15 +147,11 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         # Create a fresh mock embedding with tp_size=1
         layer = self._create_layer()
         layer.tp_size = 1
-        layer.quant_method.embedding = MagicMock(
-            return_value=torch.randn(3, layer.embedding_dim)
-        )
+        layer.quant_method.embedding = MagicMock(return_value=torch.randn(3, layer.embedding_dim))
 
         input_ = torch.tensor([1, 2, 3])
 
-        with patch(
-            "torch.ops.vllm.maybe_pad_and_reduce", side_effect=lambda x: x
-        ) as mock_reduce_tp1:
+        with patch("torch.ops.vllm.maybe_pad_and_reduce", side_effect=lambda x: x) as mock_reduce_tp1:
             output = layer.forward(input_)
 
         # Should just pass through without masking
@@ -173,9 +167,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
 
         input_ = torch.tensor([15, 35])  # one org vocab, one added vocab
 
-        with patch(
-            "torch.ops.vllm.maybe_pad_and_reduce", side_effect=lambda x: x
-        ) as mock_reduce_tp:
+        with patch("torch.ops.vllm.maybe_pad_and_reduce", side_effect=lambda x: x) as mock_reduce_tp:
             # Call the forward method
             output = layer.forward(input_)
 
@@ -223,9 +215,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
 
         for input_, expected_shape in test_cases:
             with self.subTest(input=input_):
-                with patch(
-                    "torch.ops.vllm.maybe_pad_and_reduce", side_effect=lambda x: x
-                ):
+                with patch("torch.ops.vllm.maybe_pad_and_reduce", side_effect=lambda x: x):
                     # Call the forward method
                     output = layer.forward(input_)
                 self.assertEqual(output.shape, expected_shape)
@@ -244,9 +234,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_group.rank_in_group = 0
         self.mock_ascend_config = MagicMock()
         self.mock_quant_method = MagicMock()
-        self.mock_quant_method.apply = MagicMock(
-            return_value=torch.randn(1, self.vocab_size)
-        )
+        self.mock_quant_method.apply = MagicMock(return_value=torch.randn(1, self.vocab_size))
         self.patches = [
             patch(
                 "vllm_ascend.ascend_config.get_ascend_config",

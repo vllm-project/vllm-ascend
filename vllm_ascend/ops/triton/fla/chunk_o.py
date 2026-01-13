@@ -9,7 +9,6 @@
 
 # ruff: noqa: E501
 # mypy: ignore-errors
-from typing import Optional
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -75,15 +74,9 @@ def chunk_fwd_kernel_o(
         b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
         for i_k in range(tl.cdiv(K, BK)):
-            p_q = tl.make_block_ptr(
-                q, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
-            )
-            p_k = tl.make_block_ptr(
-                k, (K, T), (1, Hg * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1)
-            )
-            p_h = tl.make_block_ptr(
-                h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0)
-            )
+            p_q = tl.make_block_ptr(q, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_k = tl.make_block_ptr(k, (K, T), (1, Hg * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+            p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
             # [BT, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
             # [BK, BT]
@@ -109,12 +102,8 @@ def chunk_fwd_kernel_o(
         m_A = o_i[:, None] >= o_i[None, :]
         b_A = tl.where(m_A, b_A, 0)
 
-        p_v = tl.make_block_ptr(
-            v, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
-        )
-        p_o = tl.make_block_ptr(
-            o, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
-        )
+        p_v = tl.make_block_ptr(v, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_o = tl.make_block_ptr(o, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
         b_v = tl.load(p_v, boundary_check=(0, 1))
         # to fix mma -> mma layout conversion
@@ -128,9 +117,9 @@ def chunk_fwd_o(
     k: torch.Tensor,
     v: torch.Tensor,
     h: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    g: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]

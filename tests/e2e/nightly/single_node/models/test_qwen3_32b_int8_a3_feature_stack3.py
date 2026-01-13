@@ -103,11 +103,7 @@ async def test_models(model: str, tp_size: int) -> None:
         "--compilation-config",
         '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60]}',
     ]
-    with RemoteOpenAIServer(
-        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
-    ) as server:
-        send_v1_chat_completions(
-            prompts[0], model, server, request_args=api_keyword_args
-        )
+    with RemoteOpenAIServer(model, server_args, server_port=port, env_dict=env_dict, auto_port=False) as server:
+        send_v1_chat_completions(prompts[0], model, server, request_args=api_keyword_args)
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)

@@ -42,9 +42,7 @@ class TestHcclDataTypeEnum(TestBase):
 
         for torch_dtype, expected_enum in expected.items():
             with self.subTest(torch_dtype=torch_dtype):
-                self.assertEqual(
-                    hcclDataTypeEnum.from_torch(torch_dtype), expected_enum
-                )
+                self.assertEqual(hcclDataTypeEnum.from_torch(torch_dtype), expected_enum)
 
     def test_unsupported_dtype_raises(self):
         with self.assertRaises(ValueError):
@@ -143,9 +141,7 @@ class TestHCLLLibrary(TestBase):
 
         lib.hcclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream)
 
-        lib._funcs["HcclAllReduce"].assert_called_once_with(
-            sendbuff, recvbuff, count, datatype, op, comm, stream
-        )
+        lib._funcs["HcclAllReduce"].assert_called_once_with(sendbuff, recvbuff, count, datatype, op, comm, stream)
         mock_hccl_check.assert_called_once_with(0)
 
     @patch.object(HCCLLibrary, "HCCL_CHECK")
@@ -161,9 +157,7 @@ class TestHCLLLibrary(TestBase):
 
         lib.hcclBroadcast(buff, count, datatype, root, comm, stream)
 
-        lib._funcs["HcclBroadcast"].assert_called_once_with(
-            buff, count, datatype, root, comm, stream
-        )
+        lib._funcs["HcclBroadcast"].assert_called_once_with(buff, count, datatype, root, comm, stream)
         mock_hccl_check.assert_called_once_with(0)
 
     @patch.object(HCCLLibrary, "HCCL_CHECK")

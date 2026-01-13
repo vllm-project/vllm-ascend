@@ -1,7 +1,7 @@
 import math
 from contextlib import contextmanager
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -42,11 +42,11 @@ def set_ascend_forward_context(
     vllm_config: VllmConfig,
     virtual_engine: int = 0,
     num_tokens: int = 0,
-    num_tokens_across_dp: Optional[torch.Tensor] = None,
+    num_tokens_across_dp: torch.Tensor | None = None,
     in_profile_run: bool = False,
-    num_actual_tokens: Optional[int] = None,
+    num_actual_tokens: int | None = None,
     aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    batch_descriptor: Optional[BatchDescriptor] = None,
+    batch_descriptor: BatchDescriptor | None = None,
     model_instance: torch.nn.Module = None,
     is_draft_model=False,
 ):
@@ -88,16 +88,12 @@ def set_ascend_forward_context(
             sp_enabled = enable_sp(vllm_config) and num_tokens is not None
             mmrs_fusion = False
         else:
-            sp_enabled = (
-                enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
-            )
+            sp_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
         forward_context.mmrs_fusion = mmrs_fusion
         forward_context.num_tokens = num_tokens
         forward_context.sp_enabled = sp_enabled
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
-        forward_context.flashcomm_v2_enabled = (
-            flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
-        )
+        forward_context.flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
 
         if forward_context.sp_enabled or forward_context.flashcomm_v2_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
@@ -114,12 +110,7 @@ def set_ascend_forward_context(
 
         # TODO(rjg-lyh): refactor mlp weight prefetch method
         # set for mlp weight prefetch
-        prefetch_mlp_enabled = (
-            envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP
-            and forward_context.layer_idx is not None
-            and num_tokens is not None
-            and num_tokens < 500
-        )
+        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and forward_context.layer_idx is not None and num_tokens is not None and num_tokens < 500
         if prefetch_mlp_enabled:
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
@@ -132,15 +123,9 @@ def set_ascend_forward_context(
 
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
-            max_tokens_across_dp = (
-                forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
-            )
+            max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
             if forward_context.sp_enabled or forward_context.flashcomm_v2_enabled:
-                padded_length = (
-                    (max_tokens_across_dp + tp_world_size - 1)
-                    // tp_world_size
-                    * tp_world_size
-                )
+                padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
                 forward_context.padded_length = padded_length
                 forward_context.pad_size = pad_size
@@ -153,9 +138,7 @@ def set_ascend_forward_context(
             if num_actual_tokens is None:
                 num_actual_tokens = num_tokens
             # NOTE: token num which need to pad to when mc2
-            forward_context.padded_num_tokens = (
-                math.ceil(max_tokens_across_dp / tp_world_size) * tp_world_size
-            )
+            forward_context.padded_num_tokens = math.ceil(max_tokens_across_dp / tp_world_size) * tp_world_size
             reserved_mc2_mask = get_mc2_mask()
             if reserved_mc2_mask is not None:
                 mc2_mask = reserved_mc2_mask[: forward_context.padded_num_tokens]
@@ -169,10 +152,10 @@ def set_ascend_forward_context(
             pass
 
 
-_mc2_tokens_capacity: Optional[int] = None
-_reserved_mc2_mask: Optional[torch.Tensor] = None
-_sin: Optional[torch.Tensor] = None
-_cos: Optional[torch.Tensor] = None
+_mc2_tokens_capacity: int | None = None
+_reserved_mc2_mask: torch.Tensor | None = None
+_sin: torch.Tensor | None = None
+_cos: torch.Tensor | None = None
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
@@ -199,9 +182,7 @@ def set_mc2_mask(vllm_config, device):
     if _reserved_mc2_mask is not None:
         return
     if is_moe_model(vllm_config):
-        _reserved_mc2_mask = torch.zeros(
-            get_mc2_tokens_capacity(), dtype=torch.bool, device=device
-        )
+        _reserved_mc2_mask = torch.zeros(get_mc2_tokens_capacity(), dtype=torch.bool, device=device)
     else:
         _reserved_mc2_mask = None
 
@@ -210,9 +191,7 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
-def select_moe_comm_method(
-    num_tokens: int, vllm_config: VllmConfig, is_draft_model=False
-) -> Optional[MoECommType]:
+def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, token count, and quantization.
 
@@ -245,58 +224,35 @@ def select_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "quantize", None),
     )
 
-    if (
-        not vllm_config.parallel_config.enable_expert_parallel
-        or get_ep_group().world_size == 1
-    ):
+    if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A2}:
-        if (
-            num_tokens <= mc2_tokens_capacity
-            and vllm_config.parallel_config.world_size_across_dp
-            / vllm_config.parallel_config.pipeline_parallel_size
-            >= 16
-        ):
+        if num_tokens <= mc2_tokens_capacity and vllm_config.parallel_config.world_size_across_dp / vllm_config.parallel_config.pipeline_parallel_size >= 16:
             moe_comm_type = MoECommType.MC2
         else:
             moe_comm_type = MoECommType.ALLGATHER
 
     elif soc_version in {AscendDeviceType.A3}:
         ascend_config = get_ascend_config()
-        dynamic_eplb = (
-            ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
-        )
+        dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
-        fused_mc2_enable = (
-            envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic"
-        )
-        dispatch_ffn_combine_enable = (
-            get_ep_group().world_size <= 16
-            and (not is_draft_model)
-            and (not dynamic_eplb)
-        )
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic"
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 16 and (not is_draft_model) and (not dynamic_eplb)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                 fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
             elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
-                fused_decode_enable = (
-                    fused_mc2_enable
-                    and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
-                )
-            moe_comm_type = (
-                MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
-            )
+                fused_decode_enable = fused_mc2_enable and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                 fused_prefill_enable = fused_mc2_enable and dispatch_ffn_combine_enable
             elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
                 fused_prefill_enable = False
-            moe_comm_type = (
-                MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
-            )
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
 
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")

@@ -91,7 +91,6 @@ import heapq
 import ipaddress
 import os
 import sys
-import threading
 import uuid
 from contextlib import asynccontextmanager
 from typing import List
@@ -361,6 +360,9 @@ async def send_request_to_service(client: httpx.AsyncClient,
     aborted_requests = proxy_state.aquire_aborted_prefiller_requests(
         prefiller_id)
     req_data = req_data.copy()
+    kv_transfer_params = dict(req_data.get("kv_transfer_params", {}))
+    kv_transfer_params["aborted_request"] = list(aborted_requests)
+    req_data["kv_transfer_params"] = kv_transfer_params
     req_data["stream"] = False
     req_data["max_tokens"] = 1
     req_data["min_tokens"] = 1
@@ -503,7 +505,12 @@ async def _handle_completions(api: str, request: Request):
                     yield chunk
             except Exception as e:
                 logger.error(
-                    f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} will be routing to the target prefiller when new request is ready to dispatch to it"
+                    "Error during streaming from decoder %s: %s "
+                    "the aborted request %s will be routing to the target prefiller "
+                    "when new request is ready to dispatch to it",
+                    decoder.url,
+                    str(e),
+                    request_id,
                 )
 
             # After streaming done, release tokens
@@ -562,7 +569,7 @@ async def metaserver(request: Request):
         prefiller = proxy_state.prefillers[prefiller_idx]
         logger.debug(f"Using prefill {prefiller.url=} {req_data=}")
         # Send request to prefiller
-        response = await send_request_to_service(
+        await send_request_to_service(
             prefiller.client,
             prefiller_idx,
             api,

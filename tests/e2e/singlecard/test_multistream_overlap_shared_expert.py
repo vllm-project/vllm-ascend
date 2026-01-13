@@ -80,21 +80,15 @@ def test_models_with_multistream_overlap_shared_expert(
 
     vllm_moe_ms_eager_outputs_list = []
     for output in vllm_moe_ms_eager_outputs:
-        vllm_moe_ms_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text)
-        )
+        vllm_moe_ms_eager_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
     vllm_moe_ms_aclgraph_outputs_list = []
     for output in vllm_moe_ms_aclgraph_outputs:
-        vllm_moe_ms_aclgraph_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text)
-        )
+        vllm_moe_ms_aclgraph_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
     vllm_eager_outputs_list = []
     for output in vllm_eager_outputs:
-        vllm_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text)
-        )
+        vllm_eager_outputs_list.append((output.outputs[0].index, output.outputs[0].text))
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs_list,

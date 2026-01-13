@@ -66,27 +66,13 @@ def test_multimodal_vl(vl_config):
 
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_multimodal_audio():
-    audio_prompt = "".join(
-        [f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(2)]
-    )
+    audio_prompt = "".join([f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(2)])
     question = "What sport and what nursery rhyme are referenced?"
-    prompt = (
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        "<|im_start|>user\n"
-        f"{audio_prompt}{question}<|im_end|>\n"
-        "<|im_start|>assistant\n"
-    )
-    mm_data = {
-        "audio": [
-            asset.audio_and_sample_rate
-            for asset in [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
-        ]
-    }
+    prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{audio_prompt}{question}<|im_end|>\n<|im_start|>assistant\n"
+    mm_data = {"audio": [asset.audio_and_sample_rate for asset in [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]]}
     inputs = {"prompt": prompt, "multi_modal_data": mm_data}
 
-    sampling_params = SamplingParams(
-        temperature=0.2, max_tokens=10, stop_token_ids=None
-    )
+    sampling_params = SamplingParams(temperature=0.2, max_tokens=10, stop_token_ids=None)
 
     with VllmRunner(
         "Qwen/Qwen2-Audio-7B-Instruct",

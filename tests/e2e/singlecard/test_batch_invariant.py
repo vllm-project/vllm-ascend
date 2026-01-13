@@ -70,10 +70,7 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
 
     if target_words > 50:
         # For longer prompts, repeat context
-        padding_text = (
-            " This is an interesting topic that deserves more explanation. "
-            * (target_words // 50)
-        )
+        padding_text = " This is an interesting topic that deserves more explanation. " * (target_words // 50)
         base_prompt = base_prompt + padding_text
 
     return base_prompt
@@ -84,10 +81,7 @@ def _extract_step_logprobs(request_output):
         inner = request_output.outputs[0]
         if hasattr(inner, "logprobs") and inner.logprobs is not None:
             t = torch.tensor(
-                [
-                    inner.logprobs[i][tid].logprob
-                    for i, tid in enumerate(inner.token_ids)
-                ],
+                [inner.logprobs[i][tid].logprob for i, tid in enumerate(inner.token_ids)],
                 dtype=torch.float32,
             )
             return t, inner.token_ids
@@ -202,16 +196,10 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
         passes = num_trials - mismatches
         # Dump how many passed vs failed
-        print(
-            f"[determinism] total={num_trials}, passed={passes}, "
-            f"failed={mismatches}, max_batch_size={max_batch_size}"
-        )
+        print(f"[determinism] total={num_trials}, passed={passes}, failed={mismatches}, max_batch_size={max_batch_size}")
 
         if mismatches > 0:
-            pytest.fail(
-                f"Nondeterministic outputs detected: {mismatches} failed out "
-                f"of {num_trials} trials (max_batch_size={max_batch_size})."
-            )
+            pytest.fail(f"Nondeterministic outputs detected: {mismatches} failed out of {num_trials} trials (max_batch_size={max_batch_size}).")
 
     finally:
         del llm
@@ -271,10 +259,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
         assert len(outs) == 1
         step_logprobs, token_ids = _extract_step_logprobs(outs[0])
         if step_logprobs is None:
-            pytest.skip(
-                "Logits are not available on RequestOutput; "
-                "enable logprobs return to run this test."
-            )
+            pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
         bs1_logprobs_per_prompt.append(step_logprobs)
         bs1_tokens_per_prompt.append(token_ids)
         print(f"[BS=1] Prompt {idx} generated tokens: {token_ids}")
@@ -296,10 +281,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
         print(f"[BS={len(prompts)}] Prompt {idx} generated tokens: {tokens}")
         step_logprobs, token_ids = _extract_step_logprobs(o)
         if step_logprobs is None:
-            pytest.skip(
-                "Logits are not available on RequestOutput; "
-                "enable logprobs return to run this test."
-            )
+            pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
         bsN_logprobs_per_prompt.append(step_logprobs)
         bsN_tokens_per_prompt.append(token_ids)
 
@@ -314,10 +296,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
         )
     ):
         if len(logprobs_bs1) != len(logprobs_bsN):
-            reason = (
-                f"Different number of steps: {len(logprobs_bs1)} (BS=1) "
-                f"vs {len(logprobs_bsN)} (BS=N)"
-            )
+            reason = f"Different number of steps: {len(logprobs_bs1)} (BS=1) vs {len(logprobs_bsN)} (BS=N)"
             failed_prompts.append(
                 {
                     "prompt_idx": i,
@@ -340,12 +319,8 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
                     "prompt_preview": prompts[i][:100],
                     "bs1_tokens": tokens_bs1,
                     "bsN_tokens": tokens_bsN,
-                    "bs1_all_logprobs": [
-                        logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))
-                    ],
-                    "bsN_all_logprobs": [
-                        logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))
-                    ],
+                    "bs1_all_logprobs": [logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))],
+                    "bsN_all_logprobs": [logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))],
                 }
             )
             continue
@@ -381,12 +356,8 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
                         "prompt_preview": prompts[i][:100],
                         "bs1_tokens": tokens_bs1,
                         "bsN_tokens": tokens_bsN,
-                        "bs1_all_logprobs": [
-                            logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))
-                        ],
-                        "bsN_all_logprobs": [
-                            logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))
-                        ],
+                        "bs1_all_logprobs": [logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))],
+                        "bsN_all_logprobs": [logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))],
                     }
                 )
                 break
@@ -395,10 +366,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
     # Print summary of all failures
     if failed_prompts:
         print(f"\n{'=' * 80}")
-        fail_msg = (
-            f"BATCH INVARIANCE FAILURES: {len(failed_prompts)}/"
-            f"{len(prompts)} prompts failed"
-        )
+        fail_msg = f"BATCH INVARIANCE FAILURES: {len(failed_prompts)}/{len(prompts)} prompts failed"
         print(fail_msg)
         print(f"{'=' * 80}")
         for fail in failed_prompts:
@@ -422,10 +390,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
         print(f"{'=' * 80}\n")
 
         # Fail the test with summary
-        msg = (
-            f"Batch invariance violated in {len(failed_prompts)}/"
-            f"{len(prompts)} prompts. See output above for details."
-        )
+        msg = f"Batch invariance violated in {len(failed_prompts)}/{len(prompts)} prompts. See output above for details."
         pytest.fail(msg)
 
 
@@ -543,10 +508,7 @@ def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.Monke
         assert len(outs) == 1
         step_logprobs, token_ids = _extract_step_logprobs(outs[0])
         if step_logprobs is None:
-            pytest.skip(
-                "Logits are not available on RequestOutput; "
-                "enable logprobs return to run this test."
-            )
+            pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
         bs1_logprobs_per_prompt.append(step_logprobs)
         bs1_tokens_per_prompt.append(token_ids)
         print(f"[BS=1] Prompt {idx} generated tokens: {token_ids}")
@@ -567,10 +529,7 @@ def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.Monke
         print(f"[BS={len(prompts)}] Prompt {idx} generated tokens: {tokens}")
         step_logprobs, token_ids = _extract_step_logprobs(o)
         if step_logprobs is None:
-            pytest.skip(
-                "Logits are not available on RequestOutput; "
-                "enable logprobs return to run this test."
-            )
+            pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
         bsN_logprobs_per_prompt.append(step_logprobs)
         bsN_tokens_per_prompt.append(token_ids)
 
@@ -585,10 +544,7 @@ def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.Monke
         )
     ):
         if len(logprobs_bs1) != len(logprobs_bsN):
-            reason = (
-                f"Different number of steps: {len(logprobs_bs1)} (BS=1) "
-                f"vs {len(logprobs_bsN)} (BS=N)"
-            )
+            reason = f"Different number of steps: {len(logprobs_bs1)} (BS=1) vs {len(logprobs_bsN)} (BS=N)"
             differences_found.append(
                 {
                     "prompt_idx": i,
@@ -631,10 +587,7 @@ def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.Monke
 
             if not torch.equal(a, b):
                 max_diff = torch.abs(a - b).max().item()
-                print(
-                    f"\n[EXPECTED DIVERGENCE FOUND] Prompt {i}, "
-                    f"Token {t}: max_diff={max_diff:.6e}"
-                )
+                print(f"\n[EXPECTED DIVERGENCE FOUND] Prompt {i}, Token {t}: max_diff={max_diff:.6e}")
                 bs1_tok = tokens_bs1[t] if t < len(tokens_bs1) else "N/A"
                 bsN_tok = tokens_bsN[t] if t < len(tokens_bsN) else "N/A"
                 print(f"  Token IDs: bs1={bs1_tok}, bsN={bsN_tok}")
@@ -656,11 +609,7 @@ def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.Monke
     # Print summary
     print(f"\n{'=' * 80}")
     if differences_found:
-        success_msg = (
-            f"✓ SUCCESS: Batch invariance is doing something! "
-            f"Found {len(differences_found)}/{len(prompts)} prompts "
-            f"with differences when batch invariance was DISABLED."
-        )
+        success_msg = f"✓ SUCCESS: Batch invariance is doing something! Found {len(differences_found)}/{len(prompts)} prompts with differences when batch invariance was DISABLED."
         print(success_msg)
         print(f"{'=' * 80}")
         for diff in differences_found:

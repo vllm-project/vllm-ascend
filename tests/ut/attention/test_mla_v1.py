@@ -219,16 +219,10 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.speculative_config = None
 
         ascend_config = MagicMock()
-        with patch(
-            "vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config
-        ):
-            builder = AscendMLAMetadataBuilder(
-                None, None, mock_vllm_config, mock_device
-            )
+        with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config):
+            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
 
-            self.assertEqual(
-                builder.block_size, mock_vllm_config.cache_config.block_size
-            )
+            self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(
                 builder.chunked_prefill_enabled,
                 mock_vllm_config.scheduler_config.enable_chunked_prefill,
@@ -250,16 +244,10 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.speculative_config = mock_spec_config
 
         ascend_config = MagicMock()
-        with patch(
-            "vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config
-        ):
-            builder = AscendMLAMetadataBuilder(
-                None, None, mock_vllm_config, mock_device
-            )
+        with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config):
+            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
 
-            self.assertEqual(
-                builder.block_size, mock_vllm_config.cache_config.block_size
-            )
+            self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(
                 builder.chunked_prefill_enabled,
                 mock_vllm_config.scheduler_config.enable_chunked_prefill,
@@ -268,9 +256,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
-    def test_ascend_mla_metadata_builder_build_full_graph(
-        self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla
-    ):
+    def test_ascend_mla_metadata_builder_build_full_graph(self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla):
         pcp_group = MagicMock()
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
@@ -326,12 +312,8 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         mock_vllm_config.speculative_config = None
 
-        with patch(
-            "vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config
-        ):
-            builder = AscendMLAMetadataBuilder(
-                None, None, mock_vllm_config, mock_device
-            )
+        with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config):
+            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
             builder.decode_threshold = 1
 
         input_batch = MagicMock()
@@ -365,9 +347,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         expect_output = [1, 2, 4, 5, 6, 6, 7, 8]
         num_reqs = 4
         num_reqs_pad_size = 4
-        output_seq_lens = builder.pad_actual_seq_len_q_mtp_disable_pad(
-            num_reqs_pad_size, num_reqs, input_seq_lens
-        )
+        output_seq_lens = builder.pad_actual_seq_len_q_mtp_disable_pad(num_reqs_pad_size, num_reqs, input_seq_lens)
         self.assertEqual(output_seq_lens, expect_output)
 
     def test_pad_actual_seq_lens_q_mtp_enable_pad(self):
@@ -390,9 +370,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         expect_output = [2, 4, 6, 8]
         num_reqs = 3
         num_reqs_pad_size = 1
-        output_seq_lens = builder.pad_actual_seq_len_q_mtp_enable_pad(
-            num_reqs_pad_size, num_reqs, input_seq_lens, common_metadata
-        )
+        output_seq_lens = builder.pad_actual_seq_len_q_mtp_enable_pad(num_reqs_pad_size, num_reqs, input_seq_lens, common_metadata)
         self.assertEqual(output_seq_lens, expect_output)
 
 
@@ -560,9 +538,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
-    def test_build_decode_only_metadata(
-        self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla
-    ):
+    def test_build_decode_only_metadata(self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         pcp_group = MagicMock()
         pcp_group.world_size = 1
@@ -615,9 +591,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
-    def test_build_for_graph_capture_decode_only(
-        self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla
-    ):
+    def test_build_for_graph_capture_decode_only(self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         pcp_group = MagicMock()
         pcp_group.world_size = 1
@@ -660,9 +634,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             torch.tensor([10, 10]),
             torch.Tensor([10, 10]),
         )
-        metadata = builder.build_for_graph_capture(
-            common_attn_metadata, AscendAttentionState.DecodeOnly
-        )
+        metadata = builder.build_for_graph_capture(common_attn_metadata, AscendAttentionState.DecodeOnly)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
         self.assertEqual(metadata.num_actual_tokens, base_inputs["num_actual_tokens"])
@@ -698,9 +670,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         )
         mock_get_cos_and_sin_mla.return_value = (torch.tensor(10), torch.Tensor(10))
         with self.assertRaises(NotImplementedError) as ctx:
-            builder.build_for_graph_capture(
-                common_attn_metadata, AscendAttentionState.PrefillNoCache
-            )
+            builder.build_for_graph_capture(common_attn_metadata, AscendAttentionState.PrefillNoCache)
         self.assertIn(
             "Currently we only support building dummy metadata for DecodeOnly and SpecDecoding state",
             str(ctx.exception),
@@ -790,14 +760,10 @@ class TestAscendMLAImpl(TestBase):
     def test_q_proj_and_k_up_proj(self):
         batch_size = 4
         x = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
-        q_proj_output = torch.randn(
-            batch_size, self.impl.num_heads, self.impl.qk_head_dim
-        )
+        q_proj_output = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
         self.impl.q_proj.return_value = (q_proj_output,)
         if not hasattr(self.impl, "W_UK_T") or self.impl.W_UK_T is None:
-            self.impl.W_UK_T = torch.randn(
-                self.impl.num_heads, self.impl.qk_nope_head_dim, self.impl.kv_lora_rank
-            )
+            self.impl.W_UK_T = torch.randn(self.impl.num_heads, self.impl.qk_nope_head_dim, self.impl.kv_lora_rank)
         result = self.impl._q_proj_and_k_up_proj(x)
         ql_nope, q_pe = result
         self.assertEqual(ql_nope.shape[0], batch_size)
@@ -813,9 +779,7 @@ class TestAscendMLAImpl(TestBase):
         layer.input_size_per_partition = 10
         quant_method = MagicMock(spec=UnquantizedLinearMethod)
         layer.quant_method = quant_method
-        shape_0 = self.impl.num_heads * (
-            self.impl.qk_nope_head_dim + self.impl.v_head_dim
-        )
+        shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim)
         shape_1 = self.impl.kv_lora_rank
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
@@ -841,9 +805,7 @@ class TestAscendMLAImpl(TestBase):
         q_pe = query[..., self.impl.qk_nope_head_dim :]
         q_nope = query[..., : self.impl.qk_nope_head_dim]
 
-        out, lse = self.impl._compute_prefill_context(
-            q_nope, q_pe, kv_cache, 32, metadata, prefix_out, prefix_lse
-        )
+        out, lse = self.impl._compute_prefill_context(q_nope, q_pe, kv_cache, 32, metadata, prefix_out, prefix_lse)
 
         self.assertTrue(torch.equal(prefix_out, out))
         self.assertTrue(torch.equal(prefix_lse, lse))
@@ -884,13 +846,9 @@ class TestAscendMLAImpl(TestBase):
 
         meta = MagicMock()
         meta.prefill = prefill_meta
-        self.impl.prefill_mask = torch.triu(
-            torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype), 1
-        )
+        self.impl.prefill_mask = torch.triu(torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype), 1)
 
-        out, lse = self.impl._compute_prefill_context(
-            q_nope, q_pe, kv_cache, 32, meta, prefix_out, prefix_lse
-        )
+        out, lse = self.impl._compute_prefill_context(q_nope, q_pe, kv_cache, 32, meta, prefix_out, prefix_lse)
 
         mock_load.assert_called_once()
         mock_ring.assert_called_once()
@@ -909,13 +867,9 @@ class TestAscendMLAImpl(TestBase):
     ):
         num_tokens = 100
         block_size = 4
-        q_nope = torch.randn(
-            num_tokens, self.impl.num_heads, self.impl.qk_nope_head_dim
-        )
+        q_nope = torch.randn(num_tokens, self.impl.num_heads, self.impl.qk_nope_head_dim)
         q_pe = torch.randn(num_tokens, self.impl.num_heads, self.impl.qk_rope_head_dim)
-        k_nope = torch.randn(
-            num_tokens, self.impl.num_heads, self.impl.qk_nope_head_dim
-        )
+        k_nope = torch.randn(num_tokens, self.impl.num_heads, self.impl.qk_nope_head_dim)
         k_pe = torch.randn(num_tokens, self.impl.num_heads, self.impl.qk_rope_head_dim)
         metadata = MagicMock()
         metadata.decode = MagicMock()
@@ -925,13 +879,9 @@ class TestAscendMLAImpl(TestBase):
             torch.randn(num_tokens, self.impl.num_heads, self.impl.kv_lora_rank),
             None,
         ]
-        mock_up_proj.return_value = torch.randn(
-            num_tokens, self.impl.num_heads, self.impl.v_head_dim
-        )
+        mock_up_proj.return_value = torch.randn(num_tokens, self.impl.num_heads, self.impl.v_head_dim)
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        result = self.impl._forward_decode(
-            q_nope, q_pe, k_nope, k_pe, block_size, metadata
-        )
+        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, block_size, metadata)
         self.assertEqual(result.shape[0], num_tokens)
         self.assertEqual(result.shape[1], self.impl.num_heads)
         self.assertEqual(result.shape[2], self.impl.v_head_dim)
@@ -940,9 +890,7 @@ class TestAscendMLAImpl(TestBase):
 
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
-    def test_mla_preprocess(
-        self, magic_npu_fetch, mock_maybe_all_gather_and_maybe_unpad
-    ):
+    def test_mla_preprocess(self, magic_npu_fetch, mock_maybe_all_gather_and_maybe_unpad):
         magic_npu_fetch.return_value = MagicMock()
         mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
         batch_size = 4
@@ -983,15 +931,11 @@ class TestAscendMLAImpl(TestBase):
             torch.randn(
                 num_prefill_tokens,
                 self.impl.num_heads,
-                self.impl.qk_rope_head_dim
-                + self.impl.kv_lora_rank
-                + self.impl.q_lora_rank,
+                self.impl.qk_rope_head_dim + self.impl.kv_lora_rank + self.impl.q_lora_rank,
             )
         ]
         self.impl.q_proj = MagicMock()
-        self.impl.q_proj.return_value = [
-            torch.randn(num_prefill_tokens, self.impl.num_heads, self.impl.qk_head_dim)
-        ]
+        self.impl.q_proj.return_value = [torch.randn(num_prefill_tokens, self.impl.num_heads, self.impl.qk_head_dim)]
         self.impl.kv_b_proj = MagicMock()
         self.impl.kv_b_proj.return_value = [
             torch.randn(
@@ -1005,21 +949,15 @@ class TestAscendMLAImpl(TestBase):
         self.impl.exec_kv_decode.return_value = [MagicMock(), MagicMock()]
         self.impl.exec_kv_prefill = MagicMock()
         self.impl.exec_kv_prefill.return_value = [
-            torch.randn(
-                num_prefill_tokens, self.impl.num_heads, self.impl.qk_rope_head_dim
-            ),
-            torch.randn(
-                num_prefill_tokens, self.impl.num_heads, self.impl.kv_lora_rank
-            ),
+            torch.randn(num_prefill_tokens, self.impl.num_heads, self.impl.qk_rope_head_dim),
+            torch.randn(num_prefill_tokens, self.impl.num_heads, self.impl.kv_lora_rank),
         ]
         self.impl._q_proj_and_k_up_proj = MagicMock()
         self.impl._q_proj_and_k_up_proj.return_value = [MagicMock(), MagicMock()]
         self.impl.num_kv_heads = self.impl.num_heads
         self.impl.is_kv_producer = False
 
-        decode_res, prefill_res = self.impl._mla_preprocess(
-            "mock_layer", hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False
-        )
+        decode_res, prefill_res = self.impl._mla_preprocess("mock_layer", hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False)
 
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)
@@ -1078,9 +1016,7 @@ class TestAscendMLAImpl(TestBase):
 
     @patch("vllm_ascend.attention.mla_v1.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score")
-    def test_forward_decode(
-        self, mock_npu_fused_infer_attention_score, mock_get_forward_context
-    ):
+    def test_forward_decode(self, mock_npu_fused_infer_attention_score, mock_get_forward_context):
         B = 2
         N = self.impl.num_kv_heads
         BS = 100
@@ -1105,9 +1041,7 @@ class TestAscendMLAImpl(TestBase):
             None,
         ]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        result = self.impl._forward_decode(
-            q_nope, q_pe, k_nope, k_pe, BS, attn_metadata
-        )
+        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS, attn_metadata)
 
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], N)

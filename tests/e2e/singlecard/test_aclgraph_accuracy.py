@@ -31,7 +31,10 @@ CASE_QWEN_ACLGRAPH = LLMTestCase(
         " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I want to know if there are any",
         " the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president",
         " Paris. The capital of France is also the capital of the Republic of France. The capital of France is also the capital of the European Union. The capital of",
-        " not just a technological frontier but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and",
+        (
+            " not just a technological frontier but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial "
+            "intelligence and"
+        ),
     ],
 )
 
@@ -106,9 +109,7 @@ def test_piecewise_res_consistency(cur_case: LLMTestCase):
     )
 
 
-@pytest.mark.parametrize(
-    "cur_case", [CASE_QWEN_FULL_DECODE_ONLY, CASE_DS_FULL_DECODE_ONLY]
-)
+@pytest.mark.parametrize("cur_case", [CASE_QWEN_FULL_DECODE_ONLY, CASE_DS_FULL_DECODE_ONLY])
 def test_full_decode_only_res_consistency(cur_case: LLMTestCase, monkeypatch):
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
     runner_kwargs = {

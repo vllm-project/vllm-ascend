@@ -6,8 +6,8 @@ import threading
 import time
 import types
 import unittest
-from collections import defaultdict, deque
-from typing import Any, Dict, OrderedDict
+from collections import OrderedDict, defaultdict, deque
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -104,10 +104,7 @@ class TestGetAndClearFinishedSingleRequests(unittest.TestCase):
 
         self.tracker.finished_requests = {"req_1", "req_2"}
         with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [
-                executor.submit(self.tracker.get_and_clear_finished_requests)
-                for _ in range(3)
-            ]
+            futures = [executor.submit(self.tracker.get_and_clear_finished_requests) for _ in range(3)]
             results = [f.result() for f in futures]
         self.assertEqual(sum(1 for r in results if r), 1)
         self.assertEqual(len(self.tracker.finished_requests), 0)
@@ -115,7 +112,7 @@ class TestGetAndClearFinishedSingleRequests(unittest.TestCase):
 
 class TestKVCacheSendingThreadInit(unittest.TestCase):
     def setUp(self):
-        kv_caches: Dict[str, Any] = {}
+        kv_caches: dict[str, Any] = {}
         self.common_args = {
             "tp_rank": 1,
             "prefill_tp_size": 4,
@@ -132,9 +129,7 @@ class TestKVCacheSendingThreadInit(unittest.TestCase):
 
     def tearDown(self):
         for thread in self.threads:
-            if hasattr(thread, "task_tracker") and hasattr(
-                thread.task_tracker, "socket"
-            ):
+            if hasattr(thread, "task_tracker") and hasattr(thread.task_tracker, "socket"):
                 thread.task_tracker.socket.close()
             if hasattr(thread, "is_alive") and thread.is_alive():
                 thread.join(timeout=0.1)
@@ -160,7 +155,7 @@ class TestKVCacheSendingThreadInit(unittest.TestCase):
 
 class TestGetAndClearFinishedRequests(unittest.TestCase):
     def setUp(self):
-        kv_caches: Dict[str, Any] = {}
+        kv_caches: dict[str, Any] = {}
         self.common_args = {
             "tp_rank": 1,
             "prefill_tp_size": 4,
@@ -212,11 +207,7 @@ class TestKVCacheSendingThread(unittest.TestCase):
             pcp_rank=0,
         )
         thread.start()
-        actual_port = base_port + (
-            thread.pp_rank * thread.tp_size
-            + thread.tp_rank
-            + thread.pcp_rank * thread.prefill_tp_size
-        )
+        actual_port = base_port + (thread.pp_rank * thread.tp_size + thread.tp_rank + thread.pcp_rank * thread.prefill_tp_size)
         self.assertTrue(ready_event.wait(timeout=3), "Server thread startup timeout")
 
         context = zmq.Context()  # type: ignore
@@ -249,7 +240,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: Dict[str, Any] = {}
+        self.kv_caches: dict[str, Any] = {}
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -305,7 +296,7 @@ class TestSocketManagement(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: Dict[str, Any] = {}
+        self.kv_caches: dict[str, Any] = {}
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -361,7 +352,7 @@ class TestCoreFunctionality(unittest.TestCase):
         self.ready_event = threading.Event()
         self.mock_queue = MagicMock()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: Dict[str, Any] = {"layer_0": (MagicMock(), MagicMock())}
+        self.kv_caches: dict[str, Any] = {"layer_0": (MagicMock(), MagicMock())}
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -412,9 +403,7 @@ class TestCoreFunctionality(unittest.TestCase):
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_kv_cache(self, mock_get_meta):
-        with patch(
-            "vllm_ascend.distributed.mooncake_connector.get_ascend_config"
-        ) as mock_config:
+        with patch("vllm_ascend.distributed.mooncake_connector.get_ascend_config") as mock_config:
             mock_config.return_value.enable_kv_nz = False
             self.thread.kv_caches_base_addr["remote_engine"] = {6666: [0x3000, 0x4000]}
             self.thread._transfer_kv_cache(self.test_req)
@@ -441,7 +430,7 @@ class TestMetadataHandling(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: Dict[str, Any] = {}
+        self.kv_caches: dict[str, Any] = {}
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -480,13 +469,9 @@ class TestMetadataHandling(unittest.TestCase):
 
             mock_get_socket.assert_called_once_with("host1", 5555)
             mock_return_socket.assert_called_once_with(mock_socket, "host1", 5555)
-            mock_send.assert_called_once_with(
-                mock_socket, self.thread.encoder.encode((GET_META_MSG, ""))
-            )
+            mock_send.assert_called_once_with(mock_socket, self.thread.encoder.encode((GET_META_MSG, "")))
             mock_recv.assert_called_once_with(mock_socket, self.thread.remote_poller)
-            self.assertEqual(
-                self.thread.kv_caches_base_addr["remote_engine"][5555], [0x3000, 0x4000]
-            )
+            self.assertEqual(self.thread.kv_caches_base_addr["remote_engine"][5555], [0x3000, 0x4000])
 
     @patch("vllm_ascend.distributed.mooncake_connector.ensure_zmq_send")
     @patch(
@@ -513,7 +498,7 @@ class TestMainThreadLoop(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: Dict[str, Any] = {}
+        self.kv_caches: dict[str, Any] = {}
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -584,9 +569,7 @@ class MockVllmConfig:
 
 
 class MockRequest:
-    def __init__(
-        self, request_id, prompt_token_ids=None, kv_transfer_params=None, status=None
-    ):
+    def __init__(self, request_id, prompt_token_ids=None, kv_transfer_params=None, status=None):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids or [1, 2, 3, 4]
         self.kv_transfer_params = kv_transfer_params or {}
@@ -965,9 +948,8 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(dst_g, [])
 
     def test_zmq_ctx_invalid_type(self):
-        with self.assertRaises(ValueError):
-            with zmq_ctx("INVALID", "tcp://127.0.0.1:5555"):
-                pass
+        with self.assertRaises(ValueError), zmq_ctx("INVALID", "tcp://127.0.0.1:5555"):
+            pass
 
     @patch("vllm_ascend.distributed.mooncake_connector.make_zmq_socket")
     def test_zmq_ctx_ok(self, mock_make_socket):
@@ -1218,9 +1200,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     }.get(k, d),
                 ),
             ):
-                self.vllm_config.model_config.hf_text_config.num_key_value_heads = (
-                    num_kv_heads
-                )
+                self.vllm_config.model_config.hf_text_config.num_key_value_heads = num_kv_heads
                 self.vllm_config.model_config.is_deepseek_mla = is_deepseek_mla
                 worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
                 worker.tp_num_need_pulls = tp_num_need_pulls
@@ -1231,9 +1211,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             get_tp_rank(16, 1, 1, 4, 4, False)[0],
             [[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]],
         )
-        self.assertIn(
-            get_tp_rank(8, 1, 1, 4, 4, False)[0], [[0, 2, 4, 6], [1, 3, 5, 7]]
-        )
+        self.assertIn(get_tp_rank(8, 1, 1, 4, 4, False)[0], [[0, 2, 4, 6], [1, 3, 5, 7]])
         self.assertIn(get_tp_rank(4, 1, 1, 4, 4, False)[0], [[0, 1, 2, 3]])
         self.assertIn(
             get_tp_rank(16, 1, 4, 4, 1, False),
@@ -1269,9 +1247,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             get_tp_rank(8, 2, 4, 4, 1, False),
             [[[0, 8], [2, 10], [4, 12], [6, 14]], [[1, 9], [3, 11], [5, 13], [7, 15]]],
         )
-        self.assertIn(
-            get_tp_rank(4, 2, 4, 4, 4, False), [[[0, 4], [1, 5], [2, 6], [3, 7]]]
-        )
+        self.assertIn(get_tp_rank(4, 2, 4, 4, 4, False), [[[0, 4], [1, 5], [2, 6], [3, 7]]])
         self.assertIn(
             get_tp_rank(4, 4, 4, 4, 1, False),
             [[[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]]],
@@ -1351,15 +1327,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             meta.remote_port = remote_port
             meta.remote_block_ids = remote_block_ids
             meta.local_block_ids = local_block_ids
-            meta.num_external_tokens = (
-                pcp_size * dcp_size * len(local_block_ids) * worker.block_size
-            )
+            meta.num_external_tokens = pcp_size * dcp_size * len(local_block_ids) * worker.block_size
             meta.num_prompt_blocks = pcp_size * dcp_size * len(local_block_ids)
             meta.remote_engine_id = remote_engine_id
 
-            remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = (
-                worker._get_kv_split_metadata("0", meta)
-            )
+            remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = worker._get_kv_split_metadata("0", meta)
 
             return (
                 remote_handshake_port_list,
@@ -1440,9 +1412,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         )
 
         self.assertEqual(
-            get_kv_split_metadata(
-                True, 1, 2, 8, 0, 0, 8, 2, 2, 30000, [1, 2, 3], [1, 2, 3, 4, 5], 0
-            ),
+            get_kv_split_metadata(True, 1, 2, 8, 0, 0, 8, 2, 2, 30000, [1, 2, 3], [1, 2, 3, 4, 5], 0),
             ([[30000], [30008]], [[1, 2, 3], [4, 5]], [[1, 2, 3], [1, 2]]),
         )
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, Optional, Tuple, Union
+from collections.abc import Callable
 
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
@@ -22,15 +22,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self,
         max_num_batched_tokens: int,
         max_batches: int,
-        device: Union[torch.device, str],
+        device: torch.device | str,
         **kwargs,
     ):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
-        if get_ascend_device_type() == AscendDeviceType._310P or (
-            self.lora_config is not None and self.lora_config.max_lora_rank >= 128
-        ):
+        if get_ascend_device_type() == AscendDeviceType._310P or (self.lora_config is not None and self.lora_config.max_lora_rank >= 128):
             from vllm.lora.ops.torch_ops import (
                 bgmv_expand,
                 bgmv_expand_slice,
@@ -140,9 +138,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
-        self.bgmv_expand_slice(
-            x, w_t_all, y, self.token_lora_indices, y_offset, y_slice_size, add_inputs
-        )
+        self.bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset, y_slice_size, add_inputs)
 
     def _apply_expand(
         self,
@@ -159,14 +155,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         GEMM of lora'b.
         """
 
-        expand_slice_fun: Callable = (
-            self._expand_slice_prefill if self.is_prefill else self._expand_slice_decode
-        )
+        expand_slice_fun: Callable = self._expand_slice_prefill if self.is_prefill else self._expand_slice_decode
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
 
-    def _apply_shrink(
-        self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float
-    ):
+    def _apply_shrink(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float):
         """
         Perform the ` y+=x@w_t_all` computation, which is suitable for the
         GEMM of lora'a.
@@ -177,17 +169,15 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        shrink_fun: Callable = (
-            self._shrink_prefill if self.is_prefill else self._shrink_decode
-        )
+        shrink_fun: Callable = self._shrink_prefill if self.is_prefill else self._shrink_decode
         shrink_fun(y, x, w_t_all, scale)
         y = y.view_as(y_org)
 
     def add_shrink(
         self,
-        y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+        y: tuple[torch.Tensor, ...] | torch.Tensor,
         x: torch.Tensor,
-        lora_a_stacked: Tuple[torch.Tensor, ...],
+        lora_a_stacked: tuple[torch.Tensor, ...],
         scale: float,
         **kwargs,
     ):
@@ -217,10 +207,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     def add_expand(
         self,
         y: torch.Tensor,
-        x: Union[Tuple[torch.Tensor, ...], torch.Tensor],
-        lora_b_stacked: Tuple[torch.Tensor, ...],
-        lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
-        output_slices: Tuple[int, ...],
+        x: tuple[torch.Tensor, ...] | torch.Tensor,
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        lora_bias_stacked: tuple[torch.Tensor, ...] | None,
+        output_slices: tuple[int, ...],
         offset_start: int = 0,
         add_inputs=True,
         **kwargs,
@@ -248,9 +238,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         offset_left = offset_start
         if lora_bias_stacked is not None:
-            self._apply_bias(
-                self.token_lora_indices, y, output_slices, lora_bias_stacked
-            )
+            self._apply_bias(self.token_lora_indices, y, output_slices, lora_bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
             self._apply_expand(
                 y,
@@ -285,9 +273,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         # Embedding layer only need expand op
-        expand_fun: Callable = (
-            self._expand_prefill if self.is_prefill else self._expand_decode
-        )
+        expand_fun: Callable = self._expand_prefill if self.is_prefill else self._expand_decode
         x = x.to(torch.float32)
         expand_fun(y, x, lora_b_stacked, add_inputs)
 
@@ -295,12 +281,12 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self,
         y: torch.Tensor,
         x: torch.Tensor,
-        lora_a_stacked: Tuple[torch.Tensor, ...],
-        lora_b_stacked: Tuple[torch.Tensor, ...],
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
         scale: float,
-        output_slices: Tuple[int, ...],
+        output_slices: tuple[int, ...],
         *,
-        buffer: Optional[Tuple[torch.Tensor, ...]] = None,
+        buffer: tuple[torch.Tensor, ...] | None = None,
         **kwargs,
     ) -> None:
         """
@@ -332,14 +318,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default, consistent with the
             # triton op
-            buffer = tuple(
-                torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
-                for _ in range(len(output_slices))
-            )
+            buffer = tuple(torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device) for _ in range(len(output_slices)))
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
-        self.add_expand(
-            y, buffer, lora_b_stacked, None, output_slices, add_inputs=True, **kwargs
-        )
+        self.add_expand(y, buffer, lora_b_stacked, None, output_slices, add_inputs=True, **kwargs)
 
     def add_lora_logits(
         self,
@@ -349,7 +330,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         lora_b_stacked: torch.Tensor,
         scale,
         *,
-        buffer: Optional[torch.Tensor] = None,
+        buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
         """

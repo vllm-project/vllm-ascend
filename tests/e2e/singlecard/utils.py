@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Optional
 
 from vllm import SamplingParams
 
@@ -53,7 +52,7 @@ class LLMTestCase:
     model: str
     prompts: list[str]
     golden_answers: list[str]
-    quantization: Optional[str] = None
+    quantization: str | None = None
     sampling_params: SamplingParams = field(
         default_factory=lambda: SamplingParams(
             max_tokens=32,
@@ -72,9 +71,7 @@ def gen_and_valid(
     golden_answers: list[str],
 ):
     with VllmRunner(**runner_kwargs) as runner:
-        vllm_aclgraph_outputs = runner.model.generate(
-            prompts=prompts, sampling_params=sampling_params
-        )
+        vllm_aclgraph_outputs = runner.model.generate(prompts=prompts, sampling_params=sampling_params)
     outputs_gen = []
     for output in vllm_aclgraph_outputs:
         outputs_gen.append(([output.outputs[0].index], output.outputs[0].text))

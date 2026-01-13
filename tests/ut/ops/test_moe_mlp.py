@@ -44,9 +44,7 @@ class TestCumsumGroupList(unittest.TestCase):
             with self.subTest(src=src_list_type, dst=dst_list_type):
                 with self.assertRaises(NotImplementedError) as excinfo:
                     cumsum_group_list(self.glist_dict[0], src_list_type, dst_list_type)
-                self.assertIn(
-                    "This feature is under development.", str(excinfo.exception)
-                )
+                self.assertIn("This feature is under development.", str(excinfo.exception))
 
 
 if __name__ == "__main__":

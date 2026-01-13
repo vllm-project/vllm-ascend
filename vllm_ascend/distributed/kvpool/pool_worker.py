@@ -1,6 +1,6 @@
 import math
 import threading
-from typing import Dict, Generator, Optional, Type
+from collections.abc import Generator
 
 import torch
 from vllm.config import VllmConfig
@@ -32,7 +32,7 @@ from vllm_ascend.distributed.kvpool.kv_transfer import (
     KVTransferThread,
 )
 
-backend_map: Dict[str, Type[Backend]] = {
+backend_map: dict[str, type[Backend]] = {
     "mooncake": MooncakeBackend,
     "memcache": MemcacheBackend,
 }
@@ -50,11 +50,7 @@ class KVPoolWorker:
         parallel_config = vllm_config.parallel_config
         self.dp_rank = parallel_config.data_parallel_rank
         self.use_mla = False
-        if (
-            hasattr(model_config, "use_mla")
-            and isinstance(model_config.use_mla, bool)
-            and model_config.use_mla
-        ):
+        if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
         self.use_layerwise = use_layerwize
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -65,22 +61,12 @@ class KVPoolWorker:
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = (
-            get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
-        )
+        self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "load_async", False
-        )
-        self.consumer_is_to_put = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "consumer_is_to_put", False
-            )
-        )
-        self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "backend", "mooncake"
-        )
+        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get("consumer_is_to_put", False)
+        self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.block_size = vllm_config.cache_config.block_size
 
         if self.pcp_size > 1:
@@ -113,32 +99,18 @@ class KVPoolWorker:
         partitions = None
         if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
             num_hidden_layers = model_config.hf_text_config.num_hidden_layers
-            partition_list_str = (
-                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                    "prefill_pp_layer_partition", None
-                )
-            )
-            prefill_pp_size = int(
-                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                    "prefill_pp_size", 1
-                )
-            )
+            partition_list_str = vllm_config.kv_transfer_config.kv_connector_extra_config.get("prefill_pp_layer_partition", None)
+            prefill_pp_size = int(vllm_config.kv_transfer_config.kv_connector_extra_config.get("prefill_pp_size", 1))
 
             if partition_list_str is not None:
                 try:
                     partitions = [int(layer) for layer in partition_list_str.split(",")]
                 except ValueError as err:
-                    raise ValueError(
-                        "Invalid partition string: {}".format(partition_list_str)
-                    ) from err
+                    raise ValueError("Invalid partition string: {}".format(partition_list_str)) from err
                 if len(partitions) != prefill_pp_size:
-                    raise ValueError(
-                        f"{len(partitions)=} does not match {prefill_pp_size=}."
-                    )
+                    raise ValueError(f"{len(partitions)=} does not match {prefill_pp_size=}.")
                 if sum(partitions) != num_hidden_layers:
-                    raise ValueError(
-                        f"{sum(partitions)=} does not match {num_hidden_layers=}."
-                    )
+                    raise ValueError(f"{sum(partitions)=} does not match {num_hidden_layers=}.")
             else:
                 layers_per_partition = num_hidden_layers // prefill_pp_size
                 partitions = [layers_per_partition for _ in range(prefill_pp_size)]
@@ -147,9 +119,7 @@ class KVPoolWorker:
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
 
-        self.token_database = ChunkedTokenDatabase(
-            self.metadata, self.block_size, self.use_mla, partitions
-        )
+        self.token_database = ChunkedTokenDatabase(self.metadata, self.block_size, self.use_mla, partitions)
 
         real_backend = backend_map.get(self.backend.lower())
 
@@ -162,8 +132,8 @@ class KVPoolWorker:
             parallel_config
         )
 
-        self.kv_send_thread: Optional[KVTransferThread] = None
-        self.kv_recv_thread: Optional[KVTransferThread] = None
+        self.kv_send_thread: KVTransferThread | None = None
+        self.kv_recv_thread: KVTransferThread | None = None
 
         self.finished_store_req: set[str] = set()
 
@@ -290,9 +260,7 @@ class KVPoolWorker:
             if load_spec is None or not load_spec.can_load:  # load =0
                 continue
             token_len = request.token_len_chunk
-            if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
-                load_spec.kvpool_cached_tokens == token_len - 1
-            ):
+            if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (load_spec.kvpool_cached_tokens == token_len - 1):
                 token_len = request.load_spec.kvpool_cached_tokens + 1
             else:
                 token_len = request.load_spec.kvpool_cached_tokens
@@ -310,32 +278,15 @@ class KVPoolWorker:
                     addr_list = []
                     size_list = []
                     key_list = []
-                    mask_num = (
-                        request.load_spec.vllm_cached_tokens
-                        // self.block_size
-                        * self.block_size
-                    )
-                    for start, end, key in self.token_database.process_tokens(
-                        token_len, request.block_hashes, mask_num
-                    ):
-                        addr, size, _ = self.token_database.prepare_value(
-                            start, end, request.block_ids
-                        )
+                    mask_num = request.load_spec.vllm_cached_tokens // self.block_size * self.block_size
+                    for start, end, key in self.token_database.process_tokens(token_len, request.block_hashes, mask_num):
+                        addr, size, _ = self.token_database.prepare_value(start, end, request.block_ids)
                         key_list.append(key.to_string())
                         addr_list.append(addr)
                         size_list.append(size)
-                    key_list_c = (
-                        key_list[self.tp_rank % len(key_list) :]
-                        + key_list[: self.tp_rank % len(key_list)]
-                    )
-                    addr_list_c = (
-                        addr_list[self.tp_rank % len(addr_list) :]
-                        + addr_list[: self.tp_rank % len(addr_list)]
-                    )
-                    size_list_c = (
-                        size_list[self.tp_rank % len(size_list) :]
-                        + size_list[: self.tp_rank % len(size_list)]
-                    )
+                    key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+                    addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+                    size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
                     self.m_store.get(key_list_c, addr_list_c, size_list_c)
 
     def wait_for_layer_load(self) -> None:
@@ -397,7 +348,7 @@ class KVPoolWorker:
     def retrieve_layer(
         self,
         request: ReqMeta,
-    ) -> Generator[Optional[torch.Tensor], None, None]:
+    ) -> Generator[torch.Tensor | None, None, None]:
         """
         Retrieve the KV cache in a layerwise manner.
 
@@ -428,9 +379,7 @@ class KVPoolWorker:
         ends = []
         keys = []
         first_flag = True
-        for start, end, key in self.token_database.process_tokens(
-            token_len, request.block_hashes, mask_num
-        ):
+        for start, end, key in self.token_database.process_tokens(token_len, request.block_hashes, mask_num):
             keys_multi_layer = key.split_layers(self.num_layers)
             starts.append(start)
             ends.append(end)
@@ -466,18 +415,14 @@ class KVPoolWorker:
                 yield None
 
         retrieved_tokens = torch.sum(ret_mask)
-        logger.debug(
-            f"Retrieved {retrieved_tokens} "
-            f"out of {num_required_tokens} "
-            f"out of total {token_len} tokens"
-        )
+        logger.debug(f"Retrieved {retrieved_tokens} out of {num_required_tokens} out of total {token_len} tokens")
 
         yield ret_mask
 
     def store_layer(
         self,
         request: ReqMeta,
-        current_event: Optional[torch.npu.Event],
+        current_event: torch.npu.Event | None,
     ) -> Generator[None, None, None]:
         """
         Store the KV cache in a layerwise manner.
@@ -502,9 +447,7 @@ class KVPoolWorker:
         starts = []
         ends = []
         keys = []
-        for start, end, key in self.token_database.process_tokens(
-            request.token_len_chunk, request.block_hashes
-        ):
+        for start, end, key in self.token_database.process_tokens(request.token_len_chunk, request.block_hashes):
             keys_multi_layer = key.split_layers(self.num_layers)
             starts.append(start)
             ends.append(end)
@@ -548,8 +491,7 @@ class KVPoolWorker:
         )
 
         logger.debug(
-            "Number of completed KV cache send requests: %d, receive "
-            "requests: %d, tp_rank:%d",
+            "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
             len(done_sending),
             len(done_recving),
             self.tp_rank,
@@ -602,9 +544,7 @@ class KVPoolWorker:
         keys = []
         try:
             starts = []
-            for start, end, key in self.token_database.process_tokens(
-                token_len, block_hashes
-            ):
+            for start, end, key in self.token_database.process_tokens(token_len, block_hashes):
                 if use_layerwise:
                     keys_multi_layer = key.split_layers(self.num_layers)
                     for item in keys_multi_layer:
@@ -641,9 +581,7 @@ class KVPoolWorker:
         keys = []
         try:
             starts = []
-            for start, end, key in self.token_database.process_tokens(
-                token_len, block_hashes
-            ):
+            for start, end, key in self.token_database.process_tokens(token_len, block_hashes):
                 if use_layerwise:
                     keys_multi_layer = key.split_layers(self.num_layers)
                     for item in keys_multi_layer:

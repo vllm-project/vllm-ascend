@@ -84,10 +84,8 @@ DEFAULT_PIP_PATTERNS = {
 
 def run(command):
     """Return (return-code, stdout, stderr)."""
-    shell = True if type(command) is str else False
-    p = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=shell
-    )
+    shell = isinstance(command, str)
+    p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=shell)
     raw_output, raw_err = p.communicate()
     rc = p.returncode
     if get_platform() == "win32":
@@ -134,11 +132,7 @@ def get_conda_packages(run_lambda, patterns=None):
     if out is None:
         return out
 
-    return "\n".join(
-        line
-        for line in out.splitlines()
-        if not line.startswith("#") and any(name in line for name in patterns)
-    )
+    return "\n".join(line for line in out.splitlines() if not line.startswith("#") and any(name in line for name in patterns))
 
 
 def get_gcc_version(run_lambda):
@@ -146,9 +140,7 @@ def get_gcc_version(run_lambda):
 
 
 def get_clang_version(run_lambda):
-    return run_and_parse_first_match(
-        run_lambda, "clang --version", r"clang version (.*)"
-    )
+    return run_and_parse_first_match(run_lambda, "clang --version", r"clang version (.*)")
 
 
 def get_cmake_version(run_lambda):
@@ -220,21 +212,15 @@ def get_windows_version(run_lambda):
     system_root = os.environ.get("SYSTEMROOT", "C:\\Windows")
     wmic_cmd = os.path.join(system_root, "System32", "Wbem", "wmic")
     findstr_cmd = os.path.join(system_root, "System32", "findstr")
-    return run_and_read_all(
-        run_lambda, "{} os get Caption | {} /v Caption".format(wmic_cmd, findstr_cmd)
-    )
+    return run_and_read_all(run_lambda, "{} os get Caption | {} /v Caption".format(wmic_cmd, findstr_cmd))
 
 
 def get_lsb_version(run_lambda):
-    return run_and_parse_first_match(
-        run_lambda, "lsb_release -a", r"Description:\t(.*)"
-    )
+    return run_and_parse_first_match(run_lambda, "lsb_release -a", r"Description:\t(.*)")
 
 
 def check_release_file(run_lambda):
-    return run_and_parse_first_match(
-        run_lambda, "cat /etc/*-release", r'PRETTY_NAME="(.*)"'
-    )
+    return run_and_parse_first_match(run_lambda, "cat /etc/*-release", r'PRETTY_NAME="(.*)"')
 
 
 def get_os(run_lambda):
@@ -291,9 +277,7 @@ def get_pip_packages(run_lambda, patterns=None):
     # But here it is invoked as `python -mpip`
     def run_with_pip(pip):
         out = run_and_read_all(run_lambda, pip + ["list", "--format=freeze"])
-        return "\n".join(
-            line for line in out.splitlines() if any(name in line for name in patterns)
-        )
+        return "\n".join(line for line in out.splitlines() if any(name in line for name in patterns))
 
     pip_version = "pip3" if sys.version[0] == "3" else "pip"
     out = run_with_pip([sys.executable, "-mpip"])
@@ -310,9 +294,7 @@ def get_cann_info(run_lambda):
     cpu_arch = str(out).split()[-1]
     return run_and_read_all(
         run_lambda,
-        "cat /usr/local/Ascend/ascend-toolkit/latest/{}-linux/ascend_toolkit_install.info".format(
-            cpu_arch
-        ),
+        "cat /usr/local/Ascend/ascend-toolkit/latest/{}-linux/ascend_toolkit_install.info".format(cpu_arch),
     )
 
 
@@ -348,9 +330,7 @@ def get_env_info():
     return SystemEnv(
         torch_version=version_str,
         is_debug_build=debug_mode_str,
-        python_version="{} ({}-bit runtime)".format(
-            sys_version, sys.maxsize.bit_length() + 1
-        ),
+        python_version="{} ({}-bit runtime)".format(sys_version, sys.maxsize.bit_length() + 1),
         python_platform=get_python_platform(),
         pip_version=pip_version,
         pip_packages=pip_list_output,
@@ -412,14 +392,14 @@ CANN:
 
 def pretty_str(envinfo):
     def replace_nones(dct, replacement="Could not collect"):
-        for key in dct.keys():
+        for key in dct:
             if dct[key] is not None:
                 continue
             dct[key] = replacement
         return dct
 
     def replace_bools(dct, true="Yes", false="No"):
-        for key in dct.keys():
+        for key in dct:
             if dct[key] is True:
                 dct[key] = true
             elif dct[key] is False:
@@ -457,13 +437,9 @@ def pretty_str(envinfo):
     # Tag conda and pip packages with a prefix
     # If they were previously None, they'll show up as ie '[conda] Could not collect'
     if mutable_dict["pip_packages"]:
-        mutable_dict["pip_packages"] = prepend(
-            mutable_dict["pip_packages"], "[{}] ".format(envinfo.pip_version)
-        )
+        mutable_dict["pip_packages"] = prepend(mutable_dict["pip_packages"], "[{}] ".format(envinfo.pip_version))
     if mutable_dict["conda_packages"]:
-        mutable_dict["conda_packages"] = prepend(
-            mutable_dict["conda_packages"], "[conda] "
-        )
+        mutable_dict["conda_packages"] = prepend(mutable_dict["conda_packages"], "[conda] ")
     mutable_dict["cpu_info"] = envinfo.cpu_info
     mutable_dict["npu_info"] = envinfo.npu_info
     mutable_dict["cann_info"] = envinfo.cann_info
@@ -479,27 +455,14 @@ def main():
     output = get_pretty_env_info()
     print(output)
 
-    if (
-        TORCH_AVAILABLE
-        and hasattr(torch, "utils")
-        and hasattr(torch.utils, "_crash_handler")
-    ):
+    if TORCH_AVAILABLE and hasattr(torch, "utils") and hasattr(torch.utils, "_crash_handler"):
         minidump_dir = torch.utils._crash_handler.DEFAULT_MINIDUMP_DIR
         if sys.platform == "linux" and os.path.exists(minidump_dir):
-            dumps = [
-                os.path.join(minidump_dir, dump) for dump in os.listdir(minidump_dir)
-            ]
+            dumps = [os.path.join(minidump_dir, dump) for dump in os.listdir(minidump_dir)]
             latest = max(dumps, key=os.path.getctime)
             ctime = os.path.getctime(latest)
-            creation_time = datetime.datetime.fromtimestamp(ctime).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-            msg = (
-                "\n*** Detected a minidump at {} created on {}, ".format(
-                    latest, creation_time
-                )
-                + "if this is related to your bug please include it when you file a report ***"
-            )
+            creation_time = datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S")
+            msg = "\n*** Detected a minidump at {} created on {}, ".format(latest, creation_time) + "if this is related to your bug please include it when you file a report ***"
             print(msg, file=sys.stderr)
 
 

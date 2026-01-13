@@ -25,9 +25,7 @@ def test_models_topk() -> None:
     example_prompts = [
         "The capital of France is",
     ]
-    sampling_params = SamplingParams(
-        max_tokens=10, temperature=0.0, top_k=10, top_p=0.9
-    )
+    sampling_params = SamplingParams(max_tokens=10, temperature=0.0, top_k=10, top_p=0.9)
 
     with VllmRunner(
         "Qwen/Qwen3-0.6B",

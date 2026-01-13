@@ -1,5 +1,3 @@
-from typing import Optional
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -19,15 +17,7 @@ def validate_cmp(y_cal, y_ref, dtype, device="npu"):
         torch.testing.assert_close(y_ref, y_cal, rtol=1e-02, atol=1e-02, equal_nan=True)
     elif dtype == torch.float32:
         torch.testing.assert_close(y_ref, y_cal, rtol=1e-03, atol=4e-03, equal_nan=True)
-    elif (
-        dtype == torch.int32
-        or dtype == torch.int64
-        or dtype == torch.int16
-        or dtype == torch.int8
-        or dtype == torch.uint32
-    ):
-        assert torch.equal(y_cal, y_ref)
-    elif dtype == torch.bool:
+    elif (dtype == torch.int32 or dtype == torch.int64 or dtype == torch.int16 or dtype == torch.int8 or dtype == torch.uint32) or dtype == torch.bool:
         assert torch.equal(y_cal, y_ref)
     else:
         raise ValueError('Invalid parameter "dtype" is found : {}'.format(dtype))
@@ -36,11 +26,11 @@ def validate_cmp(y_cal, y_ref, dtype, device="npu"):
 def causal_conv1d_ref(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    initial_states: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
+    initial_states: torch.Tensor | None = None,
     return_final_states: bool = False,
-    final_states_out: Optional[torch.Tensor] = None,
-    activation: Optional[str] = "silu",
+    final_states_out: torch.Tensor | None = None,
+    activation: str | None = "silu",
 ):
     """
     x: (batch, dim, seqlen)
@@ -65,9 +55,7 @@ def causal_conv1d_ref(
     out = out[..., :seqlen]
 
     if return_final_states:
-        final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(
-            dtype_in
-        )  # (batch, dim, width - 1)
+        final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(dtype_in)  # (batch, dim, width - 1)
         if final_states_out is not None:
             final_states_out.copy_(final_states)
         else:
@@ -83,8 +71,8 @@ def causal_conv1d_fn_pytorch(
     cache_indices: torch.Tensor,
     has_initial_state: torch.Tensor,
     conv_states: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    activation: Optional[str] = "silu",
+    bias: torch.Tensor | None = None,
+    activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
 ):
     """
@@ -138,12 +126,8 @@ def causal_conv1d_fn_pytorch(
                 bias,
                 activation=activation,
                 return_final_states=True,
-                final_states_out=conv_states[cache_indices[i]][
-                    ..., : (width - 1)
-                ].unsqueeze(0),
-                initial_states=conv_states[cache_indices[i]][..., : (width - 1)]
-                if has_initial_state[i]
-                else None,
+                final_states_out=conv_states[cache_indices[i]][..., : (width - 1)].unsqueeze(0),
+                initial_states=conv_states[cache_indices[i]][..., : (width - 1)] if has_initial_state[i] else None,
             )
         )
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
@@ -177,31 +161,17 @@ def test_causal_conv1d(
 
     x = torch.randn(cu_seqlen, dim, device=device, dtype=itype).transpose(0, 1)
     weight = torch.randn(dim, width, device=device, dtype=itype)
-    query_start_loc = torch.cumsum(
-        torch.tensor([0] + seq_len, device=device, dtype=torch.int32), dim=0
-    )
+    query_start_loc = torch.cumsum(torch.tensor([0] + seq_len, device=device, dtype=torch.int32), dim=0)
     cache_indices = torch.arange(num_seq, device=device, dtype=torch.int32)
-    has_initial_state_tensor = torch.tensor(
-        [has_initial_state] * num_seq, device=device, dtype=torch.bool
-    )
+    has_initial_state_tensor = torch.tensor([has_initial_state] * num_seq, device=device, dtype=torch.bool)
     activation = None if not silu_activation else "silu"
 
     if has_initial_state:
-        conv_states = torch.randn(
-            (num_seq, state_len, dim), device=device, dtype=itype
-        ).transpose(-1, -2)
-        conv_states_ref = (
-            torch.randn((num_seq, state_len, dim), device=device, dtype=itype)
-            .transpose(-1, -2)
-            .copy_(conv_states)
-        )
+        conv_states = torch.randn((num_seq, state_len, dim), device=device, dtype=itype).transpose(-1, -2)
+        conv_states_ref = torch.randn((num_seq, state_len, dim), device=device, dtype=itype).transpose(-1, -2).copy_(conv_states)
     else:
-        conv_states = torch.zeros(
-            (num_seq, state_len, dim), device=device, dtype=itype
-        ).transpose(-1, -2)
-        conv_states_ref = torch.zeros(
-            (num_seq, state_len, dim), device=device, dtype=itype
-        ).transpose(-1, -2)
+        conv_states = torch.zeros((num_seq, state_len, dim), device=device, dtype=itype).transpose(-1, -2)
+        conv_states_ref = torch.zeros((num_seq, state_len, dim), device=device, dtype=itype).transpose(-1, -2)
 
     if has_bias:
         bias = torch.randn(dim, device=device, dtype=itype)
@@ -233,9 +203,7 @@ def test_causal_conv1d(
     validate_cmp(conv_states, conv_states_ref, itype)
 
 
-def causal_conv1d_update_ref(
-    x, conv_state, weight, bias=None, activation=None, cache_seqlens=None
-):
+def causal_conv1d_update_ref(x, conv_state, weight, bias=None, activation=None, cache_seqlens=None):
     """
     x: (batch, dim) or (batch, dim, seqlen)
     conv_state: (batch, dim, state_len), where state_len >= width - 1
@@ -260,26 +228,16 @@ def causal_conv1d_update_ref(
     assert conv_state.shape == (batch, dim, state_len)
     assert weight.shape == (dim, width)
     if cache_seqlens is None:
-        x_new = torch.cat([conv_state, x], dim=-1).to(
-            weight.dtype
-        )  # (batch, dim, state_len + seqlen)
+        x_new = torch.cat([conv_state, x], dim=-1).to(weight.dtype)  # (batch, dim, state_len + seqlen)
         conv_state.copy_(x_new[:, :, -state_len:])
     else:
-        width_idx = torch.arange(
-            -(width - 1), 0, dtype=torch.long, device=x.device
-        ).unsqueeze(0) + cache_seqlens.unsqueeze(1)
-        width_idx = (
-            torch.remainder(width_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
-        )
+        width_idx = torch.arange(-(width - 1), 0, dtype=torch.long, device=x.device).unsqueeze(0) + cache_seqlens.unsqueeze(1)
+        width_idx = torch.remainder(width_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
         x_new = torch.cat([conv_state.gather(2, width_idx), x], dim=-1).to(weight.dtype)
-        copy_idx = torch.arange(seqlen, dtype=torch.long, device=x.device).unsqueeze(
-            0
-        ) + cache_seqlens.unsqueeze(1)
+        copy_idx = torch.arange(seqlen, dtype=torch.long, device=x.device).unsqueeze(0) + cache_seqlens.unsqueeze(1)
         copy_idx = torch.remainder(copy_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
         conv_state.scatter_(2, copy_idx, x)
-    out = F.conv1d(x_new, weight.unsqueeze(1), bias, padding=0, groups=dim)[
-        :, :, -seqlen:
-    ]
+    out = F.conv1d(x_new, weight.unsqueeze(1), bias, padding=0, groups=dim)[:, :, -seqlen:]
     if unsqueeze:
         out = out.squeeze(-1)
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
@@ -294,9 +252,7 @@ def causal_conv1d_update_ref(
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [True, False])
 @pytest.mark.parametrize("batch_size", [3, 64])
-def test_causal_conv1d_update_with_batch_gather(
-    batch_size, with_padding, dim, width, seqlen, has_bias, silu_activation, itype
-):
+def test_causal_conv1d_update_with_batch_gather(batch_size, with_padding, dim, width, seqlen, has_bias, silu_activation, itype):
     device = "npu"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
@@ -308,15 +264,11 @@ def test_causal_conv1d_update_with_batch_gather(
     total_entries = 10 * batch_size
 
     # x will be (batch, dim, seqlen) with contiguous along dim-axis
-    x = torch.randn(
-        padded_batch_size, seqlen, dim, device=device, dtype=itype
-    ).transpose(1, 2)
+    x = torch.randn(padded_batch_size, seqlen, dim, device=device, dtype=itype).transpose(1, 2)
 
     x_ref = x.clone()
 
-    conv_state_indices = torch.randperm(total_entries)[:batch_size].to(
-        dtype=torch.int32, device=device
-    )
+    conv_state_indices = torch.randperm(total_entries)[:batch_size].to(dtype=torch.int32, device=device)
     unused_states_bool = torch.ones(total_entries, dtype=torch.bool, device=device)
     unused_states_bool[conv_state_indices] = False
     padded_state_indices = torch.concat(
@@ -329,9 +281,7 @@ def test_causal_conv1d_update_with_batch_gather(
 
     # conv_state will be (cache_lines, dim, state_len)
     # with contiguous along dim-axis
-    conv_state = torch.randn(
-        total_entries, width - 1, dim, device=device, dtype=itype
-    ).transpose(1, 2)
+    conv_state = torch.randn(total_entries, width - 1, dim, device=device, dtype=itype).transpose(1, 2)
 
     conv_state_for_padding_test = conv_state.clone()
 
@@ -349,12 +299,8 @@ def test_causal_conv1d_update_with_batch_gather(
         conv_state_indices=padded_state_indices,
         pad_slot_id=PAD_SLOT_ID,
     )
-    out_ref = causal_conv1d_update_ref(
-        x_ref[:batch_size], conv_state_ref, weight, bias, activation=activation
-    )
+    out_ref = causal_conv1d_update_ref(x_ref[:batch_size], conv_state_ref, weight, bias, activation=activation)
 
     assert torch.equal(conv_state[conv_state_indices, :], conv_state_ref)
-    assert torch.equal(
-        conv_state[unused_states_bool], conv_state_for_padding_test[unused_states_bool]
-    )
+    assert torch.equal(conv_state[unused_states_bool], conv_state_for_padding_test[unused_states_bool])
     assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)

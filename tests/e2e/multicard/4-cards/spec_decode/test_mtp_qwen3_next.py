@@ -75,10 +75,7 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
             for pos in range(len(metric.values)):
                 num_accepted_tokens_per_pos[pos] += metric.values[pos]
 
-    acceptance_per_pos = [
-        num_accepted_tokens / num_drafts
-        for num_accepted_tokens in num_accepted_tokens_per_pos
-    ]
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
     if not match:
@@ -94,9 +91,7 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("num_speculative_tokens", [1])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
-def test_qwen3_next_mtp_correctness_tp4(
-    model_name: str, num_speculative_tokens: int, disable_padded_drafter_batch: bool
-):
+def test_qwen3_next_mtp_correctness_tp4(model_name: str, num_speculative_tokens: int, disable_padded_drafter_batch: bool):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",

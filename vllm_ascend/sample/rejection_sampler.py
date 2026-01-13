@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional
 
 import torch
 from vllm.triton_utils import HAS_TRITON, triton
@@ -89,7 +88,7 @@ def rejection_sample(
     # [batch_size]
     cu_num_draft_tokens: torch.Tensor,
     # [num_tokens, vocab_size]
-    draft_probs: Optional[torch.Tensor],
+    draft_probs: torch.Tensor | None,
     # [num_tokens, vocab_size]
     target_probs: torch.Tensor,
     # [batch_size, 1]
@@ -145,11 +144,7 @@ def rejection_sample(
                 block_size,
             )
         else:
-            if (
-                min(num_draft_tokens) == 1
-                and max(num_draft_tokens) == 1
-                and sampling_metadata.all_greedy
-            ):
+            if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1 and sampling_metadata.all_greedy:
                 rejection_greedy_sample_spec_len_1_pytorch(
                     output_token_ids,
                     draft_token_ids,
@@ -319,7 +314,7 @@ def sample_recovered_tokens(
     num_draft_tokens: list[int],
     cu_num_draft_tokens: torch.Tensor,
     draft_token_ids: torch.Tensor,
-    draft_probs: Optional[torch.Tensor],
+    draft_probs: torch.Tensor | None,
     target_probs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
     device: torch.device,
@@ -334,9 +329,7 @@ def sample_recovered_tokens(
     )
     q.exponential_()
 
-    num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(
-        device, non_blocking=True
-    )
+    num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(device, non_blocking=True)
     has_draft_mask = num_draft_tensor > 0
 
     for i, generator in sampling_metadata.generators.items():
@@ -386,9 +379,7 @@ def rejection_greedy_sample_spec_len_1_pytorch(
     accept_req_mask = draft_token_ids == target_argmax
     output_token_ids[:, 0] = target_argmax
     bonus_token_ids = bonus_token_ids.squeeze(1)
-    output_token_ids[:, 1] = torch.where(
-        accept_req_mask, bonus_token_ids, output_token_ids[:, 1]
-    )
+    output_token_ids[:, 1] = torch.where(accept_req_mask, bonus_token_ids, output_token_ids[:, 1])
 
 
 def rejection_greedy_sample_pytorch(
@@ -404,41 +395,29 @@ def rejection_greedy_sample_pytorch(
     batch_size = output_token_ids.size(0)
     num_tokens = draft_token_ids.size(0)
     device = output_token_ids.device
-    draft_tokens_per_req = torch.tensor(draft_tokens_per_req).to(
-        device, non_blocking=True
-    )
+    draft_tokens_per_req = torch.tensor(draft_tokens_per_req).to(device, non_blocking=True)
     if is_greedy is None:
         is_greedy = torch.ones(batch_size, dtype=torch.bool, device=device)
 
     start_indices = cu_num_draft_tokens - draft_tokens_per_req
     req_ids = torch.arange(batch_size, device=device)
     token_req_ids = torch.repeat_interleave(req_ids, draft_tokens_per_req)
-    token_positions = (
-        torch.arange(num_tokens, device=device) - start_indices[token_req_ids]
-    )
+    token_positions = torch.arange(num_tokens, device=device) - start_indices[token_req_ids]
 
     # Find the first mismatch position of each request.
     mismatch_global = draft_token_ids != target_argmax
     if max_spec_len == 0:
-        first_mismatch_pos_per_req = torch.zeros(
-            batch_size, dtype=torch.long, device=device
-        )
+        first_mismatch_pos_per_req = torch.zeros(batch_size, dtype=torch.long, device=device)
     else:
         # [bs, max_spec_len]
-        pos_matrix = torch.full(
-            (batch_size, max_spec_len), -1, dtype=torch.long, device=device
-        )
+        pos_matrix = torch.full((batch_size, max_spec_len), -1, dtype=torch.long, device=device)
         pos_matrix[token_req_ids, token_positions] = token_positions
-        mismatch_matrix = torch.full(
-            (batch_size, max_spec_len), False, dtype=torch.bool, device=device
-        )
+        mismatch_matrix = torch.full((batch_size, max_spec_len), False, dtype=torch.bool, device=device)
         mismatch_matrix[token_req_ids, token_positions] = mismatch_global
         mismatch_positions = torch.where(mismatch_matrix, pos_matrix, max_spec_len * 2)
         first_mismatch_pos_per_req, _ = torch.min(mismatch_positions, dim=1)
         no_mismatch_mask = first_mismatch_pos_per_req == max_spec_len * 2
-        first_mismatch_pos_per_req[no_mismatch_mask] = draft_tokens_per_req[
-            no_mismatch_mask
-        ]
+        first_mismatch_pos_per_req[no_mismatch_mask] = draft_tokens_per_req[no_mismatch_mask]
 
     # Copy matched target tokens into output.
     copy_len = torch.minimum(first_mismatch_pos_per_req + 1, draft_tokens_per_req)
@@ -447,9 +426,7 @@ def rejection_greedy_sample_pytorch(
     greedy_mask = is_greedy.unsqueeze(1)
     final_copy_mask = copy_mask & greedy_mask
     global_idx = start_indices.unsqueeze(1) + copy_indices
-    output_token_ids[final_copy_mask] = target_argmax[global_idx[final_copy_mask]].to(
-        output_token_ids.dtype
-    )
+    output_token_ids[final_copy_mask] = target_argmax[global_idx[final_copy_mask]].to(output_token_ids.dtype)
     # Fill bonus token.
     needs_bonus = is_greedy & (first_mismatch_pos_per_req >= draft_tokens_per_req)
     if torch.any(needs_bonus):
@@ -517,9 +494,7 @@ def rejection_random_sample_pytorch(
 
     if IS_NGRAM:
         ones_cpu = torch.ones(1, pin_memory=True, dtype=torch.float32)
-        draft_token_probs = ones_cpu.to(device, non_blocking=True).expand_as(
-            draft_tokens
-        )
+        draft_token_probs = ones_cpu.to(device, non_blocking=True).expand_as(draft_tokens)
     else:
         flat_indices = global_token_indices.flatten()
         flat_draft_tokens = draft_tokens.flatten()
@@ -537,9 +512,7 @@ def rejection_random_sample_pytorch(
     zero_threshold_cpu = torch.tensor([0.0], pin_memory=True, dtype=torch.float32)
     zero_threshold = zero_threshold_cpu.to(device, non_blocking=True)
 
-    acceptance_condition = (draft_token_probs > zero_threshold) & (
-        target_token_probs / draft_token_probs >= uniform_token_probs
-    )
+    acceptance_condition = (draft_token_probs > zero_threshold) & (target_token_probs / draft_token_probs >= uniform_token_probs)
 
     first_rejection = (~acceptance_condition) & valid_mask
 
@@ -558,21 +531,15 @@ def rejection_random_sample_pytorch(
     non_greedy_mask = ~is_greedy
     update_mask = non_greedy_mask[:, None] & valid_mask & (~should_skip)
 
-    first_reject_mask = (
-        (pos_indices == first_reject_pos) & valid_mask & non_greedy_mask[:, None]
-    )
+    first_reject_mask = (pos_indices == first_reject_pos) & valid_mask & non_greedy_mask[:, None]
     final_update_mask = update_mask | first_reject_mask
     final_tokens = torch.where(
         first_reject_mask,
         recovered_tokens,
-        torch.where(
-            final_acceptance, draft_tokens, output_token_ids[:, :max_draft_len]
-        ),
+        torch.where(final_acceptance, draft_tokens, output_token_ids[:, :max_draft_len]),
     )
 
-    output_token_ids[:, :max_draft_len] = torch.where(
-        final_update_mask, final_tokens, output_token_ids[:, :max_draft_len]
-    )
+    output_token_ids[:, :max_draft_len] = torch.where(final_update_mask, final_tokens, output_token_ids[:, :max_draft_len])
 
     no_rejection = first_reject_pos.squeeze(1) >= num_draft_per_batch
     should_add_bonus = non_greedy_mask & no_rejection
@@ -581,9 +548,7 @@ def rejection_random_sample_pytorch(
 
     seq_len = output_token_ids.shape[1]
     all_positions_cpu = torch.arange(seq_len, pin_memory=True)
-    all_positions = all_positions_cpu.to(device, non_blocking=True)[
-        None, :
-    ]  # [1, seq_len]
+    all_positions = all_positions_cpu.to(device, non_blocking=True)[None, :]  # [1, seq_len]
 
     batch_bonus_positions = bonus_positions[:, None]  # [batch_size, 1]
 
@@ -597,9 +562,7 @@ def rejection_random_sample_pytorch(
     bonus_pos_mask = bonus_pos_match & final_bonus_mask[:, None]
 
     bonus_values_expanded = bonus_token_ids.view(-1, 1).expand(-1, seq_len)
-    output_token_ids[:] = torch.where(
-        bonus_pos_mask, bonus_values_expanded, output_token_ids
-    )
+    output_token_ids[:] = torch.where(bonus_pos_mask, bonus_values_expanded, output_token_ids)
 
 
 def expand_pytorch(
@@ -645,9 +608,7 @@ def expand_pytorch(
 
     in_range = (token_indices >= cu_start_exp) & (token_indices < cu_end_exp)
 
-    replaced_input = torch.where(
-        input_ptr == replace_from, replace_to, input_ptr
-    ).float()
+    replaced_input = torch.where(input_ptr == replace_from, replace_to, input_ptr).float()
 
     token_values = torch.einsum("tb,b->t", in_range.float(), replaced_input)
 
@@ -704,9 +665,7 @@ def sample_recovered_tokens_pytorch(
     cu_start_expanded = cu_start[None, :]  # [1, batch_size]
     cu_end_expanded = cu_end[None, :]  # [1, batch_size]
 
-    in_range_mask = (token_indices_expanded >= cu_start_expanded) & (
-        token_indices_expanded < cu_end_expanded
-    )
+    in_range_mask = (token_indices_expanded >= cu_start_expanded) & (token_indices_expanded < cu_end_expanded)
 
     token_to_batch = torch.argmax(in_range_mask.int(), dim=1)
 
@@ -734,9 +693,7 @@ def sample_recovered_tokens_pytorch(
 
     prob_over_q = prob / q_values_safe
 
-    prob_over_q = torch.where(
-        (q_values == 0) | torch.isinf(q_values), -1e10, prob_over_q
-    )
+    prob_over_q = torch.where((q_values == 0) | torch.isinf(q_values), -1e10, prob_over_q)
 
     recovered_ids = torch.argmax(prob_over_q, dim=1)
 
@@ -775,9 +732,7 @@ def rejection_random_sample_block_verify_pytorch(
 
     if IS_NGRAM:
         ones_cpu = torch.ones(1, pin_memory=True, dtype=torch.float32)
-        draft_token_probs = ones_cpu.to(device, non_blocking=True).expand_as(
-            draft_tokens
-        )
+        draft_token_probs = ones_cpu.to(device, non_blocking=True).expand_as(draft_tokens)
     else:
         flat_indices = global_token_indices.flatten()
         flat_draft_tokens = draft_tokens.flatten()
@@ -800,24 +755,16 @@ def rejection_random_sample_block_verify_pytorch(
 
     last_accept_pos = torch.where(
         legal_mask.any(dim=-1, keepdim=True),
-        (
-            max_spec_len
-            - legal_mask.flip(dims=[-1]).float().argmax(dim=-1, keepdim=True)
-            - 1
-        ),
+        (max_spec_len - legal_mask.flip(dims=[-1]).float().argmax(dim=-1, keepdim=True) - 1),
         -1,
     )
     non_greedy_mask = (~is_greedy)[:, None]
 
     accept_mask = (pos_indices <= last_accept_pos) & valid_mask & non_greedy_mask
-    output_token_ids[:, :max_spec_len] = torch.where(
-        accept_mask, draft_tokens, output_token_ids[:, :max_spec_len]
-    )
+    output_token_ids[:, :max_spec_len] = torch.where(accept_mask, draft_tokens, output_token_ids[:, :max_spec_len])
 
     reject_mask = (pos_indices == last_accept_pos + 1) & valid_mask & non_greedy_mask
-    output_token_ids[:, :max_spec_len] = torch.where(
-        reject_mask, recovered_tokens, output_token_ids[:, :max_spec_len]
-    )
+    output_token_ids[:, :max_spec_len] = torch.where(reject_mask, recovered_tokens, output_token_ids[:, :max_spec_len])
 
     bonus_mask = (last_accept_pos + 1 >= num_draft_per_batch) & non_greedy_mask
     all_positions_cpu = torch.arange(max_spec_len + 1, pin_memory=True)
@@ -825,6 +772,4 @@ def rejection_random_sample_block_verify_pytorch(
     bonus_pos_match = all_positions == num_draft_per_batch
     bonus_mask = bonus_mask & bonus_pos_match
     bonus_values_expanded = bonus_token_ids.view(-1, 1).expand(-1, max_spec_len + 1)
-    output_token_ids[:] = torch.where(
-        bonus_mask, bonus_values_expanded, output_token_ids
-    )
+    output_token_ids[:] = torch.where(bonus_mask, bonus_values_expanded, output_token_ids)

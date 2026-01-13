@@ -30,20 +30,12 @@ def fused_gdn_gating_kernel(
 ):
     i_b, i_s = tl.program_id(0), tl.program_id(1)
     for row_idx in range(0, ROW_ITER):
-        batch_off = (
-            i_b * ROW_ITER * BLK_BATCHES
-            + row_idx * BLK_BATCHES
-            + tl.arange(0, BLK_BATCHES)
-        )
+        batch_off = i_b * ROW_ITER * BLK_BATCHES + row_idx * BLK_BATCHES + tl.arange(0, BLK_BATCHES)
 
         for col_idx in range(0, COL_ITER):
             head_off = col_idx * BLK_HEADS + tl.arange(0, BLK_HEADS)
 
-            off = (
-                batch_off[:, None] * seq_len * NUM_HEADS
-                + i_s * NUM_HEADS
-                + head_off[None, :]
-            )
+            off = batch_off[:, None] * seq_len * NUM_HEADS + i_s * NUM_HEADS + head_off[None, :]
             head_mask = head_off < NUM_HEADS
             mask = head_mask[None, :] & (batch_off[:, None] < NUM_BATCHES)
 
@@ -53,9 +45,7 @@ def fused_gdn_gating_kernel(
             blk_bias = tl.load(dt_bias + head_off, mask=head_mask)
 
             x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)[None, :]
-            softplus_x = tl.where(
-                beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
-            )
+            softplus_x = tl.where(beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x)
 
             blk_g = -tl.exp(blk_A_log.to(tl.float32)) * softplus_x
             tl.store(g + off, blk_g.to(g.dtype.element_ty), mask=mask)
@@ -93,12 +83,7 @@ def fused_gdn_gating_patch(
         progs = num_cores
         FACTOR = 8 * num_heads
         row_per_core = triton.cdiv(batch, num_cores)
-        BLK_BATCHES = (
-            triton.next_power_of_2(
-                triton.cdiv(UNIFIED_BUFFER_SIZE, FACTOR * BLK_HEADS) // a.element_size()
-            )
-            // 2
-        )
+        BLK_BATCHES = triton.next_power_of_2(triton.cdiv(UNIFIED_BUFFER_SIZE, FACTOR * BLK_HEADS) // a.element_size()) // 2
         ROW_ITER = triton.cdiv(row_per_core, BLK_BATCHES)
 
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)

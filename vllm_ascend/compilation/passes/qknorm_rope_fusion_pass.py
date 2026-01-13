@@ -34,15 +34,11 @@ class QKNormRopeFusionPattern:
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = eps
-        self.device = (
-            vllm_config.device_config.device if vllm_config.device_config else None
-        )
+        self.device = vllm_config.device_config.device if vllm_config.device_config else None
 
     def get_inputs(self):
         T = 5
-        qkv = torch.empty(
-            T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu"
-        )
+        qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
         q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         cos = torch.empty(1, T, 1, self.head_dim, dtype=torch.bfloat16, device="npu")
@@ -59,14 +55,10 @@ class QKNormRopeFusionPattern:
         ):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-            q_by_head = q.view(
-                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
-            )
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
             q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight, self.eps)
 
-            k_by_head = k.view(
-                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
-            )
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
             k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight, self.eps)
 
             q_flat = q_norm_out.view(q.shape)
@@ -75,9 +67,7 @@ class QKNormRopeFusionPattern:
             k_flat = k_norm_out.view(k.shape)
             k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1, self.head_dim)
 
-            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(
-                q_reshape, k_reshape, cos, sin
-            )
+            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
 
             return q_rope, k_rope, v
 
@@ -104,9 +94,7 @@ class QKNormRopeFusionPattern:
 
             return results
 
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
+        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
 
 
 class QKNormRopeFusionPatternWithBias:
@@ -118,15 +106,11 @@ class QKNormRopeFusionPatternWithBias:
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = eps
         self.vllm_config = vllm_config
-        self.device = (
-            vllm_config.device_config.device if vllm_config.device_config else None
-        )
+        self.device = vllm_config.device_config.device if vllm_config.device_config else None
 
     def get_inputs(self):
         T = 5
-        qkv = torch.empty(
-            T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu"
-        )
+        qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
         q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         q_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
@@ -148,15 +132,11 @@ class QKNormRopeFusionPatternWithBias:
         ):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-            q_by_head = q.view(
-                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
-            )
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
             q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight, self.eps)
             q_normed = q_norm_out + q_bias
 
-            k_by_head = k.view(
-                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
-            )
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
             k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight, self.eps)
             k_normed = k_norm_out + k_bias
 
@@ -166,9 +146,7 @@ class QKNormRopeFusionPatternWithBias:
             k_flat = k_normed.view(k.shape)
             k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1, self.head_dim)
 
-            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(
-                q_reshape, k_reshape, cos, sin
-            )
+            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
 
             return q_rope, k_rope, v
 
@@ -196,9 +174,7 @@ class QKNormRopeFusionPatternWithBias:
             )
             return results
 
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
+        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
 
 
 class QKNormRopeFusionPass(VllmInductorPass):
@@ -208,25 +184,17 @@ class QKNormRopeFusionPass(VllmInductorPass):
 
     def __init__(self, vllm_config: VllmConfig):
         super().__init__(vllm_config)
-        self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(
-            pass_name="qknorm_rope_fusion_pass"
-        )
+        self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(pass_name="qknorm_rope_fusion_pass")
 
         dtype = vllm_config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
-            logger.debug(
-                "QKNorm and Rope fusion not enabled: unsupported dtype %s", dtype
-            )
+            logger.debug("QKNorm and Rope fusion not enabled: unsupported dtype %s", dtype)
             return
 
         # use one attn layer to get meta (such as head_dim) for QKNormRopeFusionPattern
-        attn_layers: dict[str, Attention] = get_layers_from_vllm_config(
-            vllm_config, Attention
-        )
+        attn_layers: dict[str, Attention] = get_layers_from_vllm_config(vllm_config, Attention)
         if len(attn_layers) == 0:
-            logger.debug(
-                "QKNorm and Rope fusion enabled, but no Attention layers were discovered."
-            )
+            logger.debug("QKNorm and Rope fusion enabled, but no Attention layers were discovered.")
             return
         layer = next(iter(attn_layers.values()))
         for epsilon in [1e-6, 1e-5]:

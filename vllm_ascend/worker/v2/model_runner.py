@@ -135,17 +135,11 @@ class NPUModelRunner(GPUModelRunner):
 
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
-        num_scheduled_tokens = np.array(
-            [scheduler_output.num_scheduled_tokens[i] for i in req_ids], dtype=np.int32
-        )
+        num_scheduled_tokens = np.array([scheduler_output.num_scheduled_tokens[i] for i in req_ids], dtype=np.int32)
         num_valid_tokens = num_scheduled_tokens
         if scheduler_output.scheduled_spec_decode_tokens:
             num_valid_tokens = np.array(
-                [
-                    num_tokens
-                    - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-                    for num_tokens, i in zip(num_scheduled_tokens, req_ids)
-                ],
+                [num_tokens - len(scheduler_output.scheduled_spec_decode_tokens.get(i, [])) for num_tokens, i in zip(num_scheduled_tokens, req_ids)],
                 dtype=np.int32,
             )
         attn_state = build_attn_state(
@@ -156,9 +150,7 @@ class NPUModelRunner(GPUModelRunner):
             num_valid_tokens,
         )
 
-        idx_mapping_list = [
-            self.req_states.req_id_to_index[req_id] for req_id in req_ids
-        ]
+        idx_mapping_list = [self.req_states.req_id_to_index[req_id] for req_id in req_ids]
         idx_mapping = self.input_buffers.idx_mapping
         idx_mapping.np[:num_reqs] = idx_mapping_list
         idx_mapping_np = idx_mapping.np[:num_reqs]
@@ -173,16 +165,11 @@ class NPUModelRunner(GPUModelRunner):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
-            cu_num_logits = torch.arange(
-                num_reqs + 1, device=self.device, dtype=torch.int32
-            )
+            cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
         else:
             draft_tokens = scheduler_output.scheduled_spec_decode_tokens
             num_draft_tokens = np.array(
-                [
-                    len(draft_tokens[req_id]) if req_id in draft_tokens else 0
-                    for req_id in req_ids
-                ],
+                [len(draft_tokens[req_id]) if req_id in draft_tokens else 0 for req_id in req_ids],
                 dtype=np.int32,
             )
             total_num_draft_tokens = int(num_draft_tokens.sum())
@@ -248,9 +235,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
-        slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc_gpu, self.input_buffers.positions[:num_tokens]
-        )
+        slot_mappings = self.block_tables.compute_slot_mappings(query_start_loc_gpu, self.input_buffers.positions[:num_tokens])
 
         # Layer name -> attention metadata.
         # TODO(Ronald1995): try to add a new method `build_attn_metadata` in
@@ -265,9 +250,7 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens=self.input_buffers.seq_lens,
             seq_lens_cpu=self.input_buffers.seq_lens_cpu,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
-            num_computed_tokens_cpu=self.req_states.num_computed_tokens_cpu[
-                idx_mapping_cpu
-            ],
+            num_computed_tokens_cpu=self.req_states.num_computed_tokens_cpu[idx_mapping_cpu],
             block_tables=block_tables,
             # torch_npu._reshape_and_cache operator requires slot_mappings to
             # be torch.int32.
@@ -355,9 +338,7 @@ class NPUModelRunner(GPUModelRunner):
         for i, req_id in enumerate(req_ids):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
-            self.input_buffers.seq_lens_cpu[i] = (
-                num_computed_tokens + num_scheduled_tokens[req_id]
-            )
+            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
 
     def eplb_warmup(self):
         # TODO(Ronald1995): just define the method in case calling error in

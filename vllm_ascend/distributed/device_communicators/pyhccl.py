@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -38,9 +37,9 @@ from vllm_ascend.utils import current_stream
 class PyHcclCommunicator:
     def __init__(
         self,
-        group: Union[ProcessGroup, StatelessProcessGroup],
-        device: Union[int, str, torch.device],
-        library_path: Optional[str] = None,
+        group: ProcessGroup | StatelessProcessGroup,
+        device: int | str | torch.device,
+        library_path: str | None = None,
     ):
         """
         Args:
@@ -56,9 +55,7 @@ class PyHcclCommunicator:
 
         if not isinstance(group, StatelessProcessGroup):
             assert dist.is_initialized()
-            assert dist.get_backend(group) != dist.Backend.HCCL, (
-                "PyHcclCommunicator should be attached to a non-HCCL group."
-            )
+            assert dist.get_backend(group) != dist.Backend.HCCL, "PyHcclCommunicator should be attached to a non-HCCL group."
             # note: this rank is the rank in the group
             self.rank = dist.get_rank(group)
             self.world_size = dist.get_world_size(group)
@@ -119,9 +116,7 @@ class PyHcclCommunicator:
         # `torch.npu.device` is a context manager that changes the
         # current npu device to the specified one
         with torch.npu.device(device):
-            self.comm: hcclComm_t = self.hccl.hcclCommInitRank(
-                self.world_size, self.unique_id, self.rank
-            )
+            self.comm: hcclComm_t = self.hccl.hcclCommInitRank(self.world_size, self.unique_id, self.rank)
 
             stream = current_stream()
             # A small all_reduce for warmup.
@@ -130,18 +125,13 @@ class PyHcclCommunicator:
             stream.synchronize()
             del data
 
-    def all_reduce(
-        self, in_tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM, stream=None
-    ) -> torch.Tensor:
+    def all_reduce(self, in_tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM, stream=None) -> torch.Tensor:
         if self.disabled:
             return None
         # hccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
-        assert in_tensor.device == self.device, (
-            f"this hccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {in_tensor.device}"
-        )
+        assert in_tensor.device == self.device, f"this hccl communicator is created to work on {self.device}, but the input tensor is on {in_tensor.device}"
 
         out_tensor = torch.empty_like(in_tensor)
 
@@ -161,10 +151,7 @@ class PyHcclCommunicator:
     def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
         if self.disabled:
             return
-        assert tensor.device == self.device, (
-            f"this hccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {tensor.device}"
-        )
+        assert tensor.device == self.device, f"this hccl communicator is created to work on {self.device}, but the input tensor is on {tensor.device}"
         if stream is None:
             stream = current_stream()
         if src == self.rank:

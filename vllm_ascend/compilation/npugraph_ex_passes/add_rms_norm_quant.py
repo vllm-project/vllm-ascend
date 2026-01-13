@@ -68,14 +68,10 @@ def replacement_add_rms_norm_quant(epsilon):
         """
         Pattern for AddRMSNormQuant fusion.
         """
-        output = torch.ops.npu.npu_add_rms_norm(
-            rms_norm_input, residual, rms_norm_weight, epsilon
-        )
+        output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, epsilon)
         out0 = output[0]
         out1 = output[2]
-        quantized_output = torch.ops.npu.npu_quantize(
-            out0, scale, offset, torch.qint8, -1, False
-        )
+        quantized_output = torch.ops.npu.npu_quantize(out0, scale, offset, torch.qint8, -1, False)
         return quantized_output, out1
 
     def replacement(
@@ -135,15 +131,11 @@ def replacement_add_rms_norm_quant_with_bias(epsilon):
         """
         Pattern for AddRMSNormQuantWithBias fusion.
         """
-        output = torch.ops.npu.npu_add_rms_norm(
-            rms_norm_input, residual, rms_norm_weight, epsilon
-        )
+        output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, epsilon)
         out0 = output[0]
         out1 = output[2]
         out0 = out0 + bias
-        quantized_output = torch.ops.npu.npu_quantize(
-            out0, scale, offset, torch.qint8, -1, False
-        )
+        quantized_output = torch.ops.npu.npu_quantize(out0, scale, offset, torch.qint8, -1, False)
         return quantized_output, out1
 
     def replacement(
@@ -205,15 +197,11 @@ def replacement_add_rms_norm_quant_sp_pattern(epsilon):
         """
         Pattern for AddRMSNormQuantSPPattern fusion.
         """
-        output = torch.ops.npu.npu_add_rms_norm(
-            rms_norm_input, residual, rms_norm_weight, epsilon
-        )
+        output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, epsilon)
         out0 = output[0]
         out1 = output[2]
         out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
-        quantized_output = torch.ops.npu.npu_quantize(
-            out0, scale, offset, torch.qint8, -1, False
-        )
+        quantized_output = torch.ops.npu.npu_quantize(out0, scale, offset, torch.qint8, -1, False)
         return quantized_output, out1
 
     def replacement(
@@ -237,9 +225,7 @@ def replacement_add_rms_norm_quant_sp_pattern(epsilon):
         )
         quantized_output = output[0]
         out1 = output[2]
-        quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            quantized_output, True
-        )
+        quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(quantized_output, True)
         return quantized_output, out1
 
     def get_inputs():
@@ -276,16 +262,12 @@ def replacement_add_rms_norm_quant_sp_pattern_with_bias(epsilon):
         """
         Pattern for AddRMSNormQuantSPPatternWithBias fusion.
         """
-        output = torch.ops.npu.npu_add_rms_norm(
-            rms_norm_input, residual, rms_norm_weight, epsilon
-        )
+        output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, epsilon)
         out0 = output[0]
         out1 = output[2]
         out0 = out0 + bias
         out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
-        quantized_output = torch.ops.npu.npu_quantize(
-            out0, scale, offset, torch.qint8, -1, False
-        )
+        quantized_output = torch.ops.npu.npu_quantize(out0, scale, offset, torch.qint8, -1, False)
         return quantized_output, out1
 
     def replacement(
@@ -311,9 +293,7 @@ def replacement_add_rms_norm_quant_sp_pattern_with_bias(epsilon):
         )
         quantized_output = output[0]
         out1 = output[2]
-        quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            quantized_output, True
-        )
+        quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(quantized_output, True)
         return quantized_output, out1
 
     def get_inputs():
@@ -341,9 +321,7 @@ def replacement_add_rms_norm_quant_sp_pattern_with_bias(epsilon):
 # register converter for pass
 common_epsilons = [1e-5, 1e-6]
 for eps in common_epsilons:
-    logger.info(
-        f"Start register fusion pattern for AddRMSNormQuant with epsilons={eps}"
-    )
+    logger.info(f"Start register fusion pattern for AddRMSNormQuant with epsilons={eps}")
     replacement_add_rms_norm_quant(eps)
     replacement_add_rms_norm_quant_with_bias(eps)
     replacement_add_rms_norm_quant_sp_pattern(eps)

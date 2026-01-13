@@ -54,9 +54,7 @@ class VllmbenchRunner:
         ]
         self._concat_config_args(vllm_bench_cmd)
         print(f"running vllm_bench cmd: {' '.join(vllm_bench_cmd)}")
-        self.proc: subprocess.Popen = subprocess.Popen(
-            vllm_bench_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
+        self.proc: subprocess.Popen = subprocess.Popen(vllm_bench_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def __init__(
         self,
@@ -72,9 +70,7 @@ class VllmbenchRunner:
         self.model_path = model_path
         if not self.model_path:
             self.model_path = maybe_download_from_modelscope(model_name)
-        assert self.model_path is not None, (
-            f"Failed to download model: model={self.model_path}"
-        )
+        assert self.model_path is not None, f"Failed to download model: model={self.model_path}"
         self.port = port
         self.host_ip = host_ip
         curr_time = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -114,16 +110,12 @@ class VllmbenchRunner:
         stdout, stderr = self.proc.communicate()
 
         if self.proc.returncode != 0:
-            logging.error(
-                f"vllm bench command failed, return code: {self.proc.returncode}"
-            )
+            logging.error(f"vllm bench command failed, return code: {self.proc.returncode}")
             logging.error(f"Standard output: {stdout}")
             logging.error(f"Standard error: {stderr}")
             raise RuntimeError(f"vllm bench command execution failed: {stderr}")
 
-        logging.info(
-            f"vllm bench command completed, return code: {self.proc.returncode}"
-        )
+        logging.info(f"vllm bench command completed, return code: {self.proc.returncode}")
         if stdout:
             lines = stdout.split("\n")
             last_lines = lines[-100:] if len(lines) > 100 else lines
@@ -136,14 +128,17 @@ class VllmbenchRunner:
     def _get_result(self):
         result_file = os.path.join(os.getcwd(), self.result_filename)
         print("Getting performance results from file: ", result_file)
-        with open(result_file, "r", encoding="utf-8") as f:
+        with open(result_file, encoding="utf-8") as f:
             self.result = json.load(f)
 
     def _performance_verify(self):
         self._get_result()
         output_throughput = self.result["output_throughput"]
-        assert float(output_throughput) >= self.baseline * self.threshold, (
-            f"Performance verification failed. The current Output Token Throughput is {output_throughput} token/s, which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
+        min_throughput = self.baseline * self.threshold
+        assert float(output_throughput) >= min_throughput, (
+            "Performance verification failed. The current Output Token Throughput is "
+            f"{output_throughput} token/s, which is not greater than or equal to "
+            f"{self.threshold} * baseline {self.baseline}."
         )
 
 
@@ -171,5 +166,5 @@ def run_vllm_bench_case(
         print(e)
         error_msg = f"vllm_bench run failed, reason is {e}"
         logging.error(error_msg)
-        assert False, f"vllm_bench run failed, reason is {e}"
+        raise AssertionError(error_msg) from e
     return vllm_bench_result

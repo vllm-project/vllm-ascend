@@ -12,7 +12,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from typing import List, TypedDict
+from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -154,9 +154,7 @@ def mock_dist_env(mocker: MockerFixture):
             "vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context",
             return_value=mock_forward_context_obj,
         ),
-        patch(
-            "vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3
-        ),
+        patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3),
         patch(
             "vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context",
             return_value=mock_forward_context_obj,
@@ -199,15 +197,9 @@ def mock_moe_env(mocker: MockerFixture):
                 torch.tensor([0, 1, 2, 4, 6, 2, 7, 1]),
             ),
         ),
-        patch(
-            "torch_npu.npu_moe_compute_expert_tokens", return_value=(torch.randn(8, 2))
-        ),
-        patch(
-            "torch_npu.npu_moe_distribute_dispatch", return_value=(torch.randn(16, 2))
-        ),
-        patch(
-            "torch_npu.npu_moe_distribute_combine", return_value=(torch.randn(16, 2))
-        ),
+        patch("torch_npu.npu_moe_compute_expert_tokens", return_value=(torch.randn(8, 2))),
+        patch("torch_npu.npu_moe_distribute_dispatch", return_value=(torch.randn(16, 2))),
+        patch("torch_npu.npu_moe_distribute_combine", return_value=(torch.randn(16, 2))),
         patch("torch_npu.npu_grouped_matmul", return_value=([torch.randn(16, 2)])),
         patch("torch_npu.npu_swiglu", return_value=(torch.randn(16, 2))),
         patch(
@@ -252,27 +244,25 @@ def moe_method(mock_dist_env):
 
 class Device(TypedDict):
     device_id: int
-    device_expert: List[int]
+    device_expert: list[int]
 
 
 class Layer(TypedDict):
     layer_id: int
     device_count: int
-    device_list: List[Device]
+    device_list: list[Device]
 
 
 class MockData(TypedDict):
     moe_layer_count: int
-    layer_list: List[Layer]
+    layer_list: list[Layer]
 
 
 class MockQuantMethod(nn.Module):
     def __init__(self, shared_experts, num_tokens):
         super().__init__()
         if shared_experts:
-            self.apply = MagicMock(
-                return_value=(torch.randn(num_tokens, 32), torch.randn(num_tokens, 10))
-            )
+            self.apply = MagicMock(return_value=(torch.randn(num_tokens, 32), torch.randn(num_tokens, 10)))
         else:
             self.apply = MagicMock(return_value=(torch.randn(num_tokens, 32)))
 
@@ -294,9 +284,7 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
     ):
         pass
 
-    def apply(
-        self, hidden_states: torch.Tensor, expert_weights: torch.Tensor
-    ) -> torch.Tensor:
+    def apply(self, hidden_states: torch.Tensor, expert_weights: torch.Tensor) -> torch.Tensor:
         pass
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module):
@@ -541,9 +529,7 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertEqual(result.shape, hidden_states_shape)
         self.assertEqual(result.dtype, torch.bfloat16)
 
-    @patch(
-        "vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P
-    )
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P)
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_swiglu")
     @patch("torch_npu.npu_dynamic_quant")
@@ -612,9 +598,7 @@ class TestUnifiedApplyMLP(TestBase):
             torch.rand(10, 1, dtype=torch.float32),
             torch.rand(10, 1, dtype=torch.float32),
         )
-        mock_npu_grouped_matmul.side_effect = [
-            [torch.randn(10, 20, dtype=torch.bfloat16)]
-        ]
+        mock_npu_grouped_matmul.side_effect = [[torch.randn(10, 20, dtype=torch.bfloat16)]]
         mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.bfloat16)
         mock_npu_dynamic_quant.return_value = (
             torch.randint(-128, 127, (10, 40), dtype=torch.int8),

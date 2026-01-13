@@ -27,10 +27,7 @@ from tests.e2e.conftest import VllmRunner
 
 
 def generate_prompts(input_len, batchsize):
-    prompts = [
-        " ".join([f"{random.choice(string.ascii_letters)}" for _ in range(input_len)])
-        for _ in range(batchsize)
-    ]
+    prompts = [" ".join([f"{random.choice(string.ascii_letters)}" for _ in range(input_len)]) for _ in range(batchsize)]
     return prompts
 
 

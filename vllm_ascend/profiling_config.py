@@ -21,9 +21,9 @@ This module generates the service_profiling_symbols.yaml configuration file
 to ~/.config/vllm_ascend/ directory.
 """
 
+import contextlib
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import vllm
 from vllm.logger import logger
@@ -129,7 +129,7 @@ def get_config_dir() -> Path:
     return config_dir
 
 
-def _cleanup_temp_file(tmp_path: Optional[Path]) -> None:
+def _cleanup_temp_file(tmp_path: Path | None) -> None:
     """
     Clean up a temporary file if it exists.
 
@@ -137,13 +137,11 @@ def _cleanup_temp_file(tmp_path: Optional[Path]) -> None:
         tmp_path: Path to the temporary file to clean up.
     """
     if tmp_path is not None and tmp_path.exists():
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass  # Ignore cleanup errors
 
 
-def generate_service_profiling_config() -> Optional[Path]:
+def generate_service_profiling_config() -> Path | None:
     """
     Generate the service_profiling_symbols.yaml configuration file
     to ~/.config/vllm_ascend/ directory.
@@ -170,9 +168,7 @@ def generate_service_profiling_config() -> Optional[Path]:
     try:
         config_dir.mkdir(parents=True, exist_ok=True)
     except (OSError, PermissionError) as e:
-        logger.error(
-            f"Failed to create configuration directory {config_dir}: {e}", exc_info=True
-        )
+        logger.error(f"Failed to create configuration directory {config_dir}: {e}", exc_info=True)
         return None
 
     # Write the configuration file atomically using a temporary file
@@ -195,9 +191,7 @@ def generate_service_profiling_config() -> Optional[Path]:
         tmp_path.replace(config_file)
         return config_file
     except (OSError, PermissionError) as e:
-        logger.error(
-            f"Failed to write configuration file {config_file}: {e}", exc_info=True
-        )
+        logger.error(f"Failed to write configuration file {config_file}: {e}", exc_info=True)
         return None
     finally:
         # Clean up the temporary file if it wasn't successfully replaced

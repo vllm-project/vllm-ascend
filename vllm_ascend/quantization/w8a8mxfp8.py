@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 import torch_npu
@@ -29,28 +29,22 @@ class AscendW8A8MXFP8DynamicLinearMethod:
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
-        self.group_size = vllm_config.quant_config.quant_description.get(
-            "group_size", 32
-        )
+        self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
     @staticmethod
-    def get_weight(
-        input_size: int, output_size: int, params_dtype: torch.dtype
-    ) -> Dict[str, Any]:
-        params_dict = {
-            "weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)
-        }
+    def get_weight(input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)}
         return params_dict
 
     @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pertensor_param(params_dtype: torch.dtype) -> dict[str, Any]:
         return {}
 
     @staticmethod
     def get_perchannel_param(
         output_size: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return {}
 
     def get_pergroup_param(
@@ -58,24 +52,20 @@ class AscendW8A8MXFP8DynamicLinearMethod:
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
-        layer_type: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        layer_type: str | None = None,
+    ) -> dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(
-            output_size, input_size // self.group_size, dtype=torch.uint8
-        )
+        params_dict["weight_scale"] = torch.empty(output_size, input_size // self.group_size, dtype=torch.uint8)
         return params_dict
 
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-        tp_rank: Optional[int] = 0,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-            x, dst_type=torch.float8_e4m3fn
-        )
+        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
         pertoken_scale = dynamic_scale
         output_dtype = x.dtype
 

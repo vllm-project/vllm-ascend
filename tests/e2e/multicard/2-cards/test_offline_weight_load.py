@@ -32,11 +32,7 @@ MODELS = ["Qwen/Qwen3-30B-A3B"]
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_qwen3_offline_load_and_sleepmode_tp2(model):
-    script = (
-        Path(__file__).parent.parent.parent.parent.parent
-        / "examples"
-        / "offline_external_launcher.py"
-    )
+    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     cmd = [
         sys.executable,

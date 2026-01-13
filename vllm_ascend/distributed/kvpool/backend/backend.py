@@ -4,14 +4,17 @@ from vllm.config import ParallelConfig
 
 
 class Backend(ABC):
+    @abstractmethod
     def __init__(self, parallel_config: ParallelConfig):
-        pass
+        raise NotImplementedError
 
+    @abstractmethod
     def set_device(self):
-        pass
+        raise NotImplementedError
 
+    @abstractmethod
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def exists(self, keys: list[str]) -> list[int]:

@@ -62,30 +62,18 @@ def rms_norm(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_split_qkv_rmsnorm_rope(
-    num_tokens, num_q_heads, num_kv_heads, head_size, eps, dtype, seed, device
-):
+def test_split_qkv_rmsnorm_rope(num_tokens, num_q_heads, num_kv_heads, head_size, eps, dtype, seed, device):
     torch.manual_seed(seed)
     torch.set_default_device(device)
     init_device_properties_triton()
 
     q_hidden_size = num_q_heads * head_size
     kv_hidden_size = num_kv_heads * head_size
-    qkv = torch.randn(
-        num_tokens, q_hidden_size + kv_hidden_size * 2, dtype=dtype, device=device
-    )
+    qkv = torch.randn(num_tokens, q_hidden_size + kv_hidden_size * 2, dtype=dtype, device=device)
     q_weight = torch.randn(head_size, dtype=dtype, device=device)
     k_weight = torch.randn(head_size, dtype=dtype, device=device)
-    sin = (
-        torch.from_numpy(np.random.uniform(0, 1, [num_tokens, 1, 1, head_size]))
-        .to(dtype)
-        .npu()
-    )
-    cos = (
-        torch.from_numpy(np.random.uniform(0, 1, [num_tokens, 1, 1, head_size]))
-        .to(dtype)
-        .npu()
-    )
+    sin = torch.from_numpy(np.random.uniform(0, 1, [num_tokens, 1, 1, head_size])).to(dtype).npu()
+    cos = torch.from_numpy(np.random.uniform(0, 1, [num_tokens, 1, 1, head_size])).to(dtype).npu()
     # fused kernel
     q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
         input=qkv,
@@ -100,9 +88,7 @@ def test_split_qkv_rmsnorm_rope(
     )
 
     # split
-    _q, _k, v_gold = qkv.cpu().split(
-        [q_hidden_size, kv_hidden_size, kv_hidden_size], dim=-1
-    )
+    _q, _k, v_gold = qkv.cpu().split([q_hidden_size, kv_hidden_size, kv_hidden_size], dim=-1)
     # norm
     _q = rms_norm(_q.reshape(-1, head_size), q_weight.cpu(), eps)
     _k = rms_norm(_k.reshape(-1, head_size), k_weight.cpu(), eps)
@@ -115,13 +101,9 @@ def test_split_qkv_rmsnorm_rope(
     k_gold = k_gold.reshape(num_tokens, -1)
 
     # Compare the results.
-    torch.testing.assert_close(
-        q.to(torch.float32).cpu(), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
-    )
+    torch.testing.assert_close(q.to(torch.float32).cpu(), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
-    torch.testing.assert_close(
-        k.to(torch.float32).cpu(), k_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
-    )
+    torch.testing.assert_close(k.to(torch.float32).cpu(), k_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
     torch.testing.assert_close(
         v.to(torch.float32).cpu(),
@@ -143,32 +125,20 @@ def test_split_qkv_rmsnorm_rope(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_split_qkv_rmsnorm_rope_with_bias(
-    num_tokens, num_q_heads, num_kv_heads, head_size, eps, dtype, seed, device
-):
+def test_split_qkv_rmsnorm_rope_with_bias(num_tokens, num_q_heads, num_kv_heads, head_size, eps, dtype, seed, device):
     torch.manual_seed(seed)
     torch.set_default_device(device)
     init_device_properties_triton()
 
     q_hidden_size = num_q_heads * head_size
     kv_hidden_size = num_kv_heads * head_size
-    qkv = torch.randn(
-        num_tokens, q_hidden_size + kv_hidden_size * 2, dtype=dtype, device=device
-    )
+    qkv = torch.randn(num_tokens, q_hidden_size + kv_hidden_size * 2, dtype=dtype, device=device)
     q_weight = torch.randn(head_size, dtype=dtype, device=device)
     k_weight = torch.randn(head_size, dtype=dtype, device=device)
     q_bias = torch.randn(head_size, dtype=dtype, device=device)
     k_bias = torch.randn(head_size, dtype=dtype, device=device)
-    sin = (
-        torch.from_numpy(np.random.uniform(0, 1, [num_tokens, 1, 1, head_size]))
-        .to(dtype)
-        .npu()
-    )
-    cos = (
-        torch.from_numpy(np.random.uniform(0, 1, [num_tokens, 1, 1, head_size]))
-        .to(dtype)
-        .npu()
-    )
+    sin = torch.from_numpy(np.random.uniform(0, 1, [num_tokens, 1, 1, head_size])).to(dtype).npu()
+    cos = torch.from_numpy(np.random.uniform(0, 1, [num_tokens, 1, 1, head_size])).to(dtype).npu()
     # fused kernel
     q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
         input=qkv,
@@ -185,16 +155,10 @@ def test_split_qkv_rmsnorm_rope_with_bias(
     )
 
     # split
-    _q, _k, v_gold = qkv.cpu().split(
-        [q_hidden_size, kv_hidden_size, kv_hidden_size], dim=-1
-    )
+    _q, _k, v_gold = qkv.cpu().split([q_hidden_size, kv_hidden_size, kv_hidden_size], dim=-1)
     # norm
-    _q = rms_norm(
-        _q.reshape(-1, head_size), q_weight.cpu(), eps, norm_bias=q_bias.cpu()
-    )
-    _k = rms_norm(
-        _k.reshape(-1, head_size), k_weight.cpu(), eps, norm_bias=k_bias.cpu()
-    )
+    _q = rms_norm(_q.reshape(-1, head_size), q_weight.cpu(), eps, norm_bias=q_bias.cpu())
+    _k = rms_norm(_k.reshape(-1, head_size), k_weight.cpu(), eps, norm_bias=k_bias.cpu())
     _q = _q.reshape(num_tokens, 1, -1, head_size)
     _k = _k.reshape(num_tokens, 1, -1, head_size)
 
@@ -204,13 +168,9 @@ def test_split_qkv_rmsnorm_rope_with_bias(
     k_gold = k_gold.reshape(num_tokens, -1)
 
     # Compare the results.
-    torch.testing.assert_close(
-        q.to(torch.float32).cpu(), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
-    )
+    torch.testing.assert_close(q.to(torch.float32).cpu(), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
-    torch.testing.assert_close(
-        k.to(torch.float32).cpu(), k_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
-    )
+    torch.testing.assert_close(k.to(torch.float32).cpu(), k_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
     torch.testing.assert_close(
         v.to(torch.float32).cpu(),

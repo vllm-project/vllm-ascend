@@ -5,7 +5,6 @@
 # https://github.com/vllm-project/vllm/blob/main/vllm/tests/kernels/test_rotary_embedding.py
 
 import gc
-from typing import Optional, Tuple, Union
 
 import pytest
 import torch
@@ -86,18 +85,13 @@ class RotaryEmbedding(nn.Module):
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
-    def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
+    def _compute_inv_freq(self, base: int | float) -> torch.Tensor:
         """Compute the inverse frequency."""
         # NOTE(woosuk): To exactly match the HF implementation, we need to
         # use CPU to compute the cache and then move it to GPU. However, we
         # create the cache on GPU for faster initialization. This may cause
         # a slight numerical difference between the HF implementation and ours.
-        inv_freq = 1.0 / (
-            base
-            ** (
-                torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim
-            )
-        )
+        inv_freq = 1.0 / (base ** (torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
         return inv_freq
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
@@ -116,8 +110,8 @@ class RotaryEmbedding(nn.Module):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """A PyTorch-native implementation of forward()."""
         if offsets is not None:
             positions = positions + offsets
@@ -159,7 +153,7 @@ def test_rotary_embedding_quant_with_leading_dim(
     seq_len: int,
     num_heads: int,
     head_size: int,
-    rotary_dim: Optional[int],
+    rotary_dim: int | None,
     dtype: torch.dtype,
     seed: int,
     device: str,
@@ -172,9 +166,7 @@ def test_rotary_embedding_quant_with_leading_dim(
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
-    rope = RotaryEmbedding(
-        head_size, rotary_dim, max_position, base, is_neox_style, dtype
-    )
+    rope = RotaryEmbedding(head_size, rotary_dim, max_position, base, is_neox_style, dtype)
     rope = rope.to(dtype=dtype)
     num_tokens = batch_size * seq_len
     positions = torch.randint(0, max_position, (batch_size * seq_len,))
@@ -195,12 +187,8 @@ def test_rotary_embedding_quant_with_leading_dim(
     )
 
     # Compare the results.
-    torch.testing.assert_close(
-        query.view(ref_query.size()), ref_query, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
-    )
-    torch.testing.assert_close(
-        key.view(ref_key.size()), ref_key, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
-    )
+    torch.testing.assert_close(query.view(ref_query.size()), ref_query, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(key.view(ref_key.size()), ref_key, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
@@ -234,7 +222,7 @@ class ModelwithRotaryEmbedding(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None,
+        offsets: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # we simulated a simple attention layer to test if it can be seamlessly captured into aclgraph
         qkv = self.qkv_proj(hidden_states)
@@ -303,18 +291,14 @@ def test_capture_rotary_embedding_in_aclgraph(
         return gm
 
     static_positions = torch.randint(0, max_position_embeddings, (num_tokens,))
-    static_hidden_states = torch.randn(
-        num_tokens, num_heads * head_size, dtype=dtype, device="npu"
-    )
+    static_hidden_states = torch.randn(num_tokens, num_heads * head_size, dtype=dtype, device="npu")
     compiled_model = torch.compile(model, backend=custom_op_checking_backend)
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
         # warmup the fx graph before capture
         for i in range(3):
-            static_output = compiled_model(
-                static_positions, static_hidden_states, offsets=None
-            )
+            static_output = compiled_model(static_positions, static_hidden_states, offsets=None)
     stream.wait_stream(torch.npu.current_stream())
 
     aclgraph = torch.npu.NPUGraph()
@@ -323,12 +307,8 @@ def test_capture_rotary_embedding_in_aclgraph(
         # Capture the model in aclgraph.
         static_output = compiled_model(static_positions, static_hidden_states)
     # Capture the model in aclgraph.
-    random_filled_positions = torch.randint(
-        0, max_position_embeddings, (num_tokens,), device="npu"
-    )
-    random_filled_hidden_states = torch.randn(
-        num_tokens, num_heads * head_size, dtype=dtype, device="npu"
-    )
+    random_filled_positions = torch.randint(0, max_position_embeddings, (num_tokens,), device="npu")
+    random_filled_hidden_states = torch.randn(num_tokens, num_heads * head_size, dtype=dtype, device="npu")
     static_positions.copy_(random_filled_positions)
     static_hidden_states.copy_(random_filled_hidden_states)
 
@@ -338,9 +318,7 @@ def test_capture_rotary_embedding_in_aclgraph(
         ACL_GRPAH_FIRST_RUN = False
         return
     output_reference = model(static_positions, static_hidden_states)
-    torch.testing.assert_close(
-        static_output, output_reference, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
-    )
+    torch.testing.assert_close(static_output, output_reference, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

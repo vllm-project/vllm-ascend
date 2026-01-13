@@ -84,12 +84,8 @@ def torch_moe(a, w1, w2, topk_weights, topk_ids, topk, expert_map):
     for i in range(w1.shape[0]):
         mask = topk_ids == i
         if mask.sum():
-            out[mask] = SiluAndMul()(a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(
-                0, 1
-            )
-    return (
-        out.view(B, -1, w2.shape[1]) * topk_weights.view(B, -1, 1).to(out.dtype)
-    ).sum(dim=1)
+            out[mask] = SiluAndMul()(a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
+    return (out.view(B, -1, w2.shape[1]) * topk_weights.view(B, -1, 1).to(out.dtype)).sum(dim=1)
 
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
@@ -153,15 +149,11 @@ def test_token_dispatcher_with_all_gather(
         group_list_type=group_list_type,
     )
 
-    combined_output = dispatcher.token_combine(
-        hidden_states=expert_output, context_metadata=context_metadata, bias=None
-    )
+    combined_output = dispatcher.token_combine(hidden_states=expert_output, context_metadata=context_metadata, bias=None)
 
     torch_output = torch_moe(a, w1, w2, topk_weights, topk_ids, topk, expert_map)
 
-    torch.testing.assert_close(
-        combined_output.routed_out, torch_output, atol=4e-2, rtol=1
-    )
+    torch.testing.assert_close(combined_output.routed_out, torch_output, atol=4e-2, rtol=1)
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
@@ -239,9 +231,7 @@ def test_token_dispatcher_with_all_gather_quant(
             dynamic_scale=dynamic_scale,
             with_quant=True,
         )
-        combined_output = dispatcher.token_combine(
-            hidden_states=expert_output, context_metadata=context_metadata, bias=None
-        )
+        combined_output = dispatcher.token_combine(hidden_states=expert_output, context_metadata=context_metadata, bias=None)
         assert combined_output.routed_out.shape == (m, k)
         gc.collect()
         torch.npu.empty_cache()
@@ -278,9 +268,7 @@ def test_select_experts(
     hidden_states = torch.randn(m, n, device=device, dtype=dtype)
     router_logits = torch.randn(m, e, device=device, dtype=dtype)
 
-    e_score_correction_bias = (
-        torch.randn(e, device=device, dtype=dtype) if with_e_correction else None
-    )
+    e_score_correction_bias = torch.randn(e, device=device, dtype=dtype) if with_e_correction else None
 
     custom_routing_function = None
     if custom_routing:
@@ -290,17 +278,13 @@ def test_select_experts(
         custom_routing_function.return_value = (mock_weights, mock_ids)
 
     with (
-        patch(
-            "vllm_ascend.ops.fused_moe.experts_selector._native_grouped_topk"
-        ) as mock_native_grouped_topk,
+        patch("vllm_ascend.ops.fused_moe.experts_selector._native_grouped_topk") as mock_native_grouped_topk,
         patch(
             "vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method",
             return_value=MagicMock(),
         ),
     ):
-        mock_native_grouped_topk.side_effect = (
-            lambda x, num_groups, k: torch.randn_like(x)
-        )
+        mock_native_grouped_topk.side_effect = lambda x, num_groups, k: torch.randn_like(x)
 
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,

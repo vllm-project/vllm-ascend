@@ -54,9 +54,7 @@ def layer_norm_fwd_kernel(
         X_base = X + (i * BLOCK_ROWS * stride_x_row) + row * stride_x_row + group * N
         Y_base = Y + (i * BLOCK_ROWS * stride_y_row) + row * stride_y_row + group * N
         if HAS_Z:
-            Z_base = (
-                Z + (i * BLOCK_ROWS * stride_z_row) + row * stride_z_row + group * N
-            )
+            Z_base = Z + (i * BLOCK_ROWS * stride_z_row) + row * stride_z_row + group * N
         if not IS_RMS_NORM:
             Mean_base = Mean + (i * BLOCK_ROWS) + group * M
         Rstd_base = Rstd + (i * BLOCK_ROWS) + group * M
@@ -124,11 +122,7 @@ def _layer_norm_fwd(
     else:
         out = torch.empty_like(x)
     assert out.stride(-1) == 1
-    mean = (
-        torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
-        if not is_rms_norm
-        else None
-    )
+    mean = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()

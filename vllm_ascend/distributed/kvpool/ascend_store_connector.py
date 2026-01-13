@@ -1,5 +1,5 @@
 import threading
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import zmq
@@ -31,29 +31,17 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: Optional[KVCacheConfig] = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
-        super().__init__(
-            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
-        )
+        super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
-        self.use_layerwise = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "use_layerwise", False
-            )
-        )
-        self.consumer_is_to_put = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "consumer_is_to_put", False
-            )
-        )
+        self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
+        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get("consumer_is_to_put", False)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
-            logger.warning(
-                "It is recommended to use the AscendStoreConnector, as the MoonCakeStoreConnector will be removed in the future."
-            )
+            logger.warning("It is recommended to use the AscendStoreConnector, as the MoonCakeStoreConnector will be removed in the future.")
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
@@ -69,29 +57,19 @@ class AscendStoreConnector(KVConnectorBase_V1):
 
             assert self.connector_worker is not None
             if vllm_config.parallel_config.rank == 0:
-                self.lookup_server = LookupKeyServer(
-                    self.connector_worker, vllm_config, self.use_layerwise
-                )
+                self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config, self.use_layerwise)
 
     ############################################################
     # Scheduler Side Methods
     ############################################################
 
-    def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
-    ) -> tuple[int, bool]:
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.get_num_new_matched_tokens(
-            request, num_computed_tokens
-        )
+        return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
-    def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
-    ):
+    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.update_state_after_alloc(
-            request, blocks, num_external_tokens
-        )
+        return self.connector_scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
     def build_connector_meta(
         self,
@@ -104,7 +82,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -152,9 +130,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        done_sending, done_recving = self.connector_worker.get_finished(
-            finished_req_ids
-        )
+        done_sending, done_recving = self.connector_worker.get_finished(finished_req_ids)
         return done_sending, done_recving
 
 
@@ -186,9 +162,7 @@ class LookupKeyServer:
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
                 hash_frames = all_frames[1:]
                 hashes_str = self.decoder.decode(hash_frames)
-                result = self.pool_worker.lookup_scheduler(
-                    token_len, hashes_str, self.use_layerwise
-                )
+                result = self.pool_worker.lookup_scheduler(token_len, hashes_str, self.use_layerwise)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 

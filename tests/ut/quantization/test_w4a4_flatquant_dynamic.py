@@ -41,9 +41,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         Tests weight packing using the mocked NPU kernel.
         """
         weight_tensor = torch.randn(self.output_size, self.input_size)
-        mock_packed_tensor = torch.randint(
-            0, 100, (self.output_size, self.input_size // 8), dtype=torch.int32
-        )
+        mock_packed_tensor = torch.randint(0, 100, (self.output_size, self.input_size // 8), dtype=torch.int32)
         mock_npu_tensor = MagicMock()
         mock_npu_tensor.to.return_value = mock_packed_tensor
         mock_torch_npu.npu_convert_weight_to_int4pack.return_value = mock_npu_tensor
@@ -58,15 +56,11 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
 
     def test_get_weight(self):
         """Tests the get_weight static method for correct output."""
-        params = self.method.get_weight(
-            self.input_size, self.output_size, self.params_dtype
-        )
+        params = self.method.get_weight(self.input_size, self.output_size, self.params_dtype)
         self.assertIn("weight", params)
         self.assertEqual(params["weight"].shape, (self.output_size, self.input_size))
         self.assertEqual(params["weight"].dtype, torch.int8)
-        self.assertEqual(
-            AscendW4A4FlatQuantDynamicLinearMethod.input_size, self.input_size
-        )
+        self.assertEqual(AscendW4A4FlatQuantDynamicLinearMethod.input_size, self.input_size)
 
     def test_get_weight_value_error(self):
         """Tests that get_weight raises ValueError for invalid input_size."""
@@ -99,9 +93,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
 
     def test_get_pergroup_param(self):
         """Tests the get_pergroup_param method."""
-        params = self.method.get_pergroup_param(
-            self.input_size, self.output_size, self.params_dtype
-        )
+        params = self.method.get_pergroup_param(self.input_size, self.output_size, self.params_dtype)
         self.assertEqual(params, {})
 
     def _prepare_apply_mocks_and_layer(self, batch_size):
@@ -111,9 +103,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         layer.left_trans = torch.randn(m, m, dtype=self.params_dtype)
         layer.right_trans = torch.randn(n, n, dtype=self.params_dtype)
         layer.aclnn_clip_ratio = 0.95
-        layer.weight_packed = torch.randint(
-            -8, 7, (self.output_size, self.input_size // 8), dtype=torch.int32
-        )
+        layer.weight_packed = torch.randint(-8, 7, (self.output_size, self.input_size // 8), dtype=torch.int32)
         layer.weight_scale = torch.randn(self.output_size, 1, dtype=torch.float32)
         x = torch.randn(batch_size, self.input_size, dtype=self.params_dtype)
         return layer, x, m, n
@@ -123,9 +113,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         """Tests the apply method with a batch size smaller than MAX_BATCH_SIZE."""
         batch_size = 128
         layer, x, m, n = self._prepare_apply_mocks_and_layer(batch_size)
-        mock_quant_x = torch.randint(
-            0, 255, (batch_size, self.input_size // 8), dtype=torch.int32
-        )
+        mock_quant_x = torch.randint(0, 255, (batch_size, self.input_size // 8), dtype=torch.int32)
         mock_act_scale = torch.randn(batch_size, 1, dtype=torch.float32)
         mock_torch_npu.npu_kronecker_quant.return_value = (
             mock_quant_x.view(batch_size, m, n // 8),
@@ -137,9 +125,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         output = self.method.apply(layer, x, bias=bias)
         mock_torch_npu.npu_kronecker_quant.assert_called_once()
         mock_torch_npu.npu_quant_matmul.assert_called_once()
-        self.assertTrue(
-            torch.allclose(output, mock_output + bias.to(self.params_dtype))
-        )
+        self.assertTrue(torch.allclose(output, mock_output + bias.to(self.params_dtype)))
         self.assertEqual(output.shape, (batch_size, self.output_size))
 
     @patch(
@@ -151,9 +137,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         """Tests the apply method with a batch size larger than MAX_BATCH_SIZE."""
         batch_size = 25
         layer, x, m, n = self._prepare_apply_mocks_and_layer(batch_size)
-        mock_quant_x = torch.randint(
-            0, 255, (batch_size, self.input_size // 8), dtype=torch.int32
-        )
+        mock_quant_x = torch.randint(0, 255, (batch_size, self.input_size // 8), dtype=torch.int32)
         mock_act_scale = torch.randn(batch_size, 1, dtype=torch.float32)
         mock_torch_npu.npu_kronecker_quant.side_effect = [
             (mock_quant_x[:10].view(10, m, n // 8), mock_act_scale[:10]),
@@ -173,26 +157,20 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         layer, x, _, _ = self._prepare_apply_mocks_and_layer(16)
         layer.left_trans = torch.randn(20, 20)
         layer.right_trans = torch.randn(30, 30)  # 20 * 30 != 768
-        with self.assertRaisesRegex(
-            ValueError, "FlatQuant transform matrices dimension mismatch"
-        ):
+        with self.assertRaisesRegex(ValueError, "FlatQuant transform matrices dimension mismatch"):
             self.method.apply(layer, x)
 
     @patch("vllm_ascend.quantization.w4a4_flatquant_dynamic.pack_int4_weights")
     def test_process_weights_after_loading(self, mock_pack_weights):
         """Tests weight processing after loading, without transpose."""
         layer = nn.Module()
-        layer.weight = torch.randint(
-            -8, 7, (self.output_size, self.input_size), dtype=torch.int8
-        )
+        layer.weight = torch.randint(-8, 7, (self.output_size, self.input_size), dtype=torch.int8)
         layer.weight_scale = torch.randn(self.output_size, 1, dtype=torch.bfloat16)
         layer.weight_offset = torch.randn(self.output_size, 1, dtype=torch.bfloat16)
         layer.left_trans = torch.randn(24, 24)
         layer.right_trans = torch.randn(32, 32)
         layer.clip_ratio = torch.tensor([0.9])
-        mock_packed = torch.randint(
-            0, 100, (self.output_size, self.input_size // 8), dtype=torch.int32
-        )
+        mock_packed = torch.randint(0, 100, (self.output_size, self.input_size // 8), dtype=torch.int32)
         mock_pack_weights.return_value = mock_packed
         self.method.process_weights_after_loading(layer)
         mock_pack_weights.assert_called_once()

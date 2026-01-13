@@ -96,9 +96,7 @@ class TestCpuAlloc(unittest.TestCase):
         }
         groups = {"[0, 1, 2, 3, 4, 5]": [0, 1, 2]}
         result = self.cpu_alloc.average_distribute(groups)
-        self.assertEqual(
-            result, {0: [0, 1, 2, 3], 1: [4, 5, 6, 7], 2: [8, 9, 10, 11, 12, 13]}
-        )
+        self.assertEqual(result, {0: [0, 1, 2, 3], 1: [4, 5, 6, 7], 2: [8, 9, 10, 11, 12, 13]})
 
     def test_extend_numa(self):
         result = self.cpu_alloc.extend_numa([])
@@ -149,9 +147,7 @@ class TestCpuAlloc(unittest.TestCase):
 
     @patch("vllm_ascend.cpu_binding.execute_command")
     def test_bind_threads(self, mock_execute_command):
-        thread_message = (
-            "1234 1234 ? 00:00:03 acl_thread\n4567 4567 ? 00:00:03 release_thread"
-        )
+        thread_message = "1234 1234 ? 00:00:03 acl_thread\n4567 4567 ? 00:00:03 release_thread"
         mock_execute_command.return_value = (thread_message, 0)
         self.cpu_alloc.device_info.running_npu_list = [0]
         self.cpu_alloc.assign_main = {0: [0, 1]}

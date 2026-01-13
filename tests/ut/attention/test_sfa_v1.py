@@ -135,12 +135,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor(
-            [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
-        )
-        common_attn_metadata.query_start_loc_cpu = torch.tensor(
-            [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
-        )
+        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
         common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
         common_attn_metadata.positions = torch.randn(100)
@@ -164,9 +160,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
-    def test_ascend_sfa_metadata_builder_build_for_graph_capture(
-        self, mock_get_cos_and_sin_mla, mock_get_current_vllm_config
-    ):
+    def test_ascend_sfa_metadata_builder_build_for_graph_capture(self, mock_get_cos_and_sin_mla, mock_get_current_vllm_config):
         cfg = MagicMock()
         cfg.model_config = MagicMock()
         cfg.model_config.hf_text_config = MagicMock()
@@ -191,12 +185,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor(
-            [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
-        )
-        common_attn_metadata.query_start_loc_cpu = torch.tensor(
-            [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
-        )
+        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
         common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
         common_attn_metadata.positions = torch.randn(100)

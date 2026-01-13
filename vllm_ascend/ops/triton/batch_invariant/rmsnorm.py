@@ -99,10 +99,7 @@ def rms_norm(
         Tensor with RMS normalization applied along the last dimension
     """
     assert weight.dim() == 1, "Weight must be 1-dimensional"
-    assert input_.shape[-1] == weight.shape[0], (
-        f"Input last dimension ({input_.shape[-1]}) must match "
-        f"weight dimension ({weight.shape[0]})"
-    )
+    assert input_.shape[-1] == weight.shape[0], f"Input last dimension ({input_.shape[-1]}) must match weight dimension ({weight.shape[0]})"
 
     # Flatten all dimensions except the last one
     original_shape = input_.shape
@@ -114,9 +111,7 @@ def rms_norm(
 
     output = torch.empty_like(input_2d, dtype=input_.dtype)
     BLOCK_SIZE = 1024
-    max_grid_size = driver.active.utils.get_device_properties(
-        torch.npu.current_device()
-    )["num_vectorcore"]
+    max_grid_size = driver.active.utils.get_device_properties(torch.npu.current_device())["num_vectorcore"]
 
     grid = (min(n_rows, max_grid_size),)
 
