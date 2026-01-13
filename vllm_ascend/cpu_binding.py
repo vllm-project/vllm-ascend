@@ -14,16 +14,14 @@ ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 
 
 def execute_command(cmd: List[str]) -> Tuple[str, int]:
-    with subprocess.Popen(cmd,
-                          shell=False,
-                          stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE) as p:
+    with subprocess.Popen(
+        cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    ) as p:
         out, _ = p.communicate(timeout=1000)
     return out.decode(), p.returncode
 
 
 class DeviceInfo:
-
     def __init__(self):
         self.npu_map_info: Dict[str, Dict[str, str]] = self.get_npu_map_info()
         self.allowed_cpus: List[int] = self.parse_allowed_cpus()
@@ -104,8 +102,7 @@ class DeviceInfo:
     def parse_topo_affinity(self) -> Dict[int, List[int]]:
         chip_logic_id = 0
         affinity: Dict[int, List[int]] = {}
-        affinity_message, _ = execute_command(
-            ["npu-smi", "info", "-t", "topo"])
+        affinity_message, _ = execute_command(["npu-smi", "info", "-t", "topo"])
         for line in affinity_message.splitlines():
             if line.startswith("NPU"):
                 parts = line.split()
@@ -117,7 +114,6 @@ class DeviceInfo:
 
 
 class CpuAlloc:
-
     def __init__(self, rank_id: int):
         self.rank_id = rank_id
         self.device_info: DeviceInfo = DeviceInfo()
@@ -129,8 +125,7 @@ class CpuAlloc:
         self.assign_rel: Dict[int, List[int]] = {}
 
     @staticmethod
-    def get_threads_map(
-            thread_message: str) -> Dict[str, Dict[str, List[str]]]:
+    def get_threads_map(thread_message: str) -> Dict[str, Dict[str, List[str]]]:
         threads_map: Dict[str, Dict[str, List[str]]] = {}
         for line in thread_message.splitlines():
             parts = line.split()
@@ -144,10 +139,7 @@ class CpuAlloc:
             else:
                 continue
             if main_pid not in threads_map:
-                threads_map[main_pid] = {
-                    "acl_thread": [],
-                    "release_thread": []
-                }
+                threads_map[main_pid] = {"acl_thread": [], "release_thread": []}
             threads_map[main_pid][key].append(sub_pid)
         return threads_map
 
@@ -157,23 +149,27 @@ class CpuAlloc:
             cpu_list = ",".join(map(str, cpus))
             if bind_sub_thread:
                 bind_result, return_code = execute_command(
-                    ["taskset", "-acp", cpu_list, pid])
+                    ["taskset", "-acp", cpu_list, pid]
+                )
             else:
                 bind_result, return_code = execute_command(
-                    ["taskset", "-cp", cpu_list, pid])
+                    ["taskset", "-cp", cpu_list, pid]
+                )
             if return_code != 0:
                 raise RuntimeError(f"Failed to bind {pid} to CPU {cpu_list}.")
 
-    def average_distribute(
-            self, groups: Dict[str, List[int]]) -> Dict[int, List[int]]:
+    def average_distribute(self, groups: Dict[str, List[int]]) -> Dict[int, List[int]]:
         result: Dict[int, List[int]] = {}
         for key, npu_list in groups.items():
             cpu_list = sorted(self.npu_cpu_pool[npu_list[0]])
             cpu_num_per_npu = len(cpu_list) // len(npu_list)
             for i, npu in enumerate(npu_list):
                 start_index = i * cpu_num_per_npu
-                end_index = (i + 1) * cpu_num_per_npu if i < len(
-                    npu_list) - 1 else len(cpu_list)
+                end_index = (
+                    (i + 1) * cpu_num_per_npu
+                    if i < len(npu_list) - 1
+                    else len(cpu_list)
+                )
                 result[npu] = cpu_list[start_index:end_index]
         return result
 
@@ -220,7 +216,8 @@ class CpuAlloc:
         for node in sorted(self.numa_to_cpu_map):
             # Available CPUs on this NUMA (constrained by allowed_cpus)
             cpus = [
-                c for c in self.numa_to_cpu_map[node]
+                c
+                for c in self.numa_to_cpu_map[node]
                 if c in self.device_info.allowed_cpus
             ]
             if not cpus:
@@ -251,7 +248,8 @@ class CpuAlloc:
             return
         for npu in self.device_info.running_npu_list:
             base_cpu_list = [
-                cpu for cpu in self.device_info.npu_affinity.get(npu, [])
+                cpu
+                for cpu in self.device_info.npu_affinity.get(npu, [])
                 if cpu in self.device_info.allowed_cpus
             ]
             if not base_cpu_list:
@@ -280,7 +278,8 @@ class CpuAlloc:
             else:
                 raise RuntimeError(
                     "The number of CPUs is insufficient to bind to the NPUs. "
-                    "Each NPU requires at least 3 CPUs.")
+                    "Each NPU requires at least 3 CPUs."
+                )
             self.assign_main[npu] = main
             self.assign_acl[npu] = acl
             self.assign_rel[npu] = rel
@@ -290,10 +289,8 @@ class CpuAlloc:
         current_npu = self.device_info.running_npu_list[self.rank_id]
         main = " ".join(map(str, self.assign_main[current_npu]))
         acl = " ".join(map(str, self.assign_acl[current_npu]))
-        rel = str(self.assign_rel[current_npu]
-                  ) if self.assign_rel[current_npu] else ""
-        logger.info(
-            f"NPU{current_npu}: main=[{main}]  acl=[{acl}]  release=[{rel}]")
+        rel = str(self.assign_rel[current_npu]) if self.assign_rel[current_npu] else ""
+        logger.info(f"NPU{current_npu}: main=[{main}]  acl=[{acl}]  release=[{rel}]")
 
     def bind_threads(self) -> None:
         thread_message, _ = execute_command(["ps", "-Te"])
@@ -303,8 +300,7 @@ class CpuAlloc:
         self.bind(main_pid, self.assign_main[current_npu], True)
         for acl_thread in threads_map.get(main_pid, {}).get("acl_thread", []):
             self.bind(acl_thread, self.assign_acl[current_npu], False)
-        for release_thread in threads_map.get(main_pid,
-                                              {}).get("release_thread", []):
+        for release_thread in threads_map.get(main_pid, {}).get("release_thread", []):
             self.bind(release_thread, self.assign_rel[current_npu], False)
 
     def run_all(self) -> None:

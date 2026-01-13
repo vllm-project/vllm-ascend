@@ -24,14 +24,8 @@ from vllm_ascend.model_loader.netloader.load import elastic_load
 @pytest.fixture
 def mock_sources():
     return [
-        {
-            "device_id": 0,
-            "sources": ["a", "b"]
-        },
-        {
-            "device_id": 1,
-            "sources": ["c"]
-        },
+        {"device_id": 0, "sources": ["a", "b"]},
+        {"device_id": 1, "sources": ["c"]},
     ]
 
 
@@ -76,8 +70,10 @@ def test_model_load_fail(mock_logger, mock_p2p):
     mock_client.ack = ["foo", "bar"]
     mock_client.server_addr = "addr"
 
-    with patch("vllm_ascend.model_loader.netloader.load.ElasticClient",
-               return_value=mock_client):
+    with patch(
+        "vllm_ascend.model_loader.netloader.load.ElasticClient",
+        return_value=mock_client,
+    ):
         # P2PLoad.load returns None
         mock_p2p_instance = MagicMock()
         mock_p2p_instance.load.return_value = None
@@ -97,8 +93,10 @@ def test_model_load_success(mock_logger, mock_p2p):
     mock_client.ack = ["foo", "bar"]
     mock_client.server_addr = "addr"
 
-    with patch("vllm_ascend.model_loader.netloader.load.ElasticClient",
-               return_value=mock_client):
+    with patch(
+        "vllm_ascend.model_loader.netloader.load.ElasticClient",
+        return_value=mock_client,
+    ):
         expected_model = object()
         mock_p2p_instance = MagicMock()
         mock_p2p_instance.load.return_value = expected_model

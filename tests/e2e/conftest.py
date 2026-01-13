@@ -37,23 +37,29 @@ from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
 from requests.exceptions import RequestException
 from torch import nn
-from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          BatchEncoding, BatchFeature)
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    BatchFeature,
+)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
-from vllm.config.model import (ConvertOption, RunnerOption,
-                               _get_and_verify_dtype)
+from vllm.config.model import ConvertOption, RunnerOption, _get_and_verify_dtype
 from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.model_utils import (TokensTextLogprobs,
-                                   TokensTextLogprobsPromptLogprobs)
+from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
 from tests.e2e.nightly.multi_node.scripts.multi_node_config import (
-    DisaggregatedPrefillCfg, NodeInfo)
+    DisaggregatedPrefillCfg,
+    NodeInfo,
+)
 from vllm_ascend.ascend_config import clear_ascend_config
+
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
@@ -63,7 +69,9 @@ adapt_patch(True)
 adapt_patch(False)
 
 from vllm.distributed.parallel_state import (  # noqa E402
-    destroy_distributed_environment, destroy_model_parallel)
+    destroy_distributed_environment,
+    destroy_model_parallel,
+)
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _M = TypeVar("_M")
@@ -85,6 +93,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         torch.distributed.destroy_process_group()
     if shutdown_ray:
         import ray  # Lazy import Ray
+
         ray.shutdown()
     gc.collect()
     torch.npu.empty_cache()
@@ -94,14 +103,14 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
-    def _start_server(self, model: str, server_cmd: list[str],
-                      env_dict: Optional[dict[str, str]]) -> None:
-        """Subclasses override this method to customize server process launch
-        """
+    def _start_server(
+        self, model: str, server_cmd: list[str], env_dict: Optional[dict[str, str]]
+    ) -> None:
+        """Subclasses override this method to customize server process launch"""
         env = os.environ.copy()
         # the current process might initialize npu,
         # to be safe, we should use spawn method
-        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
         logger.info(f"Starting server with command: {' '.join(server_cmd)}")
@@ -113,46 +122,47 @@ class RemoteOpenAIServer:
         )
 
     def __init__(
-            self,
-            model: str,
-            vllm_serve_args: Union[list[str], str],
-            *,
-            server_host: str = '0.0.0.0',
-            server_port: int = 8080,
-            env_dict: Optional[dict[str, str]] = None,
-            seed: Optional[int] = None,
-            auto_port: bool = True,
-            nodes_info: Optional[list[NodeInfo]] = None,
-            disaggregated_prefill: Optional[DisaggregatedPrefillCfg] = None,
-            proxy_port: Optional[int] = None,
-            max_wait_seconds: Optional[float] = None,
-            override_hf_configs: Optional[dict[str, Any]] = None) -> None:
+        self,
+        model: str,
+        vllm_serve_args: Union[list[str], str],
+        *,
+        server_host: str = "0.0.0.0",
+        server_port: int = 8080,
+        env_dict: Optional[dict[str, str]] = None,
+        seed: Optional[int] = None,
+        auto_port: bool = True,
+        nodes_info: Optional[list[NodeInfo]] = None,
+        disaggregated_prefill: Optional[DisaggregatedPrefillCfg] = None,
+        proxy_port: Optional[int] = None,
+        max_wait_seconds: Optional[float] = None,
+        override_hf_configs: Optional[dict[str, Any]] = None,
+    ) -> None:
         if isinstance(vllm_serve_args, str):
             vllm_serve_args = shlex.split(vllm_serve_args)
         else:
             vllm_serve_args = ["vllm", "serve", model, *vllm_serve_args]
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
-                raise ValueError("You have manually specified the port "
-                                 "when `auto_port=True`.")
+                raise ValueError(
+                    "You have manually specified the port when `auto_port=True`."
+                )
 
             # No need for a port if using unix sockets
             if "--uds" not in vllm_serve_args:
                 # Don't mutate the input args
-                vllm_serve_args = vllm_serve_args + [
-                    "--port", str(get_open_port())
-                ]
+                vllm_serve_args = vllm_serve_args + ["--port", str(get_open_port())]
         if seed is not None:
             if "--seed" in vllm_serve_args:
-                raise ValueError("You have manually specified the seed "
-                                 f"when `seed={seed}`.")
+                raise ValueError(
+                    f"You have manually specified the seed when `seed={seed}`."
+                )
 
             vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
 
         if override_hf_configs is not None:
             vllm_serve_args = vllm_serve_args + [
                 "--hf-overrides",
-                json.dumps(override_hf_configs)
+                json.dumps(override_hf_configs),
             ]
 
         self.host = str(server_host)
@@ -166,12 +176,14 @@ class RemoteOpenAIServer:
         self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 2800
         if self.disaggregated_prefill:
-            assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
+            assert proxy_port is not None, (
+                "for disaggregated_prefill, proxy port must be provided"
+            )
             self._wait_for_server_pd(timeout=max_wait_seconds)
         else:
             self._wait_for_multiple_servers(
-                [(self.host, self.url_for("health"))],
-                timeout=max_wait_seconds)
+                [(self.host, self.url_for("health"))], timeout=max_wait_seconds
+            )
 
     def __enter__(self):
         return self
@@ -211,24 +223,25 @@ class RemoteOpenAIServer:
         def url_health(ip: str, port: int) -> str:
             return f"http://{ip}:{port}/health"
 
-        targets = [(node_info.ip, url_health(node_info.ip, self.port))
-                   for node_info in self.nodes_info if not node_info.headless]
+        targets = [
+            (node_info.ip, url_health(node_info.ip, self.port))
+            for node_info in self.nodes_info
+            if not node_info.headless
+        ]
 
         # Wait for proxy ready
         master_node = self.nodes_info[0]
         url_proxy = f"http://{master_node.ip}:{proxy_port}/healthcheck"
 
         # Wait for master node proxy first
-        self._wait_for_multiple_servers([(master_node.ip, url_proxy)],
-                                        timeout=timeout)
+        self._wait_for_multiple_servers([(master_node.ip, url_proxy)], timeout=timeout)
 
         # Then wait for all api_server nodes
         self._wait_for_multiple_servers(targets=targets, timeout=timeout)
 
-    def _wait_for_multiple_servers(self,
-                                   targets,
-                                   timeout: float,
-                                   log_interval: float = 30.0):
+    def _wait_for_multiple_servers(
+        self, targets, timeout: float, log_interval: float = 30.0
+    ):
         """
         targets: List[(node_ip, url)]
         log_interval
@@ -310,14 +323,15 @@ class RemoteOpenAIServer:
     def get_async_client(self, **kwargs):
         if "timeout" not in kwargs:
             kwargs["timeout"] = 600
-        return openai.AsyncOpenAI(base_url=self.url_for("v1"),
-                                  api_key=self.DUMMY_API_KEY,
-                                  max_retries=0,
-                                  **kwargs)
+        return openai.AsyncOpenAI(
+            base_url=self.url_for("v1"),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
 
 
 class VllmRunner:
-
     def __init__(
         self,
         model_name: str,
@@ -362,12 +376,12 @@ class VllmRunner:
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
     ) -> list[TextPrompt]:
-
-        if any(x is not None and len(x) != len(prompts)
-               for x in [images, videos, audios]):
+        if any(
+            x is not None and len(x) != len(prompts) for x in [images, videos, audios]
+        ):
             raise ValueError(
-                "All non-None multimodal inputs must have the same length as "
-                "prompts")
+                "All non-None multimodal inputs must have the same length as prompts"
+            )
 
         inputs = []
         for i, prompt in enumerate(prompts):
@@ -402,14 +416,11 @@ class VllmRunner:
         audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> list[tuple[list[list[int]], list[str]]]:
-        inputs = self.get_inputs(prompts,
-                                 images=images,
-                                 videos=videos,
-                                 audios=audios)
+        inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
 
-        req_outputs = self.model.generate(inputs,
-                                          sampling_params=sampling_params,
-                                          **kwargs)
+        req_outputs = self.model.generate(
+            inputs, sampling_params=sampling_params, **kwargs
+        )
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for req_output in req_outputs:
@@ -436,8 +447,9 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 output_logprobs = sample.logprobs
-            outputs.append((output_ids, output_str, output_logprobs,
-                            req_output.prompt_logprobs))
+            outputs.append(
+                (output_ids, output_str, output_logprobs, req_output.prompt_logprobs)
+            )
         return outputs
 
     def generate_w_logprobs(
@@ -448,23 +460,22 @@ class VllmRunner:
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
         **kwargs: Any,
-    ) -> Union[list[TokensTextLogprobs],
-               list[TokensTextLogprobsPromptLogprobs]]:
-        inputs = self.get_inputs(prompts,
-                                 images=images,
-                                 videos=videos,
-                                 audios=audios)
+    ) -> Union[list[TokensTextLogprobs], list[TokensTextLogprobsPromptLogprobs]]:
+        inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
 
-        req_outputs = self.model.generate(inputs,
-                                          sampling_params=sampling_params,
-                                          **kwargs)
+        req_outputs = self.model.generate(
+            inputs, sampling_params=sampling_params, **kwargs
+        )
 
-        toks_str_logsprobs_prompt_logprobs = (
-            self._final_steps_generate_w_logprobs(req_outputs))
+        toks_str_logsprobs_prompt_logprobs = self._final_steps_generate_w_logprobs(
+            req_outputs
+        )
         # Omit prompt logprobs if not required by sampling params
-        return ([x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
-                if sampling_params.prompt_logprobs is None else
-                toks_str_logsprobs_prompt_logprobs)
+        return (
+            [x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
+            if sampling_params.prompt_logprobs is None
+            else toks_str_logsprobs_prompt_logprobs
+        )
 
     def generate_greedy(
         self,
@@ -476,14 +487,15 @@ class VllmRunner:
         **kwargs: Any,
     ) -> list[tuple[list[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-        outputs = self.generate(prompts,
-                                greedy_params,
-                                images=images,
-                                videos=videos,
-                                audios=audios,
-                                **kwargs)
-        return [(output_ids[0], output_str[0])
-                for output_ids, output_str in outputs]
+        outputs = self.generate(
+            prompts,
+            greedy_params,
+            images=images,
+            videos=videos,
+            audios=audios,
+            **kwargs,
+        )
+        return [(output_ids[0], output_str[0]) for output_ids, output_str in outputs]
 
     def generate_greedy_logprobs(
         self,
@@ -497,38 +509,39 @@ class VllmRunner:
         stop_token_ids: Optional[list[int]] = None,
         stop: Optional[list[str]] = None,
         **kwargs: Any,
-    ) -> Union[list[TokensTextLogprobs],
-               list[TokensTextLogprobsPromptLogprobs]]:
+    ) -> Union[list[TokensTextLogprobs], list[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
             temperature=0.0,
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=num_prompt_logprobs,
             stop_token_ids=stop_token_ids,
-            stop=stop)
+            stop=stop,
+        )
 
-        return self.generate_w_logprobs(prompts,
-                                        greedy_logprobs_params,
-                                        images=images,
-                                        audios=audios,
-                                        videos=videos,
-                                        **kwargs)
+        return self.generate_w_logprobs(
+            prompts,
+            greedy_logprobs_params,
+            images=images,
+            audios=audios,
+            videos=videos,
+            **kwargs,
+        )
 
     def classify(self, prompts: list[str]) -> list[list[float]]:
         req_outputs = self.model.classify(prompts)
         return [req_output.outputs.probs for req_output in req_outputs]
 
-    def embed(self,
-              prompts: list[str],
-              images: Optional[PromptImageInput] = None,
-              videos: Optional[PromptVideoInput] = None,
-              audios: Optional[PromptAudioInput] = None,
-              *args,
-              **kwargs) -> list[list[float]]:
-        inputs = self.get_inputs(prompts,
-                                 images=images,
-                                 videos=videos,
-                                 audios=audios)
+    def embed(
+        self,
+        prompts: list[str],
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+        *args,
+        **kwargs,
+    ) -> list[list[float]]:
+        inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
 
         req_outputs = self.model.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
@@ -561,14 +574,11 @@ class VllmRunner:
 
 
 class HfRunner:
-
     def get_default_device(self):
-
-        return ("cpu"
-                if current_platform.is_cpu() else current_platform.device_type)
+        return "cpu" if current_platform.is_cpu() else current_platform.device_type
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
-        if x is None or isinstance(x, (bool, )):
+        if x is None or isinstance(x, (bool,)):
             return x
 
         if device is None:
@@ -640,14 +650,15 @@ class HfRunner:
             )
 
             # in case some unquantized custom models are not in same dtype
-            if (getattr(model, "quantization_method", None) is None
-                    and any(p.dtype != self.dtype
-                            for p in model.parameters())):
+            if getattr(model, "quantization_method", None) is None and any(
+                p.dtype != self.dtype for p in model.parameters()
+            ):
                 model = model.to(dtype=self.dtype)
 
-            if (getattr(model, "quantization_method", None) != "bitsandbytes"
-                    and len({p.device
-                             for p in model.parameters()}) < 2):
+            if (
+                getattr(model, "quantization_method", None) != "bitsandbytes"
+                and len({p.device for p in model.parameters()}) < 2
+            ):
                 model = model.to(device=self.device)
 
             self.model = model
@@ -662,6 +673,7 @@ class HfRunner:
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
         from transformers import AutoProcessor  # noqa: F401
+
         self.processor = AutoProcessor.from_pretrained(
             model_name,
             torch_dtype=torch_dtype,
@@ -732,16 +744,11 @@ class HfRunner:
 
         return outputs
 
-    def encode(self, prompts: list[str], *args,
-               **kwargs) -> list[list[torch.Tensor]]:
+    def encode(self, prompts: list[str], *args, **kwargs) -> list[list[torch.Tensor]]:
         return self.model.encode(prompts, *args, **kwargs)
 
-    def predict(self, prompts: list[list[str]], *args,
-                **kwargs) -> torch.Tensor:
-        return self.model.predict(prompts,
-                                  *args,
-                                  convert_to_tensor=True,
-                                  **kwargs)
+    def predict(self, prompts: list[list[str]], *args, **kwargs) -> torch.Tensor:
+        return self.model.predict(prompts, *args, convert_to_tensor=True, **kwargs)
 
     def __enter__(self):
         return self
@@ -758,9 +765,14 @@ def ilama_lora_files():
 
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
-    return [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-             f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
-             f"{q}<|im_end|>\n<|im_start|>assistant\n") for q in questions]
+    return [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{q}<|im_end|>\n<|im_start|>assistant\n"
+        )
+        for q in questions
+    ]
 
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:

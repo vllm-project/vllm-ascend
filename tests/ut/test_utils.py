@@ -19,8 +19,7 @@ from threading import Lock
 from unittest import mock
 
 import torch
-from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
-                         VllmConfig)
+from vllm.config import CompilationConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
@@ -28,11 +27,11 @@ from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 class TestUtils(TestBase):
-
     def setUp(self):
         import importlib
 
         from vllm_ascend import platform
+
         importlib.reload(platform)
 
     def test_nd_to_nz_2d(self):
@@ -69,22 +68,29 @@ class TestUtils(TestBase):
         input_tensor = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
         output = utils.nd_to_nz_2d(input_tensor)
         expected = torch.tensor(
-            [[[[1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]]])
+            [
+                [
+                    [
+                        [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    ]
+                ]
+            ]
+        )
         self.assertTrue(torch.allclose(output, expected))
 
     def test_aligned_16(self):
@@ -110,15 +116,13 @@ class TestUtils(TestBase):
 
         utils._CUSTOM_OP_ENABLED = None
 
-        with mock.patch('builtins.__import__') as mock_import_module:
+        with mock.patch("builtins.__import__") as mock_import_module:
             mock_import_module.side_effect = ImportError("import error")
             self.assertFalse(utils.enable_custom_op())
 
     def test_find_hccl_library(self):
-        with mock.patch.dict(os.environ,
-                             {"HCCL_SO_PATH": "/path/to/hccl/libhccl.so"}):
-            self.assertEqual(utils.find_hccl_library(),
-                             "/path/to/hccl/libhccl.so")
+        with mock.patch.dict(os.environ, {"HCCL_SO_PATH": "/path/to/hccl/libhccl.so"}):
+            self.assertEqual(utils.find_hccl_library(), "/path/to/hccl/libhccl.so")
         with mock.patch("torch.version.cann", None):
             self.assertRaises(ValueError, utils.find_hccl_library)
         with mock.patch("torch.version.cann", "Ascend910"):
@@ -157,7 +161,6 @@ class TestUtils(TestBase):
         from transformers import PretrainedConfig
 
         class SimpleConfig(PretrainedConfig):
-
             def __init__(self, num_hidden_layers=12):
                 self.num_hidden_layers = num_hidden_layers
 
@@ -168,39 +171,30 @@ class TestUtils(TestBase):
         self.assertEqual(utils.get_max_hidden_layers(SimpleConfig(24)), 24)
 
         class NestedConfig(PretrainedConfig):
-
             def to_dict(self):
                 return {
                     "model": {
-                        "encoder": {
-                            "num_hidden_layers": 8
-                        },
-                        "decoder": {
-                            "num_hidden_layers": 12
-                        }
+                        "encoder": {"num_hidden_layers": 8},
+                        "decoder": {"num_hidden_layers": 12},
                     },
-                    "other_setting": True
+                    "other_setting": True,
                 }
 
         self.assertEqual(utils.get_max_hidden_layers(NestedConfig()), 12)
 
         class MultiValueConfig(PretrainedConfig):
-
             def to_dict(self):
                 return {
                     "num_hidden_layers": 6,
                     "submodule": {
                         "num_hidden_layers": 18,
-                        "subsub": {
-                            "num_hidden_layers": 9
-                        }
-                    }
+                        "subsub": {"num_hidden_layers": 9},
+                    },
                 }
 
         self.assertEqual(utils.get_max_hidden_layers(MultiValueConfig()), 18)
 
         class NoLayerConfig(PretrainedConfig):
-
             def to_dict(self):
                 return {"attention_heads": 8}
 
@@ -210,46 +204,53 @@ class TestUtils(TestBase):
 
     def test_update_aclgraph_sizes(self):
         test_compilation_config = CompilationConfig(
-            cudagraph_capture_sizes=[i for i in range(150)])
+            cudagraph_capture_sizes=[i for i in range(150)]
+        )
         model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
         test_model_config = ModelConfig(model=model_path, enforce_eager=True)
         test_parallel_config = ParallelConfig()
         test_vllm_config = VllmConfig(
             model_config=test_model_config,
             compilation_config=test_compilation_config,
-            parallel_config=test_parallel_config)
+            parallel_config=test_parallel_config,
+        )
         utils.update_aclgraph_sizes(test_vllm_config)
-        os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
+        os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
         utils.update_aclgraph_sizes(test_vllm_config)
-        del os.environ['HCCL_OP_EXPANSION_MODE']
+        del os.environ["HCCL_OP_EXPANSION_MODE"]
 
         self.assertEqual(
-            0,
-            len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
+            0, len(test_vllm_config.compilation_config.cudagraph_capture_sizes)
+        )
 
     @mock.patch("vllm.model_executor.custom_op.CustomOp")
     @mock.patch("vllm_ascend.ops.activation.AscendQuickGELU")
     @mock.patch("vllm_ascend.ops.activation.AscendSiluAndMul")
     @mock.patch("vllm_ascend.ops.layernorm.AscendRMSNorm")
-    def test_register_ascend_customop(self, mock_ascend_rmsnorm,
-                                      mock_ascend_silu_and_mul,
-                                      mock_ascend_quick_gelu, mock_customop):
+    def test_register_ascend_customop(
+        self,
+        mock_ascend_rmsnorm,
+        mock_ascend_silu_and_mul,
+        mock_ascend_quick_gelu,
+        mock_customop,
+    ):
         utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count,
-                         len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(
+            mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS)
+        )
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count,
-                         len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(
+            mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS)
+        )
 
 
 class TestProfileExecuteDuration(TestBase):
-
     def setUp(self):
         utils.ProfileExecuteDuration._instance = None
         utils.ProfileExecuteDuration._observations = []
@@ -282,16 +283,16 @@ class TestProfileExecuteDuration(TestBase):
             self.assertIs(first_instance, instance)
 
     def test_atexit_registration(self):
-        with mock.patch('atexit.register') as mock_register:
+        with mock.patch("atexit.register") as mock_register:
             instance = utils.ProfileExecuteDuration()
             mock_register.assert_called_once_with(instance.destroy)
 
     def test_lock_usage(self):
         original_lock = utils.ProfileExecuteDuration._lock
 
-        with mock.patch.object(utils.ProfileExecuteDuration,
-                               '_lock',
-                               wraps=original_lock) as mock_lock:
+        with mock.patch.object(
+            utils.ProfileExecuteDuration, "_lock", wraps=original_lock
+        ) as mock_lock:
             utils.ProfileExecuteDuration()
             mock_lock.__enter__.assert_called()
             mock_lock.__exit__.assert_called()

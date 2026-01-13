@@ -4,8 +4,11 @@ from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.distributed.parallel_state import get_shard_weight_group
 from vllm_ascend.ops.layer_shard_linear import (
-    is_hidden_layer, post_process_after_loading_for_shard_weight_series,
-    reach_layer_for_shard_weight_series, register_layer_to_shard_weight_series)
+    is_hidden_layer,
+    post_process_after_loading_for_shard_weight_series,
+    reach_layer_for_shard_weight_series,
+    register_layer_to_shard_weight_series,
+)
 from vllm_ascend.utils import flashcomm2_enable, o_shard_enable
 
 
@@ -55,7 +58,8 @@ class Flashcomm2OShardManager:
                 series_name="o_proj",
                 group=get_shard_weight_group(),
                 layer=layer,
-                prefetch_step=prefetch_step)
+                prefetch_step=prefetch_step,
+            )
 
     def get_layer(self, layer_idx: int) -> Optional[Any]:
         """Safely retrieves a registered layer by its index.

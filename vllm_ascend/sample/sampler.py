@@ -35,7 +35,6 @@ def random_sample(
 
 
 class AscendSampler(Sampler):
-
     def __init__(self, logprobs_mode=DEFAULT_LOGPROBS_MODE):
         # TODO: support logprobs_mode in vllm-ascend
         super().__init__(logprobs_mode=logprobs_mode)
@@ -62,7 +61,6 @@ class AscendSampler(Sampler):
 
 
 class AscendTopKTopPSampler(TopKTopPSampler):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.apply_top_k_top_p = apply_top_k_top_p

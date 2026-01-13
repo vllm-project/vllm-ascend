@@ -23,21 +23,22 @@ from vllm.config import get_current_vllm_config
 
 
 class AscendW8A8MXFP8DynamicLinearMethod:
-    """Linear method for Ascend W8A8_DYNAMIC.
-    """
+    """Linear method for Ascend W8A8_DYNAMIC."""
+
     model_dtype = None
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get(
-            "group_size", 32)
+            "group_size", 32
+        )
 
     @staticmethod
-    def get_weight(input_size: int, output_size: int,
-                   params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_weight(
+        input_size: int, output_size: int, params_dtype: torch.dtype
+    ) -> Dict[str, Any]:
         params_dict = {
-            "weight":
-            torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)
+            "weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)
         }
         return params_dict
 
@@ -52,16 +53,17 @@ class AscendW8A8MXFP8DynamicLinearMethod:
     ) -> Dict[str, Any]:
         return {}
 
-    def get_pergroup_param(self,
-                           input_size: int,
-                           output_size: int,
-                           params_dtype: torch.dtype,
-                           layer_type: Optional[str] = None) -> Dict[str, Any]:
+    def get_pergroup_param(
+        self,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        layer_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(output_size,
-                                                  input_size //
-                                                  self.group_size,
-                                                  dtype=torch.uint8)
+        params_dict["weight_scale"] = torch.empty(
+            output_size, input_size // self.group_size, dtype=torch.uint8
+        )
         return params_dict
 
     def apply(
@@ -71,9 +73,9 @@ class AscendW8A8MXFP8DynamicLinearMethod:
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-
         quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-            x, dst_type=torch.float8_e4m3fn)
+            x, dst_type=torch.float8_e4m3fn
+        )
         pertoken_scale = dynamic_scale
         output_dtype = x.dtype
 
@@ -86,13 +88,13 @@ class AscendW8A8MXFP8DynamicLinearMethod:
             pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
             bias=bias,
             output_dtype=output_dtype,
-            group_sizes=[1, 1, self.group_size])
+            group_sizes=[1, 1, self.group_size],
+        )
 
         return output
 
     def process_weights_after_loading(self, layer):
         n_dim, k_dim = layer.weight_scale.data.shape
-        layer.weight_scale.data = layer.weight_scale.data.reshape(
-            n_dim, k_dim // 2, 2)
+        layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)

@@ -19,11 +19,14 @@ import pytest
 import torch
 
 from tests.ut.base import PytestBase
-from vllm_ascend.device_allocator.camem import (AllocationData, CaMemAllocator,
-                                                create_and_map,
-                                                find_loaded_library,
-                                                get_pluggable_allocator,
-                                                unmap_and_release)
+from vllm_ascend.device_allocator.camem import (
+    AllocationData,
+    CaMemAllocator,
+    create_and_map,
+    find_loaded_library,
+    get_pluggable_allocator,
+    unmap_and_release,
+)
 
 
 def dummy_malloc(args):
@@ -35,7 +38,6 @@ def dummy_free(ptr):
 
 
 class TestCaMem(PytestBase):
-
     def test_find_loaded_library_success_and_not_found(self):
         path = find_loaded_library("libc")
         assert path is not None, "Expected to find libc library"
@@ -45,34 +47,38 @@ class TestCaMem(PytestBase):
         path = find_loaded_library("non_existent_library")
         assert path is None, "Expected to not find non-existent library"
 
-    @pytest.mark.parametrize("handle", [
-        (1, 2, 3),
-        ("device", 99),
-        (None, ),
-    ])
+    @pytest.mark.parametrize(
+        "handle",
+        [
+            (1, 2, 3),
+            ("device", 99),
+            (None,),
+        ],
+    )
     def test_create_and_map_calls_python_create_and_map(self, handle):
-        with patch("vllm_ascend.device_allocator.camem.python_create_and_map"
-                   ) as mock_create:
+        with patch(
+            "vllm_ascend.device_allocator.camem.python_create_and_map"
+        ) as mock_create:
             create_and_map(handle)
             mock_create.assert_called_once_with(*handle)
 
-    @pytest.mark.parametrize("handle", [
-        (42, "bar"),
-        ("foo", ),
-    ])
+    @pytest.mark.parametrize(
+        "handle",
+        [
+            (42, "bar"),
+            ("foo",),
+        ],
+    )
     def test_unmap_and_release_calls_python_unmap_and_release(self, handle):
         with patch(
-                "vllm_ascend.device_allocator.camem.python_unmap_and_release"
+            "vllm_ascend.device_allocator.camem.python_unmap_and_release"
         ) as mock_release:
             unmap_and_release(handle)
             mock_release.assert_called_once_with(*handle)
 
     @patch("vllm_ascend.device_allocator.camem.init_module")
-    @patch(
-        "vllm_ascend.device_allocator.camem.torch.npu.memory.NPUPluggableAllocator"
-    )
-    def test_get_pluggable_allocator(self, mock_allocator_class,
-                                     mock_init_module):
+    @patch("vllm_ascend.device_allocator.camem.torch.npu.memory.NPUPluggableAllocator")
+    def test_get_pluggable_allocator(self, mock_allocator_class, mock_init_module):
         mock_allocator_instance = MagicMock()
         mock_allocator_class.return_value = mock_allocator_instance
 
@@ -133,12 +139,14 @@ class TestCaMem(PytestBase):
 
         def mock_torch_empty(*args, **kwargs):
             # If pin_memory was explicitly set to True, change it to False
-            if 'pin_memory' in kwargs and kwargs['pin_memory'] is True:
-                kwargs['pin_memory'] = False
+            if "pin_memory" in kwargs and kwargs["pin_memory"] is True:
+                kwargs["pin_memory"] = False
             return original_torch_empty(*args, **kwargs)
 
-        with patch("vllm_ascend.device_allocator.camem.torch.empty",
-                   side_effect=mock_torch_empty):
+        with patch(
+            "vllm_ascend.device_allocator.camem.torch.empty",
+            side_effect=mock_torch_empty,
+        ):
             allocator.sleep(offload_tags="tag1")
 
         # only offload tag1, other tag2 call unmap_and_release
@@ -151,8 +159,9 @@ class TestCaMem(PytestBase):
 
     @patch("vllm_ascend.device_allocator.camem.create_and_map")
     @patch("vllm_ascend.device_allocator.camem.memcpy")
-    def test_wake_up_loads_and_clears_cpu_backup(self, mock_memcpy,
-                                                 mock_create_and_map):
+    def test_wake_up_loads_and_clears_cpu_backup(
+        self, mock_memcpy, mock_create_and_map
+    ):
         allocator = CaMemAllocator.get_instance()
 
         handle = (1, 10, 1000, 0)
@@ -176,8 +185,9 @@ class TestCaMem(PytestBase):
         mock_ctx.__exit__.return_value = None
 
         with patch(
-                "vllm_ascend.device_allocator.camem.use_memory_pool_with_allocator",
-                return_value=mock_ctx):
+            "vllm_ascend.device_allocator.camem.use_memory_pool_with_allocator",
+            return_value=mock_ctx,
+        ):
             with allocator.use_memory_pool(tag="my_tag"):
                 assert allocator.current_tag == "my_tag"
             # restore old tag after context manager exits

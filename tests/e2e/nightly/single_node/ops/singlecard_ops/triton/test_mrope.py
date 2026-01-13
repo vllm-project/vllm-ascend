@@ -20,10 +20,10 @@ DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
 
 
-def pytorch_forward_native(q, k, cos, sin, mrope_section, head_size,
-                           rotary_dim, mrope_interleaved):
-    """PyTorch-native implementation equivalent to forward().
-    """
+def pytorch_forward_native(
+    q, k, cos, sin, mrope_section, head_size, rotary_dim, mrope_interleaved
+):
+    """PyTorch-native implementation equivalent to forward()."""
 
     num_tokens = q.shape[0]
     n_q_head = q.shape[1] // head_size
@@ -46,10 +46,8 @@ def pytorch_forward_native(q, k, cos, sin, mrope_section, head_size,
 
         if mrope_interleaved:
             cos_offsets = torch.arange(0, head_size // 2, device=q.device)
-            h_mask = (
-                (cos_offsets % 3) == 1) & (cos_offsets <= 3 * mrope_section[1])
-            w_mask = (
-                (cos_offsets % 3) == 2) & (cos_offsets <= 3 * mrope_section[2])
+            h_mask = ((cos_offsets % 3) == 1) & (cos_offsets <= 3 * mrope_section[1])
+            w_mask = ((cos_offsets % 3) == 2) & (cos_offsets <= 3 * mrope_section[2])
             t_mask = ~(h_mask | w_mask)
 
             cos_row[t_mask] = token_cos[t_mask, 0]
@@ -102,27 +100,14 @@ def pytorch_forward_native(q, k, cos, sin, mrope_section, head_size,
     return q_result, k_result
 
 
-def create_test_data(num_tokens, n_q_head, n_kv_head, rotary_dim, head_size,
-                     device, dtype):
-    q = torch.randn(num_tokens,
-                    n_q_head * head_size,
-                    dtype=dtype,
-                    device=device)
-    k = torch.randn(num_tokens,
-                    n_kv_head * head_size,
-                    dtype=dtype,
-                    device=device)
+def create_test_data(
+    num_tokens, n_q_head, n_kv_head, rotary_dim, head_size, device, dtype
+):
+    q = torch.randn(num_tokens, n_q_head * head_size, dtype=dtype, device=device)
+    k = torch.randn(num_tokens, n_kv_head * head_size, dtype=dtype, device=device)
 
-    sin = torch.randn(3,
-                      num_tokens,
-                      rotary_dim // 2,
-                      dtype=dtype,
-                      device=device)
-    cos = torch.randn(3,
-                      num_tokens,
-                      rotary_dim // 2,
-                      dtype=dtype,
-                      device=device)
+    sin = torch.randn(3, num_tokens, rotary_dim // 2, dtype=dtype, device=device)
+    cos = torch.randn(3, num_tokens, rotary_dim // 2, dtype=dtype, device=device)
 
     norm = torch.sqrt(cos**2 + sin**2)
     cos = cos / norm
@@ -158,36 +143,33 @@ def test_mrotary_embedding_triton_kernel(
     if rotary_dim == -1:
         rotary_dim = head_size
 
-    q_trt, k_trt, cos, sin = create_test_data(num_tokens=num_tokens,
-                                              n_q_head=num_q_heads,
-                                              n_kv_head=num_k_heads,
-                                              head_size=head_size,
-                                              rotary_dim=rotary_dim,
-                                              device=device,
-                                              dtype=dtype)
+    q_trt, k_trt, cos, sin = create_test_data(
+        num_tokens=num_tokens,
+        n_q_head=num_q_heads,
+        n_kv_head=num_k_heads,
+        head_size=head_size,
+        rotary_dim=rotary_dim,
+        device=device,
+        dtype=dtype,
+    )
 
     q_gold, k_gold = q_trt.clone(), k_trt.clone()
 
-    q_trt, k_trt = triton_mrope(q_trt, k_trt, cos, sin, mrope_section,
-                                head_size, rotary_dim, True)
+    q_trt, k_trt = triton_mrope(
+        q_trt, k_trt, cos, sin, mrope_section, head_size, rotary_dim, True
+    )
 
-    q_gold, k_gold = pytorch_forward_native(q_gold, k_gold, cos, sin,
-                                            mrope_section, head_size,
-                                            rotary_dim, True)
+    q_gold, k_gold = pytorch_forward_native(
+        q_gold, k_gold, cos, sin, mrope_section, head_size, rotary_dim, True
+    )
     atol = DEFAULT_ATOL
     rtol = DEFAULT_RTOL
     if dtype == torch.bfloat16:
         atol = 1e-02
         rtol = 1e-02
     # Compare the results.
-    torch.testing.assert_close(q_trt.view(q_gold.size()),
-                               q_gold,
-                               atol=atol,
-                               rtol=rtol)
-    torch.testing.assert_close(k_trt.view(k_gold.size()),
-                               k_gold,
-                               atol=atol,
-                               rtol=rtol)
+    torch.testing.assert_close(q_trt.view(q_gold.size()), q_gold, atol=atol, rtol=rtol)
+    torch.testing.assert_close(k_trt.view(k_gold.size()), k_gold, atol=atol, rtol=rtol)
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

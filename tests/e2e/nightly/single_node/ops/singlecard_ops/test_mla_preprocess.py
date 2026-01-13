@@ -20,25 +20,24 @@ def test_mla_preprocess_kernel(cache_mode: str):
     dtype = torch.bfloat16
 
     hidden_states = torch.randn((token_num, N_7168), dtype=dtype).npu()
-    quant_scale0 = torch.randn((1, ), dtype=dtype).npu()
-    quant_offset0 = torch.randint(0, 7, (1, ), dtype=torch.int8).npu()
+    quant_scale0 = torch.randn((1,), dtype=dtype).npu()
+    quant_offset0 = torch.randint(0, 7, (1,), dtype=torch.int8).npu()
 
     wdqkv = torch.randint(0, 7, (1, 224, 2112, 32), dtype=torch.int8).npu()
     wdqkv = torch_npu.npu_format_cast(wdqkv.contiguous(), 29)
 
-    de_scale0 = torch.rand((2112, ), dtype=torch.float).npu()
-    bias0 = torch.randint(0, 7, (2112, ), dtype=torch.int32).npu()
+    de_scale0 = torch.rand((2112,), dtype=torch.float).npu()
+    bias0 = torch.randint(0, 7, (2112,), dtype=torch.int32).npu()
     gamma1 = torch.randn((1536), dtype=dtype).npu()
     beta1 = torch.randn((1536), dtype=dtype).npu()
-    quant_scale1 = torch.randn((1, ), dtype=dtype).npu()
-    quant_offset1 = torch.randint(0, 7, (1, ), dtype=torch.int8).npu()
+    quant_scale1 = torch.randn((1,), dtype=dtype).npu()
+    quant_offset1 = torch.randint(0, 7, (1,), dtype=torch.int8).npu()
 
-    wuq = torch.randint(0, 7, (1, 48, head_num * 192, 32),
-                        dtype=torch.int8).npu()
+    wuq = torch.randint(0, 7, (1, 48, head_num * 192, 32), dtype=torch.int8).npu()
     wuq = torch_npu.npu_format_cast(wuq.contiguous(), 29)
 
-    de_scale1 = torch.rand((head_num * 192, ), dtype=torch.float).npu()
-    bias1 = torch.randint(0, 7, (head_num * 192, ), dtype=torch.int32).npu()
+    de_scale1 = torch.rand((head_num * 192,), dtype=torch.float).npu()
+    bias1 = torch.randint(0, 7, (head_num * 192,), dtype=torch.int32).npu()
 
     gamma2 = torch.randn((512), dtype=dtype).npu()
 
@@ -47,16 +46,16 @@ def test_mla_preprocess_kernel(cache_mode: str):
 
     wuk = torch.randn((head_num, 128, 512), dtype=dtype).npu()
     wuk = torch_npu.npu_format_cast(wuk, 29)
-    kv_cache = torch.randint(0,
-                             7,
-                             (block_num, head_num * 512 // 32, block_size, 32),
-                             dtype=dtype).npu()
+    kv_cache = torch.randint(
+        0, 7, (block_num, head_num * 512 // 32, block_size, 32), dtype=dtype
+    ).npu()
     kv_cache_rope = torch.randn(
-        (block_num, head_num * 64 // 16, block_size, 16), dtype=dtype).npu()
+        (block_num, head_num * 64 // 16, block_size, 16), dtype=dtype
+    ).npu()
 
-    slotmapping = torch.randint(0, 7, (token_num, ), dtype=torch.int32).npu()
+    slotmapping = torch.randint(0, 7, (token_num,), dtype=torch.int32).npu()
 
-    ctkv_scale = torch.randn((1, ), dtype=dtype).npu()
+    ctkv_scale = torch.randn((1,), dtype=dtype).npu()
     qnope_scale = torch.randn((head_num), dtype=dtype).npu()
 
     q_nope_out = torch.empty(

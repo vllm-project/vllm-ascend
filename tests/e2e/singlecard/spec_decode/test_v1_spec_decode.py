@@ -95,28 +95,28 @@ def test_ngram_correctness(
     sampling_config: SamplingParams,
     model_name: str,
 ):
-    '''
+    """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
-    '''
+    """
 
     with VllmRunner(
-            model_name,
-            max_model_len=1024,
-            cudagraph_capture_sizes=[1, 2, 4, 8],
+        model_name,
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as ref_llm:
         ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
 
     with VllmRunner(
-            model_name,
-            speculative_config={
-                "method": "ngram",
-                "prompt_lookup_max": 5,
-                "prompt_lookup_min": 3,
-                "num_speculative_tokens": 3,
-            },
-            max_model_len=1024,
-            cudagraph_capture_sizes=[1, 2, 4, 8],
+        model_name,
+        speculative_config={
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+        },
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
     matches = 0
@@ -139,22 +139,24 @@ def test_suffix_correctness(
     sampling_config: SamplingParams,
     model_name: str,
 ):
-    '''
+    """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
-    '''
-    with VllmRunner(model_name,
-                    max_model_len=1024,
-                    cudagraph_capture_sizes=[1, 2, 4, 8]) as ref_llm:
+    """
+    with VllmRunner(
+        model_name, max_model_len=1024, cudagraph_capture_sizes=[1, 2, 4, 8]
+    ) as ref_llm:
         ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
 
-    with VllmRunner(model_name,
-                    speculative_config={
-                        "method": "suffix",
-                        "num_speculative_tokens": 8,
-                    },
-                    cudagraph_capture_sizes=[1, 2, 4, 8],
-                    max_model_len=1024) as runner:
+    with VllmRunner(
+        model_name,
+        speculative_config={
+            "method": "suffix",
+            "num_speculative_tokens": 8,
+        },
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_model_len=1024,
+    ) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
     matches = 0
     misses = 0
@@ -176,22 +178,24 @@ def test_suffix_acceptance(
     sampling_config: SamplingParams,
     model_name: str,
 ):
-    '''
+    """
     Check that suffix decoding caching takes effect and improves acceptance
     lengths and acceptance rates over multiple runs of the same prompts.
-    '''
+    """
     num_draft = []
     num_accept = []
-    with VllmRunner(model_name,
-                    speculative_config={
-                        "method": "suffix",
-                        "suffix_decoding_max_spec_factor": 2.0,
-                        "suffix_decoding_max_cached_requests": 1000,
-                        "num_speculative_tokens": 10,
-                    },
-                    max_model_len=1024,
-                    cudagraph_capture_sizes=[1, 2, 4, 8],
-                    disable_log_stats=False) as runner:
+    with VllmRunner(
+        model_name,
+        speculative_config={
+            "method": "suffix",
+            "suffix_decoding_max_spec_factor": 2.0,
+            "suffix_decoding_max_cached_requests": 1000,
+            "num_speculative_tokens": 10,
+        },
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        disable_log_stats=False,
+    ) as runner:
         for i in range(10):
             runner.model.chat(test_prompts[i], sampling_config)
             metrics = runner.model.get_metrics()
@@ -229,10 +233,9 @@ def test_eagle_logprobs(
     draft_tensor_parallel_size: Union[None, int],
 ):
     prompt = {"role": "user", "content": "Hello world " * 10}
-    sampling_params = SamplingParams(temperature=0,
-                                     logprobs=1,
-                                     max_tokens=10,
-                                     ignore_eos=False)
+    sampling_params = SamplingParams(
+        temperature=0, logprobs=1, max_tokens=10, ignore_eos=False
+    )
 
     ref_llm = LLM(model=model_name, max_model_len=2048)
     ref_outputs = ref_llm.chat([prompt], sampling_params)
@@ -245,19 +248,19 @@ def test_eagle_logprobs(
 
     spec_model_name = eagle3_model_name() if use_eagle3 else eagle_model_name()
     with VllmRunner(
-            model_name,
-            max_num_seqs=1,
-            max_num_batched_tokens=2048,
-            gpu_memory_utilization=0.6,
-            speculative_config={
-                "method": "eagle3" if use_eagle3 else "eagle",
-                "model": spec_model_name,
-                "num_speculative_tokens": 2,
-                "draft_tensor_parallel_size": draft_tensor_parallel_size,
-                "max_model_len": 128,
-            },
-            max_model_len=128,
-            cudagraph_capture_sizes=[1, 2, 4, 8],
+        model_name,
+        max_num_seqs=1,
+        max_num_batched_tokens=2048,
+        gpu_memory_utilization=0.6,
+        speculative_config={
+            "method": "eagle3" if use_eagle3 else "eagle",
+            "model": spec_model_name,
+            "num_speculative_tokens": 2,
+            "draft_tensor_parallel_size": draft_tensor_parallel_size,
+            "max_model_len": 128,
+        },
+        max_model_len=128,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as runner:
         spec_outputs = runner.model.chat([prompt], sampling_params)
 
@@ -269,10 +272,9 @@ def test_eagle_logprobs(
                 spec_logprobs.append(logprobs[token_id])
 
     for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
-        assert math.isclose(ref_logprob.logprob,
-                            spec_logprob.logprob,
-                            rel_tol=5e-2,
-                            abs_tol=1e-1)
+        assert math.isclose(
+            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1
+        )
         assert ref_logprob.rank == spec_logprob.rank
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
@@ -330,7 +332,8 @@ def test_llama_qwen_eagle_acceptance(
             [prompt],
             tokenize=False,
             add_generation_prompt=True,
-        ) for prompt in prompts
+        )
+        for prompt in prompts
     ]
 
     speculative_config = {
@@ -344,16 +347,16 @@ def test_llama_qwen_eagle_acceptance(
     compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
 
     with VllmRunner(
-            main_model_name,
-            max_model_len=2048,
-            disable_log_stats=False,
-            tensor_parallel_size=1,
-            max_num_seqs=256,
-            distributed_executor_backend="mp",
-            gpu_memory_utilization=0.7,
-            speculative_config=speculative_config,
-            compilation_config=compilation_config,
-            async_scheduling=async_scheduling,
+        main_model_name,
+        max_model_len=2048,
+        disable_log_stats=False,
+        tensor_parallel_size=1,
+        max_num_seqs=256,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.7,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        async_scheduling=async_scheduling,
     ) as llm:
         _ = llm.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()
@@ -438,7 +441,8 @@ def test_eagle3_sp_acceptance(
             [prompt],
             tokenize=False,
             add_generation_prompt=True,
-        ) for prompt in prompts
+        )
+        for prompt in prompts
     ]
 
     speculative_config = {
@@ -451,17 +455,17 @@ def test_eagle3_sp_acceptance(
     compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
 
     with VllmRunner(
-            main_model_name,
-            enforce_eager=True,
-            max_model_len=8192,
-            disable_log_stats=False,
-            tensor_parallel_size=1,
-            max_num_seqs=256,
-            distributed_executor_backend="mp",
-            gpu_memory_utilization=0.7,
-            speculative_config=speculative_config,
-            compilation_config=compilation_config,
-            async_scheduling=async_scheduling,
+        main_model_name,
+        enforce_eager=True,
+        max_model_len=8192,
+        disable_log_stats=False,
+        tensor_parallel_size=1,
+        max_num_seqs=256,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.7,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        async_scheduling=async_scheduling,
     ) as llm:
         _ = llm.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()

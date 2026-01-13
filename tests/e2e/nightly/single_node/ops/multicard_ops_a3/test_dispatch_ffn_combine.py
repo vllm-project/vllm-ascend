@@ -12,7 +12,6 @@ enable_custom_op()
 
 
 class TestDisptachFFNCombine:
-
     def __init__(self, rank, world_size, port):
         self.rank = rank
         self.world_size = world_size
@@ -23,7 +22,8 @@ class TestDisptachFFNCombine:
         hcomm_info = None
         if torch.__version__ > "2.0.1":
             hcomm_info = comm_group._get_backend(
-                torch.device("npu")).get_hccl_comm_name(self.rank)
+                torch.device("npu")
+            ).get_hccl_comm_name(self.rank)
         else:
             hcomm_info = comm_group.get_hccl_comm_name(self.rank)
         return hcomm_info
@@ -74,8 +74,9 @@ class TestDisptachFFNCombine:
             "group_tp": None,
         }
         if ep_size and tp_size:
-            group_ep, group_tp = self.setup_ep_tp(self.rank, tp_size, ep_size,
-                                                  "hccl", None, None)
+            group_ep, group_tp = self.setup_ep_tp(
+                self.rank, tp_size, ep_size, "hccl", None, None
+            )
             hcomm_info_dist["ep_hcomm_info"] = self.get_hcomm(group_ep)
             hcomm_info_dist["tp_hcomm_info"] = self.get_hcomm(group_tp)
             hcomm_info_dist["group_ep"] = group_ep
@@ -99,16 +100,14 @@ class TestDisptachFFNCombine:
 
         torch_npu.npu.config.allow_internal_format = True
         x = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
-        weight1 = self.generate_random_tensor((e, k, n),
-                                              dtype=torch.int8).npu()
+        weight1 = self.generate_random_tensor((e, k, n), dtype=torch.int8).npu()
         weight1 = torch_npu.npu_format_cast(weight1, 29)
-        weight2 = self.generate_random_tensor((e, k2, n2),
-                                              dtype=torch.int8).npu()
+        weight2 = self.generate_random_tensor((e, k2, n2), dtype=torch.int8).npu()
         weight2 = torch_npu.npu_format_cast(weight2, 29)
 
-        expert_idx = torch.randint(0,
-                                   self.world_size * e, (m, topk),
-                                   dtype=torch.int32).npu()
+        expert_idx = torch.randint(
+            0, self.world_size * e, (m, topk), dtype=torch.int32
+        ).npu()
         scale1 = torch.randint(0, 1, (e, n), dtype=torch.int64).npu()
         scale2 = torch.randint(0, 1, (e, n2), dtype=torch.int64).npu()
         probs = torch.randn(size=(m, topk), dtype=torch.float32).npu()
@@ -118,11 +117,9 @@ class TestDisptachFFNCombine:
         scale1_npu = []
         scale2_npu = []
         for i in range(e):
-            weight1_nz_npu.append(
-                torch_npu.npu_format_cast(weight1[i].npu(), 29))
+            weight1_nz_npu.append(torch_npu.npu_format_cast(weight1[i].npu(), 29))
             scale1_npu.append(scale1[i].npu())
-            weight2_nz_npu.append(
-                torch_npu.npu_format_cast(weight2[i].npu(), 29))
+            weight2_nz_npu.append(torch_npu.npu_format_cast(weight2[i].npu(), 29))
             scale2_npu.append(scale2[i].npu())
 
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
@@ -153,16 +150,14 @@ class TestDisptachFFNCombine:
 
         torch_npu.npu.config.allow_internal_format = True
         x = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
-        weight1 = self.generate_random_tensor((e, k, n),
-                                              dtype=torch.int8).npu()
+        weight1 = self.generate_random_tensor((e, k, n), dtype=torch.int8).npu()
         weight1 = torch_npu.npu_format_cast(weight1, 29)
-        weight2 = self.generate_random_tensor((e, k2, n2),
-                                              dtype=torch.int8).npu()
+        weight2 = self.generate_random_tensor((e, k2, n2), dtype=torch.int8).npu()
         weight2 = torch_npu.npu_format_cast(weight2, 29)
 
-        expert_idx = torch.randint(0,
-                                   self.world_size * e, (m, topk),
-                                   dtype=torch.int32).npu()
+        expert_idx = torch.randint(
+            0, self.world_size * e, (m, topk), dtype=torch.int32
+        ).npu()
         scale1 = torch.randint(0, 1, (e, n), dtype=torch.int64).npu()
         scale2 = torch.randint(0, 1, (e, n2), dtype=torch.int64).npu()
         probs = torch.randn(size=(m, topk), dtype=torch.float32).npu()

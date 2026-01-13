@@ -44,8 +44,8 @@ def test_qwen3_dense_eager_mode(
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=enforce_eager,
+        model,
+        max_model_len=1024,
+        enforce_eager=enforce_eager,
     ) as runner:
         runner.model.generate(prompts, sampling_params)

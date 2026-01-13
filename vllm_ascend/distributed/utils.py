@@ -6,12 +6,12 @@ import torch.distributed as dist
 from vllm.distributed.parallel_state import GroupCoordinator, get_dp_group
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.distributed.parallel_state import (get_fc3_quant_x_group,
-                                                    get_p_tp_group)
+from vllm_ascend.distributed.parallel_state import get_fc3_quant_x_group, get_p_tp_group
 
 
-def kv_alltoall_and_rearrange(pd_tp_ratio: int, key: torch.Tensor,
-                              value: torch.TensorType):
+def kv_alltoall_and_rearrange(
+    pd_tp_ratio: int, key: torch.Tensor, value: torch.TensorType
+):
     if pd_tp_ratio <= 1:
         return None, None
     elif key is None or value is None:
@@ -24,17 +24,16 @@ def kv_alltoall_and_rearrange(pd_tp_ratio: int, key: torch.Tensor,
 def alltoall_and_rearrange(tp_ratio: int, input_tensor: torch.Tensor):
     num_kv_heads = input_tensor.size(1)
     output_tensor = torch.zeros_like(input_tensor)
-    dist.all_to_all_single(output_tensor,
-                           input_tensor,
-                           group=get_p_tp_group().device_group)
+    dist.all_to_all_single(
+        output_tensor, input_tensor, group=get_p_tp_group().device_group
+    )
     input_tensor = 0
     result = rearrange_output(output_tensor, tp_ratio, num_kv_heads)
     output_tensor = 0
     return result
 
 
-def rearrange_output(base_output: torch.Tensor, cut_num: int,
-                     num_kv_heads: int):
+def rearrange_output(base_output: torch.Tensor, cut_num: int, num_kv_heads: int):
     size_0 = base_output.size(0)
     if size_0 % cut_num != 0:
         raise ValueError(
@@ -50,22 +49,21 @@ def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
     data_ptr = tensor.data_ptr()
     aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
     offset = (aligned_addr - data_ptr) // tensor.element_size()
-    return tensor[int(offset):]
+    return tensor[int(offset) :]
 
 
 def get_transfer_timeout_value():
     ascend_transfer_timeout = os.getenv("ASCEND_TRANSFER_TIMEOUT", "")
     if len(ascend_transfer_timeout) > 0:
         return int(ascend_transfer_timeout)
-    hccl_rdma_timeout = int(os.getenv('HCCL_RDMA_TIMEOUT',
-                                      '20'))  # type: ignore
-    hccl_rdma_retry_cnt = int(os.getenv('HCCL_RDMA_RETRY_CNT',
-                                        '7'))  # type: ignore
-    return int((4.096 * (2**hccl_rdma_timeout)) * hccl_rdma_retry_cnt // 1000 +
-               3000)
+    hccl_rdma_timeout = int(os.getenv("HCCL_RDMA_TIMEOUT", "20"))  # type: ignore
+    hccl_rdma_retry_cnt = int(os.getenv("HCCL_RDMA_RETRY_CNT", "7"))  # type: ignore
+    return int((4.096 * (2**hccl_rdma_timeout)) * hccl_rdma_retry_cnt // 1000 + 3000)
 
 
-def fc3_all_gather_and_maybe_unpad_impl(x: torch.Tensor, ) -> torch.Tensor:
+def fc3_all_gather_and_maybe_unpad_impl(
+    x: torch.Tensor,
+) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
@@ -79,33 +77,34 @@ def fc3_all_gather_and_maybe_unpad_impl(x: torch.Tensor, ) -> torch.Tensor:
     else:
         # unpad
         num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
-        result = torch.empty((num_tokens_across_dp_cpu.sum(), *x.shape[1:]),
-                             device=x.device,
-                             dtype=x.dtype)
+        result = torch.empty(
+            (num_tokens_across_dp_cpu.sum(), *x.shape[1:]),
+            device=x.device,
+            dtype=x.dtype,
+        )
         dp_size = get_dp_group().world_size
         x = x.view(dp_size, forward_context.padded_length, *x.shape[1:])
         offset = 0
         for idx in range(dp_size):
             num_tokens_dp = num_tokens_across_dp_cpu[idx]
-            result[offset:offset + num_tokens_dp] = x[idx, :num_tokens_dp]
+            result[offset : offset + num_tokens_dp] = x[idx, :num_tokens_dp]
             offset += num_tokens_dp
         x = result
     return x
 
 
-def all_gather_async(input: torch.Tensor,
-                     group: GroupCoordinator,
-                     output: Optional[torch.Tensor] = None,
-                     async_op: bool = True):
+def all_gather_async(
+    input: torch.Tensor,
+    group: GroupCoordinator,
+    output: Optional[torch.Tensor] = None,
+    async_op: bool = True,
+):
     if group.world_size == 1:
         return input, None
     if output is None:
         input_size = input.size()
-        output_size = (input_size[0] * group.world_size, ) + input_size[1:]
-        output = torch.empty(output_size,
-                             dtype=input.dtype,
-                             device=input.device)
-    return output, dist.all_gather_into_tensor(output,
-                                               input,
-                                               group=group.device_group,
-                                               async_op=async_op)
+        output_size = (input_size[0] * group.world_size,) + input_size[1:]
+        output = torch.empty(output_size, dtype=input.dtype, device=input.device)
+    return output, dist.all_gather_into_tensor(
+        output, input, group=group.device_group, async_op=async_op
+    )
