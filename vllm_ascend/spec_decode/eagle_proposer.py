@@ -438,22 +438,36 @@ class EagleProposer(VllmEagleProposer):
         else:
             input_batch_size = batch_size
 
-        attn_metadata.num_actual_tokens = batch_size
-        attn_metadata.max_query_len = 1
-        attn_metadata.query_start_loc = self.arange_cpu[:batch_size + 1]
-        attn_metadata.num_decodes, attn_metadata.num_prefills, attn_metadata.num_decode_tokens, attn_metadata.num_prefill_tokens = 0, batch_size, 0, batch_size
-        attn_metadata.num_actual_tokens_pcp_padded = attn_metadata.num_decode_tokens + attn_metadata.num_prefill_tokens
-
-        attn_metadata.actual_seq_lengths_q = attn_metadata.query_start_loc[
-            1:].tolist()
-        attn_metadata.seq_lens_list = attn_metadata.seq_lens.tolist()
-        attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = \
                 self.runner.cudagraph_dispatcher.dispatch(num_tokens=input_batch_size, uniform_decode=True, has_lora=has_lora)
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
+        
+        common_attn_metadata.num_actual_tokens = batch_size
+        common_attn_metadata.max_query_len = 1
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            common_attn_metadata.block_table_tensor = self._pad_length(common_attn_metadata.block_table_tensor, input_batch_size)
+            common_attn_metadata.num_reqs = input_batch_size
+            common_attn_metadata.seq_lens = self._pad_length(common_attn_metadata.seq_lens, input_batch_size)
+            common_attn_metadata.seq_lens_cpu = self._pad_length(common_attn_metadata.seq_lens_cpu, input_batch_size)
+            common_attn_metadata.query_start_loc = self.arange[:
+                                                               input_batch_size
+                                                               + 1]
+            common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
+                self.token_arange_np[:input_batch_size + 1]).clone()
+        else:
+            common_attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+            common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
+                self.token_arange_np[:batch_size + 1]).clone()
+
+        common_attn_metadata.decode_token_per_req = 1
+        common_attn_metadata.attn_mask = (
+            self.attn_mask_builder.get_splitfuse_attn_mask())
+        common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        common_attn_metadata.num_input_tokens = input_batch_size
+
         for now_speculative in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -473,22 +487,31 @@ class EagleProposer(VllmEagleProposer):
             clamped_positions = torch.where(exceeds_max_model_len, 0,
                                             positions)
 
-            # TODO: Increment the sequence lengths.
-
-            attn_metadata.seq_lens = attn_metadata.seq_lens + 1
-            attn_metadata.seq_lens_list = [
-                _ + 1 for _ in attn_metadata.seq_lens_list
-            ]
-            # TODO: Consider max model length.
-            # attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
-            #                                 self.max_model_len)
+            # For data integrity when async scheduling, we shouldn't use in place
+            # operations in case they are modified in next step's `prepare_input`
+            # of main model.
+            # Increment the sequence lengths.
+            common_attn_metadata.seq_lens[:batch_size] += 1
             # For the requests that exceed the max model length, we set the
-            # TODO: sequence length to 1 to minimize their overheads in attention.
+            # sequence length to 1 to minimize their overheads in attention.
+            common_attn_metadata.seq_lens[:batch_size].masked_fill_(
+                exceeds_max_model_len, 1)
+
+            common_attn_metadata.seq_lens_cpu[:batch_size] = (
+                common_attn_metadata.seq_lens_cpu[:batch_size] + 1)
+            exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] > \
+                self.max_model_len
+            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(
+                exceeds_mask, 1)
+            common_attn_metadata.num_computed_tokens_cpu += 1
+            common_attn_metadata.positions[:batch_size] = clamped_positions
+            common_attn_metadata.positions[batch_size:] = 0
 
             if self.attn_metadata_builder is None:
                 attn_metadata_builder = self._get_attention_metadata_builder()
             else:
                 attn_metadata_builder = self.attn_metadata_builder
+
             block_size = attn_metadata_builder.kv_cache_spec.block_size
 
             # Compute the slot mapping.
@@ -496,26 +519,32 @@ class EagleProposer(VllmEagleProposer):
             block_ids = attn_metadata.block_tables.gather(
                 dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
-            slot_mapping_tmp = (block_ids * block_size +
+            slot_mapping = (block_ids * block_size +
                                 clamped_positions % block_size)
 
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
-            slot_mapping_tmp.masked_fill_(exceeds_max_model_len,
+            slot_mapping.masked_fill_(exceeds_max_model_len,
                                           PADDING_SLOT_ID)
-            # NOTE: ASCEND slot_mapping must on cpu
-            attn_metadata.slot_mapping[:slot_mapping_tmp.shape[0]].copy_(
-                slot_mapping_tmp.to(torch.int32))
-            attn_metadata.slot_mapping[slot_mapping_tmp.shape[0]:].fill_(
-                PADDING_SLOT_ID)
+
+            common_attn_metadata.slot_mapping[:slot_mapping.
+                                                shape[0]].copy_(
+                                                    slot_mapping.to(
+                                                        torch.int32))
+            common_attn_metadata.slot_mapping[
+                slot_mapping.shape[0]:].fill_(PADDING_SLOT_ID)
+
+            # Rebuild attention metadata
+            attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
+                common_attn_metadata=common_attn_metadata,
+                draft_index=now_speculative + 1,
+            )
+
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
-            attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
-
-            attn_metadata.attn_mask = attn_mask
 
             # update global cos, sin
             update_cos_sin(self.positions[:input_batch_size])
@@ -929,3 +958,9 @@ class EagleProposer(VllmEagleProposer):
             else:
                 update_attn_params(self.update_stream, forward_context,
                                    num_tokens, self.vllm_config)
+
+    # padding view into correct length
+    def _pad_length(self, view, target_length):
+        pad_length = target_length - len(view)
+        padded_view = F.pad(view, (0, pad_length), mode='constant', value=0)
+        return padded_view
