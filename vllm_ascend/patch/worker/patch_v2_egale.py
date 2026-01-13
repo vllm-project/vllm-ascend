@@ -19,12 +19,13 @@
 import numpy as np
 import torch
 import vllm
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle import (prepare_eagle_decode,
                                                   prepare_eagle_inputs)
+
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
 
 @torch.inference_mode()
