@@ -68,9 +68,6 @@ class NPUModelRunner(GPUModelRunner):
         self.speculator: AscendEagleSpeculator | None = None
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)
-            raise NotImplementedError(
-                "torch.gather has some issue on NPU now, AscendEagleSpeculator's propose has called torch.gather, so we disable eagle speculator temporarily."
-            )
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -98,9 +95,6 @@ class NPUModelRunner(GPUModelRunner):
         # so reinitialize sampler here.
         self.sampler: AscendSampler = AscendSampler(
             logprobs_mode=self.model_config.logprobs_mode, )
-
-        # decode token per request (used in attention backends.)
-        self.decode_token_per_req = self.num_speculative_steps + 1
 
         # we need to copy num_computed_tokens back to cpu to help
         # update actual seq_lens_cpu. gpu attention backend doesn't need these

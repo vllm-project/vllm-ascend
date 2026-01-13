@@ -264,3 +264,15 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
+# ** 12. File: worker/patch_v2_eagle.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
+#    Why:
+#       `propose` method use torch.gather, but the gather operator will
+#       pollute the arguments passed to it. the bug is reported to huawei
+#       CANN team, but not fixed yet.
+#    How：
+#       clone the out attribute ahead of gather to avoid the bug.
+#    Future Plan:
+#       Remove this patch when cann fix the gather bug.
+#
