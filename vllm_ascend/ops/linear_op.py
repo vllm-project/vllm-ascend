@@ -62,7 +62,7 @@ from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
-from vllm_ascend.utils import (enable_dsa_cp, enable_sp, flashcomm2_enable,
+from vllm_ascend.utils import (enable_dsa_cp, enable_sp_by_custom_op, flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
                                oproj_tp_enable, shared_expert_dp_enabled)
@@ -704,7 +704,7 @@ def _get_column_parallel_op(
     if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
         if any(p in prefix for p in ("qkv_proj", "conv1d", "query_key_value")):
             return Flashcomm2OshardQKVParallelOp(layer)
-    if enable_sp():
+    if enable_sp_by_custom_op():
         if "shared_expert" in prefix:
             return None
         sp_column_prefix = [
@@ -737,7 +737,7 @@ def _get_row_parallel_op(
     if flashcomm2_enable():
         if "o_proj" in prefix or "out_proj" in prefix:
             return Flashcomm2OProjRowParallelOp(layer)
-    if enable_sp():
+    if enable_sp_by_custom_op():
         if "shared_expert" in prefix:
             return None
         sp_row_prefixes = [

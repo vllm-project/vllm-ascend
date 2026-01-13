@@ -70,6 +70,7 @@ _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
 _HAS_ROPE = None
+_ENABLE_SP_BY_COMTUM_OP = None
 
 
 def _print_callback_on_stream(*args):
@@ -790,6 +791,14 @@ def mlp_tp_enable() -> bool:
 
 def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
+
+
+# flash comm 1 for vl model is implemented by pass
+def enable_sp_by_custom_op(vllm_config: VllmConfig = None):
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+    return enable_sp(vllm_config) and not is_vl_model(vllm_config)
 
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:

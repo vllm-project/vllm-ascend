@@ -355,13 +355,17 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        if is_vl_model(vllm_config):
-            if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))) or \
-               bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))):
+        # TODO: delete enable_sp overwrite after VLLM_ASCEND_ENABLE_FLASHCOMM1 is deleted
+        if is_vl_model(vllm_config) and enable_sp(vllm_config):
+            if is_moe_model(vllm_config) or vllm_config.model_config.enforce_eager:
                 raise ValueError(
-                    "Currently, VL models doesn't support "
+                    "For VL mdoels, only dense models with graph mode support "
                     "FLASHCOMM in vllm-ascend. We will fix this in the future. "
                     "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
+            vllm_config.compilation_config.pass_config.enable_sp = True
+            if not is_moe_model(vllm_config) and vllm_config.compilation_config.compile_ranges_split_points is None:
+                from vllm_ascend.compilation.passes.sequence_parallelism import SP_THREHOLD
+                vllm_config.compilation_config.compile_ranges_split_points = [SP_THREHOLD, vllm_config.scheduler_config.max_num_batched_tokens]
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -457,17 +461,17 @@ class NPUPlatform(Platform):
         Args:
             attn_metadata (dict[str, Any]): attention metadata for all layers.
             vllm_config (VllmConfig): configuration of vllm.
-            dp_metadata (DpMetada): metadata for data parallelism. 
+            dp_metadata (DpMetada): metadata for data parallelism.
                 lack of typehint because of circular import.
             virtual_engine (int, optional): index of virtual engine. Defaults to 0.
             num_tokens (int | None, optional): number of tokens. Defaults to None.
-            num_tokens_across_dp (torch.Tensor | None, optional): number of tokens 
+            num_tokens_across_dp (torch.Tensor | None, optional): number of tokens
                 across data parallelism.Defaults to None.
             cudagraph_runtime_mode (CUDAGraphMode, optional): mode of cudagraph runtime.
                 Defaults to None.lack of typehint because of circular import.
             batch_descriptor (BatchDescriptor, optional): descriptor of batch.
                 Defaults to None.
-            ubatch_slices (UBatchSlices, optional): slice info for dual batch. 
+            ubatch_slices (UBatchSlices, optional): slice info for dual batch.
                 Defaults to None. lack of typehint because of circular import
 
         Returns:
