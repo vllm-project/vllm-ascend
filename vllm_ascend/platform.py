@@ -343,7 +343,7 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
             )
-            vllm_config.scheduler_config.enable_chunked_prefill = True
+            vllmconfig.scheduler_config.enable_chunked_prefill = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
         if vllm_config.kv_transfer_config is not None and \
@@ -362,6 +362,21 @@ class NPUPlatform(Platform):
                     "Currently, VL models doesn't support "
                     "FLASHCOMM in vllm-ascend. We will fix this in the future. "
                     "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
+
+        if model_config and not model_config.enable_sleep_mode:
+            npu_alloc_configs = envs_ascend.PYTORCH_NPU_ALLOC_CONF
+            # This environment variable may have more than one key-value pairs.
+            # We should append ",expandable_segments:True" to the current configs.
+            # For example: "page_size:1g" + ",expandable_segments:True".
+            # NOTE: `max_split_size_mb` or `garbage_collection_threshold` cannot
+            # be enabled together with `expandable_segments=True`.
+            if "expandable_segments" not in npu_alloc_configs and \
+                "max_split_size_mb" not in npu_alloc_configs and \
+                "garbage_collection_threshold" not in npu_alloc_configs:
+                npu_alloc_configs += ",expandable_segments:True"
+            os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
+            logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
+
 
     @classmethod
     def import_kernels(cls) -> None:
