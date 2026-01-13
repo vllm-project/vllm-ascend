@@ -1919,6 +1919,11 @@ class NPUModelRunner(GPUModelRunner):
 
             attn_metadata = {}
 
+            # The reason why we use a fixed seq_len rather than max_query_len is that
+            # _npu_paged_attention_get_workspace only returns max workspace with specific
+            # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
+            # in inference. This will be removed once npu_fused_infer_attention_score
+            # outperforms _npu_paged_attention on all cases.
             seq_lens = SEQ_LEN_WITH_MAX_PA_WORKSPACE if force_attention else max_query_len
             self.seq_lens.np[:num_reqs] = seq_lens
             self.seq_lens.np[num_reqs:] = 0
