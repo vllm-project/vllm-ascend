@@ -217,8 +217,12 @@ class AscendSequenceParallelismPass(VllmInductorPass):
             AscendQwen3VLMiddleAllReduceRMSNormPattern(
                 config, epsilon).register(self.patterns)
         
-        if not is_moe_model(config):
-            self.min_tokens = SP_THREHOLD
+        if is_moe_model(config):
+            self.min_tokens = 0
+        else:
+            additional_config = config.additional_config if config.additional_config is not None else {}
+            sp_threshold = additional_config.get("sp_threshold", SP_THREHOLD)
+            self.min_tokens = sp_threshold
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
