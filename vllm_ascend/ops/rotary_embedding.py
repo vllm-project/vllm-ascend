@@ -29,7 +29,6 @@ from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
-from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
                                get_ascend_device_type, has_rope, is_vl_model,
@@ -225,7 +224,7 @@ def _rope_forward_oot(
                     sin = cos_sin[..., self.rotary_dim:]
                 cos = cos.view(-1, self.rotary_dim)
                 sin = sin.view(-1, self.rotary_dim)
-                q, k = rope_forward_triton(query.view(query.shape[0], -1,
+                q, k = torch.ops.vllm.triton_rope(query.view(query.shape[0], -1,
                                                       self.head_size),
                                            key.view(key.shape[0], -1,
                                                     self.head_size),
