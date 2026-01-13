@@ -231,8 +231,7 @@ class AscendCompilationConfig:
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
-        # TODO: Why or?
-        self.fuse_qknorm = HAS_TRITON or fuse_qknorm
+        self.fuse_qknorm = HAS_TRITON and fuse_qknorm
         self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
 
 
