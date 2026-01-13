@@ -192,10 +192,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             weight_quant = scheme_dict.get("weights")
             input_quant = scheme_dict.get("input_activations")
 
-            if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-                quant_scheme = AscendW8A8DynamicFusedMoEMethod()
-            elif self._is_w4a16(weight_quant, input_quant):
+            if self._is_w4a16(weight_quant, input_quant):
                 quant_scheme = AscendW4A16FusedMoEMethod()
+            elif self._is_dynamic_token_w8a8(weight_quant, input_quant):
+                quant_scheme = AscendW8A8DynamicFusedMoEMethod()
             else:
                 raise RuntimeError(
                     f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}"
