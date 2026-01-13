@@ -1,10 +1,9 @@
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 from llmcompressor.utils import dispatch_for_generation
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Select model and load it.
 MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
