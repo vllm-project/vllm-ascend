@@ -79,22 +79,6 @@ def npugraph_ex_compile(
     compile_range: Range,
     key: Optional[str] = None,
 ) -> tuple[Optional[Callable], Optional[Any]]:
-    # When currently using the FULL_DECODE_ONLY mode,
-    # the piecewise compilation level slicing process
-    # in vllm is also encountered.
-    # This process causes the output to no longer be
-    # wrapped as a tuple when the fx graph has a single
-    # output, but torch.compile has a mandatory check.
-    fx_graph = graph.graph
-    if not graph_returns_tuple(graph):
-        output_node = fx_graph.output_node()
-        with fx_graph.inserting_before(output_node):
-            return_value = output_node.args[0]
-            tuple_node = fx_graph.create_node("call_function",
-                                              tuple,
-                                              args=([return_value], ))
-        output_node.args = (tuple_node, )
-        graph.recompile()
 
     import torchair
 
@@ -123,8 +107,11 @@ def npugraph_ex_compile(
         config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
 
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
-    compile_graph = npugraph_ex(graph, example_inputs)
-    return compile_graph, None
+
+    if not graph_returns_tuple(graph):
+        return make_graph_return_tuple(graph, example_inputs, npugraph_ex), None
+
+    return npugraph_ex(graph, example_inputs), None
 
 
 class AscendCompiler(CompilerInterface):

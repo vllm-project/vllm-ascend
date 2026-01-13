@@ -104,8 +104,7 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
-                               check_and_adjust_hidden_states_type, enable_sp,
-                               get_ascend_device_type, is_moe_model,
+                               enable_sp, get_ascend_device_type, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
                                set_weight_prefetch_method, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -1105,7 +1104,6 @@ class NPUModelRunner(GPUModelRunner):
                 inputs_embeds=inputs_embeds,
                 **self._init_model_kwargs())
 
-        hidden_states = check_and_adjust_hidden_states_type(hidden_states)
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
             and not self.use_sparse:
@@ -1562,8 +1560,6 @@ class NPUModelRunner(GPUModelRunner):
                         self.debugger.stop()
                         self.debugger.step()
                     return pool_output
-                hidden_states = check_and_adjust_hidden_states_type(
-                    hidden_states)
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             if broadcast_pp_output:
@@ -2255,7 +2251,6 @@ class NPUModelRunner(GPUModelRunner):
                                         dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         # TODO: need to rum a dummy sampler for generate task
-        hidden_states = check_and_adjust_hidden_states_type(hidden_states)
         hidden_states = hidden_states[logit_indices]
         output = self.model.compute_logits(hidden_states)
         return output
