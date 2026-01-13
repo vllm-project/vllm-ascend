@@ -20,10 +20,12 @@ def send_v1_completions(prompt, model, server, request_args=None):
 def send_v1_chat_completions(prompt, model, server, request_args=None):
     data: dict[str, Any] = {
         "model": model,
-        "messages": [{
-            "role": "user",
-            "content": prompt,
-        }],
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
     }
     if request_args:
         data.update(request_args)
