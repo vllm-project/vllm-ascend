@@ -1,9 +1,14 @@
 name: Nightly Image Build Schedule
 
 on:
-  schedule:
-    # UTC+8: 20pm, 23pm
-    - cron: '0 12,15 * * *'
+  workflow_call:
+    secrets:
+      HW_USERNAME:
+        required: false
+        description: 'Huawei Cloud SWR Username'
+      HW_TOKEN:
+        required: false
+        description: 'Huawei Cloud SWR Token'
 
 # This workflow builds and pushes Docker images for nightly-ci
 # It will be built base on the quay.io/ascend/vllm-ascend:main

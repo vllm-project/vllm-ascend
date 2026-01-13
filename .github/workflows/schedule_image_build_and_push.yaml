@@ -56,3 +56,13 @@ jobs:
       workflow_dispatch_tag: ${{ inputs.tag }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+
+  
+  nightly_image_build:
+    name: Nightly Image Build and Push
+    needs: image_build
+    if: github.event_name == 'schedule'
+    uses: ./.github/workflows/_nightly_image_build.yaml
+    secrets:
+      HW_USERNAME: ${{ secrets.HW_USERNAME }}
+      HW_TOKEN: ${{ secrets.HW_TOKEN }}
