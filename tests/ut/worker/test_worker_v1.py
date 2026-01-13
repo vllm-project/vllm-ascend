@@ -5,6 +5,7 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
+from vllm_ascend.utils import vllm_version_is
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 
@@ -52,7 +53,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
-    @patch(init_cached_hf_modules_path)
+    @patch(init_cached_hf_modules_path, create=True)
     @patch("vllm_ascend.worker.worker.NPUWorker._init_profiler")
     def test_init_npu_worker_normal_case(
         self,
@@ -106,7 +107,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
-    @patch(init_cached_hf_modules_path)
+    @patch(init_cached_hf_modules_path, create=True)
     @patch("vllm_ascend.worker.worker.NPUWorker._init_profiler")
     def test_init_npu_worker_with_trust_remote_code(
         self,
@@ -140,7 +141,10 @@ class TestNPUWorker(TestBase):
         )
 
         # Verify init_cached_hf_modules is called (trust_remote_code=True)
-        mock_init_cached_hf_modules.assert_called_once()
+        if vllm_version_is('0.13.0'):
+            mock_init_cached_hf_modules.assert_called_once()
+        else:
+            mock_init_cached_hf_modules.assert_not_called()
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
@@ -149,7 +153,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
-    @patch(init_cached_hf_modules_path)
+    @patch(init_cached_hf_modules_path, create=True)
     @patch("vllm_ascend.worker.worker.NPUWorker._init_profiler")
     def test_init_npu_worker_with_custom_cache_dtype(
         self,
@@ -813,10 +817,11 @@ class TestNPUWorker(TestBase):
                 mock_scheduler_output, None)
             self.assertEqual(result, mock_model_output)
 
+    @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
     @patch("vllm_ascend.worker.worker.get_tp_group")
     def test_execute_model_middle_rank(self, mock_get_tp_group,
-                                       mock_get_pp_group):
+                                       mock_get_pp_group, mock_enable_sp):
         """Test execute_model method - middle rank case"""
         from vllm.sequence import IntermediateTensors
 
@@ -1113,12 +1118,14 @@ class TestNPUWorker(TestBase):
             worker.model_runner.initialize_kv_cache.assert_called_once_with(
                 mock_kv_cache_config)
 
+    @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
     @patch("vllm_ascend.worker.worker.get_tp_group")
     @patch("vllm_ascend.worker.worker.EMPTY_MODEL_RUNNER_OUTPUT")
     def test_execute_model_kv_connector_not_finished(self, mock_empty_output,
                                                      mock_get_tp_group,
-                                                     mock_get_pp_group):
+                                                     mock_get_pp_group,
+                                                     mock_enable_sp):
         """Test execute_model method - kv_connector_output not finished sending/recving case"""
         from vllm.sequence import IntermediateTensors
 
