@@ -33,7 +33,7 @@ from vllm_ascend.utils import refresh_block_size
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD,
     COMPILATION_PASS_KEY, AscendDeviceType, enable_sp, get_ascend_device_type,
-    is_vl_model, update_aclgraph_sizes, update_cudagraph_capture_sizes,
+    update_aclgraph_sizes, update_cudagraph_capture_sizes,
     update_default_aclgraph_sizes, check_kv_extra_config)
 
 if TYPE_CHECKING:
@@ -359,13 +359,6 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        if is_vl_model(vllm_config):
-            if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))) or \
-               bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))):
-                raise ValueError(
-                    "Currently, VL models doesn't support "
-                    "FLASHCOMM in vllm-ascend. We will fix this in the future. "
-                    "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
 
     @classmethod
     def import_kernels(cls) -> None:
