@@ -139,6 +139,9 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.moe_load = self.model.get_all_moe_loads()
         return self.moe_load
 
+    def get_moe_load_lists(self):
+        return self.model.get_moe_load_lists()
+
     def get_init_expert_map(self, num_moe_layers):
         expert_map = self.model.get_all_expert_map(num_moe_layers)
         if dist.is_initialized():
