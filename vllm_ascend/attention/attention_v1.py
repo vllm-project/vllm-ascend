@@ -780,6 +780,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and self.sliding_window is not None
             and attn_metadata.seq_lens.shape[0] == query.size(0)
+            and self.sinks is None
         ):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
