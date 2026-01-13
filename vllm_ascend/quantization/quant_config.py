@@ -205,7 +205,7 @@ class AscendQuantConfig(QuantizationConfig):
 # key: model_type
 # value: orig_to_new_prefix
 QUANT_MODEL_PREFIX_MAPPINGS = {
-    "qwen3_vl_moe": {
+    "qwen3_vl_moe_text": {
         "visual.": "model.visual.",
         "language_model.lm_head.": "lm_head.",
         "language_model.model.": "model.language_model.",
@@ -292,7 +292,7 @@ packed_modules_model_mapping = {
             "up_proj",
         ],
     },
-    "qwen3_vl_moe": {
+    "qwen3_vl_moe_text": {
         "qkv_proj": [
             "q_proj",
             "k_proj",
