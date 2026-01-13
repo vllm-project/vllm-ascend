@@ -21,6 +21,7 @@ on:
     branches:
       - 'main'
       - '*-dev'
+      - 'releases/v*'
     types: [ labeled, synchronize ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly

@@ -92,6 +92,8 @@ class AisbenchRunner:
         self.max_out_len = aisbench_config["max_out_len"]
         self.batch_size = aisbench_config["batch_size"]
         self.request_rate = aisbench_config.get("request_rate", 0)
+        self.trust_remote_code = aisbench_config.get("trust_remote_code",
+                                                     False)
         self.temperature = aisbench_config.get("temperature")
         self.top_k = aisbench_config.get("top_k")
         self.top_p = aisbench_config.get("top_p")
@@ -144,6 +146,9 @@ class AisbenchRunner:
         content = re.sub(r'max_out_len.*',
                          f'max_out_len = {self.max_out_len},', content)
         content = re.sub(r'batch_size.*', f'batch_size = {self.batch_size},',
+                         content)
+        content = re.sub(r'trust_remote_code=.*',
+                         f'trust_remote_code={self.trust_remote_code},',
                          content)
         content = content.replace("top_k", "#top_k")
         content = content.replace("seed", "#seed")

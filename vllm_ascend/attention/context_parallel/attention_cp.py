@@ -45,7 +45,11 @@ from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
-    # AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    """
+    Builder for constructing AscendMetadata with Context Parallelism support.
+
+    Extends AscendAttentionMetadataBuilder with PCP/DCP metadata handling.
+    """
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.

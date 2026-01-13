@@ -83,7 +83,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'light' }}
         run: |
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py::test_models_output
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
           pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
 
       - name: Run e2e test
@@ -105,7 +105,7 @@ jobs:
           # xgrammar has parameter mismatching bug, please follows: https://github.com/vllm-project/vllm-ascend/issues/5524
           # pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
           # torch 2.8 doesn't work with lora, fix me
-          #pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py
@@ -216,7 +216,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_full_graph_mode.py
           # torch 2.8 doesn't work with lora, fix me
-          #pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
           
 
           # To avoid oom, we need to run the test in a single process.
@@ -240,8 +240,8 @@ jobs:
 
   e2e-4-cards:
     name: multicard-4
-    needs: [e2e, e2e-2-cards]
-    if: ${{ needs.e2e.result == 'success' && needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
+    needs: [e2e-2-cards]
+    if: ${{ needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11

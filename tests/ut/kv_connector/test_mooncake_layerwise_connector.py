@@ -170,36 +170,6 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.thread._transfer_kv_cache(send_task)
         self.engine.batch_transfer_sync_write.assert_not_called()
 
-    def test_transfer_skips_when_tp_not_sender(self):
-
-        thread = KVCacheSendingLayerThread(
-            engine=self.engine,
-            total_layers=2,
-            ready_event=self.ready_event,
-            tp_rank=1,
-            pd_head_ratio=1,
-            num_head_replica=2,
-            kv_cache_base_addr=[1000, 2000, 3000, 4000],
-            use_mla=False,
-            block_len=[1024],
-            decode_tp_size=1,
-            first_kv_cache=self.first_kv_cache,
-            k_buffer=MagicMock(),
-            v_buffer=MagicMock(),
-            resharding_stream=MagicMock(),
-            callback_func=MagicMock())
-        req_meta = self.req_meta_base
-        send_task = SendTask(
-            send_request={"req3": req_meta},
-            wait_event=MagicMock(),
-            k_cache=self.key,
-            v_cache=self.value,
-            layer_idx=1,
-            rearrange_block_ids=[],
-        )
-        thread._transfer_kv_cache(send_task)
-        self.engine.batch_transfer_sync_write.assert_not_called()
-
     @patch(
         "vllm_ascend.distributed.mooncake_layerwise_connector.group_concurrent_contiguous",
         side_effect=group_concurrent_contiguous)
@@ -425,6 +395,7 @@ class MockVllmConfig:
         self.parallel_config.data_parallel_size = 1
         self.parallel_config.data_parallel_rank = 0
         self.cache_config.block_size = 16
+        self.model_config.hf_config.num_key_value_heads = 1
 
         self.kv_transfer_config.engine_id = "test_engine"
         self.kv_transfer_config.kv_port = 5000

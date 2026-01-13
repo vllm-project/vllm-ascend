@@ -1,6 +1,6 @@
 # vLLM Ascend Plugin documents
 
-Live doc: https://vllm-ascend.readthedocs.io
+Live doc: https://docs.vllm.ai/projects/ascend
 
 ## Build the docs
 

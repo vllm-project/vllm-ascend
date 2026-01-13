@@ -136,21 +136,9 @@ class AscendStoreConnector(KVConnectorBase_V1):
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        meta = self._get_connector_metadata()
         done_sending, done_recving = self.connector_worker.get_finished(
             finished_req_ids)
-        sended_and_finished: set[str] = set()
-        for item in list(self.sended_but_unfinished_reqs):
-            if item not in meta.unfinished_request_ids:
-                sended_and_finished.add(item)
-                self.sended_but_unfinished_reqs.remove(item)
-        for item in done_sending:
-            if item in meta.unfinished_request_ids:
-                self.sended_but_unfinished_reqs.add(item)
-            else:
-                sended_and_finished.add(item)
-
-        return sended_and_finished, done_recving
+        return done_sending, done_recving
 
 
 class LookupKeyServer:
