@@ -132,6 +132,12 @@ class AscendAttentionState(Enum):
 
 @dataclass
 class AscendMetadata:
+    """
+    Per-layer attention metadata for Ascend FlashAttention backend.
+
+    Contains attention masks, token counts, sequence lengths and KV cache
+    related properties for attention computation.
+    """
     # **************************** Basic Properties ************************** #
     attn_mask: Optional[torch.Tensor] = None
     # Current state of this attention run.
@@ -186,7 +192,12 @@ class AscendMetadata:
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
-    # AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    """
+    Builder for constructing AscendMetadata from CommonAttentionMetadata.
+
+    Handles attention mask generation and metadata preparation for
+    Ascend FlashAttention backend.
+    """
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
