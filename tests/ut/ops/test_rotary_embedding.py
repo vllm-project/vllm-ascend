@@ -38,40 +38,24 @@ class TestCustomRotaryEmbeddingEnabled(unittest.TestCase):
 
     def test_custom_rotary_embedding_enabled(self):
         # Test when all conditions are True
-        with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
-                   return_value=True):
-            result = _custom_rotary_embedding_enabled(self.query, True,
-                                                      self.head_size)
-            self.assertTrue(result)
+        result = _custom_rotary_embedding_enabled(self.query, True,
+                                                  self.head_size)
+        self.assertTrue(result)
 
         # Test when dtype is not float16
-        with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
-                   return_value=True):
-            query = self.query.to(torch.float32)
-            result = _custom_rotary_embedding_enabled(query, True,
-                                                      self.head_size)
-            self.assertFalse(result)
+        query = self.query.to(torch.float32)
+        result = _custom_rotary_embedding_enabled(query, True, self.head_size)
+        self.assertFalse(result)
 
         # Test when neox_style is False
-        with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
-                   return_value=True):
-            result = _custom_rotary_embedding_enabled(self.query, False,
-                                                      self.head_size)
-            self.assertFalse(result)
+        result = _custom_rotary_embedding_enabled(self.query, False,
+                                                  self.head_size)
+        self.assertFalse(result)
 
         # Test when head_size is not divisible by 32
-        with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
-                   return_value=True):
-            result = _custom_rotary_embedding_enabled(self.query, True,
-                                                      self.head_size + 1)
-            self.assertFalse(result)
-
-        # Test when custom op is disabled
-        with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
-                   return_value=False):
-            result = _custom_rotary_embedding_enabled(self.query, True,
-                                                      self.head_size)
-            self.assertFalse(result)
+        result = _custom_rotary_embedding_enabled(self.query, True,
+                                                  self.head_size + 1)
+        self.assertFalse(result)
 
 
 class TestAscendRotaryEmbedding(unittest.TestCase):
