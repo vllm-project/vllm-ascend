@@ -222,7 +222,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_quant_method.apply = MagicMock(
             return_value=torch.randn(1, self.vocab_size))
         self.patches = [
-            patch("vllm_ascend.ascend_config.get_ascend_config",
+            patch("vllm_ascend.config.vllm_ascend.get_ascend_config",
                   return_value=self.mock_ascend_config),
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group",

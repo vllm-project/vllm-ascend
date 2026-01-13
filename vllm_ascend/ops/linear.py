@@ -35,8 +35,9 @@ from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
+from vllm_ascend.config.utils import enable_sp
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import enable_sp, maybe_trans_nz
+from vllm_ascend.utils import maybe_trans_nz
 
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):

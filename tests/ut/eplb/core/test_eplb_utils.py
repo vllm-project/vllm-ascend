@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
                                                          FusedMoEParallelConfig
                                                          )
 
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.config.vllm_ascend import init_ascend_config
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils, init_eplb_config
 # isort: on
 

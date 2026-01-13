@@ -10,8 +10,8 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.config.vllm_ascend import init_ascend_config
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 
 

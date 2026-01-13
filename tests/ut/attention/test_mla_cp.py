@@ -5,12 +5,12 @@ from vllm.distributed.parallel_state import GroupCoordinator
 
 from tests.ut.attention.utils import patch_distributed_groups
 from tests.ut.base import TestBase
-from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     CPChunkedContextMetadata, _npu_attention_update, _process_attn_out_lse)
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl
 from vllm_ascend.attention.mla_v1 import ChunkedContextMetadata
+from vllm_ascend.config.vllm_ascend import init_ascend_config
 
 
 def get_pcp_split_info(pcp_rank, pcp_size, seq_lens):

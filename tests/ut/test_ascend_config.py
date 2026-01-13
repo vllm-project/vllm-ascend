@@ -16,8 +16,9 @@
 from vllm.config import VllmConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.ascend_config import (clear_ascend_config, get_ascend_config,
-                                       init_ascend_config)
+from vllm_ascend.config.vllm_ascend import (clear_ascend_config,
+                                            get_ascend_config,
+                                            init_ascend_config)
 
 
 class TestAscendConfig(TestBase):

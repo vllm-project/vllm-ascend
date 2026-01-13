@@ -36,15 +36,16 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.config.vllm_ascend import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, flashcomm2_enable,
-                               mlp_tp_enable, oproj_tp_enable)
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
+from ..config.utils import flashcomm2_enable
+from ..config.finegrained_tp import oproj_tp_enable, mlp_tp_enable
 from .utils import get_quant_method, is_mx_quant_type
 
 

@@ -33,5 +33,5 @@ def register_model_loader():
 
 
 def register_service_profiling():
-    from .profiling_config import generate_service_profiling_config
+    from vllm_ascend.config.profiling import generate_service_profiling_config
     generate_service_profiling_config()
