@@ -7,7 +7,8 @@ from vllm_ascend.ops.triton.fla.sigmoid_gating import \
     fused_recurrent_gated_delta_rule_fwd_kernel
 from vllm_ascend.ops.triton.mamba.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update_npu)
-from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample as ascend_gumbel_sample
+from vllm_ascend.worker.v2.sample.gumbel import \
+    gumbel_sample as ascend_gumbel_sample
 
 vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_update = causal_conv1d_update_npu
 vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_fn = causal_conv1d_fn

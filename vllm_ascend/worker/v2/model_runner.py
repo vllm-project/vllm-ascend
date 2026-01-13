@@ -33,9 +33,10 @@ from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
                                               build_attn_state)
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
+from vllm_ascend.worker.v2.spec_decode import init_speculator
+from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
-from vllm_ascend.worker.v2.spec_decode import init_speculator
 
 logger = init_logger(__name__)
 
@@ -64,10 +65,13 @@ class NPUModelRunner(GPUModelRunner):
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
+        self.speculator: AscendEagleSpeculator | None = None
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)
-        else:
-            self.speculator = None
+            raise NotImplementedError(
+                "torch.gather has some issue on NPU now, AscendEagleSpeculator's propose has called torch.gather, so we disable eagle speculator temporarily."
+            )
+
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
         self.req_states: AscendRequestState = AscendRequestState(

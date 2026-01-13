@@ -16,15 +16,17 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import vllm
 from contextlib import contextmanager
 from typing import Any
+
 import torch
-from vllm.v1.worker.gpu.spec_decode.eagle import EagleSpeculator
+import vllm
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.spec_decode.eagle import EagleSpeculator
+
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
 
 class AscendEagleSpeculator(EagleSpeculator):
@@ -95,7 +97,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         attn_metadata: dict[str, Any],
         num_tokens_across_dp: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Overrride GPU EagleSpeculator.run_model for Ascend NPUs, because
+        """Override GPU EagleSpeculator.run_model for Ascend NPUs, because
         in decode phase, we need to update seq_lens_cpu in attn_metadata after
         run model.
         """
@@ -136,8 +138,9 @@ class AscendEagleSpeculator(EagleSpeculator):
 @contextmanager
 def build_attn_metadata_wrapper():
     """Context manager to override attention metadata building for Ascend NPUs."""
+    original_func = vllm.v1.worker.gpu.spec_decode.eagle.build_attn_metadata
     try:
         vllm.v1.worker.gpu.spec_decode.eagle.build_attn_metadata = build_attn_metadata
         yield
     finally:
-        pass
+        vllm.v1.worker.gpu.spec_decode.eagle.build_attn_metadata = original_func
