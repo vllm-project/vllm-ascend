@@ -68,7 +68,7 @@ We welcome and value any contributions and collaborations:
 vllm-ascend has main branch and dev branch.
 
 - **main**: main branch，corresponds to the vLLM main branch, and is continuously monitored for quality through Ascend CI.
-- **vX.Y.Z-dev**: development branch, created with part of new releases of vLLM. For example, `v0.7.3-dev` is the dev branch for vLLM `v0.7.3` version.
+- **releases/vX.Y.Z**: development branch, created with part of new releases of vLLM. For example, `releases/v0.13.0` is the dev branch for vLLM `v0.13.0` version.
 
 Below is maintained branches:
 

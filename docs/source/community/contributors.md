@@ -1,6 +1,6 @@
-# Maintainers and Contributors
+# Committers and Contributors
 
-## Maintainers
+## Committers
 
 | Name | Github ID | Date |
 |:-----------:|:-----:|:-----:|
