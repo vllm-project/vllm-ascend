@@ -800,7 +800,7 @@ def cleanup_triton_cache():
     Automatically cleanup triton cache before each test case.
     This prevents cache-related issues between test runs.
     """
-    import shutil
+    # import shutil
     import glob
     import os
     import subprocess
@@ -899,7 +899,6 @@ def cleanup_triton_cache():
 
         except Exception as e:
             logger.warning(f"[/tmp/tmp*] Error checking tmp files: {e}")
-
 
     if os.path.exists(triton_cache_path):
         size = get_cache_size(triton_cache_path)
