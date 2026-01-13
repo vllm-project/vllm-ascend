@@ -89,7 +89,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 vLLM Ascend includes two branches: main and dev.
 
 - **main**: corresponds to the vLLM main branch and latest 1 or 2 release version. It is continuously monitored for quality through Ascend CI.
-- **vX.Y.Z-dev**: development branch, created with part of new releases of vLLM. For example, `v0.7.3-dev` is the dev branch for vLLM `v0.7.3` version.
+- **releases/vX.Y.Z**: development branch, created with part of new releases of vLLM. For example, `releases/v0.13.0` is the dev branch for vLLM `v0.13.0` version.
 
 Commits should typically be merged into the main branch first, and only then backported to the dev branch, to reduce maintenance costs as much as possible.
 
@@ -104,7 +104,7 @@ The table below lists branch states.
 
 ### Branch states
 
-Note that vLLM Ascend will only be released for a certain vLLM release version, not for every version. Hence, you may notice that some versions have corresponding dev branches (e.g. `0.7.1-dev` and `0.7.3-dev` ), while others do not (e.g. `0.7.2-dev`).
+Note that vLLM Ascend will only be released for a certain vLLM release version, not for every version. Hence, you may notice that some versions have corresponding dev branches (e.g. `releases/v0.13.0`), while others do not (e.g. `releases/v0.12.0`). The vLLM Ascend release branch now follows the `releases/vX.Y.Z` naming convention, replacing the previous `vX.Y.Z-dev` format to align with vLLM's branch naming standards.
 
 Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend version branch and supports its latest version (such as 0.7.3), as shown below:
 
@@ -140,15 +140,15 @@ To reduce maintenance costs, **all branch documentation content should remain co
 
 | Version | Purpose | Code Branch |
 |-----|-----|---------|
-| latest | Doc for the latest dev branch | vX.Y.Z-dev (Will be `main` after the first final release) |
-| version | Doc for historical released versions | Git tags, like vX.Y.Z[rcN] |
-| stable (not yet released) | Doc for latest final release branch | Will be `vX.Y.Z-dev` after the first official release |
+| latest | Doc for the latest rc release of main branch | `main` branch |
+| rc version | Doc for RC released versions | `vX.Y.ZrcN` --> `vX.Y.ZrcN` tag |
+| version | Doc for historical released versions | `vX.Y.Z` --> `releases/vX.Y.Z` branch |
 
 Notes:
 
-- `latest` documentation: Matches the current maintenance branch `vX.Y.Z-dev` (will be `main` after the first final release). It is continuously updated to ensure usability for the latest release.
-- `version` documentation: Corresponds to specific released versions (e.g., `v0.7.3`, `v0.7.3rc1`). There are no further updates after release.
-- `stable` documentation (**not yet released**): Official release documentation. Updates are allowed in real-time after release, typically based on vX.Y.Z-dev. Once stable documentation is available, non-stable versions should display a header warning: `You are viewing the latest developer preview docs. Click here to view docs for the latest stable release.`.
+- `latest` documentation: always points to latest rc release of main branch.
+- `rc version` documentation: there are no further updates after release.
+- `version` documentation: keep updating the `releases/vX.Y.Z` branch documentation to fix doc bugs.
 
 ## Software dependency management
 - `torch-npu`: Ascend Extension for PyTorch (torch-npu) releases a stable version to [PyPi](https://pypi.org/project/torch-npu)
