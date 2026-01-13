@@ -28,7 +28,7 @@ The wrapper classes handle:
 - Delegation to the underlying scheme's apply() method
 """
 
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
@@ -45,8 +45,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
-from vllm_ascend.utils import (flashcomm2_enable, mlp_tp_enable,
-                               oproj_tp_enable)
+from vllm_ascend.utils import flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
 

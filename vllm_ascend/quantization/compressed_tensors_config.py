@@ -30,8 +30,6 @@ from vllm.model_executor.layers.quantization import (
     QUANTIZATION_METHODS, register_quantization_config)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
-    CompressedTensorsScheme
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
@@ -247,8 +245,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         )
 
     def _get_scheme_from_parts(
-        self, weight_quant: "QuantizationArgs",
-        input_quant: "QuantizationArgs"
+        self, weight_quant: "QuantizationArgs", input_quant: "QuantizationArgs"
     ) -> Union[AscendLinearScheme, AscendMoEScheme]:
         """Determine the appropriate Ascend scheme based on quantization args.
         
