@@ -42,3 +42,51 @@ plugins.md033.enabled = false # inline-html
 plugins.md046.enabled = false # code-block-style
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
 plugins.md029.enabled = false # ol-prefix
+
+[tool.ruff]
+# TODO: according to PEP8, there should be 80 characters per line
+line-length = 120
+# Folder to be modified
+exclude = [
+    "examples/**",
+    "tests/**",
+    "vllm_ascend/**",
+]
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+    # flake8-logging-format
+    "G",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # zip without `strict=`
+    "B905",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+    # TODO: FIE ME
+    "G004",
+    "B904",
+    "SIM108",
+    "SIM102"
+]
+
+[tool.ruff.format]
+docstring-code-format = true
