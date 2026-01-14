@@ -94,7 +94,7 @@ class TestAscendModelSlimConfig(TestBase):
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
             patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
             patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme), \
-            patch('vllm_ascend.quantization.wrappers.AscendLinearMethod', return_value=MagicMock()) as mock_ascend_linear:
+            patch('vllm_ascend.quantization.method_adapters.AscendLinearMethod', return_value=MagicMock()) as mock_ascend_linear:
 
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIs(method, mock_ascend_linear.return_value)
@@ -107,7 +107,7 @@ class TestAscendModelSlimConfig(TestBase):
         mock_scheme = MagicMock()
         with patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
             patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme), \
-            patch('vllm_ascend.quantization.wrappers.AscendKVCacheMethod', \
+            patch('vllm_ascend.quantization.method_adapters.AscendKVCacheMethod', \
                    return_value=MagicMock()) as mock_ascend_kvcache:
             # Test with fa_quant_type
             method = self.ascend_config.get_quant_method(
@@ -134,7 +134,7 @@ class TestAscendModelSlimConfig(TestBase):
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
             patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
             patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme), \
-            patch('vllm_ascend.quantization.wrappers.AscendFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
+            patch('vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
             method = self.ascend_config.get_quant_method(
                 fused_moe_layer, "moe_layer")
             self.assertIs(method, mock_ascend_moe.return_value)
