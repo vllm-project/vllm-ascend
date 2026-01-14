@@ -108,7 +108,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         # 所有FFN和前min_size的Attention参与p2p通信
         # 所有FFN: world_rank in [0, ffn_size), 前min_size个Attention: world_rank in [ffn_size, ffn_size+min_size)
         import datetime
-        timeout = datetime.timedelta(seconds=300)
+        timeout = datetime.timedelta(seconds=30000)
         if self.is_vaild_rank_for_inequal_AF(self.rank):
             self.p2p_pg = init_afd_process_group(
                 backend="hccl",
