@@ -395,11 +395,6 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                         attn_size=self.attn_size,
                         max_num_tokens=self.decode_max_num_token,
                         )
-                    # [64,2048]
-                    hidden_states, dynamic_scales, group_list, handle, topk_weights, afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
-                    print(f'recv_attn_output success ,layer id is {layer_idx},ubatch_idx is {ubatch_idx}',flush=True)
-                    m2n_afdconnector_data.handle = handle
-                    m2n_afdconnector_data.topk_weights = topk_weights
                 elif self.connector_name == "camm2nconnector":
                     cam_afdconnector_data = CAMM2NAFDConnectorMetadata(
                         moe_expert_num = self.n_routed_experts,
@@ -416,7 +411,6 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
                     group_list = expertTokenNums.to(torch.int64)
                     topk_weights = simulateExpertScales
-                    print(f'cam recv_attn_output success ,layer id is {layer_idx},ubatch_idx is {ubatch_idx}',flush=True)
                 elif self.connector_name == "camp2pconnector":
                     cam_afdconnector_data = CAMP2PAFDConnectorMetadata(
                         moe_expert_num = self.n_routed_experts,
