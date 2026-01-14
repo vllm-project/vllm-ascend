@@ -2,9 +2,9 @@
 
 ## Introduction
 
-The Qwen-VL(Vision-Language) series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
+The Qwen-VL (Vision-Language) series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
 
-This document will show the main verification steps of the `Qwen3-VL-30B-A3B-Instruct`, including supported features, feature configuration, environment preparation, NPU deployment.
+This document will show the main verification steps of the `Qwen3-VL-30B-A3B-Instruct`.
 
 ## Supported Features
 
@@ -13,20 +13,18 @@ This document will show the main verification steps of the `Qwen3-VL-30B-A3B-Ins
 
 ## Environment Preparation
 
-### Model Weight
+### Prepare Model Weights
 
-Require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 16) node.
+Running this model requires 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 16) node.
 
-`Qwen3-VL-30B-A3B-Instruct`: [download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) or download by below command:
+Download model weight at [ModelScope Website](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) or download by below command:
 
 ```bash
 pip install modelscope
 modelscope download --model Qwen/Qwen3-VL-30B-A3B-Instruct
 ```
 
-A sample Qwen3-VL-MoE quantization script can be found in the modelslim code repository: [Qwen3-VL-MoE Quantization Script Example](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/multimodal_vlm/Qwen3-VL-MoE/README.md).
-
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weights to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### Installation
 
@@ -206,110 +204,4 @@ INFO 12-24 09:49:22 [loggers.py:257] Engine 000: Avg prompt throughput: 19.6 tok
 
 ### Offline Inference
 
-:::::{tab-set}
-:sync-group: install
-
-::::{tab-item} Image Inputs
-:sync: multi
-
-Run the following script to execute offline inference on multi-NPU:
-
-```bash
-pip install qwen_vl_utils
-```
-
-```python
-from transformers import AutoProcessor
-from vllm import LLM, SamplingParams
-from qwen_vl_utils import process_vision_info
-
-
-MODEL_PATH = "Qwen/Qwen3-VL-30B-A3B-Instruct"
-
-if __name__ == '__main__':
-
-    llm = LLM(
-        model=MODEL_PATH,
-        max_model_len=128000,
-        tensor_parallel_size=2,
-        enable_expert_parallel=True,
-    )
-
-    sampling_params = SamplingParams(max_tokens=512)
-
-    image_messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "image": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png",
-                    "min_pixels": 224 * 224,
-                    "max_pixels": 1280 * 28 * 28,
-                },
-                {"type": "text", "text": "Please provide a detailed description of this image"},
-            ],
-        },
-    ]
-    messages = image_messages
-
-    processor = AutoProcessor.from_pretrained(MODEL_PATH)
-    prompt = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-    image_inputs, _, _ = process_vision_info(messages, return_video_kwargs=True)
-
-    mm_data = {}
-    if image_inputs is not None:
-        mm_data["image"] = image_inputs
-
-    llm_inputs = {
-        "prompt": prompt,
-        "multi_modal_data": mm_data,
-    }
-
-    outputs = llm.generate([llm_inputs], sampling_params=sampling_params)
-    generated_text = outputs[0].outputs[0].text
-    print(generated_text)
-```
-
-If you run this script successfully, you can see the info shown below:
-
-```md
-This image displays a logo, likely for a brand or organization, featuring a combination of a graphic icon and text.
-
-- **The Icon**: On the left side, there is a geometric logo composed of interlocking lines that form a three-dimensional, abstract shape. The design is reminiscent of a stylized hexagon or star, constructed from a continuous line that creates a sense of depth and complexity. The icon is rendered in a solid, light blue or purplish-blue color. It could be interpreted as a stylized representation of a 'T', a quantum tunnel, or a circuit.
-
-- **The Text**: To the right of the icon, the name is written in two parts:
-    - The top line shows the name "TONGYI" in a clean, sans-serif typeface. The text is in the same blue/purple color as the icon.
-    - The bottom line features the name "Qwen" in a slightly larger, bolder, and darker gray font.
-
-- **Overall Composition**: The logo is clean and modern, set against a plain white background. The use of a geometric icon next to a clear name suggests a connection to technology, software, data science, or a similar modern field. The two-part naming scheme ("TONGYI" and "Qwen") is common for large language models or AI systems, where "TONGYI" might be a project or company name and "Qwen" is the specific model name. For example, "Qwen" is the name of the large language model developed by Alibaba Cloud's Tongyi Lab.
-```
-
-::::
-::::{tab-item} Video Inputs
-:sync: multi
-
-Run the following script to execute offline inference on multi-NPU:
-
-```bash
-pip install qwen_vl_utils
-```
-
-```python
-# TODO...
-```
-
-If you run this script successfully, you can see the info shown below:
-
-```bash
-# TODO...
-```
-
-::::
-:::::
+The usage of offline inference with `Qwen3-VL-30B-A3B-Instruct` is totally the same as that of `Qwen3-VL-8B-Instruct`, find more details at [link](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/Qwen-VL-Dense.html#offline-inference).
