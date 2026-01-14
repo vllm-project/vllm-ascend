@@ -363,8 +363,12 @@ class NPUPlatform(Platform):
                     "FLASHCOMM in vllm-ascend. We will fix this in the future. "
                     "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
 
+        # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
+        # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
+        # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
+        # Find more details about how to configure this environment variable at https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
         if model_config and not model_config.enable_sleep_mode:
-            npu_alloc_configs = envs_ascend.PYTORCH_NPU_ALLOC_CONF
+            npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
             # This environment variable may have more than one key-value pairs.
             # We should append ",expandable_segments:True" to the current configs.
             # For example: "page_size:1g" + ",expandable_segments:True".

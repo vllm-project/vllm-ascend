@@ -132,12 +132,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale balance scheduling
     "VLLM_ASCEND_BALANCE_SCHEDULING":
     lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", '0'))),
-    # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
-    # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
-    # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
-    # Find more details about how to configure this environment variable at https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
-    "PYTORCH_NPU_ALLOC_CONF":
-    lambda: os.getenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True"),
 }
 
 # end-env-vars-definition
