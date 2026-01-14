@@ -37,7 +37,7 @@ using namespace AscendC;
 #include "catlass/gemm/kernel/matmul_epilogue.hpp"
 #include "catlass/gemm/gemm_type.hpp"
 #include "catlass/layout/layout.hpp"
-#include "catlass/status.hpp"
+// #include "catlass/status.hpp"
 
 #include "utils/select_helper.hpp"
 #include "utils/const_args.hpp"
@@ -141,7 +141,7 @@ __aicore__ inline void DispatchFFNCombineBF16<TemplateMMA2ACFunc>::Init(GM_ADDR 
     topK = tilingData.dispatchFFNCombineBF16Info.topK;
     expertPerRank = tilingData.dispatchFFNCombineBF16Info.expertPerRank;
     maxOutputSize = tilingData.dispatchFFNCombineBF16Info.maxOutputSize;
-    listLen = tilingData.dispatchFFNCombineInfo.listLen;
+    listLen = tilingData.dispatchFFNCombineBF16Info.listLen;
 
     m0 = tilingData.cocTiling.m0;
     k0 = tilingData.cocTiling.k0;
