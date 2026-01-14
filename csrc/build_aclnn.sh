@@ -64,6 +64,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "lightning_indexer"
         "sparse_flash_attention"
         "dispatch_ffn_combine"
+        "dispatch_ffn_combine_bf16"
         "dispatch_gmm_combine_decode"
         "moe_combine_normal"
         "moe_dispatch_normal"
