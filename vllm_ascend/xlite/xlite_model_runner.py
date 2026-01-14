@@ -18,7 +18,11 @@
 # isort: skip_file
 import torch.nn as nn
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+from vllm_ascend.worker.model_runner_v1 import (
+    NPUModelRunner, _torch_cuda_wrapper,
+    _replace_gpu_model_runner_function_wrapper)
 
 
 class XliteModelRunner(NPUModelRunner):
@@ -34,3 +38,15 @@ class XliteModelRunner(NPUModelRunner):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         super().initialize_kv_cache(kv_cache_config)
         self.model.register_kv_caches(self.kv_caches)
+
+    def capture_model(self) -> None:
+        # Find GPUModelRunner in the MRO
+        gpu_runner_cls = next((cls for cls in self.__class__.__mro__
+                               if cls.__name__ == "GPUModelRunner"), None)
+        if gpu_runner_cls is None:
+            raise TypeError("Could not find GPUModelRunner in the MRO. "
+                            "The class hierarchy may have changed.")
+        parent_module_name = gpu_runner_cls.__module__
+        with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(
+                parent_module_name):
+            GPUModelRunner.capture_model(self)
