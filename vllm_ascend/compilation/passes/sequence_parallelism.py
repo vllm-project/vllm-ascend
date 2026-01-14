@@ -11,6 +11,7 @@ from vllm_ascend.utils import is_moe_model
 
 SP_THREHOLD = 1000
 
+
 class _SequenceParallelPatternHelper:
     """Helper for sequence parallelism patterns."""
 
@@ -20,7 +21,7 @@ class _SequenceParallelPatternHelper:
         dtype: torch.dtype,
         device: str,
     ):
-        self.epsilon = epsilon
+        self.eps = epsilon
         self.dtype = dtype
         self.device = device
         self.tp_group = get_tp_group()
@@ -44,15 +45,15 @@ class _SequenceParallelPatternHelper:
             world_size=self.tp_size,
             group_name=self.tp_group.unique_name)
 
+    def empty(self, *args, **kws):
+        return torch.empty(*args, dtype=self.dtype, device="npu", **kws)
+
 
 class AscendMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(eps, vllm_config.model_config.dtype,
                          torch.npu.current_device())
-        self.vllm_config = vllm_config
-        self.dtype = vllm_config.model_config.dtype
-        self.eps = eps
 
     def empty(self, *args, **kws):
         return torch.empty(*args, dtype=self.dtype, device="npu", **kws)
@@ -101,12 +102,6 @@ class AscendLastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(eps, vllm_config.model_config.dtype,
                          torch.npu.current_device())
-        self.vllm_config = vllm_config
-        self.dtype = vllm_config.model_config.dtype
-        self.eps = eps
-
-    def empty(self, *args, **kws):
-        return torch.empty(*args, dtype=self.dtype, device="npu", **kws)
 
     def get_inputs(self):
         input = self.empty(8, 16)
@@ -150,12 +145,6 @@ class AscendQwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(eps, vllm_config.model_config.dtype,
                          torch.npu.current_device())
-        self.vllm_config = vllm_config
-        self.dtype = vllm_config.model_config.dtype
-        self.eps = eps
-
-    def empty(self, *args, **kws):
-        return torch.empty(*args, dtype=self.dtype, device="npu", **kws)
 
     def get_inputs(self):
         input = self.empty(8, 16)
