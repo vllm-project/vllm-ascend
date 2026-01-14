@@ -355,14 +355,11 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        # TODO: delete enable_sp overwrite after VLLM_ASCEND_ENABLE_FLASHCOMM1 is deleted
         if is_vl_model(vllm_config) and enable_sp(vllm_config):
-            if is_moe_model(vllm_config) or vllm_config.model_config.enforce_eager:
-                raise ValueError(
-                    "For VL mdoels, only dense models with graph mode support "
-                    "FLASHCOMM in vllm-ascend. We will fix this in the future. "
-                    "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
-            vllm_config.compilation_config.pass_config.enable_sp = True
+            raise ValueError("""Flash Comm V1 is not supported for VL models. \
+                Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
+                For optimal performance with VL models, we recommend enabling Sequence Parallelism \
+                via --compilation-config '{"pass_config": {"enable_sp": true}}'.""")
 
         # only dense models need to set default compile_ranges_split_points
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens

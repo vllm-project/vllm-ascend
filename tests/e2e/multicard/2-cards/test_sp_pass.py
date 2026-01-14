@@ -27,7 +27,6 @@ def test_sequence_parallelism_tp2(model: str) -> None:
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
 
-    os.environ["VLLM_ASCEND_ENABLE_FLASHCOMM1"] = "1"
     with VllmRunner(
             model,
             max_model_len=1024,
