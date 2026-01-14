@@ -44,6 +44,7 @@ def get_attn_mask_builder(device: torch.device):
 
 
 def build_attn_metadata(
+    *,
     attn_metadata_builders: list[AttentionMetadataBuilder],
     num_reqs: int,
     num_tokens: int,
@@ -51,10 +52,10 @@ def build_attn_metadata(
     query_start_loc_cpu: torch.Tensor,
     seq_lens: torch.Tensor,
     seq_lens_np: np.ndarray,
-    num_computed_tokens_cpu: torch.Tensor | None,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
+    num_computed_tokens_cpu: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
     attn_state: Any | None = None,
     graph_pad_size: int = -1,

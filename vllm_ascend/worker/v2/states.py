@@ -47,9 +47,6 @@ class AscendRequestState(RequestState):
             device,
             pin_memory,
         )
-        # because we will override these attribute, delete these attribute to
-        # make sure it's collected by python gc immediately.
-        del self.prefill_token_ids
         # vllm gpu_model_runner_v2 deprecate the seqs_lens_cpu attribute,
         # because they think most attention backends do not need it.
         # However, Ascend attention backend muse uses seqs_lens_cpu,
@@ -60,11 +57,6 @@ class AscendRequestState(RequestState):
             dtype=torch.int32,
             device="cpu",
         )
-        # NOTE(Ronald1995): Ascend NPUs do not support UVA yet,
-        # so we use CpuGpuBuffer to allocate prefill_token_ids buffer.
-        self.prefill_token_ids: CpuGpuBuffer = self._make_buffer(  # type: ignore
-            (self.max_num_reqs, self.max_model_len),
-            dtype=torch.int32)
 
     def add_request(
         self,
@@ -86,20 +78,3 @@ class AscendRequestState(RequestState):
         )
         req_idx = self.req_id_to_index[req_id]
         self.num_computed_tokens_cpu[req_idx] = num_computed_tokens
-
-
-@contextmanager
-def uva_wrapper():
-    """Context manager to disable UVA for Ascend NPUs."""
-
-    class UvaBufferWrapper:
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-    try:
-        # TODO(Ronald1995): rectify this when NPU support uva.
-        vllm.v1.worker.gpu.states.UvaBuffer = UvaBufferWrapper
-        yield
-    finally:
-        pass
