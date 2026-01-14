@@ -21,8 +21,8 @@ vllm_ascend
 │   ├── core
 │   │   ├── policy
 │   │   │   ├── policy_abstract.py
-│   │   │   ├── policy_dynamic_ep.py
-│   │   │   ├── policy_dynamic_ep_v2.py
+│   │   │   ├── policy_default_eplb.py
+│   │   │   ├── policy_swift_balancer.py
 │   │   │   ├── policy_factory.py
 │   │   │   ├── policy_flashlb.py
 │   │   ├── eplb_device_transfer_loader.py
@@ -46,9 +46,9 @@ vllm_ascend
   *Load balancing algorithms with factory pattern instantiation*
   - `policy_abstract.py`  
     Abstract class for load balancing strategy interfaces
-  - `policy_dynamic_ep.py`  
+  - `policy_default_eplb.py`  
     Default implementation of open-source EPLB paper algorithm
-  - `policy_dynamic_ep_v2.py`  
+  - `policy_swift_balancer.py`  
     Enhanced version optimizing expert swaps for low-bandwidth devices (e.g., A2)
   - `policy_flashlb.py`  
     Threshold-based adjustment reducing operational costs through layer-wise fluctuation detection
