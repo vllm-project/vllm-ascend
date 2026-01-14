@@ -6,7 +6,6 @@ import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
@@ -39,11 +38,16 @@ from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, maybe_trans_nz,
-                               weak_ref_tensors)
+                               vllm_version_is, weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+else:
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 BUILD_METADATA_STEP_PREFILL = 0
@@ -84,8 +88,11 @@ class AscendMLABackend(AttentionBackend):
 
 @dataclass
 class ChunkedContextMetadata:
-    # New for MLA (compared to FlashAttention)
-    # For handling chunked prefill
+    """
+    Metadata for chunked context handling in MLA attention.
+
+    Manages sequence boundaries and workspace for chunked prefill processing.
+    """
     cu_seq_lens: torch.Tensor
     starts: torch.Tensor
     seq_tot: list[int]
@@ -116,7 +123,8 @@ class AscendMLAPrefillMetadata:
 
 @dataclass
 class AscendMLADecodeMetadata:
-    # Input positions for rotrary embeddings since for MLA the rotary
+    """ Decode-specific metadata for Ascend MLA attention."""
+    # Input positions for rotary embeddings since for MLA the rotary
     # position embeddings are applied inside the attention backend
     input_positions: torch.Tensor
     block_table: torch.Tensor
@@ -438,7 +446,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if self.num_decodes > 0:
             decode_metadata = self.build_decode_metadata(
                 common_prefix_len, common_attn_metadata)
-
         return self.metadata_cls(  # type: ignore
             num_actual_tokens_pcp_padded=self.num_actual_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -1330,7 +1337,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.W_UK_T,
             decode_k_nope,
             decode_k_pe,
-            attn_metadata.slot_mapping[:bsz].flatten(),
+            attn_metadata.slot_mapping[:bsz],
             quant_scale0=self.quant_scale0,
             quant_offset0=self.quant_offset0,
             bias0=self.quant_bias_qkv,

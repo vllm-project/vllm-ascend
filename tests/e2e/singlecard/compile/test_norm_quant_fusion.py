@@ -305,15 +305,16 @@ def test_rmsnorm_quant_fusion(
 
     vllm_config = VllmConfig(model_config=ModelConfig(dtype=dtype))
 
-    update_environment_variables({
-        "RANK": "0",
-        "LOCAL_RANK": "0",
-        "WORLD_SIZE": "1",
-        "MASTER_ADDR": "localhost",
-        "MASTER_PORT": "12345",
-    })
-    init_distributed_environment()
-    ensure_model_parallel_initialized(1, 1)
+    with vllm.config.set_current_vllm_config(vllm_config):
+        update_environment_variables({
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "WORLD_SIZE": "1",
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "12345",
+        })
+        init_distributed_environment()
+        ensure_model_parallel_initialized(1, 1)
 
     with vllm.config.set_current_vllm_config(vllm_config):
         with set_ascend_forward_context(None, vllm_config):
