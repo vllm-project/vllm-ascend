@@ -144,9 +144,6 @@ class AscendQwen3VLMoeForConditionalGeneration(nn.Module):
                                                         rope_type="rope_3d")
             else:
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
-
-            #image_embeds = self.visual.vision_projection(image_embeds)
-        # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
         sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1)//
                 (merge_size*merge_size)).tolist()
