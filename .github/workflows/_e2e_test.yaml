@@ -119,7 +119,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
   
           # model_runner_v2
-          # pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
+          pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
 
           # pooling
           pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py
