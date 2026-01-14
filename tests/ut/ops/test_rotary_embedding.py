@@ -79,6 +79,12 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
 
     def setUp(self):
         # Common setup for tests
+        self.config_patcher = patch('vllm.config.vllm.get_current_vllm_config')
+        self.mock_get_config = self.config_patcher.start()
+        mock_config = MagicMock()
+        mock_config.compilation_config.custom_ops = ["all"]
+
+        self.mock_get_config.return_value = mock_config
         self.positions = torch.tensor([1, 2, 3])
         self.query = torch.randn(3, 1, 32, dtype=torch.float16)
         self.key = torch.randn(3, 1, 32, dtype=torch.float16)
@@ -245,6 +251,12 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
 
     def setUp(self):
         # Common setup for tests
+        self.config_patcher = patch('vllm.config.vllm.get_current_vllm_config')
+        self.mock_get_config = self.config_patcher.start()
+        mock_config = MagicMock()
+        mock_config.compilation_config.custom_ops = ["all"]
+
+        self.mock_get_config.return_value = mock_config
         self.positions = torch.tensor([1, 2, 3])
         self.query = torch.randn(3, 1, 32, dtype=torch.float16)
         self.key = torch.randn(3, 1, 32, dtype=torch.float16)
@@ -371,7 +383,11 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
 class TestAscendMRotaryEmbedding(unittest.TestCase):
 
     def setUp(self):
-        # Common setup for tests
+        self.config_patcher = patch('vllm.config.vllm.get_current_vllm_config')
+        self.mock_get_config = self.config_patcher.start()
+        mock_config = MagicMock()
+        mock_config.compilation_config.custom_ops = ["all"]
+        self.mock_get_config.return_value = mock_config
         self.number_tokens = 3
         self.num_head = 8
         self.num_kvhead = 8
