@@ -51,5 +51,16 @@ def default_unquantized_gemm(
 ) -> torch.Tensor:
     return torch.ops.vllm.unquantized_gemm(x, weight, bias)
 
+def default_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if x.device.type == "npu":
+        return torch.ops.vllm.unquantized_gemm(x, weight, bias)
+    else:
+        return torch.nn.functional.linear(x, weight, bias)
+
 
 vllm.model_executor.layers.utils.default_unquantized_gemm = default_unquantized_gemm
