@@ -350,8 +350,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         logits_soft_cap: float | None,
         attn_type: str,
         kv_sharing_target_layer_name: str | None,
-            sinks: torch.Tensor = None,
-            **kwargs,
+        sinks: torch.Tensor = None,
+        **kwargs,
     ) -> None:
         self.vllm_config = get_current_vllm_config()
         self.num_heads = num_heads
@@ -373,19 +373,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
-        if self.sliding_window is not None:
-            mask = torch.ones(2048, 2048, dtype=torch.bool)
-            triu_mask = torch.triu(mask, diagonal=1).to("npu")
-            tril_mask = torch.tril(mask, -self.sliding_window).to("npu")
-            self.share_mask_tril_spase = triu_mask + tril_mask
-        else:
-            self.share_mask_tril_spase = ~torch.tril(
-                torch.ones((2048, 2048), device='npu', dtype=torch.bool))
-
-        # For sink attention
-        self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         self.sinks = sinks
-        self.attn_mask_builder = AttentionMaskBuilder(device="npu")
 
     @staticmethod
     def update_graph_params(
@@ -730,13 +718,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
-<<<<<<< HEAD
     def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata, output: torch.Tensor):
-=======
-    def _forward_fia_slidingwindow(self, query: torch.Tensor,
-                                   attn_metadata: AscendMetadata,
-                                   output: torch.Tensor):
->>>>>>> 70b17645 (refactor(attention): Fix the condition judgment for sliding window attention calculation and add checks for sinks.)
         batch_size = attn_metadata.seq_lens.shape[0]
         block_size = 128
         query = query.view(batch_size, 1, self.num_heads * self.head_size)
@@ -759,15 +741,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             scale=self.scale,
             block_table=attn_metadata.block_tables,
             actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
-<<<<<<< HEAD
             actual_seq_lengths_kv=attn_metadata.seq_lens,
         )
-=======
-            actual_seq_lengths_kv=attn_metadata.seq_lens)
->>>>>>> 70b17645 (refactor(attention): Fix the condition judgment for sliding window attention calculation and add checks for sinks.)
 
-        attn_output = attn_output.view(batch_size, self.num_heads, self.head_size)
-        output[:batch_size] = attn_output[:batch_size]
+        output = output.view(batch_size, self.num_heads, self.head_size)
         return output
 
     def forward_fused_infer_attention(
