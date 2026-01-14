@@ -217,7 +217,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_full_graph_mode.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
-          
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/spec_decode/test_spec_decode.py
 
           # To avoid oom, we need to run the test in a single process.
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
