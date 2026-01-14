@@ -12,9 +12,6 @@ class DummyAdaptor(EplbAdaptor):
     def get_rank_expert_workload(self):
         return "workload"
 
-    def get_init_expert_map(self, num_moe_layers):
-        return {"layers": num_moe_layers}
-
     def do_update_expert_map(self, layer_id, updated_expert_map):
         return {"layer_id": layer_id, "map": updated_expert_map}
 
@@ -32,8 +29,6 @@ def test_base_class_methods_raise():
     with pytest.raises(NotImplementedError):
         adaptor.get_rank_expert_workload()
     with pytest.raises(NotImplementedError):
-        adaptor.get_init_expert_map(1)
-    with pytest.raises(NotImplementedError):
         adaptor.do_update_expert_map(1, {})
     with pytest.raises(NotImplementedError):
         adaptor.do_update_expert_weight(1, "x", "y")
@@ -48,13 +43,6 @@ def test_get_rank_expert_workload():
     adaptor = DummyAdaptor()
     result = adaptor.get_rank_expert_workload()
     assert result == "workload"
-
-
-def test_get_init_expert_map():
-    adaptor = DummyAdaptor()
-    result = adaptor.get_init_expert_map(5)
-    assert isinstance(result, dict)
-    assert result["layers"] == 5
 
 
 def test_do_update_expert_map():

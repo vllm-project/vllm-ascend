@@ -2,17 +2,17 @@
 
 ## Environmental Dependencies
 
- *  Software:
-     *  Python >= 3.10, < 3.12
-     *  CANN == 8.3.rc2
-     *  PyTorch == 2.8.0, torch-npu == 2.8.0
-     *  vLLM (same version as vllm-ascend)
-     *  mooncake-transfer-engine reference documentation: https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md
+ * Software:
+     * Python >= 3.10, < 3.12
+     * CANN == 8.3.rc2
+     * PyTorch == 2.8.0, torch-npu == 2.8.0
+     * vLLM (same version as vllm-ascend)
+     * mooncake-transfer-engine reference documentation: https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md
 
 The vllm version must be the same as the main branch of vllm-ascend, for example, 2025/07/30. The version is
 
- *  vllm: v0.10.1
- *  vllm-ascend: v0.10.1rc1
+ * vllm: v0.10.1
+ * vllm-ascend: v0.10.1rc1
 
 ## run
 
@@ -84,7 +84,6 @@ Set `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` to the co
 `--gpu-memory-utilization`: Percentage of video memory occupied by the card<br>
 `--kv-transfer-config`: follow kv_connector, kv_connector_module_path: mooncakeconnect, kv_buffer_device, and run on the NPU card. For kv_role, set kv_producer to the p node, kv_consumer to the d node, kv_parallel_size to 1, and kv_port to the port used by the node. For the p node, set engine_id and kv_rank to 0 and for the d node to 1. Configure the distributed parallel policy for the p and d nodes in the kv_connector_extra_config file based on --tensor-parallel-size and --data-parallel-size.<br>
 
-
 ### 2. Run `decode` Node
 
 ```
@@ -150,7 +149,6 @@ python load_balance_proxy_server_example.py --host localhost --prefiller-hosts h
 `--prefiller-ports`: Set this parameter to the port number of all p nodes, which is the configuration of the port number for the vllm to start the service in step 3. Write the port number after the configuration in sequence and leave a blank space between the port number and the port number. The sequence must be one-to-one mapping to the IP address of --prefiller-hosts.<br>
 `--decoder-hosts`: Set this parameter to the IP addresses of all d nodes. In the xpyd scenario, add the IP addresses to the end of this configuration item and leave a blank space between the IP addresses.<br>
 `--decoder-ports`: Set this parameter to the port number of all d nodes, which is the configuration of the port number for the vllm to start the service in step 4. Set port to the end of the configuration, and leave a blank space between port and port. The sequence must be one-to-one mapping to the IP address of --decoder-hosts.<br>
-
 
 ### 4. Run Inference
 
