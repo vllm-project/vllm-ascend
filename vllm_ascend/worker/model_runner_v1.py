@@ -77,6 +77,7 @@ from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.utils import AttentionGroup
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -99,6 +100,9 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
+from vllm_ascend.sample.logits_processor import build_logitsprocs
+from vllm_ascend.sample.rejection_sampler import (
+    AscendRejectionSampler, EntropyAdaptiveRejectionSampler)
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
@@ -377,7 +381,20 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(self.drafter, EagleProposer)
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state)
-                self.rejection_sampler = RejectionSampler(self.sampler)
+                # EARS (Entropy-Adaptive Rejection Sampling) configuration
+                ears_tolerance = envs_ascend.VLLM_EARS_TOLERANCE
+
+                if ears_tolerance > 0 and self.speculative_config.method in ["eagle3", "suffix"]:
+                    self.rejection_sampler = EntropyAdaptiveRejectionSampler(
+                        self.sampler,
+                        base_tolerance=ears_tolerance,
+                    )
+                    logger.info(
+                        f"Using EARS with base_tolerance={ears_tolerance}")
+                else:
+                    self.rejection_sampler = AscendRejectionSampler(
+                        self.sampler)
+                    logger.info("Using standard rejection sampling")
             self.actual_seq_lengths_q = list(
                 range(self.decode_token_per_req, self.max_num_tokens + 1,
                       self.decode_token_per_req))
