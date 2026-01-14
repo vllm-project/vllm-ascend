@@ -9,7 +9,7 @@ Information required to perform model forward pass:
 
 The following diagram shows what we should prepare for model inference.
 
-```
+```shell
               +---------------+
   inputs  --> |               |
               |     model     |  --> output
@@ -68,7 +68,7 @@ There are mainly three types of variables.
 Simply put, a `token ID` is an **integer** (usually `int32`), which represents a token.
 Example of `Token ID`:
 
-```
+```shell
 | Token ID     | Token         | 
 |--------------|---------------|
 | 0            | [PAD]         |
@@ -120,7 +120,7 @@ Why these `T_3_5`, `T_3_6`, `T_3_7` are in this table without being scheduled?
 
 - We fill all Token IDs in one request sequence to this table at once, but we only retrieve the tokens we scheduled this time. Then we retrieve the remain Token IDs next time.
 
-```
+```shell
 | T_0_0 | T_0_1 | T_0_2 |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
 | T_1_0 | T_1_1 |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
 | T_2_0 | T_2_1 | T_3_2 | T_3_3 | T_3_4 | T_3_5 | T_3_6 | T_3_7 |   ?   |   ?   |   ?   |   ?   |
@@ -140,7 +140,7 @@ So `token indices` = `[0 + 0 * M, 1 + 0 * M, 2 + 0 * M, 0 + 1 * M, 1 + 1 * M, 0 
 
 We use `token indices` to select out the corresponding `Input IDs` from the token table. The pseudocode is as follows:
 
-```
+```shell
 input_ids = token_table[token_indices]
 ```
 
@@ -152,7 +152,7 @@ As mentioned before, we refer to these `Token IDs` as `Input IDs`.
 
 In the current **Block Table**, we use the first block (i.e. block_0) to mark the unused block. The shape of the block is `(max num request, max model len / block size)`, where `max model len / block size = 12 / 2 = 6`.
 
-```
+```shell
 | 1  | 2  | 0  | 0  | 0  | 0  |
 | 3  | 0  | 0  | 0  | 0  | 0  |
 | 4  | 5  | 6  | 0  | 0  | 0  |
@@ -164,7 +164,7 @@ In the current **Block Table**, we use the first block (i.e. block_0) to mark th
 
 The KV cache block in the device memory is like:
 
-```
+```shell
 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | ...... 
 ```
 
@@ -219,7 +219,7 @@ Scheduled token of each request: `{'0': 1, '1': 1, '2': 3}`
 
 Current **Token IDs table**:
 
-```
+```shell
 | T_0_0 | T_0_1 | T_0_2 | T_0_3 |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
 | T_1_0 | T_1_1 | T_1_2 |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
 | T_2_0 | T_2_1 | T_3_2 | T_3_3 | T_3_4 | T_3_5 | T_3_6 | T_3_7 |   ?   |   ?   |   ?   |   ?   |
@@ -240,7 +240,7 @@ We allocate the blocks `7` and `8` to `request_1` and `request_2` respectively, 
 
 Current **Block Table**:
 
-```
+```shell
 | 1  | 2  | 0  | 0  | 0  | 0  |
 | 3  | 7  | 0  | 0  | 0  | 0  |
 | 4  | 5  | 6  | 8  | 0  | 0  |
@@ -252,7 +252,7 @@ Current **Block Table**:
 
 KV cache block in the device memory:
 
-```
+```shell
 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | ...... 
 ```
 

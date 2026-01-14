@@ -141,7 +141,7 @@ vllm serve Qwen/Qwen2.5-0.5B-Instruct &
 
 If you see a log as below:
 
-```
+```shell
 INFO:     Started server process [3594]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -184,7 +184,7 @@ vLLM is serving as a background process, you can use `kill -2 $VLLM_PID` to stop
 
 The output is as below:
 
-```
+```shell
 INFO:     Shutting down FastAPI HTTP server.
 INFO:     Shutting down
 INFO:     Waiting for application shutdown.

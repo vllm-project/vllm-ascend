@@ -37,7 +37,7 @@ vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 4096 &
 
 The vLLM server is started successfully, if you see logs as below:
 
-```
+```shell
 INFO:     Started server process [9446]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -47,7 +47,7 @@ INFO:     Application startup complete.
 
 You can query the result with input prompts:
 
-```
+```shell
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -74,7 +74,7 @@ curl http://localhost:8000/v1/completions \
 
 The output format matches the following:
 
-```
+```json
 {
     "id": "cmpl-2f678e8bdf5a4b209a3f2c1fa5832e25",
     "object": "text_completion",
@@ -111,7 +111,7 @@ pip install lm-eval[api]
 
 Run the following command:
 
-```
+```shell
 # Only test gsm8k dataset in this demo
 lm_eval \
   --model local-completions \
@@ -122,7 +122,7 @@ lm_eval \
 
 After 30 minutes, the output is as shown below:
 
-```
+```shell
 The markdown format results is as below:
 
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
@@ -175,7 +175,7 @@ pip install lm-eval
 
 Run the following command:
 
-```
+```shell
 # Only test gsm8k dataset in this demo
 lm_eval \
   --model vllm \
@@ -186,7 +186,7 @@ lm_eval \
 
 After 1 to 2 minutes, the output is shown below:
 
-```
+```shell
 The markdown format results is as below:
 
 Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|

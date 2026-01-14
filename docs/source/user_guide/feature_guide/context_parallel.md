@@ -68,7 +68,7 @@ The total world_size is `tensor_parallel_size` * `prefill_context_parallel_size`
 
 - While using Context Parallel in KV cache transfer needed scenario (e.g. KV pooling, PD-disaggregation), to simplify KV cache transmission, `cp_kv_cache_interleave_size` must be set to the same value of KV cache `block_size`(default: 128), which specify cp to split KV cache in a block-interleave style. For example:
 
-    ```
+    ```shell
     vllm serve deepseek-ai/DeepSeek-V2-Lite \
         --tensor-parallel-size 2 \
         --decode-context-parallel-size 2 \

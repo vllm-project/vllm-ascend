@@ -34,7 +34,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
 
 The vLLM server is started successfully, if you see information as below:
 
-```
+```shell
 INFO:     Started server process [6873]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -42,7 +42,7 @@ INFO:     Application startup complete.
 
 Once your server is started, you can query the model with input prompts in a new terminal.
 
-```
+```shell
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -109,13 +109,13 @@ models = [
 
 Run the following command:
 
-```
+```shell
 python3 run.py opencompass/configs/eval_vllm_ascend_demo.py --debug
 ```
 
 After 1 to 2 minutes, the output is shown below:
 
-```
+```shell
 The markdown format results is as below:
 
 | dataset | version | metric | mode | Qwen2.5-7B-Instruct-vLLM-API |

@@ -4,7 +4,7 @@
 
 When in LLM inference, each token requires nearly thousand operator executions, and when host launching operators are slower than device, it will cause host bound. In severe cases, the device will be idle for more than half of the time. To solve this problem, we use graph in LLM inference.
 
-```
+```shell
 eager mode:
 
 host:   |  launch op1  |  launch op2  |  launch op3  |  launch op4  |  launch op5  |
@@ -43,7 +43,7 @@ Obviously, we can solve this problem by capturing the biggest shape and padding 
 2. When `num_scheduled_tokens` is bigger than the threshold, use `eager_mode`;
 3. Capture multiple graphs within a range below the threshold;
 
-```
+```shell
 |    graph1    |
 |           graph2           |
 |                    graph3                    |

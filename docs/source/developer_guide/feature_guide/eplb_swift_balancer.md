@@ -16,7 +16,7 @@ Please refer to the EPLB section of the user guide for detailed information: [Ho
 
 **EPLB Module Architecture**
 
-```
+```shell
 vllm_ascend
 ├── eplb
 │   ├── adaptor

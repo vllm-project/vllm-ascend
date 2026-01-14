@@ -692,6 +692,7 @@ After careful consideration, above features **will NOT be included in v0.9.1-dev
 - Prefix cache feature does not work with the Ascend Scheduler but without chunked prefill enabled. This will be fixed in the next release. [#1350](https://github.com/vllm-project/vllm-ascend/issues/1350)
 
 ### Full Changelog
+
 <https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1>
 
 ### New Contributors

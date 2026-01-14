@@ -198,7 +198,7 @@ The parameters are explained as follows:
 
 If the service starts successfully, the following information will be displayed on node 0:
 
-```
+```shell
 INFO:     Started server process [44610]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.

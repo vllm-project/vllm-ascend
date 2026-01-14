@@ -189,7 +189,7 @@ print(generated_text)
 
 If you run this script successfully, you can see the info shown below:
 
-```
+```shell
 **Visual Components:**
 
 1.  **Abstract Geometric Icon (Left Side):**
@@ -285,7 +285,7 @@ print(generated_text)
 
 If you run this script successfully, you can see the info shown below:
 
-```
+```shell
 The image displays a logo and text related to the Qwen model, which is an artificial intelligence (AI) language model developed by Alibaba Cloud. Here is a detailed description of the elements in the image:
 
 ### **1. Logo:**

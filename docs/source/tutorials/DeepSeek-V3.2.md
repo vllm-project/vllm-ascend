@@ -156,7 +156,7 @@ Before you start, please
 
 1. prepare the script `launch_online_dp.py` on each node.
 
-    ```
+    ```python
     import argparse
     import multiprocessing
     import os
@@ -261,7 +261,7 @@ Before you start, please
 
     1. Prefill node 0
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.105 # change to your own ip
 
@@ -335,7 +335,7 @@ Before you start, please
 
     2. Prefill node 1
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.113 # change to your own ip
 
@@ -409,7 +409,7 @@ Before you start, please
 
     3. Decode node 0
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.117 # change to your own ip
 
@@ -488,7 +488,7 @@ Before you start, please
 
     4. Decode node 1
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.181 # change to your own ip
 
@@ -569,28 +569,28 @@ Once the preparation is done, you can start the server with the following comman
 
 1. Prefill node 0
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address 141.61.39.105 --dp-rpc-port 12890 --vllm-start-port 9100
 ```
 
 2. Prefill node 1
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address 141.61.39.105 --dp-rpc-port 12890 --vllm-start-port 9100
 ```
 
 3. Decode node 0
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
 ```
 
 4. Decode node 1
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
 ```
