@@ -1355,14 +1355,14 @@ class NPUModelRunner(GPUModelRunner):
                             query_start_loc_pcp_full[1:num_reqs + 1] - 1
                         target_token_ids = input_ids_pcp_full[:
                                                               num_scheduled_tokens]
-                        target_positions = positions[:num_scheduled_tokens]
+                        target_positions = self._get_positions(num_scheduled_tokens)
                         target_hidden_states = hidden_states
                     else:
                         token_indices_to_sample = None
                         # input_ids can be None for multimodal models.
                         target_token_ids = self.input_ids.gpu[:
                                                               num_scheduled_tokens]
-                        target_positions = positions[:num_scheduled_tokens]
+                        target_positions = self._get_positions(num_scheduled_tokens)
                         if self.use_aux_hidden_state_outputs:
                             target_hidden_states = torch.cat([
                                 h[:num_scheduled_tokens]
@@ -1403,7 +1403,7 @@ class NPUModelRunner(GPUModelRunner):
                         target_hidden_states = hidden_states
                     else:
                         target_token_ids = self.input_ids.gpu[token_indices]
-                        target_positions = positions[token_indices]
+                        target_positions = self._get_positions(token_indices)
                         if self.use_aux_hidden_state_outputs:
                             target_hidden_states = torch.cat(
                                 [h[token_indices] for h in aux_hidden_states],
@@ -2998,7 +2998,7 @@ class NPUModelRunner(GPUModelRunner):
     def _prepare_multimodal_fields(self):
         """
         Ensures specific multimodal tensors are on CPU.
-        This is necessary for fields like 'grid_thw' which are converted to numpy 
+        This is necessary for fields like 'grid_thw' which are converted to numpy
         inside the model's forward pass.
         """
         if not self.multimodal_cpu_fields:
