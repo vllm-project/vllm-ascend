@@ -6,9 +6,7 @@ from llmcompressor.modifiers.quantization import QuantizationModifier
 
 MODEL_ID = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, dtype=torch.bfloat16, trust_remote_code=True
-)
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.bfloat16, trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
 recipe = QuantizationModifier(
