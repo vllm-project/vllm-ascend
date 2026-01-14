@@ -365,11 +365,12 @@ class NPUPlatform(Platform):
             vllm_config.compilation_config.pass_config.enable_sp = True
 
         # only dense models need to set default compile_ranges_split_points
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config) \
-            and vllm_config.compilation_config.compile_ranges_split_points is None:
+            and vllm_config.compilation_config.compile_ranges_split_points[0] == max_num_batched_tokens:
                 from vllm_ascend.compilation.passes.sequence_parallelism import SP_THREHOLD
                 vllm_config.compilation_config.compile_ranges_split_points = \
-                    [SP_THREHOLD, vllm_config.scheduler_config.max_num_batched_tokens]
+                    [SP_THREHOLD, max_num_batched_tokens]
                 logger.info("set compile_ranges_split_points to "
                             "{vllm_config.compilation_config.compile_ranges_split_points} for sequence parallelism")
 
