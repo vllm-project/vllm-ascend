@@ -532,7 +532,7 @@ class NPUPlatform(Platform):
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
         flashcomm_v2_enabled = flashcomm2_enable(
         ) and tp_world_size > 1 and num_tokens is not None
-
+        pad_size = 0
         if (sp_enabled or flashcomm_v2_enabled):
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
@@ -556,6 +556,7 @@ class NPUPlatform(Platform):
                 mc2_mask = reserved_mc2_mask[:padded_num_tokens]
                 mc2_mask[:num_actual_tokens] = True
                 mc2_mask[num_actual_tokens:] = False
+
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
