@@ -10,7 +10,7 @@ class AscendQwen3VLProcessingInfo(nn.Module):
             Qwen3VLProcessor,
             use_fast=kwargs.pop("use_fast", True),
             do_rescale = False,
-            do_nomarlize = False,
+            do_normalize = False,
             **kwargs,
         )
 
