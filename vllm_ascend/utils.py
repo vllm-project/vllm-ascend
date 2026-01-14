@@ -62,6 +62,7 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
+_IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
@@ -840,6 +841,16 @@ def is_moe_model(vllm_config: VllmConfig):
         model_configs = vllm_config.model_config.hf_text_config.to_dict()
         _IS_MOE_MODEL = _is_contain_expert(model_configs)
     return _IS_MOE_MODEL
+
+
+def is_drafter_moe_model(vllm_config: VllmConfig):
+    """Checks if the drafter model is a MoE model by config"""
+    global _IS_DRAFTER_MOE_MODEL
+    if _IS_DRAFTER_MOE_MODEL is None:
+        model_configs = vllm_config.speculative_config.draft_model_config.hf_text_config \
+            .to_dict()
+        _IS_DRAFTER_MOE_MODEL = _is_contain_expert(model_configs)
+    return _IS_DRAFTER_MOE_MODEL
 
 
 def speculative_enable_dispatch_gmm_combine_decode(
