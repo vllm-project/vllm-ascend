@@ -22,7 +22,6 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 
 
@@ -41,8 +40,6 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.num_dense_layers = self.model.config.first_k_dense_replace
             self.global_expert_num = self.model.config.n_routed_experts
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
-        self.init_redundancy_expert = get_ascend_config(
-        ).init_redundancy_expert
 
         for i in range(self.num_dense_layers,
                        self.model.config.num_hidden_layers):
@@ -139,67 +136,11 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.moe_load = self.model.get_all_moe_loads()
         return self.moe_load
 
-    def get_init_expert_map(self, num_moe_layers):
-        expert_map = self.model.get_all_expert_map(num_moe_layers)
-        if dist.is_initialized():
-            world_size = dist.get_world_size()
-
-        gathered = torch.empty(
-            (world_size, *expert_map.shape),  # [W, L, E]
-            dtype=expert_map.dtype,
-            device=expert_map.device)
-
-        dist.all_gather_into_tensor(gathered, expert_map)
-        all_maps = gathered.permute(1, 0, 2)
-        all_expert_maps = all_maps.cpu()
-
-        for layer_idx in range(num_moe_layers):
-            self.expert_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
-                all_expert_maps[layer_idx][self.rank_id]
-
-        return all_expert_maps
-
-    def get_init_expert_map_from_file(self, num_moe_layers, expert_map_path):
-
-        try:
-            expert_map_tensor, layers_num, ranks_num = self._expert_file_to_tensor(
-                expert_map_path)
-            expert_map_all = self.local2global(expert_map_tensor)
-        except (TypeError, FileNotFoundError, OSError):
-            expert_map_all = self.determine_expert_map_all()
-
-        for layer_idx in range(num_moe_layers):
-            if self.model.config.model_type == "qwen3_moe":
-                self.expert_map_per_layer_cpu[layer_idx] = \
-                    expert_map_all[layer_idx][self.rank_id]
-            else:
-                self.expert_map_per_layer_cpu[layer_idx + self.num_dense_layers] = \
-                    expert_map_all[layer_idx][self.rank_id]
-        return expert_map_all
-
-    def _expert_file_to_tensor(self, expert_map_path: str):
-        with open(expert_map_path, "r") as f:
-            data = json.load(f)
-            layers_num = data["moe_layer_count"]
-            gpus_num = data["layer_list"][0]["device_count"]
-
-            tensor_data = []
-            for layer in data["layer_list"]:
-                device_data = []
-                for device in layer["device_list"]:
-                    device_data.append(device["device_expert"])
-                tensor_data.append(device_data)
-            expert_map_tensor = torch.tensor(tensor_data, dtype=torch.int32)
-            return expert_map_tensor, layers_num, gpus_num
-        logger.error(f"failed to read expert_map_path: {expert_map_path}")
-
     def _export_tensor_to_file(self, expert_maps, expert_map_record_path: str):
         if self.rank_id == 0:
             num_local_experts = expert_maps.max() + 1
-            expert_maps_local = self.global2local(expert_maps,
-                                                  num_local_experts)
 
-            expert_maps_list = expert_maps_local.tolist()
+            expert_maps_list = expert_maps.tolist()
             record: dict[str, Any] = {
                 "moe_layer_count": len(expert_maps_list),
                 "layer_list": []
@@ -213,9 +154,12 @@ class VllmEplbAdaptor(EplbAdaptor):
                 }
 
                 for device_idx, experts in enumerate(layer_data):
+                    placement = [
+                        experts.index(i) for i in range(num_local_experts)
+                    ]
                     device_record = {
                         "device_id": device_idx,
-                        "device_expert": experts
+                        "device_expert": placement
                     }
                     layer_record["device_list"].append(device_record)
 
@@ -240,81 +184,13 @@ class VllmEplbAdaptor(EplbAdaptor):
         if self.log2phy_map_per_layer[layer_id] is not None:
             self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
 
-    def global2local(self, placement: torch.Tensor,
-                     E_local: int) -> torch.Tensor:
+    def get_global_expert_map(self):
+        all_layer_global_expert_map = []
+        for layer_id in range(self.num_moe_layers):
+            map_cpu = self.model.model.layers[
+                layer_id].mlp.experts.global_expert_map.cpu()
+            all_layer_global_expert_map.append(map_cpu)
+            self.expert_map_per_layer_cpu[self.num_dense_layers +
+                                          layer_id] = map_cpu[self.rank_id]
 
-        L, G, _ = placement.shape
-        device = placement.device
-
-        pt_local = torch.full((L, G, E_local),
-                              fill_value=-1,
-                              dtype=torch.long,
-                              device=device)
-
-        valid = placement >= 0
-        l_idx, g_idx, k_idx = valid.nonzero(as_tuple=True)
-
-        slot_idx = placement[l_idx, g_idx, k_idx]
-
-        pt_local[l_idx, g_idx, slot_idx] = k_idx
-
-        return pt_local
-
-    def local2global(self, placement_local: torch.Tensor) -> torch.Tensor:
-
-        L, G, E_local = placement_local.shape
-        device = placement_local.device
-
-        max_id = torch.max(placement_local)
-        E_global = (max_id + 1).item() if max_id >= 0 else 0
-
-        if E_global == 0:
-            return torch.empty((L, G, 0), dtype=torch.long, device=device)
-
-        placement_global = torch.full((L, G, E_global),
-                                      fill_value=-1,
-                                      dtype=torch.long,
-                                      device=device)
-
-        valid = placement_local >= 0
-        l_idx, g_idx, slot_idx = valid.nonzero(as_tuple=True)
-        gid_idx = placement_local[l_idx, g_idx, slot_idx]
-
-        placement_global[l_idx, g_idx, gid_idx] = slot_idx
-
-        return placement_global
-
-    def determine_expert_map_all(self):
-        if self.world_size == 1:
-            local_ids = torch.arange(self.global_expert_num, dtype=torch.int32)
-            return local_ids.view(1, 1, -1).expand(self.num_moe_layers, 1, -1)
-
-        local_num_experts = self.global_expert_num // self.world_size
-
-        expert_map_all = torch.full(
-            (self.num_moe_layers, self.world_size, self.global_expert_num),
-            -1,
-            dtype=torch.int32)
-
-        for r in range(self.world_size):
-            if r < self.world_size - 1:
-                start = r * local_num_experts
-                end = (r + 1) * local_num_experts
-                local_count = local_num_experts
-            else:
-                start = r * local_num_experts
-                end = self.global_expert_num
-                local_count = self.global_expert_num - r * local_num_experts
-
-            if r < self.init_redundancy_expert:
-                local_count += 1
-                if end < self.global_expert_num:
-                    end += 1
-                else:
-                    start -= 1
-
-            local_ids = torch.arange(local_count, dtype=torch.int32)
-            expert_map_all[:, r, start:end] = local_ids.unsqueeze(0).expand(
-                self.num_moe_layers, -1)
-
-        return expert_map_all
+        return torch.stack(all_layer_global_expert_map)
