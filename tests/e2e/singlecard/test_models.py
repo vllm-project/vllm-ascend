@@ -21,6 +21,8 @@ import os
 
 import pytest
 from modelscope import snapshot_download  # type: ignore
+from vllm import SamplingParams
+from vllm.assets.audio import AudioAsset
 
 from tests.e2e.conftest import VllmRunner
 
@@ -30,6 +32,10 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 MINICPM_MODELS = [
     "openbmb/MiniCPM-2B-sft-bf16",
     "OpenBMB/MiniCPM4-0.5B",
+]
+
+WHISPER_MODELS = [
+    "openai-mirror/whisper-large-v3-turbo",
 ]
 
 
@@ -44,3 +50,26 @@ def test_minicpm(model) -> None:
                     max_model_len=512,
                     gpu_memory_utilization=0.7) as runner:
         runner.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.parametrize("model", WHISPER_MODELS)
+def test_whisper(model) -> None:
+    prompts = ["<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"]
+    audios = [AudioAsset("mary_had_lamb").audio_and_sample_rate]
+
+    sampling_params = SamplingParams(temperature=0.2,
+                                     max_tokens=10,
+                                     stop_token_ids=None)
+
+    with VllmRunner(snapshot_download(model),
+                    max_model_len=448,
+                    max_num_seqs=5,
+                    dtype="bfloat16",
+                    block_size=128,
+                    gpu_memory_utilization=0.9) as runner:
+        outputs = runner.generate(prompts=prompts,
+                                  audios=audios,
+                                  sampling_params=sampling_params)
+
+    assert outputs is not None, "Generated outputs should not be None."
+    assert len(outputs) > 0, "Generated outputs should not be empty."
