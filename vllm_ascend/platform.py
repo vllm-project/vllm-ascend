@@ -370,6 +370,8 @@ class NPUPlatform(Platform):
                 from vllm_ascend.compilation.passes.sequence_parallelism import SP_THREHOLD
                 vllm_config.compilation_config.compile_ranges_split_points = \
                     [SP_THREHOLD, vllm_config.scheduler_config.max_num_batched_tokens]
+                logger.info("set compile_ranges_split_points to "
+                            "{vllm_config.compilation_config.compile_ranges_split_points} for sequence parallelism")
 
     @classmethod
     def import_kernels(cls) -> None:
