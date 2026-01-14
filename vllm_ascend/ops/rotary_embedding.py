@@ -187,8 +187,23 @@ def _rope_forward_oot(
         self.cos_sin_cache = self.cos_sin_cache.to(query.device)
     if self.cos_sin_cache.dtype != query.dtype:
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
+    cos, sin = get_cos_and_sin_slice()
+    if  HAS_TRITON:
+       
+        cos = cos.view(-1, self.rotary_dim)#就是rope_dim 数据转换为2维
+        sin = sin.view(-1, self.rotary_dim)
+        q = query.contiguous().view(query.shape[0], -1,
+                                            self.head_size)#B,N,H,D 批次 tokens数量，头数，头的维度
+        k = key.contiguous().view(key.shape[0], -1, self.head_size)
+        query, key = torch.ops.vllm.rope_forward_triton(q,
+                                    k,
+                                    cos,
+                                    sin,
+                                    rope_dim=self.rotary_dim,
+                                    is_neox_style=True)
+        return query.view(query_shape), key.view(key_shape)
     # adopt custom kernel path for rotary_embedding
-    if _custom_rotary_embedding_enabled(
+    elif _custom_rotary_embedding_enabled(
             query, is_neox_style, self.head_size) and get_ascend_device_type(
             ) != AscendDeviceType._310P:
         query, key = torch.ops._C_ascend.rotary_embedding(
