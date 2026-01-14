@@ -14,7 +14,7 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
                                get_ascend_device_type, has_layer_idx,
-                               is_moe_model,
+                               is_drafter_moe_model, is_moe_model,
                                speculative_enable_dispatch_gmm_combine_decode)
 
 
@@ -73,7 +73,10 @@ def set_ascend_forward_context(
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
         mmrs_fusion = True
-        if is_moe_model(vllm_config):
+        # main model and drafter model may have different architecture
+        is_context_moe_model = is_drafter_moe_model(vllm_config) \
+            if is_draft_model else is_moe_model(vllm_config)
+        if is_context_moe_model:
             sp_enabled = enable_sp(vllm_config) and num_tokens is not None
             mmrs_fusion = False
         else:
