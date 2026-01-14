@@ -92,6 +92,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         self.n_routed_experts = self.model_config.hf_config.n_routed_experts
         self.hidden_size = self.model_config.hf_config.hidden_size
         print(f'self.topk is {self.topk}')
+        self.decode_max_num_token = self.scheduler_config.max_num_seqs * \
+                        self.uniform_decode_query_len
 
         # self.profiler
         # import os
@@ -105,7 +107,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         #         torch_npu.profiler.ProfilerActivity.CPU,
         #         torch_npu.profiler.ProfilerActivity.NPU
         #     ],
-        #     schedule=torch_npu.profiler.schedule(wait=2, warmup=1, active=5, repeat=1, skip_first=120),
+        #     schedule=torch_npu.profiler.schedule(wait=2, warmup=1, active=20, repeat=1, skip_first=120),
         #     # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
         #     experimental_config=experimental_config,
         #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/y00889327/prof_ffn")
@@ -138,10 +140,10 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 # TODO(yxj):ffn图模式会直接replay，应该设计成ffn收到attn消息才开始replay
                 # replay
                 if self.connector_name == "camm2nconnector":
-                    #TODO(yxj):self.max_num_tokens * self.attn_size * (self.topk // self.ffn_size)
-                    max_num_tokens = self.max_num_tokens * self.attn_size * (self.n_routed_experts // self.ffn_size)
+                    #TODO(yxj):self.decode_max_num_token * self.attn_size * (self.topk // self.ffn_size)
+                    max_num_tokens = self.decode_max_num_token * self.attn_size * (self.n_routed_experts // self.ffn_size)
                 else:
-                    max_num_tokens = self.max_num_tokens * self.topk * self.attn_size
+                    max_num_tokens = self.decode_max_num_token * self.topk * self.attn_size
                 acl_graph_info = self._acl_graphs_ubatch_full.get(max_num_tokens)
                 graph = acl_graph_info['graph']
                 graph.replay()
@@ -391,7 +393,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                         topk=self.topk,
                         expert_token_nums_type=0,
                         attn_size=self.attn_size,
-                        max_num_tokens=self.max_num_tokens,
+                        max_num_tokens=self.decode_max_num_token,
                         )
                     # [64,2048]
                     hidden_states, dynamic_scales, group_list, handle, topk_weights, afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
@@ -406,7 +408,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                         handle = None,
                         quant_mode = 0,
                         aiv_num = 48,
-                        batch_size = self.max_num_tokens,
+                        batch_size = self.decode_max_num_token,
                         h = self.hidden_size,
                         k = self.topk
                     )
@@ -423,7 +425,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                         handle = None,
                         quant_mode = 0,
                         aiv_num = 48,
-                        batch_size = self.max_num_tokens,
+                        batch_size = self.decode_max_num_token,
                         h = self.hidden_size,
                         k = self.topk
                     )

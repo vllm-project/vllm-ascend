@@ -30,6 +30,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 logger = init_logger(__name__)
 
 
+                
 class CAMM2NAFDConnector(AFDConnectorBase):
     def __init__(self,
                  rank: int,
@@ -40,6 +41,12 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         self.local_rank = local_rank
         self._initialized = False
         self.config = config
+        self.hf_config = config.model_config.hf_config
+        self.scheduler_config = config.scheduler_config
+        decode_max_num_seqs = getattr(self.scheduler_config,
+                                      'decode_max_num_seqs', 0)
+        self.max_num_reqs = max(self.scheduler_config.max_num_seqs,
+                                decode_max_num_seqs)
         self.attn_size = 0
         self.ffn_size = 0
         self.use_aclgraph = self._use_aclgraph()
@@ -155,7 +162,11 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                                                 self.hccl_comm_name2,
                                                 self.rank,
                                                 self.ffn_size,
-                                                self.attn_size)
+                                                self.attn_size,
+                                                self.hf_config.n_routed_experts,
+                                                self.max_num_reqs,
+                                                self.hf_config.hidden_size,
+                                                self.hf_config.num_experts_per_tok)
 
     # MOE发给ATTN（ATTN接收）
     def recv_ffn_output(self, hidden_states: torch.Tensor, metadata: AFDConnectorMetadata, ubatch_idx: int = 0) -> torch.Tensor:
@@ -241,11 +252,12 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             
             torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
             torch.distributed.send(object_tensor_npu, dst=dst, group=self.p2p_pg)
+            
     def recv_is_ubatch(self):        
         src = self.p2p_rank % self.min_size + self.ffn_size
         
         size_tensor = torch.empty(1, dtype=torch.long, device="npu")
-        rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)    
+        rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)  
         object_tensor_npu = torch.empty(size_tensor.item(), dtype=torch.uint8, device="npu")
         rank_object = torch.distributed.recv(object_tensor_npu, src=src, group=self.p2p_pg)
         
@@ -262,20 +274,24 @@ def cam_send_attn_output_impl(hidden_states: torch.Tensor,
                               hccl_comm_name2: str,
                               rank: int,
                               ffn_size: int,
-                              attn_size: int) -> torch.Tensor:
+                              attn_size: int,
+                              moe_expert_num:int,
+                              batch_size:int,
+                              h:int,
+                              k:int) -> torch.Tensor:
     ubatch_idx = get_forward_context().ubatch_idx
     if get_forward_context().cam_afdconnector_data is None:
         cam_afdconnector_data = CAMM2NAFDConnectorMetadata(
-            moe_expert_num = 64,
-            shared_expert_num = 0,
-            scale = None,
-            handle = None,
-            quant_mode = 0,
-            aiv_num = 48,
-            batch_size = 20,
-            h = 2048,
-            k = 8
-        )
+                    moe_expert_num = moe_expert_num,
+                    shared_expert_num = 0,
+                    scale = None,
+                    handle = None,
+                    quant_mode = 0,
+                    aiv_num = 48,
+                    batch_size = batch_size,
+                    h = h,
+                    k = k
+                )
         get_forward_context().cam_afdconnector_data = cam_afdconnector_data
 
     cam_metadata = get_forward_context().cam_afdconnector_data
@@ -313,7 +329,11 @@ def cam_send_attn_output_fake_impl(hidden_states: torch.Tensor,
                                     hccl_comm_name2: str,
                                     rank: int,
                                     ffn_size: int,
-                                    attn_size: int) -> torch.Tensor:
+                                    attn_size: int,
+                                    moe_expert_num:int,
+                                    batch_size:int,
+                                    h:int,
+                                    k:int) -> torch.Tensor:
     return hidden_states
 
 def cam_recv_ffn_output_impl(hidden_states: torch.Tensor,
