@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import os
 import random
-from typing import Any, Union
+from typing import Any
 
 import pytest
 from transformers import AutoTokenizer
@@ -217,11 +217,9 @@ def test_suffix_acceptance(
 
 
 @pytest.mark.parametrize("use_eagle3", [True], ids=["eagle3"])
-@pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
 def test_eagle_logprobs(
     model_name: str,
     use_eagle3: bool,
-    draft_tensor_parallel_size: Union[None, int],
 ):
     prompt = {"role": "user", "content": "Hello world " * 10}
     sampling_params = SamplingParams(temperature=0,
@@ -248,7 +246,6 @@ def test_eagle_logprobs(
                 "method": "eagle3" if use_eagle3 else "eagle",
                 "model": spec_model_name,
                 "num_speculative_tokens": 2,
-                "draft_tensor_parallel_size": draft_tensor_parallel_size,
                 "max_model_len": 128,
             },
             max_model_len=128,
@@ -274,13 +271,11 @@ def test_eagle_logprobs(
 
 @pytest.mark.parametrize("method", MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [3])
-@pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_llama_qwen_eagle_acceptance(
     method: str,
     num_speculative_tokens: int,
-    draft_tensor_parallel_size: Union[None, int],
     disable_padded_drafter_batch: bool,
     async_scheduling: bool,
 ):
@@ -331,7 +326,6 @@ def test_llama_qwen_eagle_acceptance(
     speculative_config = {
         "method": method,
         "num_speculative_tokens": num_speculative_tokens,
-        "draft_tensor_parallel_size": draft_tensor_parallel_size,
         "disable_padded_drafter_batch": disable_padded_drafter_batch,
         "model": spec_model_name,
     }
