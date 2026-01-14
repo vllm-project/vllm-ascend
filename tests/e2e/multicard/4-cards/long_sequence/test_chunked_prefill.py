@@ -21,9 +21,15 @@ import random
 import string
 from unittest.mock import patch
 
+import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+
+MODELS = [
+    "vllm-ascend/Qwen3-30B-A3B-W8A8",
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8",
+]
 
 
 def generate_prompts(input_len, batchsize):
@@ -41,7 +47,9 @@ def generate_prompts(input_len, batchsize):
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
         "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1"
     })
-def test_models_chunked_prefill_mixed_length_prompts_including_1_token():
+@pytest.mark.parametrize("model", MODELS)
+def test_models_chunked_prefill_mixed_length_prompts_including_1_token(
+        model: str):
     TEST_ROPE_PARAMETERS = {
         "rope_theta": 1000000,
         "rope_type": "yarn",
@@ -55,7 +63,6 @@ def test_models_chunked_prefill_mixed_length_prompts_including_1_token():
     ]
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
 
-    model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     with VllmRunner(
             model,
             enforce_eager=True,
@@ -67,6 +74,48 @@ def test_models_chunked_prefill_mixed_length_prompts_including_1_token():
             decode_context_parallel_size=1,
             enable_expert_parallel=True,
             block_size=128,
+            quantization="ascend",
+            hf_overrides={"rope_parameters": TEST_ROPE_PARAMETERS},
+    ) as runner:
+        runner.model.generate(prompts, sampling_params)
+
+
+@patch.dict(
+    os.environ, {
+        "HCCL_BUFFSIZE": "768",
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+        "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1"
+    })
+@pytest.mark.parametrize("model", MODELS)
+def test_models_chunked_prefill_with_empty_kvcache(model: str):
+    TEST_ROPE_PARAMETERS = {
+        "rope_theta": 1000000,
+        "rope_type": "yarn",
+        "factor": 4,
+        "original_max_position_embeddings": 32768
+    }
+    # Note(qcs): we use chunk_size=50, kv_cache_interleave_size=128
+    # to simulate certain edge cases.
+    prompts = [
+        generate_prompts(128, 1)[0],
+        generate_prompts(1, 1)[0],
+        generate_prompts(130, 1)[0],
+        generate_prompts(51, 1)[0],
+        generate_prompts(129, 1)[0],
+    ]
+    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
+
+    with VllmRunner(
+            model,
+            enforce_eager=True,
+            max_num_seqs=2,
+            tensor_parallel_size=2,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+            enable_expert_parallel=True,
+            long_prefill_token_threshold=50,
+            block_size=128,
+            cp_kv_cache_interleave_size=128,
             quantization="ascend",
             hf_overrides={"rope_parameters": TEST_ROPE_PARAMETERS},
     ) as runner:
