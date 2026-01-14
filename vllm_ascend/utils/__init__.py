@@ -1,6 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,34 +12,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/vllm/worker/worker.py
-#
 
 """
 Utilities module for vLLM Ascend.
 
-This module serves as a facade for the modularized utilities in vllm_ascend.utils.*.
-All imports from this module are re-exported from their respective functional modules
-to maintain backward compatibility.
-
-Module structure:
-- vllm_ascend.utils.tensor_utils: Tensor format and shape operations
-- vllm_ascend.utils.device_utils: Device type and management
-- vllm_ascend.utils.stream_utils: Stream management
-- vllm_ascend.utils.communication_utils: HCCL and communication
-- vllm_ascend.utils.parallel_config: Parallelism flags and configuration
-- vllm_ascend.utils.graph_utils: ACL/CUDA graph configuration
-- vllm_ascend.utils.model_utils: Model type detection
-- vllm_ascend.utils.profiler: Performance profiling
-- vllm_ascend.utils.debug_utils: Debug and printing utilities
-- vllm_ascend.utils.config_utils: Configuration management
-- vllm_ascend.utils.custom_ops: Custom operation registration
-- vllm_ascend.utils.weak_ref_utils: Weak reference utilities
-- vllm_ascend.utils.version_utils: Version and patch utilities
+This module provides utility functions organized by functionality:
+- tensor_utils: Tensor format and shape operations
+- device_utils: Device type and management
+- stream_utils: Stream management
+- communication_utils: HCCL and communication
+- graph_utils: ACL/CUDA graph configuration
+- model_utils: Model type detection
+- profiler: Performance profiling
+- debug_utils: Debug and printing utilities
+- config_utils: Configuration management
+- parallel_config: Parallelism flags and configuration
+- custom_ops: Custom operation registration
 """
 
-# Re-export everything from the modularized utils package
+# Import all utilities for backward compatibility
 from vllm_ascend.utils.tensor_utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
@@ -158,18 +148,7 @@ from vllm_ascend.utils.version_utils import (
     adapt_patch,
 )
 
-# Define constants that were originally in this module
-COMPILATION_PASS_KEY = "graph_fusion_manager"
-ASCEND_QUANTIZATION_METHOD = "ascend"
-COMPRESSED_TENSORS_METHOD = "compressed-tensors"
-SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
-
 __all__ = [
-    # Constants
-    "COMPILATION_PASS_KEY",
-    "ASCEND_QUANTIZATION_METHOD",
-    "COMPRESSED_TENSORS_METHOD",
-    "SOC_VERSION_INFERENCE_SERIES",
     # Tensor utilities
     "ACL_FORMAT_FRACTAL_ND",
     "ACL_FORMAT_FRACTAL_NZ",
@@ -266,3 +245,18 @@ __all__ = [
     # Version utils
     "adapt_patch",
 ]
+
+# Re-export constants from parent utils module
+import vllm_ascend.envs as envs_ascend
+
+COMPILATION_PASS_KEY = "graph_fusion_manager"
+ASCEND_QUANTIZATION_METHOD = "ascend"
+COMPRESSED_TENSORS_METHOD = "compressed-tensors"
+SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
+
+__all__.extend([
+    "COMPILATION_PASS_KEY",
+    "ASCEND_QUANTIZATION_METHOD",
+    "COMPRESSED_TENSORS_METHOD",
+    "SOC_VERSION_INFERENCE_SERIES",
+])
