@@ -384,11 +384,17 @@ class EagleProposer(VllmEagleProposer):
             model_hidden_states, model_positions = self.maybe_pad_and_reduce(
                 model_hidden_states, model_positions)
 
-            last_hidden_states, hidden_states = self._model_forward(
+            ret_hidden_states = self.model(
                 input_ids=model_input_ids,
                 positions=model_positions,
                 hidden_states=model_hidden_states,
             )
+            if self.method == "mtp":
+                last_hidden_states = ret_hidden_states
+                hidden_states = last_hidden_states
+            else:
+                last_hidden_states, hidden_states = ret_hidden_states
+
             forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
                 self._update_full_graph_params(forward_context,
@@ -524,11 +530,17 @@ class EagleProposer(VllmEagleProposer):
                 model_hidden_states, model_positions = self.maybe_pad_and_reduce(
                     model_hidden_states, model_positions)
 
-                last_hidden_states, hidden_states = self._model_forward(
+                ret_hidden_states = self.model(
                     input_ids=model_input_ids,
                     positions=model_positions,
                     hidden_states=model_hidden_states,
                 )
+                if self.method == "mtp":
+                    last_hidden_states = ret_hidden_states
+                    hidden_states = last_hidden_states
+                else:
+                    last_hidden_states, hidden_states = ret_hidden_states
+
                 forward_context = get_forward_context()
                 if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
                     self._update_full_graph_params(forward_context,
@@ -945,34 +957,3 @@ class EagleProposer(VllmEagleProposer):
                     hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                         hidden_states.contiguous(), True)
         return last_hidden_states, positions, hidden_states
-
-    def _model_forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        ret_hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            hidden_states=hidden_states,
-            inputs_embeds=inputs_embeds,
-        )
-        if self.method == "mtp":
-            last_hidden_states = ret_hidden_states
-            hidden_states = last_hidden_states
-        else:
-            last_hidden_states, hidden_states = ret_hidden_states
-        return last_hidden_states, hidden_states
-
-    def maybe_unpad_attn_metadata(self, attn_metadata: dict) -> None:
-        for layer_name in self.attn_layer_names:
-            decode_metadata = getattr(attn_metadata[layer_name], "decode",
-                                      None)
-            if self.use_async_scheduling and decode_metadata is not None:
-                actual_size = len(decode_metadata.actual_seq_lengths_q)
-                decode_metadata.seq_lens_list = (
-                    decode_metadata.seq_lens_list[:actual_size])
-                decode_metadata.block_table = (
-                    decode_metadata.block_table[:actual_size])
