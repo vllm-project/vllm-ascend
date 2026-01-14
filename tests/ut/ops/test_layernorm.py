@@ -29,7 +29,7 @@ def mock_maybe_chunk_residual_impl(x, residual):
                          [None, torch.randn(4, 8, dtype=torch.float32)])
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
 @patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
-@patch("torch_npu.npu_maybe_chunk_residual",
+@patch("torch.ops.vllm.maybe_chunk_residual",
        side_effect=mock_maybe_chunk_residual_impl)
 def test_RMSNorm_forward(mock_maybe_chunk_residual_impl, mock_add_rmsnorm,
                          mock_rmsnorm, is_310p, residual, dummy_tensor):
