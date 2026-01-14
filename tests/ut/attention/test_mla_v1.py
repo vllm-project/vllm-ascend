@@ -22,6 +22,23 @@ from vllm_ascend.utils import vllm_version_is
 
 class TestAscendMLABackend(TestBase):
 
+    def setUp(self):
+        self.mock_config = MagicMock()
+
+        mock_parallel_config = MagicMock()
+        mock_parallel_config.prefill_context_parallel_size = 1
+        mock_parallel_config.decode_context_parallel_size = 1
+
+        self.mock_config.parallel_config = mock_parallel_config
+
+        self.utils_patcher = patch(
+            'vllm_ascend.attention.utils.get_current_vllm_config',
+            return_value=self.mock_config)
+        self.utils_patcher.start()
+
+        from vllm_ascend.attention.utils import enable_cp
+        enable_cp.cache_clear()
+
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
 
@@ -244,8 +261,15 @@ class TestAscendMLAMetadataBuilder(TestBase):
                 mock_vllm_config.scheduler_config.enable_chunked_prefill)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
+    @patch('vllm_ascend.attention.attention_mask.get_pcp_group')
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
     def test_ascend_mla_metadata_builder_build_full_graph(
-            self, mock_get_cos_and_sin_mla):
+            self, mock_get_pcp_group, mock_get_pcp_group_mask,
+            mock_get_cos_and_sin_mla):
+        pcp_group = MagicMock()
+        pcp_group.world_size = 1
+        mock_get_pcp_group.return_value = pcp_group
+        mock_get_pcp_group_mask.return_value = pcp_group
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
@@ -400,14 +424,21 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.kv_cache_spec.num_heads = 32
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
+    @patch('vllm_ascend.attention.attention_mask.get_pcp_group')
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
     @patch("torch.Tensor.npu", new=lambda self: self)
     @patch("torch.npu.is_available")
     def test_build_prefix_no_cache_metadata(self, mock_npu_available,
-                                            mock_zeros,
+                                            mock_zeros, mock_get_pcp_group,
+                                            mock_get_pcp_group_mask,
                                             mock_get_cos_and_sin_mla):
         mock_npu_available.return_value = False
         torch.Tensor.pin_memory = lambda x: x  # noqa
+        pcp_group = MagicMock()
+        pcp_group.world_size = 1
+        mock_get_pcp_group.return_value = pcp_group
+        mock_get_pcp_group_mask.return_value = pcp_group
 
         def zeros_override(*args, **kwargs):
             kwargs.pop('pin_memory', None)
@@ -426,8 +457,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             slot_mapping=torch.tensor(range(20)),
             actual_seq_lengths_q=torch.tensor([0, 1]),
             positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((10, 10)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.PrefillNoCache,
             num_computed_tokens_cpu=None,
             seq_lens=None,
@@ -458,14 +487,21 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
+    @patch('vllm_ascend.attention.attention_mask.get_pcp_group')
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
     @patch("torch.Tensor.npu", new=lambda self: self)
     @patch("torch.npu.is_available")
     def test_build_chunked_prefix_metadata(self, mock_npu_available,
-                                           mock_zeros,
+                                           mock_zeros, mock_get_pcp_group,
+                                           mock_get_pcp_group_mask,
                                            mock_get_cos_and_sin_mla):
         mock_npu_available.return_value = False
         torch.Tensor.pin_memory = lambda x: x  # noqa
+        pcp_group = MagicMock()
+        pcp_group.world_size = 1
+        mock_get_pcp_group.return_value = pcp_group
+        mock_get_pcp_group_mask.return_value = pcp_group
 
         def zeros_override(*args, **kwargs):
             kwargs.pop('pin_memory', None)
@@ -485,8 +521,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             slot_mapping=torch.tensor(range(20)),
             actual_seq_lengths_q=torch.tensor([0, 1, 2]),
             positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((15, 15)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.ChunkedPrefill,
             num_computed_tokens_cpu=None,
             seq_lens=None,
@@ -517,8 +551,16 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
-    def test_build_decode_only_metadata(self, mock_get_cos_and_sin_mla):
+    @patch('vllm_ascend.attention.attention_mask.get_pcp_group')
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    def test_build_decode_only_metadata(self, mock_get_pcp_group,
+                                        mock_get_pcp_group_mask,
+                                        mock_get_cos_and_sin_mla):
         torch.Tensor.pin_memory = lambda x: x  # noqa
+        pcp_group = MagicMock()
+        pcp_group.world_size = 1
+        mock_get_pcp_group.return_value = pcp_group
+        mock_get_pcp_group_mask.return_value = pcp_group
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 1, 2, 3]),
@@ -532,8 +574,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             actual_seq_lengths_q=torch.tensor([0, 1, 2]),
             decode_token_per_req=torch.tensor([1, 1, 1]),
             positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((3, 3)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.DecodeOnly,
             num_computed_tokens_cpu=None,
             seq_lens=None,
@@ -563,9 +603,16 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
-    def test_build_for_graph_capture_decode_only(self,
+    @patch('vllm_ascend.attention.attention_mask.get_pcp_group')
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    def test_build_for_graph_capture_decode_only(self, mock_get_pcp_group,
+                                                 mock_get_pcp_group_mask,
                                                  mock_get_cos_and_sin_mla):
         torch.Tensor.pin_memory = lambda x: x  # noqa
+        pcp_group = MagicMock()
+        pcp_group.world_size = 1
+        mock_get_pcp_group.return_value = pcp_group
+        mock_get_pcp_group_mask.return_value = pcp_group
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 1, 2, 3]),
@@ -579,8 +626,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             actual_seq_lengths_q=torch.tensor([0, 1, 2]),
             decode_token_per_req=torch.tensor([1, 1, 1]),
             positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((3, 3)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.DecodeOnly,
             num_computed_tokens_cpu=None,
             seq_lens=None,
@@ -625,8 +670,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             slot_mapping=torch.tensor(range(20)),
             actual_seq_lengths_q=torch.tensor([0, 1]),
             positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((10, 10)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.PrefillNoCache,
             num_computed_tokens_cpu=None,
             seq_lens=None,

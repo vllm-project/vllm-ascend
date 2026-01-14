@@ -106,20 +106,6 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
-# ** 7. File: platform/patch_compile_backend.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.compilation.backends.PiecewiseCompileInterpreter`
-#      `vllm.compilation.piecewise_backend.PiecewiseBackend`
-#    Why:
-#       vllm removed the compile graph for general shape, which caused operator fusion to fail.
-#       This issue affects the performance of model inference on Ascend.
-#    How：
-#       recover the compiled graph for dynamic_shape in PiecewiseBackend.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/24252
-#    Future Plan:
-#       Remove this patch when fix the problem.
-#
 # * Worker Patch:
 # ===============
 #
@@ -188,7 +174,8 @@
 #
 # ** 6. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`
+#   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
+#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
 #    Why:
 #       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
 #    How：
@@ -276,4 +263,16 @@
 #       https://github.com/vllm-project/vllm/pull/31002
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
+#
+# ** 12. File: worker/patch_v2_eagle.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
+#    Why:
+#       `propose` method use torch.gather, but the gather operator will
+#       pollute the arguments passed to it. the bug is reported to huawei
+#       CANN team, but not fixed yet.
+#    How：
+#       clone the out attribute ahead of gather to avoid the bug.
+#    Future Plan:
+#       Remove this patch when cann fix the gather bug.
 #

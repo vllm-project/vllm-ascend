@@ -19,6 +19,7 @@ external_dp
 large_scale_ep
 ucm_deployment
 Fine_grained_TP
+layer_sharding
 speculative_decoding
 context_parallel
 :::

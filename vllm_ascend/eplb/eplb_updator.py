@@ -23,8 +23,6 @@ from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
-from vllm_ascend.eplb.utils import moe_load_async_stream
-from vllm_ascend.utils import npu_stream_switch
 
 
 class EplbUpdator:
@@ -60,7 +58,6 @@ class EplbUpdator:
             self.num_expert_load_gather = self.num_iterations_eplb_update
             self.periodic_load_gather = False
 
-        self.expert_map_initialized = False
         self.gate_eplb = self.ascend_config.gate_eplb
 
         self.reqs = []
@@ -103,17 +100,6 @@ class EplbUpdator:
         return (weight_update_counter >= 0
                 and weight_update_counter < self.num_moe_layers)
 
-    def get_init_expert_map(self):
-        try:
-            if not self.expert_map_initialized:
-                self.shared_dict[
-                    "expert_maps"] = self.adaptor.get_init_expert_map_from_file(
-                        self.num_moe_layers, self.expert_map_path)
-                self.expert_map_initialized = True
-        except Exception as e:
-            logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}",
-                           exc_info=True)
-
     def wakeup_eplb_worker(self):
         self.eplb_process.planner_q.put(1)
 
@@ -155,22 +141,21 @@ class EplbUpdator:
 
         self._gather_buffer = None
         if dist.is_initialized():
-            with npu_stream_switch(moe_load_async_stream()):
-                self.world_size = dist.get_world_size()
-                self.device = local_load.device
-                if self._gather_buffer is None:
-                    shape = (self.world_size, *local_load.shape)
-                    self._gather_buffer = torch.empty(shape,
-                                                      dtype=local_load.dtype,
-                                                      device=self.device)
+            self.world_size = dist.get_world_size()
+            self.device = local_load.device
+            if self._gather_buffer is None:
+                shape = (self.world_size, *local_load.shape)
+                self._gather_buffer = torch.empty(shape,
+                                                  dtype=local_load.dtype,
+                                                  device=self.device)
 
-                dist.all_gather_into_tensor(self._gather_buffer, local_load)
+            dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
-                moe_load = self._gather_buffer.permute(1, 0, 2)
-                self.shared_dict["moe_load"] = moe_load.cpu()
-                logger.debug(
-                    f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-                )
+            moe_load = self._gather_buffer.permute(1, 0, 2)
+            self.shared_dict["moe_load"] = moe_load.cpu()
+            logger.debug(
+                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
+            )
         else:
             moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()
@@ -221,7 +206,7 @@ class EplbUpdator:
 
     def warm_up_eplb(self):
 
-        self.get_init_expert_map()
+        self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1, ), device=self.device)

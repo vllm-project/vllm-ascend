@@ -25,14 +25,10 @@ def mock_distributed():
          patch('torch.distributed.get_world_size', return_value=16), \
          patch('torch.distributed.get_backend', return_value='nccl'), \
          patch('vllm_ascend.distributed.parallel_state.get_world_group') as mock_group, \
-         patch('vllm_ascend.distributed.parallel_state.get_tp_group') as mock_tp_group, \
-         patch('vllm_ascend.distributed.parallel_state.get_dp_group') as mock_dp_group, \
-         patch('vllm_ascend.distributed.parallel_state.get_pp_group') as mock_pp_group:
+         patch('vllm_ascend.distributed.parallel_state.get_tp_group') as mock_tp_group:
         mock_group.return_value.local_rank = 0
         mock_group.return_value.device_group = MagicMock()
         mock_tp_group.return_value.world_size = 4
-        mock_dp_group.return_value.world_size = 2
-        mock_pp_group.return_value.world_size = 2
         yield
 
 
@@ -50,7 +46,6 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_vllm_config.kv_transfer_config.is_kv_producer = True
     mock_envs_ascend = MagicMock()
     mock_envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE = 2
-    mock_envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED = 0
     mock_envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL = 0
     with patch('vllm_ascend.distributed.parallel_state.model_parallel_initialized', return_value=False), \
          patch('vllm_ascend.distributed.parallel_state.init_model_parallel_group'), \

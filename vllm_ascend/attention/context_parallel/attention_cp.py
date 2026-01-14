@@ -45,7 +45,11 @@ from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
-    # AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    """
+    Builder for constructing AscendMetadata with Context Parallelism support.
+
+    Extends AscendAttentionMetadataBuilder with PCP/DCP metadata handling.
+    """
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
@@ -121,7 +125,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
         slot_mapping = common_attn_metadata.slot_mapping[:
                                                          num_actual_tokens_pcp_padded]
-        attn_mask = common_attn_metadata.attn_mask
+        attn_mask = self.attn_mask_builder.get_attention_mask(
+            self.model_config)
         attn_state = common_attn_metadata.attn_state
         num_computed_tokens_cpu = (seq_lens - query_lens)
 
@@ -212,7 +217,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 head_attn_nomask_seqlens=head_attn_nomask_seqlens,
                 tail_attn_nomask_seqlens=tail_attn_nomask_seqlens,
                 q_full_idx=common_long_seq_metadata.q_full_idx,
-                pcp_prefill_mask=common_long_seq_metadata.pcp_prefill_mask,
                 pcp_allgather_restore_idx=common_long_seq_metadata.
                 pcp_allgather_restore_idx)
 
@@ -433,13 +437,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_mask_seqlens = attn_metadata.prefill.pcp_metadata.attn_mask_seqlens
         nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens \
             if is_head else attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
-        mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
         output, lse = self._attention_with_nomask_and_mask(
             **data,
             q_seqlens=attn_mask_seqlens,
             kv_seqlens_nomask=nomask_seqlens,
             kv_seqlens_mask=attn_mask_seqlens,
-            mask=mask,
+            mask=attn_metadata.attn_mask,
             attn_metadata=attn_metadata)
         return output, lse
 

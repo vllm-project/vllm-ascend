@@ -27,6 +27,8 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
@@ -114,6 +116,8 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
@@ -246,6 +250,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(4)
         ])
@@ -269,21 +275,29 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_cpugpubuffer.stop()
         self.mock_supports_multimodal_inputs.stop()
 
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
+    # cpu does not support parallel-group, let alone `sp`
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context",
+           **{"return_value.sp_enabled": False})
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
     def test_dummy_run_basic(self, mock_context, mock_get_context):
         num_tokens = 32
         with_prefill = False
 
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=num_tokens,
                                 with_prefill=with_prefill)
 
         self.assertTrue(self.proposer.model.call_count == 4)
 
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
+    # cpu does not support parallel-group, let alone `sp`
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context",
+           **{"return_value.sp_enabled": False})
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
     def test_dummy_run_with_prefill(self, mock_context, mock_get_context):
         mock_context.return_value.__enter__.return_value = None
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
         self.assertTrue(self.proposer.model.call_count == 4)
 
@@ -296,8 +310,12 @@ class TestEagleProposerDummyRun(TestBase):
         mock_return_context = MagicMock()
         mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
         mock_return_context.capturing = True
+        # cpu does not support parallel-group, let alone `sp`
+        mock_return_context.sp_enabled = False
         mock_get_context.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=64,
                                 in_graph_capturing=True,
                                 aclgraph_runtime_mode=CUDAGraphMode.FULL)
@@ -314,8 +332,12 @@ class TestEagleProposerDummyRun(TestBase):
         mock_return_context = MagicMock()
         mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
         mock_return_context.capturing = False
+        # cpu does not support parallel-group, let alone `sp`
+        mock_return_context.sp_enabled = False
         mock_get_context.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=64,
                                 in_graph_capturing=False,
                                 aclgraph_runtime_mode=CUDAGraphMode.FULL)
@@ -344,6 +366,8 @@ class TestEagleProposerHelperMethods(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
