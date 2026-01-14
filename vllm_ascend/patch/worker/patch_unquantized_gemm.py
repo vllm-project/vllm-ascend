@@ -42,15 +42,6 @@ direct_register_custom_op(op_name="unquantized_gemm",
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
-
-def default_unquantized_gemm(
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    return torch.ops.vllm.unquantized_gemm(x, weight, bias)
-
 def default_unquantized_gemm(
     layer: torch.nn.Module,
     x: torch.Tensor,
