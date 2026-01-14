@@ -1910,6 +1910,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: np.ndarray,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
+        is_graph_capturing: bool = False,
     ) -> Optional[dict[str, Any]]:
         attn_metadata: Optional[dict[str, Any]] = None
 
@@ -1924,7 +1925,7 @@ class NPUModelRunner(GPUModelRunner):
             # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
             # in inference. This will be removed once npu_fused_infer_attention_score
             # outperforms _npu_paged_attention on all cases.
-            seq_lens = SEQ_LEN_WITH_MAX_PA_WORKSPACE if force_attention else max_query_len
+            seq_lens = SEQ_LEN_WITH_MAX_PA_WORKSPACE if is_graph_capturing else max_query_len
             self.seq_lens.np[:num_reqs] = seq_lens
             self.seq_lens.np[num_reqs:] = 0
             self.seq_lens.copy_to_gpu()
@@ -2172,6 +2173,7 @@ class NPUModelRunner(GPUModelRunner):
             max_query_len=max_query_len,
             aclgraph_runtime_mode=cudagraph_runtime_mode,
             force_attention=force_attention,
+            is_graph_capturing=is_graph_capturing,
             num_scheduled_tokens=num_scheduled_tokens,
         )
 
