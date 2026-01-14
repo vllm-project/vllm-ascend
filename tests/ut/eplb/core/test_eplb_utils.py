@@ -32,13 +32,14 @@ class TestAscendConfig(unittest.TestCase):
         self.moe_config = moe_config
         self.mock_npu = patch("torch.Tensor.npu",
                               new=lambda self: self).start()
+        self.rank = 1
 
     def test_init_eplb_config_with_eplb(self):
         expert_map, log2phy, redundant_experts = init_eplb_config(
             self.ascend_config, 0, self.moe_config)
         gt_expert_map = torch.tensor([4, -1, -1, -1, 0, 1, 2, 3])
         gt_log2phy = torch.tensor([9, 1, 2, 3, 5, 6, 7, 8])
-        self.assertTrue(torch.equal(expert_map, gt_expert_map))
+        self.assertTrue(torch.equal(expert_map[self.rank], gt_expert_map))
         self.assertTrue(torch.equal(log2phy, gt_log2phy))
         self.assertEqual(redundant_experts, 2)
 
@@ -49,7 +50,7 @@ class TestAscendConfig(unittest.TestCase):
             self.ascend_config, 0, self.moe_config)
         gt_expert_map = torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3])
         gt_log2phy = torch.tensor([2, 6, 9, 3, 7, 4, 5, 8])
-        self.assertTrue(torch.equal(expert_map, gt_expert_map))
+        self.assertTrue(torch.equal(expert_map[self.rank], gt_expert_map))
         self.assertTrue(torch.equal(log2phy, gt_log2phy))
         self.assertEqual(redundant_experts, 2)
 
@@ -60,7 +61,7 @@ class TestAscendConfig(unittest.TestCase):
             self.ascend_config, 0, self.moe_config)
         gt_expert_map = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3])
         print(expert_map, log2phy, redundant_experts)
-        self.assertTrue(torch.equal(expert_map, gt_expert_map))
+        self.assertTrue(torch.equal(expert_map[self.rank], gt_expert_map))
         self.assertEqual(redundant_experts, 0)
 
 
