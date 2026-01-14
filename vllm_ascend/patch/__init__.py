@@ -174,7 +174,8 @@
 #
 # ** 6. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`
+#   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
+#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
 #    Why:
 #       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
 #    How：
@@ -262,4 +263,16 @@
 #       https://github.com/vllm-project/vllm/pull/31002
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
+#
+# ** 12. File: worker/patch_v2_eagle.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
+#    Why:
+#       `propose` method use torch.gather, but the gather operator will
+#       pollute the arguments passed to it. the bug is reported to huawei
+#       CANN team, but not fixed yet.
+#    How：
+#       clone the out attribute ahead of gather to avoid the bug.
+#    Future Plan:
+#       Remove this patch when cann fix the gather bug.
 #
