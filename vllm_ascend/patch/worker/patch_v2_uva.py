@@ -16,10 +16,74 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from typing import Callable, Set, Union, Tuple
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.block_table
 import vllm.v1.worker.gpu.states
+
+
+def get_row_indices_from_key(key: Union[int, slice, Tuple],
+                             dim_size: int) -> Set[int]:
+    """get the set of row indices involved in the given key."""
+    if isinstance(key, int):
+        # parse index such as np[1]
+        key = key if key >= 0 else dim_size + key
+        # handle negative index
+        if key < 0 or key >= dim_size:
+            raise IndexError(f"row index {key} out of [0, {dim_size})")
+        return {key}
+    elif isinstance(key, slice):
+        # parse slice such as np[1:3]
+        start, stop, step = key.indices(dim_size)
+        return set(range(start, stop, step))
+    elif isinstance(key, tuple):
+        # pasre row slice such as np[1,:100]
+        if len(key) == 0:
+            return set(range(dim_size))  # 空元组默认所有行
+        return get_row_indices_from_key(key[0], dim_size)
+    else:
+        # 其他类型（如布尔数组）保守返回所有行
+        return set(range(dim_size))
+
+
+class MonitoredNumPyArray:
+    """A wrapper around a NumPy array that monitors modifications."""
+
+    def __init__(self, array: np.ndarray, callback: Callable):
+        self._array = array
+        self._callback = callback
+
+    def __setitem__(self, key, value):
+        self._array[key] = value
+        dim_size = self._array.shape[0]  # 第一维大小
+        row_indices = get_row_indices_from_key(key, dim_size)
+        for row in row_indices:
+            self._callback(row)
+
+    def __getitem__(self, key):
+        return self._array[key]
+
+    def __getattr__(self, name):
+        return getattr(self._array, name)
+
+
+class MonitoredTorchTensor:
+    """A wrapper around a torch tensor that monitors modifications."""
+
+    def __init__(self, tensor: torch.Tensor, callback: Callable):
+        self._tensor = tensor
+        self._callback = callback
+
+    def __setitem__(self, key, value):
+        self._tensor[key] = value
+        dim_size = self._tensor.size(0)
+        row_indices = get_row_indices_from_key(key, dim_size)
+        for row in row_indices:
+            self._callback(row)
+
+    def __getattr__(self, name):
+        return getattr(self._tensor, name)
 
 
 class UvaBufferWrapper:
@@ -27,20 +91,36 @@ class UvaBufferWrapper:
     that provides CPU and NPU views of a UVA tensor."""
 
     def __init__(self, *size: int | torch.SymInt, dtype: torch.dtype):
-        self.cpu: torch.Tensor = torch.zeros(*size,
-                                             dtype=dtype,
-                                             device="cpu",
-                                             pin_memory=True)
-        self.np: np.ndarray = self.cpu.numpy()
-        self._gpu: torch.Tensor | None = None
+        self._cpu: torch.Tensor = torch.zeros(*size,
+                                              dtype=dtype,
+                                              device="cpu",
+                                              pin_memory=True)
+        self._np = self._cpu.numpy()
+        self._gpu: torch.Tensor = torch.zeros_like(self._cpu, device="npu")
+        self._modified_indices: Set[int] = set()
+
+    def _mark_cpu_modified(self, key: int):
+        self._modified_indices.add(key)
 
     @property
-    def gpu(self) -> torch.Tensor:
-        """Get the NPU view of the buffer."""
-        if self._gpu is None:
-            # use pin_memory and non_blocking copy to NPU, because in npu,
-            # non_blocking copy only works for pinned memory.
-            self._gpu = self.cpu.pin_memory().to("npu", non_blocking=True)
+    def cpu(self):
+        return MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
+
+    @property
+    def np(self):
+        return MonitoredNumPyArray(self._np, self._mark_cpu_modified)
+
+    @property
+    def gpu(self):
+        """Get the device data of the buffer."""
+        if self._modified_indices:
+            # Sort for better memory access locality
+            dirty_rows = sorted(self._modified_indices)
+            # can't use copy_ method, because copy_ for index tensor
+            #  will malloc new memory.
+            self._gpu[dirty_rows] = self._cpu[dirty_rows].to(device="npu",
+                                                             non_blocking=True)
+            self._modified_indices.clear()
         return self._gpu
 
 
