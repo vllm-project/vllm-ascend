@@ -512,7 +512,6 @@ CATLASS_DEVICE
         int64_t preCurrentmSum = 0;
         int32_t syncLoopIdx = -1;
 
-        constexpr uint32_t MAX_EXPERTS_PER_RANK = 32;
         __gm__ ElementB* weight1Array[MAX_EXPERTS_PER_RANK];
         __gm__ ElementScale * scale1Array[MAX_EXPERTS_PER_RANK];
 
@@ -635,7 +634,6 @@ CATLASS_DEVICE
             lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
         }
 
-        constexpr uint32_t MAX_EXPERTS_PER_RANK = 8;
         __gm__ ElementB* weight2Array[MAX_EXPERTS_PER_RANK];
         __gm__ ElementScale * scale2Array[MAX_EXPERTS_PER_RANK];
         int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
