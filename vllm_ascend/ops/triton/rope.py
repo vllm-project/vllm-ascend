@@ -222,15 +222,15 @@ def rope_forward_triton_impl_fake(
         num_tokens_q,
         n_q_head,
         q_head_dim,
-        device=input.device,
-        dtype=input.dtype,
+        device=q.device,
+        dtype=q.dtype,
     )
     k_output = torch.empty(
         num_tokens_k,
         n_k_head,
         k_head_dim,
-        device=input.device,
-        dtype=input.dtype,
+        device=k.device,
+        dtype=k.dtype,
     )
     return q_output, k_output
 
