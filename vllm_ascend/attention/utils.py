@@ -140,10 +140,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             slot_mapping=self.slot_mapping,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
-            positions=self.positions[:num_actual_tokens],
+            positions=self.positions,
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
-            num_input_tokens=num_actual_tokens,
+            num_input_tokens=self.num_input_tokens,
             prefill_context_parallel_metadata=self.
             prefill_context_parallel_metadata,
             max_seq_len=self.max_seq_len)
