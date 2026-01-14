@@ -585,7 +585,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
         from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
-        from vllm_ascend.quantization.wrappers import AscendLinearMethod
+        from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 
         # For unquant
         if mmrs_fusion and isinstance(self.layer.quant_method,

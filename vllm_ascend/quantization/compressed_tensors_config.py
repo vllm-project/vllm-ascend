@@ -163,7 +163,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
-        from .wrappers import AscendFusedMoEMethod, AscendLinearMethod
+        from .method_adapters import AscendFusedMoEMethod, AscendLinearMethod
 
         if isinstance(layer, LinearBase):
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD

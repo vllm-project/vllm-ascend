@@ -369,7 +369,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
-        from .wrappers import (AscendEmbeddingMethod, AscendFusedMoEMethod,
+        from .method_adapters import (AscendEmbeddingMethod, AscendFusedMoEMethod,
                                AscendKVCacheMethod, AscendLinearMethod)
 
         vllm_config = get_current_vllm_config()
