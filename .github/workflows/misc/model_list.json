@@ -204,6 +204,7 @@
       "vllm-ascend/Qwen3-30B-A3B-Puring",
       "vllm-ascend/Qwen3-30B-A3B-W8A8",
       "vllm-ascend/Qwen3-30B-A3B-W8A8-Pruning",
+      "vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w8a8",
       "vllm-ascend/Qwen3-32B-W4A4",
       "vllm-ascend/Qwen3-32B-W8A8",
       "vllm-ascend/Qwen3-8B",
