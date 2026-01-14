@@ -24,7 +24,7 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
-    "vllm-ascend/DeepSeek-V3.2-Exp-W8A8",
+    "vllm-ascend/DeepSeek-V3.2-W8A8",
 ]
 
 TENSOR_PARALLELS = [8]
@@ -45,7 +45,7 @@ aisbench_cases = [{
     "request_conf": "vllm_api_general_chat",
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
     "max_out_len": 4096,
-    "batch_size": 8,
+    "batch_size": 256,
     "baseline": 95,
     "threshold": 5
 }, {
@@ -55,7 +55,7 @@ aisbench_cases = [{
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
     "num_prompts": 16,
     "max_out_len": 1500,
-    "batch_size": 8,
+    "batch_size": 256,
     "request_rate": 0,
     "baseline": 1,
     "threshold": 0.97
@@ -70,8 +70,9 @@ aisbench_cases = [{
 async def test_models(model: str, tp_size: int, dp_size: int,
                       full_graph: bool) -> None:
     port = get_open_port()
-    env_dict = {"HCCL_BUFFSIZE": "1024", "VLLM_ASCEND_ENABLE_MLAPO": "0"}
+    env_dict = {"HCCL_BUFFSIZE": "1024", "VLLM_ASCEND_ENABLE_MLAPO": "1"}
     server_args = [
+        "--tokenizer-mode", "deepseek_v32",
         "--no-enable-prefix-caching", "--enable-expert-parallel",
         "--tensor-parallel-size",
         str(tp_size), "--data-parallel-size",
@@ -83,7 +84,7 @@ async def test_models(model: str, tp_size: int, dp_size: int,
     if full_graph:
         server_args += [
             "--compilation-config",
-            '{"cudagraph_capture": [16], "cudagraph_model":"FULL_DECODE_ONLY"}'
+            '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
         ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
