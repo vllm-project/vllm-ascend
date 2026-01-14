@@ -363,9 +363,13 @@ class NPUPlatform(Platform):
                     "FLASHCOMM in vllm-ascend. We will fix this in the future. "
                     "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
             vllm_config.compilation_config.pass_config.enable_sp = True
-            if not is_moe_model(vllm_config) and vllm_config.compilation_config.compile_ranges_split_points is None:
+
+        # only dense models need to set default compile_ranges_split_points
+        if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config) \
+            and vllm_config.compilation_config.compile_ranges_split_points is None:
                 from vllm_ascend.compilation.passes.sequence_parallelism import SP_THREHOLD
-                vllm_config.compilation_config.compile_ranges_split_points = [SP_THREHOLD, vllm_config.scheduler_config.max_num_batched_tokens]
+                vllm_config.compilation_config.compile_ranges_split_points = \
+                    [SP_THREHOLD, vllm_config.scheduler_config.max_num_batched_tokens]
 
     @classmethod
     def import_kernels(cls) -> None:
