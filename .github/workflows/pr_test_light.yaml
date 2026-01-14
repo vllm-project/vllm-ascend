@@ -85,7 +85,7 @@ jobs:
     uses: ./.github/workflows/_unit_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      runner: linux-amd64-cpu-16-hk
+      runner: linux-amd64-cpu-8-hk
       image: quay.nju.edu.cn/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
       type: pr
 
