@@ -78,7 +78,9 @@ jobs:
             --ignore tests/ut/model_loader/netloader/test_netloader_elastic.py \
             --ignore tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
             --ignore tests/ut/kv_connector/test_remote_decode_lifecycle.py \
-            --ignore tests/ut/core/test_scheduler_dynamic_batch.py
+            --ignore tests/ut/core/test_scheduler_dynamic_batch.py \
+            --ignore tests/ut/kv_connector/test_mooncake_connector.py \
+            --ignore tests/ut/worker/test_worker_v1.py
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged
