@@ -556,7 +556,6 @@ class NPUPlatform(Platform):
                 mc2_mask = reserved_mc2_mask[:padded_num_tokens]
                 mc2_mask[:num_actual_tokens] = True
                 mc2_mask[num_actual_tokens:] = False
-
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
