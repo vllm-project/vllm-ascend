@@ -78,6 +78,12 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
 
     def setUp(self):
         # Common setup for tests
+        self.config_patcher = patch('vllm.config.vllm.get_current_vllm_config')
+        self.mock_get_config = self.config_patcher.start()
+        mock_config = MagicMock()
+        mock_config.compilation_config.custom_ops = ["all"]
+
+        self.mock_get_config.return_value = mock_config
         self.positions = torch.tensor([1, 2, 3])
         self.query = torch.randn(3, 1, 32, dtype=torch.float16)
         self.key = torch.randn(3, 1, 32, dtype=torch.float16)
@@ -115,7 +121,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
                                    max_model_len=MAX_NUM_BATCHED_TOKEND)
-        model_config.hf_config = PretrainedConfig()
+        model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
             result_q, result_k = self.layer.forward(self.positions, self.query,
@@ -141,7 +147,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
                                    max_model_len=MAX_NUM_BATCHED_TOKEND)
-        model_config.hf_config = PretrainedConfig()
+        model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
             result_q, result_k = self.layer.forward(self.positions,
@@ -164,7 +170,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
             model_config = ModelConfig(MODEL,
                                        tokenizer=MODEL,
                                        max_model_len=MAX_NUM_BATCHED_TOKEND)
-            model_config.hf_config = PretrainedConfig()
+            model_config.hf_text_config = PretrainedConfig()
             vllm_config.model_config = model_config
             with set_ascend_forward_context(None, vllm_config):
                 self.layer.forward(self.positions, self.query, self.key,
@@ -184,7 +190,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
                                    max_model_len=MAX_NUM_BATCHED_TOKEND)
-        model_config.hf_config = PretrainedConfig()
+        model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
             result_q, result_k = self.layer.forward(
@@ -213,7 +219,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
                                    max_model_len=MAX_NUM_BATCHED_TOKEND)
-        model_config.hf_config = PretrainedConfig()
+        model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
             result_q, result_k = self.layer.forward(self.positions, self.query,
@@ -242,6 +248,12 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
 
     def setUp(self):
         # Common setup for tests
+        self.config_patcher = patch('vllm.config.vllm.get_current_vllm_config')
+        self.mock_get_config = self.config_patcher.start()
+        mock_config = MagicMock()
+        mock_config.compilation_config.custom_ops = ["all"]
+
+        self.mock_get_config.return_value = mock_config
         self.positions = torch.tensor([1, 2, 3])
         self.query = torch.randn(3, 1, 32, dtype=torch.float16)
         self.key = torch.randn(3, 1, 32, dtype=torch.float16)
@@ -369,6 +381,11 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
 
     def setUp(self):
         # Common setup for tests
+        self.config_patcher = patch('vllm.config.vllm.get_current_vllm_config')
+        self.mock_get_config = self.config_patcher.start()
+        mock_config = MagicMock()
+        mock_config.compilation_config.custom_ops = ["all"]
+        self.mock_get_config.return_value = mock_config
         self.number_tokens = 3
         self.num_head = 8
         self.num_kvhead = 8
@@ -404,7 +421,7 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
         model_config = ModelConfig(MODEL_VL,
                                    tokenizer=MODEL_VL,
                                    max_model_len=MAX_NUM_BATCHED_TOKEND)
-        model_config.hf_config = PretrainedConfig()
+        model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         return vllm_config
 

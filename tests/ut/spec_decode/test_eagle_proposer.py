@@ -58,7 +58,6 @@ class TestEagleProposerInitialization(TestBase):
                                  device=self.device,
                                  runner=self.runner)
 
-        self.assertEqual(proposer.block_size, 16)
         self.assertEqual(proposer.hidden_size, 4096)
         self.assertTrue(proposer.use_cuda_graph)
 
@@ -166,7 +165,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.proposer.load_model(mock_model)
         mock_get_model.assert_called_once()
-        self.assertEqual(self.proposer.attn_layer_name, ["layer3"])
+        self.assertEqual(self.proposer.attn_layer_names, ["layer3"])
         self.assertIs(self.proposer.model.model.embed_tokens,
                       mock_model.model.embed_tokens)
 
@@ -197,7 +196,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.assertIsNot(self.proposer.model.model.embed_tokens,
                          mock_model.model.embed_tokens)
-        self.assertEqual(self.proposer.attn_layer_name, ["layer2"])
+        self.assertEqual(self.proposer.attn_layer_names, ["layer2"])
 
     @patch(
         "vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
@@ -240,6 +239,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.speculative_config.num_speculative_tokens = 4
         self.device = torch.device("cpu")
         self.runner = MagicMock()
+        self.runner.pcp_size = 1
+        self.runner.dcp_size = 1
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -247,6 +248,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.model_config.use_mla = False
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(4)
         ])
@@ -270,21 +272,29 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_cpugpubuffer.stop()
         self.mock_supports_multimodal_inputs.stop()
 
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
+    # cpu does not support parallel-group, let alone `sp`
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context",
+           **{"return_value.sp_enabled": False})
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
     def test_dummy_run_basic(self, mock_context, mock_get_context):
         num_tokens = 32
         with_prefill = False
 
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=num_tokens,
                                 with_prefill=with_prefill)
 
         self.assertTrue(self.proposer.model.call_count == 4)
 
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
+    # cpu does not support parallel-group, let alone `sp`
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context",
+           **{"return_value.sp_enabled": False})
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
     def test_dummy_run_with_prefill(self, mock_context, mock_get_context):
         mock_context.return_value.__enter__.return_value = None
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
         self.assertTrue(self.proposer.model.call_count == 4)
 
@@ -297,8 +307,12 @@ class TestEagleProposerDummyRun(TestBase):
         mock_return_context = MagicMock()
         mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
         mock_return_context.capturing = True
+        # cpu does not support parallel-group, let alone `sp`
+        mock_return_context.sp_enabled = False
         mock_get_context.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=64,
                                 in_graph_capturing=True,
                                 aclgraph_runtime_mode=CUDAGraphMode.FULL)
@@ -315,8 +329,12 @@ class TestEagleProposerDummyRun(TestBase):
         mock_return_context = MagicMock()
         mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
         mock_return_context.capturing = False
+        # cpu does not support parallel-group, let alone `sp`
+        mock_return_context.sp_enabled = False
         mock_get_context.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=64,
                                 in_graph_capturing=False,
                                 aclgraph_runtime_mode=CUDAGraphMode.FULL)

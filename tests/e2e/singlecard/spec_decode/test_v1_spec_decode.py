@@ -34,7 +34,6 @@ BASELINES = {
     "eagle3": [0.68, 0.40, 0.18],
 }
 
-
 @pytest.fixture
 def test_prompts():
     prompt_types = ["repeat", "sentence"]

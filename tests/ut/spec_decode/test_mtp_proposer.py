@@ -30,7 +30,7 @@ class TestMtpProposer:
         config.additional_config = None
         config.speculative_config = MagicMock(spec=SpeculativeConfig)
         config.speculative_config.num_speculative_tokens = 2
-        config.speculative_config.method = "deepseek_mtp"
+        config.speculative_config.method = "mtp"
         config.speculative_config.draft_model_config = MagicMock()
         config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
         config.speculative_config.speculative_token_tree = str([
@@ -41,7 +41,7 @@ class TestMtpProposer:
         config.model_config.dtype = torch.float16
         config.model_config.max_model_len = 2048
         config.model_config.uses_mrope = False
-        config.model_config.hf_config = None
+        config.model_config.hf_text_config = None
 
         config.load_config = None
 
@@ -86,7 +86,6 @@ class TestMtpProposer:
         assert proposer.dtype == torch.float16
         assert proposer.num_speculative_tokens == 2
         assert proposer.hidden_size == 4096
-        assert proposer.block_size == 16
 
         # Test with mrope enabled
         assert hasattr(proposer, "positions")
@@ -99,9 +98,11 @@ class TestMtpProposer:
         mock_buffer_instance = MagicMock()
         mock_cpu_gpu_buffer.return_value = mock_buffer_instance
         runner._use_aclgraph.return_value = True
+        vllm_config.scheduler_config.async_scheduling = False
+        vllm_config.speculative_config.enforce_eager = False
         proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
 
-        assert proposer.use_aclgraph is True
+        assert proposer.use_cuda_graph is True
 
     @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")
@@ -263,6 +264,7 @@ class TestMtpProposer:
                                             device=torch.device("cpu"))
         assert torch.equal(next_token_ids, expected_next_tokens)
 
+    @patch("vllm_ascend.spec_decode.eagle_proposer.HAS_TRITON", False)
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
     def test_prepare_inputs_padded(self, mock_cpu_gpu_buffer):
         mock_buffer_instance = MagicMock()
@@ -278,6 +280,7 @@ class TestMtpProposer:
             [0, 8, 16, 24], dtype=torch.int32)
         mock_common_attn_metadata.seq_lens = torch.tensor([8, 8, 8],
                                                           dtype=torch.int32)
+        mock_common_attn_metadata.num_actual_tokens = 24
         mock_common_attn_metadata.num_reqs = 3
         mock_common_attn_metadata.num_computed_tokens_cpu = torch.tensor(
             [5, 6, 7], dtype=torch.int32)
@@ -291,14 +294,14 @@ class TestMtpProposer:
 
         mock_runner = MagicMock()
         mock_runner.actual_seq_lengths_q = MagicMock()
-        mock_runner.attn_mask = MagicMock()
-        mock_runner.spec_attn_mask = MagicMock()
         mock_runner.attn_state = MagicMock()
         mock_runner.graph_pad_size = 0
+        mock_runner.pcp_size = 1
         mock_runner.decode_token_per_req = MagicMock()
 
         proposer = MagicMock(spec=MtpProposer)
         proposer.runner = mock_runner
+        proposer.pcp_size = 1
         proposer.arange = torch.arange(100, dtype=torch.int32)
         proposer.prepare_inputs_padded = MtpProposer.prepare_inputs_padded.__get__(
             proposer)
@@ -334,5 +337,3 @@ class TestMtpProposer:
         assert spec_common_attn_metadata.num_actual_tokens == total_num_tokens
         assert spec_common_attn_metadata.max_query_len == 8
         assert spec_common_attn_metadata.actual_seq_lengths_q == proposer.runner.actual_seq_lengths_q
-        assert spec_common_attn_metadata.attn_mask == proposer.runner.attn_mask
-        assert spec_common_attn_metadata.spec_attn_mask == proposer.runner.spec_attn_mask

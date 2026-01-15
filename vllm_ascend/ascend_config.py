@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import logger
@@ -44,6 +45,9 @@ class AscendConfig:
         self.finegrained_tp_config = FinegrainedTPConfig(
             finegrained_tp_config, vllm_config)
 
+        eplb_config = additional_config.get("eplb_config", {})
+        self.eplb_config = EplbConfig(eplb_config)
+
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)
 
@@ -51,21 +55,13 @@ class AscendConfig:
             "weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(
             weight_prefetch_config)
+        self.layer_sharding = additional_config.get("layer_sharding", None)
+        logger.info_once(
+            f"Linear layer sharding enabled with config: {self.layer_sharding}. "
+            "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
+            "using it without these features may result in significant performance degradation."
+        )
 
-        # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
-        self.expert_map_path = additional_config.get("expert_map_path", None)
-        self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
-        self.expert_map_record_path = additional_config.get(
-            "expert_map_record_path",
-            None)  # Provide path to export expert map
-        self.init_redundancy_expert = additional_config.get(
-            "init_redundancy_expert", 0)
-        self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
-        self.num_iterations_eplb_update = additional_config.get(
-            "num_iterations_eplb_update", 400)
-        self.gate_eplb = additional_config.get("gate_eplb", False)
-        self.num_wait_worker_iterations = additional_config.get(
-            "num_wait_worker_iterations", 30)
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp",
             False) and vllm_config.parallel_config.enable_expert_parallel
@@ -96,14 +92,18 @@ class AscendConfig:
                 try:
                     # only support Qwen model now
                     # TODO: use a more robust method to get kv_head_num
-                    num_kv_head = vllm_config.model_config.hf_config.num_key_value_heads
+                    num_kv_head = vllm_config.model_config.hf_text_config.num_key_value_heads
                     self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
                     prefill_tp_size = min(prefill_tp_size, num_kv_head)
                     decode_tp_size = min(decode_tp_size, num_kv_head)
                     self.pd_head_ratio = prefill_tp_size // decode_tp_size
                 except Exception:
-                    raise AssertionError(
-                        "Can not get num_key_value_heads from model_config")
+                    raise ValueError(
+                        "The text_config extracted from the model config does not have "
+                        "`num_key_value_heads` attribute. This indicates a mismatch "
+                        "between the model config and vLLM's expectations. Please "
+                        "ensure that the model config is compatible with vLLM."
+                    )
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError(
@@ -111,7 +111,7 @@ class AscendConfig:
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
-        self.flashcomm2_oproj_tensor_parallel_size, self.flashcomm2_oproj_shared = get_flashcomm2_config_and_validate(
+        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(
             self, vllm_config)
         self.enable_npugraph_ex = additional_config.get(
             "enable_npugraph_ex", False)
@@ -126,7 +126,7 @@ class AscendConfig:
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
-            use_sparse = hasattr(vllm_config.model_config.hf_config,
+            use_sparse = hasattr(vllm_config.model_config.hf_text_config,
                                  "index_topk")
             if not vllm_config.model_config.is_deepseek_mla or use_sparse:
                 raise RuntimeError(
@@ -263,6 +263,62 @@ class WeightPrefetchConfig:
         self.enabled = weight_prefetch_config.get("enabled", False)
         self.prefetch_ratio = weight_prefetch_config.get(
             "prefetch_ratio", self.prefetch_ratio)
+
+
+class EplbConfig:
+    """
+    Configuration Object for xlite_graph_config from additional_config
+    """
+    _defaults = {
+        "dynamic_eplb": False,
+        "expert_map_path": None,
+        "expert_heat_collection_interval": 400,
+        "algorithm_execution_interval": 30,
+        "expert_map_record_path": None,
+        "num_redundant_experts": 0,
+        "eplb_policy_type": 1
+    }
+
+    def __init__(self, user_config: dict = {}):
+        self.config = self._defaults.copy()
+        if user_config and isinstance(user_config, dict):
+            for key, value in user_config.items():
+                if key in self.config:
+                    self.config[key] = value
+                else:
+                    raise ValueError(f"Config has no attribute '{key}'")
+
+        self._validate_config()
+
+    def __getattr__(self, key):
+        if key in self.config:
+            return self.config[key]
+        raise AttributeError(f"Config has no attribute '{key}'")
+
+    def _validate_config(self):
+        if self.expert_map_path is not None:
+            if self.expert_map_path[-5:] != ".json":
+                raise TypeError("The expert_map is not json.")
+            if not os.path.exists(self.expert_map_path):
+                raise ValueError("The expert_map is not exist.")
+        if self.expert_map_record_path is not None:
+            self.config["dynamic_eplb"] = True
+            if self.expert_map_record_path[-5:] != ".json":
+                raise TypeError("The expert_map_record_path is not json.")
+            dirname = os.path.dirname(self.expert_map_record_path)
+            os.makedirs(dirname, exist_ok=True)
+        for key in [
+                "expert_heat_collection_interval",
+                "algorithm_execution_interval", "num_redundant_experts"
+        ]:
+            if not isinstance(self.config[key], int):
+                raise TypeError(f"{key} must be an integer")
+            if self.config[key] < 0:  # type: ignore
+                raise ValueError(
+                    f"{key} must greater than 0; got {self.config[key]} instead"
+                )
+        if self.eplb_policy_type not in [0, 1, 2, 3]:
+            raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
 
 
 _ASCEND_CONFIG: Optional[AscendConfig] = None

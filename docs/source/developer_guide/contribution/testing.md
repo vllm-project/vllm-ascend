@@ -231,13 +231,13 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_offline_inference.
 ```bash
 cd /vllm-workspace/vllm-ascend/
 # Run all the single card tests
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/
 
 # Run a certain test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/test_dynamic_npugraph_batchsize.py
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py
 
 # Run a certain case in test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/test_offline_inference.py::test_models
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py::test_models_output
 ```
 
 ::::
@@ -248,7 +248,7 @@ This will reproduce the E2E test. See [vllm_ascend_test.yaml](https://github.com
 
 Run nightly multi-node test cases locally refer to section of `Running Locally` of [Multi Node Test](./multi_node_test.md).
 
-#### E2E test example:
+#### E2E test example
 
 - Offline test example: [`tests/e2e/singlecard/test_offline_inference.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_offline_inference.py)
 - Online test examples: [`tests/e2e/singlecard/test_prompt_embedding.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_prompt_embedding.py)

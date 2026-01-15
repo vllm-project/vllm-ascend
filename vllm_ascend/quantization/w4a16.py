@@ -116,8 +116,7 @@ class AscendW4A16FusedMoEMethod:
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get(
             "group_size", 32)
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
 
     def get_weight(
         self,
@@ -243,7 +242,6 @@ class AscendW4A16FusedMoEMethod:
             use_int4_w4a16=True,
             expert_map=expert_map,
             log2phy=log2phy,
-            global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
