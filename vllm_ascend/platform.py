@@ -36,7 +36,8 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD, AscendDeviceType, check_kv_extra_config,
     enable_sp, flashcomm2_enable, get_ascend_device_type, is_moe_model,
     is_vl_model, refresh_block_size, update_aclgraph_sizes,
-    update_cudagraph_capture_sizes, update_default_aclgraph_sizes)
+    update_cudagraph_capture_sizes, update_default_aclgraph_sizes,
+    enable_flash_comm_v1)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -355,21 +356,21 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        if is_vl_model(vllm_config) and enable_sp(vllm_config):
+        if is_vl_model(vllm_config) and enable_flash_comm_v1():
             raise ValueError("""Flash Comm V1 is not supported for VL models. \
                 Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
                 For optimal performance with VL models, we recommend enabling Sequence Parallelism \
                 via --compilation-config '{"pass_config": {"enable_sp": true}}'.""")
 
-        # only dense models need to set default compile_ranges_split_points
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config) \
-            and vllm_config.compilation_config.compile_ranges_split_points[0] == max_num_batched_tokens:
-                from vllm_ascend.compilation.passes.sequence_parallelism import SP_THREHOLD
+        if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config):
+                from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_threshold
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(get_sp_threshold(vllm_config))
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 vllm_config.compilation_config.compile_ranges_split_points = \
-                    [SP_THREHOLD, max_num_batched_tokens]
-                logger.info("set compile_ranges_split_points to "
-                            "{vllm_config.compilation_config.compile_ranges_split_points} for sequence parallelism")
+                    new_compile_ranges_split_points
+                logger.debug("set compile_ranges_split_points to "
+                            "{new_compile_ranges_split_points} for sequence parallelism")
 
     @classmethod
     def import_kernels(cls) -> None:

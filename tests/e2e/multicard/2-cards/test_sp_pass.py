@@ -34,7 +34,6 @@ def test_sequence_parallelism_tp2(model: str) -> None:
             compilation_config={
                 "cudagraph_capture_sizes": [2, 4],
                 "cudagraph_mode": "FULL_DECODE_ONLY",
-                "compile_ranges_split_points": [10],
                 "pass_config": {"enable_sp": True}
             },
             additional_config={"sp_threshold": 10}

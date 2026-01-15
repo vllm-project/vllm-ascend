@@ -11,6 +11,13 @@ from vllm_ascend.utils import is_moe_model
 
 SP_THREHOLD = 1000
 
+def get_sp_threshold(config: VllmConfig):
+    if is_moe_model(config):
+        return 1
+
+    additional_config = config.additional_config if config.additional_config is not None else {}
+    return additional_config.get("sp_threshold", SP_THREHOLD)
+    
 
 class _SequenceParallelPatternHelper:
     """Helper for sequence parallelism patterns."""
@@ -206,12 +213,7 @@ class AscendSequenceParallelismPass(VllmInductorPass):
             AscendQwen3VLMiddleAllReduceRMSNormPattern(
                 config, epsilon).register(self.patterns)
         
-        if is_moe_model(config):
-            self.min_tokens = 0
-        else:
-            additional_config = config.additional_config if config.additional_config is not None else {}
-            sp_threshold = additional_config.get("sp_threshold", SP_THREHOLD)
-            self.min_tokens = sp_threshold
+        self.min_tokens = get_sp_threshold(config)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
