@@ -55,7 +55,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
 
         super().__init__(moe=moe)
-        self.dynamic_eplb = get_ascend_config().dynamic_eplb
+        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod,
@@ -187,14 +187,14 @@ class AscendFusedMoE(FusedMoE):
                 dtype=vllm_config.model_config.dtype)
 
         # init moe
+        eplb_config = ascend_config.eplb_config
         self.global_expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
-            ascend_config, self.moe_instance_id, self.moe_config)
+            eplb_config, self.moe_instance_id, self.moe_config)
         if self.global_expert_map is not None:
             self._expert_map = self.global_expert_map[self.ep_rank].npu()
         self.global_num_experts = num_experts + self.global_redundant_expert_num
-        self.dynamic_eplb = (ascend_config.dynamic_eplb
-                             or ascend_config.expert_map_record_path) and (
-                                 self.log2phy is not None)
+        self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy
+                                                          is not None)
         self.local_num_experts = (torch.sum(
             self._expert_map != -1).item() if self._expert_map is not None else
                                   self.global_num_experts)

@@ -70,13 +70,13 @@ async def test_models(model: str) -> None:
         "8192", "--max-num-seqs", "12", "--trust-remote-code",
         "--gpu-memory-utilization", "0.9"
     ]
-    env_dict["EXPERT_MAP_RECORD"] = "true"
     env_dict["DYNAMIC_EPLB"] = "true"
-    additional_config["dynamic_eplb"] = True
-    additional_config["num_iterations_eplb_update"] = 14000
-    additional_config["num_wait_worker_iterations"] = 30
-    additional_config["init_redundancy_expert"] = 0
-    additional_config["gate_eplb"] = False
+    additional_config["eplb_config"] = {
+        "dynamic_eplb": True,
+        "expert_heat_collection_interval": 512,
+        "algorithm_execution_interval": 100,
+        "num_redundant_experts": 0
+    }
     server_args.extend(
         ["--compilation-config",
          json.dumps(compilation_config)])
