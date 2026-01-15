@@ -56,7 +56,6 @@ def run_prefill(prefill_done, process_close):
         kv_role="kv_producer",
         kv_port="30000",
         engine_id="0",
-        kv_connector_module_path="vllm_ascend.distributed.mooncake_connector",
         kv_connector_extra_config={"prefill": {"dp_size": 1, "tp_size": 1}, "decode": {"dp_size": 1, "tp_size": 1}},
     )
     # Set NPU memory utilization to 0.8
@@ -104,7 +103,6 @@ def run_decode(prefill_done):
         kv_role="kv_consumer",
         kv_port="30100",
         engine_id="1",
-        kv_connector_module_path="vllm_ascend.distributed.mooncake_connector",
         kv_connector_extra_config={"prefill": {"dp_size": 1, "tp_size": 1}, "decode": {"dp_size": 1, "tp_size": 1}},
     )
 

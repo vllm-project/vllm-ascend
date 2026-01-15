@@ -23,7 +23,8 @@ from torch.distributed import Backend
 from vllm.distributed.parallel_state import (GroupCoordinator,
                                              _get_unique_name, _register_group)
 
-from vllm_ascend.distributed.communicator import NPUCommunicator
+from vllm_ascend.distributed.device_communicators.npu_communicator import \
+    NPUCommunicator
 from vllm_ascend.utils import create_hccl_pg_options
 
 
