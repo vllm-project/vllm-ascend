@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from vllm.v1.worker.workspace import init_workspace_manager
+
 from vllm_ascend.worker.worker import NPUWorker
 from vllm_ascend.xlite.xlite_model_runner import XliteModelRunner
 
@@ -23,4 +25,6 @@ class XliteWorker(NPUWorker):
     def init_device(self):
         """Override init_device to init xlite model runner"""
         self.device = self._init_device()
+        num_ubatches = 1
+        init_workspace_manager(self.device, num_ubatches)
         self.model_runner = XliteModelRunner(self.vllm_config, self.device)

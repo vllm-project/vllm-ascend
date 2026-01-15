@@ -14,7 +14,8 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
                                get_ascend_device_type, has_layer_idx,
-                               is_moe_model)
+                               is_drafter_moe_model, is_moe_model,
+                               speculative_enable_dispatch_gmm_combine_decode)
 
 
 class MoECommType(Enum):
@@ -72,7 +73,10 @@ def set_ascend_forward_context(
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
         mmrs_fusion = True
-        if is_moe_model(vllm_config):
+        # main model and drafter model may have different architecture
+        is_context_moe_model = is_drafter_moe_model(vllm_config) \
+            if is_draft_model else is_moe_model(vllm_config)
+        if is_context_moe_model:
             sp_enabled = enable_sp(vllm_config) and num_tokens is not None
             mmrs_fusion = False
         else:
@@ -223,8 +227,8 @@ def select_moe_comm_method(num_tokens: int,
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
     quant_type = getattr(
-        vllm_config.model_config.hf_config, 'moe_quantize',
-        getattr(vllm_config.model_config.hf_config, 'quantize', None))
+        vllm_config.model_config.hf_text_config, 'moe_quantize',
+        getattr(vllm_config.model_config.hf_text_config, 'quantize', None))
 
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group(
     ).world_size == 1:
@@ -238,24 +242,24 @@ def select_moe_comm_method(num_tokens: int,
             moe_comm_type = MoECommType.ALLGATHER
 
     elif soc_version in {AscendDeviceType.A3}:
-        ascend_config = get_ascend_config()
-        dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+        dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-        # TODO: drop dynamic_eplb guard when dispatch_gmm_combine_decode supports tensor list inputs
-        # TODO: add guard for dispatch_gmm_combine_decode when mtp uses float while moe uses w8a8
-        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic" and (
-            not dynamic_eplb)
+        # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic"
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (
+            not is_draft_model) and (not dynamic_eplb)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
-                fused_decode_enable = fused_mc2_enable and get_ep_group(
-                ).world_size <= 16 and (not is_draft_model)
+                fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
+            elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+                fused_decode_enable = fused_mc2_enable and \
+                    speculative_enable_dispatch_gmm_combine_decode(vllm_config)
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
-                fused_prefill_enable = fused_mc2_enable and get_ep_group(
-                ).world_size <= 16 and (not is_draft_model)
+                fused_prefill_enable = fused_mc2_enable and dispatch_ffn_combine_enable
             elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL

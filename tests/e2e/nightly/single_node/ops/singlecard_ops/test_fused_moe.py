@@ -305,8 +305,8 @@ def test_select_experts(
         )
 
         call_moe_gatingtopk = check_npu_moe_gating_top_k(
-            hidden_states, topk, topk_group, num_expert_group, scoring_func,
-            custom_routing_function)
+            hidden_states, topk, renormalize, topk_group, num_expert_group,
+            scoring_func, custom_routing_function)
         if not call_moe_gatingtopk and use_grouped_topk:
             mock_native_grouped_topk.assert_called_once()
         else:

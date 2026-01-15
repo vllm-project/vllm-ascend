@@ -114,7 +114,6 @@ class MoECommMethod(ABC):
             dynamic_scale_for_share: Optional[Any] = None,
             # For load balance
             log2phy: torch.Tensor = None,
-            global_redundant_expert_num: int = 0,
             need_trans: bool = False,
             dynamic_eplb: bool = False,
             mc2_mask: torch.Tensor = None,
@@ -133,7 +132,8 @@ class MoECommMethod(ABC):
             topk_ids=topk_ids,
             expert_map=expert_map,
             log2phy=log2phy,
-            global_redundant_expert_num=global_redundant_expert_num,
+            global_redundant_expert_num=self.moe_config.
+            global_redundant_expert_num,
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
@@ -290,7 +290,6 @@ class FusedMC2CommImpl(MoECommMethod):
             dynamic_scale_for_share: Optional[Any] = None,
             # For load balance
             log2phy: torch.Tensor = None,
-            global_redundant_expert_num: int = 0,
             need_trans: bool = False,
             dynamic_eplb: bool = False,
             mc2_mask: torch.Tensor = None,
@@ -301,15 +300,22 @@ class FusedMC2CommImpl(MoECommMethod):
 
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), \
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
+
+        # Apply log2phy if needed
+        if log2phy is not None:
+            topk_ids = log2phy[topk_ids]
+
+        group_list_type = None
+        expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
             out = torch.empty_like(hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=hidden_states,
-                weight1=w1[0],
-                weight2=w2[0],
+                weight1=w1,
+                weight2=w2,
                 expert_idx=topk_ids,
-                scale1=w1_scale[0],
-                scale2=w2_scale[0],
+                scale1=w1_scale,
+                scale2=w2_scale,
                 probs=topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
                 max_output_size=65536,
@@ -317,21 +323,24 @@ class FusedMC2CommImpl(MoECommMethod):
             )
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert expert_map is not None, "expert_map cannot be None."
-            out, _ = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
+            group_list_type = 1
+            out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
                 x=hidden_states,
                 expert_ids=topk_ids,
-                gmm1_permuted_weight=w1[0],
-                gmm1_permuted_weight_scale=w1_scale[0],
-                gmm2_weight=w2[0],
-                gmm2_weight_scale=w2_scale[0],
+                gmm1_permuted_weight=w1,
+                gmm1_permuted_weight_scale=w1_scale,
+                gmm2_weight=w2,
+                gmm2_weight_scale=w2_scale,
                 expert_smooth_scales=None,
                 expert_scales=topk_weights.to(torch.float32),
                 group_ep=self.token_dispatcher.moe_all_to_all_group_name,
                 ep_rank_size=self.token_dispatcher.ep_world_size,
                 ep_rank_id=self.token_dispatcher.ep_rank_id,
-                moe_expert_num=len(expert_map),
+                moe_expert_num=self.moe_config.num_experts,
                 global_bs=self.token_dispatcher.fused_global_bs)
         else:
             raise ValueError(
                 f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
-        return FusedExpertsResult(routed_out=out)
+        return FusedExpertsResult(routed_out=out,
+                                  group_list_type=group_list_type,
+                                  expert_tokens=expert_tokens)

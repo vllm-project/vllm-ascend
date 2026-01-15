@@ -37,7 +37,7 @@ for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
 for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
 ```
 
-2. Check NPU network configuration:
+2. Check NPU HCCN Configuration:
 
 Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
@@ -48,14 +48,28 @@ cat /etc/hccn.conf
 3. Get NPU IP Addresses
 
 ```bash
-for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+# Get virtual npu ip
+for i in {0..15}; do hccn_tool -i $i -vnic -g;done
 ```
 
-4. Cross-Node PING Test
+4. Get superpodid and SDID
 
 ```bash
-# Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
-for i in {0..15}; do hccn_tool -i $i -ping -g address x.x.x.x;done
+for i in {0..15}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
+```
+
+5. Cross-Node PING Test
+
+```bash
+# Execute on the target node (replace 'x.x.x.x' with virtual npu ip address)
+for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
+```
+
+6. Check NPU TLS Configuration
+
+```bash
+# The tls settings should be consistent across all nodes
+for i in {0..15}; do hccn_tool -i $i -tls -g ; done | grep switch
 ```
 
 ::::
@@ -79,7 +93,7 @@ for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
 for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
 ```
 
-2. Check NPU network configuration:
+2. Check NPU HCCN Configuration:
 
 Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
@@ -100,11 +114,19 @@ for i in {0..7}; do hccn_tool -i $i -ip -g;done
 for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 ```
 
+5. Check NPU TLS Configuration
+
+```bash
+# The tls settings should be consistent across all nodes
+for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
+```
+
 ::::
 
 :::::
 
 ## Run with Docker
+
 Start a Docker container on each node.
 
 ```{code-block} bash
@@ -151,7 +173,7 @@ docker run --rm \
 
 ## Install Mooncake
 
-Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.
+Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
@@ -203,10 +225,12 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LI
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
 ### launch_online_dp.py
+
 Use `launch_online_dp.py` to launch external dp vllm servers.
 [launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
 
 ### run_dp_template.sh
+
 Modify `run_dp_template.sh` on each node.
 [run\_dp\_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
 
@@ -259,7 +283,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   "kv_role": "kv_producer",
   "kv_port": "30000",
   "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -319,7 +342,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   "kv_role": "kv_producer",
   "kv_port": "30100",
   "engine_id": "1",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -380,7 +402,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   "kv_role": "kv_consumer",
   "kv_port": "30200",
   "engine_id": "2",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -440,7 +461,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   "kv_role": "kv_consumer",
   "kv_port": "30200",
   "engine_id": "2",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
   "kv_connector_extra_config": {
             
             "prefill": {
@@ -508,7 +528,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   "kv_role": "kv_producer",
   "kv_port": "30000",
   "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -568,7 +587,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   "kv_role": "kv_producer",
   "kv_port": "30100",
   "engine_id": "1",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -629,7 +647,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   "kv_role": "kv_consumer",
   "kv_port": "30200",
   "engine_id": "2",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -689,7 +706,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   "kv_role": "kv_consumer",
   "kv_port": "30200",
   "engine_id": "2",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,

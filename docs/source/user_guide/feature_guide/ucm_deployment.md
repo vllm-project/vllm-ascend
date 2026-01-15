@@ -89,6 +89,7 @@ INFO:     Application startup complete.
 Congratulations, you have successfully started the vLLM server with UCM connector!
 
 ## Evaluating UCM Prefix Caching Performance
+
 After launching the vLLM server with `UCMConnector` enabled, the easiest way to observe the prefix caching effect is to run the built-in `vllm bench` CLI. Executing the following command **twice** in a separate terminal shows the improvement clearly.
 
 ```bash
@@ -109,32 +110,34 @@ vllm bench serve \
 ```
 
 ### After the first execution
+
 The `vllm bench` terminal prints the benchmark result:
 
-```
+```shell
 ---------------Time to First Token----------------
 Mean TTFT (ms):                           15323.87
 ```
 
 Inspecting the vLLM server logs reveals entries like:
 
-```
+```shell
 INFO ucm_connector.py:228: request_id: xxx, total_blocks_num: 125, hit hbm: 0, hit external: 0
 ```
 
 This indicates that for the first inference request, UCM did not hit any cached KV blocks. As a result, the full 16K-token prefill must be computed, leading to a relatively large TTFT.
 
 ### After the second execution
+
 Running the same benchmark again produces:
 
-```
+```shell
 ---------------Time to First Token----------------
 Mean TTFT (ms):                            1920.68
 ```
 
 The vLLM server logs now contain similar entries:
 
-```
+```shell
 INFO ucm_connector.py:228: request_id: xxx, total_blocks_num: 125, hit hbm: 0, hit external: 125
 ```
 

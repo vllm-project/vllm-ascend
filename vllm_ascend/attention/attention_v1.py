@@ -22,28 +22,40 @@ from typing import ClassVar, List, Optional, Tuple, Type
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
-from vllm.attention.backends.registry import (AttentionBackendEnum,
-                                              register_backend)
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.utils import (AttentionCGSupport,
-                                              AttentionMetadataBuilder)
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.context_parallel.common_cp import (
+    AscendMetadataForDecode, AscendMetadataForPrefill)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         AscendMetadataForDecode,
-                                         AscendMetadataForPrefill, enable_cp,
-                                         split_decodes_and_prefills,
+                                         enable_cp, split_decodes_and_prefills,
                                          using_paged_attention)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
     update_draft_graph_params_workspaces, update_graph_params_workspaces)
-from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
-                               weak_ref_tensors)
+from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
+from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                                  AttentionMetadataBuilder)
+    from vllm.attention.backends.abstract import (  # type: ignore
+        AttentionBackend, AttentionImpl, AttentionLayer, AttentionType)
+    from vllm.attention.backends.registry import (  # type: ignore
+        AttentionBackendEnum, register_backend)
+else:
+    from vllm.v1.attention.backend import (  # type: ignore
+        AttentionBackend, AttentionCGSupport, AttentionImpl, AttentionLayer,
+        AttentionType, AttentionMetadataBuilder)
+    from vllm.v1.attention.backends.registry import (  # type: ignore
+        AttentionBackendEnum, register_backend)
+# isort: on
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -63,7 +75,7 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
         if enable_cp():
-            from vllm_ascend.attention.attention_cp import \
+            from vllm_ascend.attention.context_parallel.attention_cp import \
                 AscendAttentionCPImpl
             return AscendAttentionCPImpl
         return AscendAttentionBackendImpl
@@ -71,7 +83,7 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
         if enable_cp():
-            from vllm_ascend.attention.attention_cp import \
+            from vllm_ascend.attention.context_parallel.attention_cp import \
                 AscendAttentionCPMetadataBuilder
             return AscendAttentionCPMetadataBuilder
         return AscendAttentionMetadataBuilder
@@ -130,6 +142,12 @@ class AscendAttentionState(Enum):
 
 @dataclass
 class AscendMetadata:
+    """
+    Per-layer attention metadata for Ascend FlashAttention backend.
+
+    Contains attention masks, token counts, sequence lengths and KV cache
+    related properties for attention computation.
+    """
     # **************************** Basic Properties ************************** #
     attn_mask: Optional[torch.Tensor] = None
     # Current state of this attention run.
@@ -184,7 +202,12 @@ class AscendMetadata:
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
-    # AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    """
+    Builder for constructing AscendMetadata from CommonAttentionMetadata.
+
+    Handles attention mask generation and metadata preparation for
+    Ascend FlashAttention backend.
+    """
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
@@ -197,6 +220,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.compilation_config = vllm_config.compilation_config
@@ -218,6 +242,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
     @classmethod
     def get_cudagraph_support(
@@ -252,9 +277,21 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
-        attn_mask = common_attn_metadata.attn_mask
-        swa_mask = common_attn_metadata.swa_mask
+        if isinstance(self.kv_cache_spec, CrossAttentionSpec):
+            seq_lens = common_attn_metadata.seq_lens
+            slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
         attn_state = common_attn_metadata.attn_state
+
+        # Get attn_mask and swa_mask from singleton AttentionMaskBuilder
+        attn_mask = self.attn_mask_builder.get_attention_mask(
+            self.model_config)
+
+        swa_mask = None
+        is_swa = hasattr(self.model_config.hf_text_config, 'sliding_window')
+        if self.model_config is not None and is_swa:
+            swa_mask = self.attn_mask_builder.get_swa_mask(
+                self.model_config.dtype,
+                self.model_config.hf_text_config.sliding_window)
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(
@@ -336,6 +373,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
+        if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
+            flashcomm2_oshard_manager.post_process_after_loading()
 
     def full_graph_fia(self, query: torch.Tensor, key: torch.Tensor,
                        value: torch.Tensor, attn_metadata: AscendMetadata,
@@ -484,6 +526,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_size = 128
             block_table = None
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
+            if self.attn_type == AttentionType.ENCODER_DECODER:
+                actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens,
+                                                     dim=0).tolist()
         elif attn_metadata.attn_state == \
                 AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.seq_lens.shape[0]
@@ -565,7 +610,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             = self._get_fia_params(key, value, attn_metadata)
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and self.attn_type != AttentionType.ENCODER_DECODER:
             key = key[:num_tokens]
             value = value[:num_tokens]
         # Get workspace from cache or calculate it if not present.
@@ -573,11 +618,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query=query,
             key=key,
             value=value,
-            pre_tokens=self.sliding_window
-            if self.sliding_window else SWA_INT_MAX,
-            next_tokens=0 if self.sliding_window else SWA_INT_MAX,
-            atten_mask=attn_metadata.swa_mask
-            if self.sliding_window else attn_metadata.attn_mask,
+            atten_mask=attn_metadata.attn_mask,
             block_table=block_table,
             input_layout="TND",
             block_size=block_size,
@@ -586,7 +627,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=4 if self.sliding_window else 3,
+            sparse_mode=3,
         )
 
         attn_output = attn_output.view(num_tokens, self.num_heads,
@@ -661,23 +702,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
-            if get_ascend_device_type() == AscendDeviceType.A5:
-                # TODO: Once eagle running to here, it may has error because of the 0 dim of slot_mapping.
-                # Should check if the 0 dim of slot_mapping must equal to the 0 dim of key.
-                # If it's necessary, the slots should be sliced.
-                torch_npu.npu_scatter_pa_kv_cache(
-                    key=key[:attn_metadata.num_actual_tokens],
-                    value=value[:attn_metadata.num_actual_tokens].contiguous(),
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_mapping=slots)
-            else:
-                torch_npu._npu_reshape_and_cache(
-                    key=key[:attn_metadata.num_actual_tokens],
-                    value=value[:attn_metadata.num_actual_tokens],
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_indices=slots[:attn_metadata.num_actual_tokens])
+            encoder_decoder = (self.attn_type == AttentionType.ENCODER_DECODER)
+            DeviceOperator.reshape_and_cache(
+                key=key[:attn_metadata.num_actual_tokens]
+                if not encoder_decoder else key,
+                value=value[:attn_metadata.num_actual_tokens]
+                if not encoder_decoder else value,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                slot_mapping=slots[:attn_metadata.num_actual_tokens]
+                if not encoder_decoder else slots)
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
         return key, value
@@ -733,18 +767,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 " for AscendAttentionBackendImpl")
 
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
-        attn_type = self.attn_type
-        if attn_type not in [
-                AttentionType.DECODER, AttentionType.ENCODER_ONLY
-        ]:
-            raise NotImplementedError("Encoder/Decoder cross-attention "
-                                      "is not implemented for "
-                                      "PallasAttentionBackendImpl")
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
-        key, value = self.reshape_and_cache(key, value, kv_cache,
-                                            attn_metadata)
+        if key is not None and value is not None:
+            key, value = self.reshape_and_cache(key, value, kv_cache,
+                                                attn_metadata)
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling":
             attn_output = self._forward_encoder_attention(

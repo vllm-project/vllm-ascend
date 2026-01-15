@@ -32,7 +32,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
-from vllm_ascend.eplb.utils import moe_load_async_stream
 from vllm_ascend.flash_common3_context import (get_flash_common3_context,
                                                set_flash_common3_context)
 from vllm_ascend.ops.fused_moe.experts_selector import (select_experts,
@@ -56,7 +55,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
 
         super().__init__(moe=moe)
-        self.dynamic_eplb = get_ascend_config().dynamic_eplb
+        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod,
@@ -188,12 +187,14 @@ class AscendFusedMoE(FusedMoE):
                 dtype=vllm_config.model_config.dtype)
 
         # init moe
-        self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
-            ascend_config, self.moe_instance_id, self.moe_config)
+        eplb_config = ascend_config.eplb_config
+        self.global_expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
+            eplb_config, self.moe_instance_id, self.moe_config)
+        if self.global_expert_map is not None:
+            self._expert_map = self.global_expert_map[self.ep_rank].npu()
         self.global_num_experts = num_experts + self.global_redundant_expert_num
-        self.dynamic_eplb = (ascend_config.dynamic_eplb
-                             or ascend_config.expert_map_record_path) and (
-                                 self.log2phy is not None)
+        self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy
+                                                          is not None)
         self.local_num_experts = (torch.sum(
             self._expert_map != -1).item() if self._expert_map is not None else
                                   self.global_num_experts)
@@ -210,7 +211,7 @@ class AscendFusedMoE(FusedMoE):
 
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
-        self.moe_config.original_num_experts = num_experts
+        self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
@@ -371,13 +372,8 @@ class AscendFusedMoE(FusedMoE):
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, \
                 "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
-            moe_load_stream = moe_load_async_stream()
-            cur_stream = torch.npu.current_stream()
-            moe_load_stream.wait_stream(cur_stream)
-            with npu_stream_switch(moe_load_stream):
-                self.moe_load += expert_tokens if group_list_type == 1 else \
-                    torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-            cur_stream.wait_stream(moe_load_stream)
+            self.moe_load += expert_tokens if group_list_type == 1 else \
+                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
         routed_out = forward_context.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
