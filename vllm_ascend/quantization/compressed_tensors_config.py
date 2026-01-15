@@ -217,12 +217,13 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         if weight_quant is None:
             return None
 
-        return self._create_scheme_for_layer_type(
+        scheme = self._create_scheme_for_layer_type(
             weight_quant=weight_quant,
             input_quant=input_quant,
             format=format,
             layer_type="linear",
         )
+        return cast(AscendLinearScheme, scheme)
 
     def _get_moe_scheme(
             self,
@@ -242,12 +243,13 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         if weight_quant is None:
             return None
 
-        return self._create_scheme_for_layer_type(
+        scheme = self._create_scheme_for_layer_type(
             weight_quant=weight_quant,
             input_quant=input_quant,
             format=format,
             layer_type="moe",
         )
+        return cast(AscendMoEScheme, scheme)
 
     def _get_quant_args(
         self,
