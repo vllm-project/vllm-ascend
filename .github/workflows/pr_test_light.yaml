@@ -47,6 +47,7 @@ jobs:
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
+      _310_tracker: ${{ steps.filter.outputs._310_tracker }}
     steps:
       - name: Setup git proxy
         run: |
@@ -73,6 +74,8 @@ jobs:
             ut_tracker:
               - 'tests/ut/**'
               - '.github/workflows/pr_test_light.yaml'
+            _310_tracker:
+              - 'vllm_ascend/_310p/**'
 
   ut:
     needs: [lint, changes]
@@ -103,4 +106,5 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-aarch64-a2
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
+      contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
       type: light

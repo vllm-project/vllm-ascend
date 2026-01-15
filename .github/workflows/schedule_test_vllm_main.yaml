@@ -36,4 +36,5 @@ jobs:
       vllm: main
       runner: linux-aarch64-a2
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
+      contains_310: false
       type: full
