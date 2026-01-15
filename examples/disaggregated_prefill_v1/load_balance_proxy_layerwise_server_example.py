@@ -91,7 +91,6 @@ import heapq
 import ipaddress
 import os
 import sys
-import threading
 import uuid
 from contextlib import asynccontextmanager
 from typing import List

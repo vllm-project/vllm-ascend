@@ -24,12 +24,13 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 
-import os
 import argparse
+import os
 
 from vllm.assets.audio import AudioAsset
+
 try:
-    import librosa # type: ignore
+    import librosa  # type: ignore
 except ImportError:
     raise Exception("Can't import librosa, please ensure it's installed")
 

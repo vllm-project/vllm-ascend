@@ -19,8 +19,8 @@ Run:
 """
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
-
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          PreTrainedTokenizer)
 from vllm import LLM
 
 

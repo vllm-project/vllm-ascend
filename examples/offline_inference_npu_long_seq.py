@@ -1,6 +1,6 @@
+import argparse
 import os
 import time
-import argparse
 
 from vllm import LLM, SamplingParams
 
