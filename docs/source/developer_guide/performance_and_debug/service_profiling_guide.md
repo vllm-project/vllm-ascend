@@ -15,6 +15,7 @@ pip install msserviceprofiler==1.2.2
 ```
 
 ### 1 Preparation
+
 Before starting the service, set the environment variable `SERVICE_PROF_CONFIG_PATH` to point to the profiling configuration file, and set the environment variable `PROFILING_SYMBOLS_PATH` to specify the YAML configuration file for the symbols that need to be imported. After that, start the vLLM service according to your deployment method.
 
 ```bash
@@ -32,6 +33,7 @@ The file `ms_service_profiler_config.json` is the profiling configuration. If it
 `service_profiling_symbols.yaml` is the configuration file containing the profiling points to be imported. You can choose **not** to set the `PROFILING_SYMBOLS_PATH` environment variable, in which case the default configuration file will be used. If the file does not exist at the path you specified, likewise, the system will generate a configuration file at your specified path for future configuration. You can customize it according to the instructions in the `Symbols Configuration File` section below.
 
 ### 2 Enable Profiling
+
 To enable the performance data collection switch, change the `enable` field from `0` to `1` in the configuration file `ms_service_profiler_config.json`. This can be accomplished by executing the following sed command:
 
 ```bash
@@ -39,6 +41,7 @@ sed -i 's/"enable":\s*0/"enable": 1/' ./ms_service_profiler_config.json
 ```
 
 ### 3 Send Requests
+
 Choose a request-sending method that suits your actual profiling needs:
 
 ```bash
@@ -65,6 +68,7 @@ msserviceprofiler analyze --input-path=./ --output-path output
 ### 5 View Results
 
 After analysis, the `output` directory will contain:
+
 - `chrome_tracing.json`: Chrome tracing format data, which can be opened in [MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html).
 - `profiler.db`: Performance data in database format.
 - `request.csv`: Request-related data.
@@ -77,7 +81,9 @@ After analysis, the `output` directory will contain:
 ---
 
 ## Appendix
+
 (profiling-configuration-file)=
+
 ### 1 Profiling Configuration File
 
 The profiling configuration file controls profiling parameters and behavior.
@@ -116,6 +122,7 @@ The configuration is in JSON format. Main parameters:
 ---
 
 (symbols-configuration-file)=
+
 ### 2 Symbols Configuration File
 
 The symbols configuration file defines which functions/methods to profile and supports flexible configuration with custom attribute collection.

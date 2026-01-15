@@ -7,12 +7,12 @@ Take the deepseek model as an example, use 8 Atlas 800T A3 servers to deploy the
 
 ## Verify Multi-Node Communication Environment
 
-### Physical Layer Requirements:
+### Physical Layer Requirements
 
 - The physical machines must be located on the same WLAN, with network connectivity.
 - All NPUs must be interconnected. For the Atlas A2 generation, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For the Atlas A3 generation, both intra-node and inter-node connectivity are via HCCS.
 
-### Verification Process:
+### Verification Process
 
 :::::{tab-set}
 ::::{tab-item} A3

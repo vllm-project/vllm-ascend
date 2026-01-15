@@ -8,12 +8,12 @@ Multi-node inference is suitable for scenarios where the model cannot be deploye
 
 ## Verify Multi-Node Communication Environment
 
-### Physical Layer Requirements:
+### Physical Layer Requirements
 
 * The physical machines must be located on the same LAN, with network connectivity.
 * All NPUs are connected with optical modules, and the connection status must be normal.
 
-### Verification Process:
+### Verification Process
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -32,7 +32,8 @@ Execute the following commands on each node in sequence. The results must all be
  cat /etc/hccn.conf
 ```
 
-### NPU Interconnect Verification:
+### NPU Interconnect Verification
+
 #### 1. Get NPU IP Addresses
 
 ```bash
@@ -47,7 +48,9 @@ hccn_tool -i 0 -ping -g address 10.20.0.20
 ```
 
 ## Set Up and Start the Ray Cluster
+
 ### Setting Up the Basic Container
+
 To ensure a consistent execution environment across all nodes, including the model path and Python environment, it is advised to use Docker images.
 
 For setting up a multi-node inference cluster with Ray, **containerized deployment** is the preferred approach. Containers should be started on both the primary and secondary nodes, with the `--net=host` option to enable proper network connectivity.
@@ -88,6 +91,7 @@ docker run --rm \
 ```
 
 ### Start Ray Cluster
+
 After setting up the containers and installing vllm-ascend on each node, follow the steps below to start the Ray cluster and execute inference tasks.
 
 Choose one machine as the primary node and the others as secondary nodes. Before proceeding, use `ip addr` to check your `nic_name` (network interface name).
@@ -133,9 +137,10 @@ Once the cluster is started on multiple nodes, execute `ray status` and `ray lis
 
 After Ray is successfully started, the following content will appear:\
 A local Ray instance has started successfully.\
-Dashboard URL: The access address for the Ray Dashboard (default: http://localhost:8265); Node status (CPU/memory resources, number of healthy nodes); Cluster connection address (used for adding multiple nodes).
+Dashboard URL: The access address for the Ray Dashboard (default: <http://localhost:8265>); Node status (CPU/memory resources, number of healthy nodes); Cluster connection address (used for adding multiple nodes).
 
 ## Start the Online Inference Service on Multi-node scenario
+
 In the container, you can use vLLM as if all NPUs were on a single node. vLLM will utilize NPU resources across all nodes in the Ray cluster.
 
 **You only need to run the vllm command on one node.**

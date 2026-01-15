@@ -10,6 +10,7 @@
 {serving_tests_markdown_table}
 
 ## Offline tests
+
 ### Latency tests
 
 - Input length: 32 tokens.

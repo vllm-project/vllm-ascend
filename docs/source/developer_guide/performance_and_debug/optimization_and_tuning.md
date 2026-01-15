@@ -200,10 +200,12 @@ echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 ```
 
 Purpose
+
 - Forces all CPU cores to run under the `performance` governor
 - Disables dynamic frequency scaling (e.g., `ondemand`, `powersave`)
 
 Benefits
+
 - Keeps CPU cores at maximum frequency
 - Reduces latency jitter
 - Improves predictability for inference workloads
@@ -224,6 +226,7 @@ Benefits
 - Improves stability for large in-memory models
 
 Notes
+
 - For inference workloads, swap can introduce second-level latency
 - Recommended values are `0` or `1`
 
@@ -244,6 +247,7 @@ Benefits
 - Improves performance stability on NUMA systems
 
 Recommended For
+
 - Multi-socket servers
 - Ascend / NPU deployments with explicit NUMA binding
 - Systems with manually managed CPU and memory affinity
@@ -255,14 +259,17 @@ sysctl -w kernel.sched_migration_cost_ns=50000
 ```
 
 Purpose
+
 - Increases the cost for the scheduler to migrate tasks between CPU cores
 
 Benefits
+
 - Reduces frequent thread migration
 - Improves CPU cache locality
 - Lowers latency jitter for inference workloads
   
 Parameter Details
+
 - Unit: nanoseconds (ns)
 - Typical recommended range: 50000–100000
 - Higher values encourage threads to stay on the same CPU core
