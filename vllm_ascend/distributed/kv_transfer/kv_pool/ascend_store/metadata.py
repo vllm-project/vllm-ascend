@@ -14,7 +14,7 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
-from vllm_ascend.distributed.cpu_offload_manager.cpu_kv_cache_manager import \
+from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.cpu_kv_cache_manager import \
     CPUKVCacheManager
 
 

@@ -137,7 +137,7 @@ spec:
                   - "--trust-remote-code"
                   - "--enforce-eager"
                   - "--kv-transfer-config"
-                  - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_parallel_size":1,"kv_port":"20001","engine_id":"0","kv_rank":0,"kv_connector_module_path":"vllm_ascend.distributed.mooncake_connector","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
+                  - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_parallel_size":1,"kv_port":"20001","engine_id":"0","kv_rank":0,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
                 imagePullPolicy: Always
                 resources:
                   limits:
@@ -240,7 +240,7 @@ spec:
                   - "--no-enable-prefix-caching"
                   - "--enforce-eager"
                   - "--kv-transfer-config"
-                  - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_parallel_size":1,"kv_port":"20002","engine_id":"1","kv_rank":1,"kv_connector_module_path":"vllm_ascend.distributed.mooncake_connector","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
+                  - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_parallel_size":1,"kv_port":"20002","engine_id":"1","kv_rank":1,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
                 imagePullPolicy: Always
                 resources:
                   limits:
