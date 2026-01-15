@@ -72,9 +72,11 @@ def set_ascend_forward_context(
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
 
-        # set for sequence parallelism, 1000 is the batch size concurrency threshold for enabling the flashcomm_v1 or sequence_parallelism feature.
-        # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
-        # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
+        # set for sequence parallelism, 1000 is the batch size concurrency threshold
+        # for enabling the flashcomm_v1 or sequence_parallelism feature.
+        # Currently, it is an empirical value. In normal scenarios, if the concurrency
+        # exceeds this threshold, the performance benefits can be maximized.
+        # Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
         mmrs_fusion = True
         # main model and drafter model may have different architecture

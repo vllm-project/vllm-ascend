@@ -67,6 +67,7 @@ exclude = [
     "vllm_ascend/worker",
     "vllm_ascend/xlite",
     "vllm_ascend/envs.py",
+    "vllm_ascend/batch_invariant.py",
 ]
 
 [tool.ruff.lint]

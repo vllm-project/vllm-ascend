@@ -436,10 +436,7 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
         cudagraph_capture_sizes += list(range(256, max_cudagraph_capture_size + 1, 16))
     # in newer version, vLLM use ascending order of cudagraph_capture_sizes.
     target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes)
-    if target_cudagraph_capture_sizes == vllm_config.compilation_config.cudagraph_capture_sizes:
-        return True
-
-    return False
+    return target_cudagraph_capture_sizes == vllm_config.compilation_config.cudagraph_capture_sizes
 
 
 def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
@@ -550,8 +547,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # Under this configuration, HCCL employs the FFTS+ method for execution unfolding,
         # which adds only 1 concurrent stream without consuming collective communication execution unfolding streams.
         # On A3 hardware, HCCL defaults to the AICPU method.
-        # This approach may additionally allocate up to rank_size (max 16) - 1 streams per collective communication domain on the device (worst case).
-        # Using the default collective communication unfolding method on A3 will lead to a significant reduction in the maximum supported sizes.
+        # This approach may additionally allocate up to rank_size (max 16) - 1 streams per collective communication
+        # domain on the device (worst case).
+        # Using the default collective communication unfolding method on A3 will lead to a significant reduction
+        # in the maximum supported sizes.
         # Therefore, the calculation formula has been modified as follows:
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
@@ -754,7 +753,8 @@ def check_ascend_device_type():
         raise RuntimeError(f"Can not support soc_version: {soc_version}.")
 
     assert _ascend_device_type == cur_device_type, (
-        f"Current device type: {cur_device_type} does not match the installed version's device type: {_ascend_device_type}, please check your installation package."
+        f"Current device type: {cur_device_type} does not match the installed version's device type: "
+        f"{_ascend_device_type}, please check your installation package."
     )
 
 
@@ -1044,26 +1044,31 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
         )
     if global_tp_size <= flashcomm2_oproj_tp_size:
         raise AssertionError(
-            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size}) cannot exceed global tensor parallel size ({global_tp_size})"
+            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size}) cannot exceed "
+            f"global tensor parallel size ({global_tp_size})"
         )
     if global_tp_size % flashcomm2_oproj_tp_size != 0:
         raise AssertionError(
-            f"Global tensor parallel size ({global_tp_size}) must be divisible by flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size})"
+            f"Global tensor parallel size ({global_tp_size}) must be divisible by "
+            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size})"
         )
     if vllm_config.kv_transfer_config is None:
         logger.warning_once(
-            "It is recommended to enable FLASHCOMM2 in P-scenario deployments, enable it in hybrid deployment may lead to decode performance degradation."
+            "It is recommended to enable FLASHCOMM2 in P-scenario deployments, enable it in hybrid deployment "
+            "may lead to decode performance degradation."
         )
     if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
         raise AssertionError(
-            "FLASHCOMM2 primarily targets P-scenario deployments, with additional support for hybrid deployment scenarios. It is not applicable in D-scenario environments."
+            "FLASHCOMM2 primarily targets P-scenario deployments, with additional support "
+            "for hybrid deployment scenarios. It is not applicable in D-scenario environments."
         )
 
     return flashcomm2_oproj_tp_size
 
 
 def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
-    # Reorganize batch_ids so that, after the all2all and reduce-scatter operation, each batch_id corresponds to the rank_id within the DP domain.
+    # Reorganize batch_ids so that, after the all2all and reduce-scatter operation,
+    # each batch_id corresponds to the rank_id within the DP domain.
     # For example, when DP = [0, 1, 2, ..., 15] and flashcomm2_oproj_tensor_parallel_size = 2,
     # the reorganized batch_ids will be [[batch0, batch8], [batch1, batch9], ..., [batch7, batch15]].
     flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
@@ -1098,7 +1103,7 @@ def refresh_block_size(vllm_config):
         return
 
     # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if not model_config.hf_text_config.model_type == "qwen3_next" and cache_config.block_size != 128:
+    if model_config.hf_text_config.model_type != "qwen3_next" and cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
             cache_config.block_size = 128
@@ -1149,7 +1154,8 @@ def singleton(cls):
     return get_instance
 
 
-# TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32. and subsequent updates will introduce new interfaces. --zzhx1
+# TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32.
+# and subsequent updates will introduce new interfaces. --zzhx1
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
     from vllm.config import get_current_vllm_config
@@ -1158,9 +1164,7 @@ def enable_dsa_cp() -> bool:
     is_ds_v32 = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
         vllm_config.model_config.hf_text_config, "index_topk"
     )
-    if is_ds_v32 and enable_sp():
-        return True
-    return False
+    return bool(is_ds_v32 and enable_sp())
 
 
 @lru_cache(maxsize=1)

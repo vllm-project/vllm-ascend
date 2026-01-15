@@ -21,6 +21,7 @@ This module generates the service_profiling_symbols.yaml configuration file
 to ~/.config/vllm_ascend/ directory.
 """
 
+import contextlib
 import tempfile
 from pathlib import Path
 
@@ -136,10 +137,8 @@ def _cleanup_temp_file(tmp_path: Path | None) -> None:
         tmp_path: Path to the temporary file to clean up.
     """
     if tmp_path is not None and tmp_path.exists():
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass  # Ignore cleanup errors
 
 
 def generate_service_profiling_config() -> Path | None:

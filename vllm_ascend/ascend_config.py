@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
@@ -55,9 +55,10 @@ class AscendConfig:
             "using it without these features may result in significant performance degradation."
         )
 
-        self.enable_shared_expert_dp = additional_config.get(
-            "enable_shared_expert_dp",
-            False) and vllm_config.parallel_config.enable_expert_parallel
+        self.enable_shared_expert_dp = (
+            additional_config.get("enable_shared_expert_dp", False)
+            and vllm_config.parallel_config.enable_expert_parallel
+        )
         if self.enable_shared_expert_dp:
             from vllm_ascend.utils import enable_sp
 
@@ -132,7 +133,8 @@ class FinegrainedTPConfig:
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
-            # dummy_run does not run the entire attention module in eager mode,, so the o_proj tp split can only be used in graph mode.
+            # dummy_run does not run the entire attention module in eager mode,
+            # so the o_proj tp split can only be used in graph mode.
             if vllm_config.model_config.enforce_eager is True:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
@@ -198,7 +200,8 @@ class XliteGraphConfig:
                 )
             if vllm_config.parallel_config.pipeline_parallel_size > 1:
                 raise RuntimeError(
-                    "Xlite graph mode is not compatible with pipeline parallelism. Please set pipeline_parallel_size to 1."
+                    "Xlite graph mode is not compatible with pipeline parallelism. "
+                    "Please set pipeline_parallel_size to 1."
                 )
             if vllm_config.cache_config.block_size != 128:
                 raise RuntimeError(
@@ -228,6 +231,7 @@ class EplbConfig:
     """
     Configuration Object for xlite_graph_config from additional_config
     """
+
     _defaults = {
         "dynamic_eplb": False,
         "expert_map_path": None,
@@ -235,10 +239,12 @@ class EplbConfig:
         "algorithm_execution_interval": 30,
         "expert_map_record_path": None,
         "num_redundant_experts": 0,
-        "eplb_policy_type": 1
+        "eplb_policy_type": 1,
     }
 
-    def __init__(self, user_config: dict = {}):
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
         self.config = self._defaults.copy()
         if user_config and isinstance(user_config, dict):
             for key, value in user_config.items():
@@ -266,21 +272,16 @@ class EplbConfig:
                 raise TypeError("The expert_map_record_path is not json.")
             dirname = os.path.dirname(self.expert_map_record_path)
             os.makedirs(dirname, exist_ok=True)
-        for key in [
-                "expert_heat_collection_interval",
-                "algorithm_execution_interval", "num_redundant_experts"
-        ]:
+        for key in ["expert_heat_collection_interval", "algorithm_execution_interval", "num_redundant_experts"]:
             if not isinstance(self.config[key], int):
                 raise TypeError(f"{key} must be an integer")
             if self.config[key] < 0:  # type: ignore
-                raise ValueError(
-                    f"{key} must greater than 0; got {self.config[key]} instead"
-                )
+                raise ValueError(f"{key} must greater than 0; got {self.config[key]} instead")
         if self.eplb_policy_type not in [0, 1, 2, 3]:
             raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
 
 
-_ASCEND_CONFIG: Optional[AscendConfig] = None
+_ASCEND_CONFIG: AscendConfig | None = None
 
 
 def init_ascend_config(vllm_config):

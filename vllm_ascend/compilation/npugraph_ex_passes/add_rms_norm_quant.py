@@ -88,7 +88,8 @@ def replacement_add_rms_norm_quant(epsilon):
             rms_norm_input,
             residual,
             rms_norm_weight,
-            # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
+            # The inverse of scale is required by npu_add_rms_norm_quant kernel
+            # which is opposite to the npu_quantize kernel.
             1.0 / scale,
             offset,
             epsilon=epsilon,
@@ -150,7 +151,8 @@ def replacement_add_rms_norm_quant_with_bias(epsilon):
             rms_norm_input,
             residual,
             rms_norm_weight,
-            # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
+            # The inverse of scale is required by npu_add_rms_norm_quant kernel
+            # which is opposite to the npu_quantize kernel.
             1.0 / scale,
             offset,
             epsilon=epsilon,
@@ -212,7 +214,8 @@ def replacement_add_rms_norm_quant_sp_pattern(epsilon):
             rms_norm_input,
             residual,
             rms_norm_weight,
-            # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
+            # The inverse of scale is required by npu_add_rms_norm_quant kernel
+            # which is opposite to the npu_quantize kernel.
             1.0 / scale,
             offset,
             epsilon=epsilon,
@@ -276,7 +279,8 @@ def replacement_add_rms_norm_quant_sp_pattern_with_bias(epsilon):
             rms_norm_input,
             residual,
             rms_norm_weight,
-            # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
+            # The inverse of scale is required by npu_add_rms_norm_quant kernel
+            # which is opposite to the npu_quantize kernel.
             1.0 / scale,
             offset,
             epsilon=epsilon,
