@@ -40,9 +40,7 @@ public:
     using ElementD = typename DType_::Element;
     using LayoutD = typename DType_::Layout;
 
-    //using CopyScaleGmToUb = Epilogue::Tile::CopyGm2Ub<ArchTag, Gemm::GemmType<float, layout::RowMajor>>;
     using CopyScaleGmToUb = Epilogue::Tile::CopyGm2Ub<ArchTag, Gemm::GemmType<float, layout::VectorLayout>>;
-        // Tile copy
     using CopyGmToUbC = typename TileCopy_::CopyGmToUbC;
     using CopyUbToGmD = typename TileCopy_::CopyUbToGmD;
 
@@ -72,17 +70,6 @@ public:
     CATLASS_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> const &resource, Params const &params = Params{}) : params(params)
     {
-        // AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-        // AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
-        // AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
-        // AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
-        // AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID2);
-        // AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID3);
-        // AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        // AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
-
-
-
         //ub:192KB
         n0 = params.n0;
         size_t ubOffset = 0;
@@ -140,15 +127,14 @@ public:
         auto gmTileC = gmC[gmCOffset];
         auto &ubCFp32 = ubFp32List[is_ping];
         auto &scaleUb = scaleUbList[is_ping];
-        // auto &ubOutFp32 = ubOutFp32List[is_ping];
 
         LayoutC layoutGM{actualBlockShape.m(), actualBlockShape.n(), params.n2};
         LayoutC layoutUB{actualBlockShape.m(), actualBlockShape.n(), n0};
 
 
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(event_id); //for debug
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(event_id);
         copyGmToUbC(ubC, gmTileC, layoutUB, layoutGM);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id); //for debug
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id);
 
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id);
         AscendC::Cast<float, ElementC, false>(ubCFp32, ubC, AscendC::RoundMode::CAST_NONE, -1, repeat, {1, 1, 8, 4});
@@ -172,7 +158,8 @@ public:
 
         
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id_2);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(event_id_2); // 注意必须是MTE2_S，不能是MTE2_V，否则会读到0，造成乱码
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(event_id_2); // Note that the value must be MTE2_S instead of MTE2_V.
+                                                                   // Otherwise, 0 will be read, causing garbled characters.
         AscendC::PipeBarrier<PIPE_V>();
         for (int32_t row = 0; row < actualBlockShape.m(); ++row) {
                 float scale = scaleUb(row);
@@ -191,7 +178,7 @@ public:
         int32_t preSumRankInExpert = 0;
         int32_t tileOffset = 0;
 
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event_id); //for debug
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event_id);
         for (int32_t dstEpIdx = 0; dstEpIdx < params.EP; dstEpIdx ++) {
             int32_t lenRankInExpert = tokenPerExpert(tokenPerExpertLayout(dstEpIdx, params.rank, groupIdx));
             int32_t dstExpertOffset = preSumBeforeRank(dstEpIdx * params.expertPerRank + groupIdx);
@@ -243,8 +230,7 @@ private:
     bool is_ping = false;
 
     
-    int32_t repeat = 128; //或者64应该也可以
-
+    int32_t repeat = 128;
 
     CopyGmToUbC copyGmToUbC;
     CopyUbToGmD copyUbToGmD;
