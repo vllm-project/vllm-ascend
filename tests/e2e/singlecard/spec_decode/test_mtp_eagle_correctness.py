@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 import os
-from typing import Union
 
 import pytest
 from vllm import SamplingParams
@@ -124,11 +123,11 @@ def test_deepseek_mtp_correctness(model_name: str, num_speculative_tokens: int,
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
 @pytest.mark.parametrize("async_scheduling", [True, False])
-@pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
-def test_llama_qwen3_eagle_correctness(
-        model_name: str, model_name_main: str, num_speculative_tokens: int,
-        method: str, disable_padded_drafter_batch: bool,
-        async_scheduling: bool, draft_tensor_parallel_size: Union[None, int]):
+def test_llama_qwen3_eagle_correctness(model_name: str, model_name_main: str,
+                                       num_speculative_tokens: int,
+                                       method: str,
+                                       disable_padded_drafter_batch: bool,
+                                       async_scheduling: bool):
 
     example_prompts = [
         "Hello, my name is",
@@ -163,8 +162,6 @@ def test_llama_qwen3_eagle_correctness(
                         "method": method,
                         "model": model_name,
                         "num_speculative_tokens": num_speculative_tokens,
-                        "draft_tensor_parallel_size":
-                        draft_tensor_parallel_size,
                         "max_model_len": 128,
                         "draft_vocab_size": 128256,
                     },

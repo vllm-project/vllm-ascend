@@ -7,11 +7,13 @@ Qwen3-Omni is the natively end-to-end multilingual omni-modal foundation models.
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, accuracy and performance evaluation.
 
 ## Supported Features
+
 Refer to [supported features](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/support_matrix/supported_models.html) to get the model's supported feature matrix.
 
 Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/index.html) to get the feature's configuration.
 
 ## Environment Preparation
+
 ### Model Weight
 
 - `Qwen3-Omni-30B-A3B-Thinking` require 2 NPU Card(64G × 2).[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
@@ -77,7 +79,9 @@ ffmpeg -version
 ```
 
 ## Deployment
+
 ### Single-node Deployment
+
 #### Offline Inference on Multi-NPU
 
 Run the following script to execute offline inference on multi-NPU:
@@ -177,6 +181,7 @@ vllm serve Qwen/Qwen3-Omni-30B-A3B-Thinking --tensor-parallel-size 2 --enable_ex
 ```
 
 ## Functional Verification
+
 Once your server is started, you can query the model with input prompts.
 
 ```bash
@@ -225,7 +230,8 @@ Here are accuracy evaluation methods.
 ### Using EvalScope
 
 As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
-1. Refer to Using evalscope(https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip) for `evalscope`installation.
+
+1. Refer to Using evalscope(<https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip>) for `evalscope`installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
 ```bash
@@ -258,11 +264,13 @@ evalscope eval \
 ## Performance
 
 ### Using vLLM Benchmark  
+
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
 Refer to vllm benchmark for more details.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

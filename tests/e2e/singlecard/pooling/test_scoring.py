@@ -5,6 +5,8 @@ import torch
 import torch.nn.functional as F
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
+from vllm_ascend.utils import vllm_version_is
+
 from tests.e2e.conftest import HfRunner, VllmRunner
 
 CROSS_ENCODER_MODELS = [
@@ -33,7 +35,10 @@ DTYPE = "half"
 def model_name(request):
     yield snapshot_download(request.param)
 
-
+@pytest.mark.skipif(
+    not vllm_version_is('0.13.0'),
+    reason="vLLM PR-32148 changed the behavior of cross scoring",
+)
 def test_cross_encoder_score_1_to_1(model_name):
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 
@@ -53,6 +58,10 @@ def test_cross_encoder_score_1_to_1(model_name):
     assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
 
 
+@pytest.mark.skipif(
+    not vllm_version_is('0.13.0'),
+    reason="vLLM PR-32148 changed the behavior of cross scoring",
+)
 def test_cross_encoder_score_1_to_N(model_name):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
@@ -76,6 +85,10 @@ def test_cross_encoder_score_1_to_N(model_name):
     assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
+@pytest.mark.skipif(
+    not vllm_version_is('0.13.0'),
+    reason="vLLM PR-32148 changed the behavior of cross scoring",
+)
 def test_cross_encoder_score_N_to_N(model_name):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],

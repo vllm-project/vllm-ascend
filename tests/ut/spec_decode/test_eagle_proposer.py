@@ -27,8 +27,6 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
-        self.vllm_config.parallel_config.tensor_parallel_size = 1
-        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
@@ -116,8 +114,6 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
-        self.vllm_config.parallel_config.tensor_parallel_size = 1
-        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
@@ -169,7 +165,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.proposer.load_model(mock_model)
         mock_get_model.assert_called_once()
-        self.assertEqual(self.proposer.attn_layer_name, ["layer3"])
+        self.assertEqual(self.proposer.attn_layer_names, ["layer3"])
         self.assertIs(self.proposer.model.model.embed_tokens,
                       mock_model.model.embed_tokens)
 
@@ -200,7 +196,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.assertIsNot(self.proposer.model.model.embed_tokens,
                          mock_model.model.embed_tokens)
-        self.assertEqual(self.proposer.attn_layer_name, ["layer2"])
+        self.assertEqual(self.proposer.attn_layer_names, ["layer2"])
 
     @patch(
         "vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
@@ -243,6 +239,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.speculative_config.num_speculative_tokens = 4
         self.device = torch.device("cpu")
         self.runner = MagicMock()
+        self.runner.pcp_size = 1
+        self.runner.dcp_size = 1
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -250,8 +248,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
-        self.vllm_config.parallel_config.tensor_parallel_size = 1
-        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
+        self.vllm_config.model_config.use_mla = False
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(4)
         ])
@@ -366,8 +363,6 @@ class TestEagleProposerHelperMethods(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
-        self.vllm_config.parallel_config.tensor_parallel_size = 1
-        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
