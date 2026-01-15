@@ -32,7 +32,8 @@ from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
-                               enable_dsa_cp, maybe_trans_nz, vllm_version_is)
+                               enable_dsa_cp, maybe_trans_nz, vllm_version_is,
+                               is_decode_only_instance)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 # isort: off
@@ -374,8 +375,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
-        self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
-        print(f'AscendSFAImpl ====================================== self.enable_mlapo:{self.enable_mlapo}========')
+        self.enable_mlapo = bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_only_instance())
+        print(f'AscendSFAImpl ====================================== self.enable_mlapo:{self.enable_mlapo}, is_decode_only:{is_decode_only_instance()}, envs.VLLM_ASCEND_ENABLE_MLAPO:{envs.VLLM_ASCEND_ENABLE_MLAPO} ====================')
 
         assert self.indexer is not None, "Indexer is required for DSA."
 
