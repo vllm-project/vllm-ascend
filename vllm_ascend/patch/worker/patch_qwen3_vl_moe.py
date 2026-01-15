@@ -22,7 +22,7 @@ from torchvision.transforms.v2 import functional
 
 class AscendQwen3VLMoeForConditionalGeneration(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super(Qwen3VLForConditionalGeneration, self).__init__()
+        nn.Module.__init__(self)
         config: Qwen3VLMoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
