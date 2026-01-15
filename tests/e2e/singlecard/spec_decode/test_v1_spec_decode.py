@@ -147,24 +147,23 @@ def test_qwen3_vl_eagle_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
     '''
-    ref_llm = LLM(model=vl_model_name, max_model_len=2048, enforce_eager=False)
-    ref_outputs = ref_llm.chat(test_prompts, sampling_config)
-    del ref_llm
+    with VllmRunner(
+            vl_model_name,
+            max_model_len=1024,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
+    ) as ref_llm:
+        ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
 
     spec_model_name = vl_eagle3_model_name()
     with VllmRunner(
             vl_model_name,
-            max_num_seqs=1,
-            max_num_batched_tokens=2048,
-            gpu_memory_utilization=0.6,
             speculative_config={
                 "method": "eagle3",
                 "model": spec_model_name,
                 "num_speculative_tokens": 2,
-                "max_model_len": 128,
             },
-            max_model_len=128,
-            enforce_eager=False,
+            max_model_len=1024,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
     matches = 0
@@ -180,7 +179,6 @@ def test_qwen3_vl_eagle_correctness(
     # Heuristic: expect at least 70% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
-
 
 def test_suffix_correctness(
     test_prompts: list[list[dict[str, Any]]],
