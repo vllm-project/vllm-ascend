@@ -14,7 +14,6 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
-from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend import envs
@@ -42,6 +41,11 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+if vllm_version_is('0.14.0'):
+    from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder  # type: ignore
+else:
+    from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
+# isort: on
 
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024

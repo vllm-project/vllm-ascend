@@ -12,7 +12,6 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
-from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
@@ -41,9 +40,16 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, maybe_trans_nz,
                                weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
+
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
+# isort: off
+if vllm_version_is('0.14.0'):
+    from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder  # type: ignore
+else:
+    from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
+# isort: on
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 BUILD_METADATA_STEP_PREFILL = 0
