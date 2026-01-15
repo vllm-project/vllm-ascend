@@ -51,7 +51,7 @@ deployment:
             }
         }'
         --additional-config
-        '{"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+        '{"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
 
   -
     server_cmd: >
@@ -87,5 +87,5 @@ deployment:
             }
         }'
         --additional-config
-        '{"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+        '{"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
 benchmarks:
