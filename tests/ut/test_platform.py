@@ -3,14 +3,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.attention.selector import AttentionSelectorConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
 
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
-                               COMPRESSED_TENSORS_METHOD, AscendDeviceType)
+                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+                               vllm_version_is)
+
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.selector import AttentionSelectorConfig  # type: ignore
+else:
+    from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
+# isort: on
 
 
 class TestNPUPlatform(TestBase):
@@ -37,6 +44,9 @@ class TestNPUPlatform(TestBase):
 
     def setUp(self):
         self.platform = NPUPlatform()
+        self.platform.supported_quantization[:] = [
+            "ascend", "compressed-tensors"
+        ]
 
     def test_class_variables(self):
         self.assertEqual(NPUPlatform._enum, PlatformEnum.OOT)
