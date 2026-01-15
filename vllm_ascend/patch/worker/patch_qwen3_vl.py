@@ -1,10 +1,10 @@
-import torch
 import torch.nn as nn
-from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
 from transformers.models.qwen3_vl import Qwen3VLProcessor
+from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
 
 
 class AscendQwen3VLProcessingInfo(nn.Module):
+
     def get_hf_processor(self, **kwargs: object) -> Qwen3VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen3VLProcessor,
@@ -13,5 +13,6 @@ class AscendQwen3VLProcessingInfo(nn.Module):
             do_normalize=False,
             **kwargs,
         )
+
 
 Qwen3VLProcessingInfo.get_hf_processor = AscendQwen3VLProcessingInfo.get_hf_processor
