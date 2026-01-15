@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from __future__ import annotations
+
 import math
 import os
 from typing import TYPE_CHECKING, Any
