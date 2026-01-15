@@ -2340,6 +2340,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config,
                                                   self.device)
+        self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     m.consumed_memory / float(2**30))
 
