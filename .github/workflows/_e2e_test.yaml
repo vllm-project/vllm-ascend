@@ -132,7 +132,7 @@ jobs:
           # spec_decode
           pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
           pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
-
+  
   e2e-2-cards:
     name: multicard-2
     runs-on: linux-aarch64-a3-2

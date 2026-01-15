@@ -3,7 +3,6 @@ from typing import Any, Optional
 
 import torch
 import zmq
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -20,6 +19,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     KVPoolScheduler, get_zmq_rpc_path_lookup)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import \
     KVPoolWorker
+from vllm_ascend.utils import vllm_version_is
+
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.abstract import AttentionMetadata  # type: ignore
+else:
+    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
+# isort: on
 
 
 class AscendStoreConnector(KVConnectorBase_V1):

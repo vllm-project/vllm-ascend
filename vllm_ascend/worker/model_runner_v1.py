@@ -30,9 +30,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.layer import Attention, MLAAttention
-from vllm.attention.selector import get_attn_backend
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed import (get_tensor_model_parallel_world_size,
@@ -119,6 +117,15 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.abstract import (  # type: ignore
+        AttentionBackend, AttentionType)
+    from vllm.attention.selector import get_attn_backend  # type: ignore
+else:
+    from vllm.v1.attention.selector import get_attn_backend  # type: ignore
+    from vllm.v1.attention.backend import AttentionBackend, AttentionType  # type: ignore
+# isort: on
 import torch_npu
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -1817,12 +1824,20 @@ class NPUModelRunner(GPUModelRunner):
                     valid_sampled_token_ids[int(i)].clear()
             else:
                 # Includes spec decode tokens.
-                valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
-                    sampled_token_ids,
-                    self.input_batch.vocab_size,
-                    discard_sampled_tokens_req_indices,
-                    return_cu_num_tokens=logprobs_tensors is not None,
-                )
+                if vllm_version_is('0.13.0'):
+                    valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
+                        sampled_token_ids,
+                        self.input_batch.vocab_size,
+                        discard_sampled_tokens_req_indices,
+                        return_cu_num_tokens=logprobs_tensors is not None,
+                    )
+                else:
+                    valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
+                        sampled_token_ids,
+                        self.input_batch.vocab_size,
+                        discard_sampled_tokens_req_indices,
+                        logprobs_tensors=logprobs_tensors,
+                    )
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
