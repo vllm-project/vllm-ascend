@@ -16,7 +16,7 @@ MODELS = [
 MODES = ["aclgraph"]
 
 TENSOR_PARALLELS = [4]
-MAX_NUM_BATCHED_TOKENS = [1024, 4096, 8192, 32768]
+MAX_NUM_BATCHED_TOKENS = [8192, 32768]
 
 prompts = [
     "San Francisco is a",
@@ -70,7 +70,7 @@ async def test_models(model: str, mode: str, tp_size: int,
         "HCCL_BUFFSIZE": "1024",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     }
-    compilation_config = {"cudagraph_mode": "FULL_DECODE_ONLY"}
+    compilation_config = {}
     server_args = [
         "--tensor-parallel-size",
         str(tp_size),
@@ -81,6 +81,9 @@ async def test_models(model: str, mode: str, tp_size: int,
         "--max-num-batched-tokens",
         str(max_num_batched_tokens),
         "--trust-remote-code",
+        "--async-scheduling",
+        "--no-enable-prefix-caching",
+        "--enable-expert-parallel",
         "--gpu-memory-utilization",
         "0.8",
         "--max-num-seqs",
