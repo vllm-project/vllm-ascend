@@ -61,17 +61,17 @@ static uint64_t GetMaxWindowSize()
 {
     uint16_t defaultWindowSize = 200;
     if (getenv(HCCL_BUFFSIZE) == nullptr) {
-        OPS_LOG_D("", "Env HCCL_BUFFSIZE don't set");
+        OP_LOGD(K_INNER_DEBUG, "Env HCCL_BUFFSIZE don't set");
     } else {
         try {
             std::string envStr(getenv(HCCL_BUFFSIZE));
             defaultWindowSize = std::stoi(envStr);
         } catch (...) {
-            OPS_LOG_E("", "Unknown Exception encountered when parser env HCCL_BUFFERSIZE");
+            OP_LOGE(K_INNER_DEBUG, "Unknown Exception encountered when parser env HCCL_BUFFERSIZE");
         }
     }
     const uint64_t maxWindowSize = static_cast<uint64_t>(defaultWindowSize) * 1024UL * 1024UL;
-    OPS_LOG_I("", "Get maxWindowSize is %lu", maxWindowSize);
+    OP_LOGD(K_INNER_DEBUG, "Get maxWindowSize is %lu", maxWindowSize);
     return maxWindowSize;
 }
 
@@ -253,7 +253,7 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     tilingData->cocTiling.moeInitRoutingQuantV2TilingData.gatherOutComputeParamsOp = moeInitRoutingQuantV2TilingBase.quantTilingData.gatherOutComputeParamsOp;
     tilingData->cocTiling.initRoutingQuantTilingKey = initRoutingQuantTilingKey;
 
-    uint64_t maxWindowSize = mc2tiling::Mc2TilingUtils::GetMaxWindowSize();
+    uint64_t maxWindowSize = GetMaxWindowSize();
     uint64_t actualSize = info.M * info.topK * info.K * sizeof(int8_t) * 3 + 3 * MB_SIZE ;
     OP_TILING_CHECK((actualSize > maxWindowSize),
         OP_LOGE(nodeName, "HCCL_BUFFSIZE is too SMALL, m = %lu, k = %lu, topK = %lu"
