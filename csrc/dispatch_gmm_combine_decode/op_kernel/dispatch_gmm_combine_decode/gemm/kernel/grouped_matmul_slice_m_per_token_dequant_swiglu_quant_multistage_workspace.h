@@ -230,7 +230,6 @@ public:
             AscendC::WholeReduceMax(ubReduceMax, ubMax, mask, tileRow, 1, 1, halfTileColumn / elementPerBlk,
                                     AscendC::ReduceOrder::ORDER_ONLY_VALUE);
             AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(0);
             AscendC::PipeBarrier<PIPE_V>();
 
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
@@ -266,6 +265,7 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(1);
             AscendC::Cast(ubOutput, ubQuantF16, AscendC::RoundMode::CAST_RINT, tileCount);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(1);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(0);
 
             auto gmTileOutput = gmOutput[params.layoutOutput.GetOffset(tileOffset)];
             auto layoutGmTileOutput = params.layoutOutput.GetTileLayout(actualTileShape);
