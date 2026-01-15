@@ -151,9 +151,9 @@ public:
         L1TileShape::K, L1TileShape::N);
 
     CATLASS_DEVICE
-    BlockMmad(Arch::Resource<ArchTag> &resource, __gm__ int32_t* flagPtr = nullptr, int32_t expertPerRank = 0, uint32_t l1BufAddrStart = 0)
+    BlockMmad(Arch::Resource<ArchTag> &resource,  int32_t expertPerRank = 0, __gm__ int32_t* flagPtr = nullptr, int32_t expertIdStart = 0, uint32_t l1BufAddrStart = 0)
     {
-        syncGroupIdx = 0;
+        syncGroupIdx = expertIdStart;
         ptrSoftFlagBase_ = flagPtr;
         expertPerRank_ = expertPerRank;
         InitL1(resource, l1BufAddrStart);

@@ -64,7 +64,6 @@ class DispatchFFNCombine : public OpDef {
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND,ge::FORMAT_ND});
 
     this->Attr("group").AttrType(REQUIRED).String();
-    this->Attr("M").AttrType(OPTIONAL).Int();
     this->Attr("transB").AttrType(OPTIONAL).Bool(false);
     this->Attr("weightNz").AttrType(OPTIONAL).Bool(false);
 
