@@ -22,9 +22,12 @@ from collections import defaultdict
 
 import numpy as np
 import torch
+import torch_npu
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
+
+_MOE_LOAD_ASYNC_STREAM = None
 
 
 def expert_file_to_tensor(expert_map_path, layer_id):
