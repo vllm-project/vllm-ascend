@@ -1,8 +1,11 @@
 # Using AISBench
+
 This document guides you to conduct accuracy testing using [AISBench](https://gitee.com/aisbench/benchmark/tree/master). AISBench provides accuracy and performance evaluation for many datasets.
 
 ## Online Server
+
 ### 1. Start the vLLM server
+
 You can run docker container to start the vLLM server on a single NPU:
 
 ```{code-block} bash
@@ -44,7 +47,7 @@ vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 35000 &
 
 The vLLM server is started successfully, if you see logs as below:
 
-```
+```shell
 INFO:     Started server process [9446]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -220,7 +223,7 @@ ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_pro
 
 After each dataset execution, you can get the result from saved files such as `outputs/default/20250628_151326`, there is an example as follows:
 
-```
+```shell
 20250628_151326/
 ├── configs # Combined configuration file for model tasks, dataset tasks, and result presentation tasks
 │   └── 20250628_151326_29317.py
@@ -276,7 +279,7 @@ ais_bench --models vllm_api_stream_chat --datasets textvqa_gen_base64 --summariz
 
 After execution, you can get the result from saved files, there is an example as follows:
 
-```
+```shell
 20251031_070226/
 |-- configs # Combined configuration file for model tasks, dataset tasks, and result presentation tasks
 |   `-- 20251031_070226_122485.py
