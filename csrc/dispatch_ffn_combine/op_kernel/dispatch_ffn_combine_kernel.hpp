@@ -296,6 +296,51 @@ private:
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
     }
 
+    // token和scale一起搬运，分别写入不同位置
+    template<typename T>
+    CATLASS_DEVICE void CopyGMToGMPerToken(
+        AscendC::GlobalTensor<T> dst,
+        AscendC::GlobalTensor<float> dstScale,
+        AscendC::GlobalTensor<T> src,
+        int32_t rows,
+        int32_t hiddenSize
+    )
+    {
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+ 
+        constexpr int32_t BufferNum = 2;
+        AscendC::LocalTensor<T> tmpBuffer1 = resource.ubBuf.template GetBufferByByte<T>(0);
+        constexpr int tmpBufferOffset = 96 * 1024; // half of UB
+        AscendC::LocalTensor<T> tmpBuffer2 = resource.ubBuf.template GetBufferByByte<T>(tmpBufferOffset);
+        uint32_t copyInNum = hiddenSize + ALIGN_512;
+        // [ReduceScatter] 2. Pre Interface Sync
+        int pingpongId = 0;
+        for (uint32_t processIndex = 0; processIndex < rows; ++processIndex) {
+            AscendC::TEventID EVENT_ID = pingpongId == 0 ? EVENT_ID0 : EVENT_ID1;
+            AscendC::LocalTensor<T> buf = pingpongId == 0 ? tmpBuffer1 : tmpBuffer2;
+            AscendC::LocalTensor<float> bufScale = buf[hiddenSize].template ReinterpretCast<float>();
+            auto inputOffset = processIndex * copyInNum;
+            auto outputOffset = processIndex * hiddenSize;
+            // [ReduceScatter] 2. Pre Interface Sync
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
+            // [ReduceScatter] 3. Start shmem_mte_get_mem_nbi
+            AscendC::DataCopy(buf, src[inputOffset], copyInNum);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
+            AscendC::DataCopy(dst[outputOffset], buf, hiddenSize);
+            AscendC::DataCopyPad(dstScale[processIndex], bufScale, {1, 4, 0, 0, 0});
+ 
+            // [ReduceScatter] 4. Post Interface Sync
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
+            pingpongId = (pingpongId + 1) % BufferNum;
+        }
+        // [ReduceScatter] 4. Post Interface Sync
+ 
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+    }
+
     CATLASS_DEVICE
     void GetCumsumForMMAIV(AscendC::GlobalTensor<int32_t> & tokenPerExpert, AscendC::GlobalTensor<int32_t> & result, uint32_t expertPerRank, uint32_t rankId, uint32_t EP)
     {
@@ -802,17 +847,16 @@ private:
                     GM_ADDR otherRankPtr = shmem(0, dstEpIdx);
                     AscendC::GlobalTensor<ElementA> gmRemoteA;
                     gmRemoteA.SetGlobalBuffer(reinterpret_cast<__gm__ ElementA*>(otherRankPtr + peermemInfo.offsetA));
-                    AscendC::GlobalTensor<ElementPerTokenScale> gmRemotePerTokenScale;
-                    gmRemotePerTokenScale.SetGlobalBuffer(reinterpret_cast<__gm__ ElementPerTokenScale*>(otherRankPtr + peermemInfo.offsetPeerPerTokenScale));
+
                     MatrixCoord offsetA{rowStart, 0};
-                    MatrixCoord shapeA{rows, params.problemShape.k()};
+
                     MatrixCoord offsetPeer{rowSrc, 0};
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
-                    int64_t gmOffsetPeer = params.layoutA.GetOffset(offsetPeer);
+                    int64_t gmOffsetPeer = rowSrc * (params.problemShape.k() + ALIGN_512);
                     // 通信Data
-                    CopyGMToGM(gmA[gmOffsetA], gmRemoteA[gmOffsetPeer], rows * params.problemShape.k(), params.ubMoveNum);
+                    CopyGMToGMPerToken(gmA[gmOffsetA], gmPerTokenScale1[rowStart], gmRemoteA[gmOffsetPeer],  rows, params.problemShape.k());
                     // 通信scale
-                    CopyGMToGM(gmPerTokenScale1[rowStart], gmRemotePerTokenScale[rowSrc], rows, rows);
+                    //CopyGMToGM(gmPerTokenScale1[rowStart], gmRemotePerTokenScale[rowSrc], rows, rows);
                 }
                 #ifdef __SOFT_SYNC__
                 //软同步的set

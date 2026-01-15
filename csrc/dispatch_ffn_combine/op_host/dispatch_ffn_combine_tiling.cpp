@@ -175,7 +175,7 @@ void SetTilingData(CoCTiling &cocTilingData, DispatchFFNCombineInfo &info)
     cocTilingData.n0 = 256;
     cocTilingData.swizzleDirect = 1;
     cocTilingData.swizzleOffset = 7;
-    cocTilingData.ubMoveNum = 16 * 1024;
+    cocTilingData.ubMoveNum = 7168;
     cocTilingData.pValue = 1;
     cocTilingData.commNpuSplit = info.worldSize;
     cocTilingData.commDataSplit = 1;
