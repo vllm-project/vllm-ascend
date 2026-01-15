@@ -16,9 +16,10 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 
-from vllm_ascend.distributed.kvpool.pool_scheduler import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler, get_zmq_rpc_path_lookup)
-from vllm_ascend.distributed.kvpool.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import \
+    KVPoolWorker
 
 
 class AscendStoreConnector(KVConnectorBase_V1):

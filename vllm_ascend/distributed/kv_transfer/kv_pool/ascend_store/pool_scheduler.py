@@ -13,7 +13,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
-from vllm_ascend.distributed.kvpool.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata, LoadSpec, ReqMeta, RequestTracker)
 
 
