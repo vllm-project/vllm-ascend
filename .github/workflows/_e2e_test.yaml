@@ -71,6 +71,9 @@ jobs:
       - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
+          apt-get -y install clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
@@ -129,7 +132,7 @@ jobs:
           # spec_decode
           pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
           pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
-
+  
   e2e-2-cards:
     name: multicard-2
     runs-on: linux-aarch64-a3-2
@@ -194,6 +197,9 @@ jobs:
       - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
+          apt-get -y install clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
@@ -217,7 +223,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_full_graph_mode.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
-          
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/spec_decode/test_spec_decode.py
 
           # To avoid oom, we need to run the test in a single process.
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
@@ -296,6 +302,9 @@ jobs:
       - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
+          apt-get -y install clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"

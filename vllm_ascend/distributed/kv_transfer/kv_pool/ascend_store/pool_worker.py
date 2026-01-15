@@ -11,15 +11,16 @@ from vllm.distributed import (get_decode_context_model_parallel_rank,
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-from vllm_ascend.distributed.kvpool.backend.backend import Backend
-from vllm_ascend.distributed.kvpool.backend.memcache_backend import \
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import \
+    Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import \
     MemcacheBackend
-from vllm_ascend.distributed.kvpool.backend.mooncake_backend import \
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import \
     MooncakeBackend
-from vllm_ascend.distributed.kvpool.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata, ChunkedTokenDatabase, KeyMetadata,
     LasyerMultiBlockReqMeta, ReqMeta)
-from vllm_ascend.distributed.kvpool.kv_transfer import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreLayerRecvingThread, KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
 

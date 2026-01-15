@@ -17,6 +17,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 ## Environment Preparation
 
 ### Model Weight
+
 - `GLM-4.5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5).
 - `GLM-4.6`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6).
 - `GLM-4.7`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7).
@@ -102,6 +103,7 @@ vllm serve /weight/glm4.5_w8a8_with_float_mtp \
 
 **Notice:**
 The parameters are explained as follows:
+
 - For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
 - `--async-scheduling` Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
 
@@ -118,6 +120,7 @@ Not test yet.
 Here are two accuracy evaluation methods.
 
 ### Using AISBench
+
 1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result, here is the result of `GLM4.6` in `vllm-ascend:main` (after `vllm-ascend:0.13.0rc1`) for reference only.
@@ -144,6 +147,7 @@ Run performance evaluation of `GLM-4.x` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.
