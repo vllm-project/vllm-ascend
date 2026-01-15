@@ -13,12 +13,6 @@ spec:
         labels:
           role: leader
       spec:
-        schedulerName: volcano
-        tolerations:
-          - key: "instance"
-            operator: "Equal"
-            value: "vllm"
-            effect: "NoSchedule"
         containers:
           - name: vllm-leader
             imagePullPolicy: Always
@@ -71,12 +65,6 @@ spec:
             path: /usr/local/Ascend/driver/tools
     workerTemplate:
       spec:
-        schedulerName: volcano
-        tolerations:
-          - key: "instance"
-            operator: "Equal"
-            value: "vllm"
-            effect: "NoSchedule"
         containers:
           - name: vllm-worker
             imagePullPolicy: Always
