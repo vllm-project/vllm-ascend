@@ -9,8 +9,8 @@ class AscendQwen3VLProcessingInfo(nn.Module):
         return self.ctx.get_hf_processor(
             Qwen3VLProcessor,
             use_fast=kwargs.pop("use_fast", True),
-            do_rescale = False,
-            do_nomarlize = False,
+            do_rescale=False,
+            do_normalize=False,
             **kwargs,
         )
 
