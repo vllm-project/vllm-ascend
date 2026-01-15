@@ -179,7 +179,7 @@ class RandomLoadBalance(EplbPolicy):
 
 #### Integer Parameters
 
-All integer input parameters must explicitly specify their maximum and minimum values and be subject to valid value validation. For example, `num_iterations_eplb_update` must be greater than 0:
+All integer input parameters must explicitly specify their maximum and minimum values and be subject to valid value validation. For example, `expert_heat_collection_interval` must be greater than 0:
 
 ```python
     @staticmethod

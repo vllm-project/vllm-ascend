@@ -91,7 +91,6 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
     D2DExpertWeightLoader
-from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
@@ -290,13 +289,11 @@ class NPUModelRunner(GPUModelRunner):
 
         self.use_aclgraph = self._use_aclgraph()
 
-        self.dynamic_eplb = self.ascend_config.dynamic_eplb or self.ascend_config.expert_map_record_path
+        eplb_config = self.ascend_config.eplb_config
+        self.dynamic_eplb = eplb_config.dynamic_eplb
         if self.dynamic_eplb:
-            EPLBParamUtils.check_dynamic_eplb(self.ascend_config.dynamic_eplb)
-            EPLBParamUtils.check_expert_map_record_path(
-                self.ascend_config.expert_map_record_path)
             self.is_eplb_warmuped = False
-            self.policy_type = self.ascend_config.eplb_policy_type
+            self.policy_type = eplb_config.eplb_policy_type
             self.eplb_loader = D2DExpertWeightLoader()
             self.manager = Manager()
             self.shared_dict = self.manager.dict({
@@ -308,8 +305,7 @@ class NPUModelRunner(GPUModelRunner):
                                             policy_type=self.policy_type,
                                             enable_d2d=True)
             self.process = self.eplb_process._launch_process()
-            ascend_config = get_ascend_config()
-            self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader,
+            self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader,
                                             self.eplb_process, self.process)
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
