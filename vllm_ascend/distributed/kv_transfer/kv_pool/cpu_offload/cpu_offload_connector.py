@@ -23,7 +23,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         MambaSpec, MLAAttentionSpec)
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.metadata import (
     MetadataServer, MetadataServerProc, MLAConfig)
 from vllm_ascend.utils import vllm_version_is
 
