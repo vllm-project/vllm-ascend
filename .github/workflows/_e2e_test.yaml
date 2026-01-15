@@ -215,6 +215,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_expert_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_full_graph_mode.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/spec_decode/test_spec_decode.py
           # torch 2.8 doesn't work with lora, fix me
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
           
