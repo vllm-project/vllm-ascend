@@ -105,10 +105,12 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     # during initialization in offline mode, so the online mode is used instead.
     env_dict.update({"DYNAMIC_EPLB": "true"})
     additional_config = {
-        "dynamic_eplb": True,
-        "num_iterations_eplb_update": 100,
-        "num_wait_worker_iterations": 20,
-        "num_redundant_experts": 2
+        "eplb_config": {
+            "dynamic_eplb": True,
+            "expert_heat_collection_interval": 100,
+            "algorithm_execution_interval": 20,
+            "num_redundant_experts": 2
+        }
     }
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     with RemoteOpenAIServer(model,
