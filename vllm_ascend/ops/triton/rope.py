@@ -165,7 +165,8 @@ def rope_forward_triton(q: torch.Tensor,
                         cos: torch.Tensor,
                         sin: torch.Tensor,
                         rope_dim: int = -1,
-                        is_neox_style: bool = True):
+                        is_neox_style: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor]:
     if not q.is_contiguous():
         q = q.contiguous()
     if not k.is_contiguous():
