@@ -160,10 +160,10 @@ def _triton_rope(
                  mask=second_k_mask)
 
 
-def rope_forward_triton(q,
-                        k,
-                        cos,
-                        sin,
+def rope_forward_triton(q: torch.Tensor,
+                        k: torch.Tensor,
+                        cos: torch.Tensor,
+                        sin: torch.Tensor,
                         rope_dim: int = -1,
                         is_neox_style: bool = True):
     if not q.is_contiguous():
