@@ -44,6 +44,7 @@ docker run --rm \
 ```
 
 ## Verify the Quantized Model
+
 Please be advised to edit the value of `"quantization_config.config_groups.group_0.targets"` from `["Linear"]` into `["MoE"]` in `config.json` of original model downloaded from [Hugging Face](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
 
 ```json

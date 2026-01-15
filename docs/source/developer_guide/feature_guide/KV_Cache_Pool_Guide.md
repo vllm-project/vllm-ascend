@@ -21,6 +21,7 @@ vLLM Ascend Currently supports Mooncake Store for KV Cache Pool. To enable Moonc
 For step-by-step deployment and configuration, please refer to the [KV Pool User Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_pool.html).
 
 ## How it works?
+
 The KV Cache Pool integrates multiple memory tiers (HBM, DRAM, SSD, etc.) through a connector-based architecture.
 
 Each connector implements a unified interface for storing, retrieving, and transferring KV blocks between tiers, depending on access frequency and hardware bandwidth.
@@ -28,6 +29,7 @@ Each connector implements a unified interface for storing, retrieving, and trans
 When combined with vLLM’s Prefix Caching mechanism, the pool enables efficient caching both locally (in HBM) and globally (via Mooncake), ensuring that frequently used prefixes remain hot while less frequently accessed KV data can spill over to lower-cost memory.
 
 ### 1. Combining KV Cache Pool with HBM Prefix Caching
+
 Prefix Caching with HBM is already supported by the vLLM V1 Engine.
 By introducing KV Connector V1, users can seamlessly combine HBM-based Prefix Caching with Mooncake-backed KV Pool.
 
@@ -54,17 +56,22 @@ To Enable this feature, we need to setup both Mooncake Connector and Mooncake St
 For details, please also refer to the Mooncake Connector Store Deployment Guide.
 
 ## How is MooncakestoreConnectorV1 Implemented?
+
 **MooncakestoreConnectorV1** inhereits the KV Connector V1 class in vLLM V1: through implementing the required methods defined in the KV connector V1 base class, one can integrate a thrid-party KV cache transfer/storage backend into the vLLM framework.
 
 MooncakeStoreConnectorV1 is also largly inspried by LMCacheConnectorV1 in term of the `Lookup Engine`/`Lookup Client` design for looking up KV cache keys, and the `ChunkedTokenDatabase` class for processing tokens into prefix-aware hashes as well as other hashing related designs. On top of this, we have also added our own design including `KVTransferThread` that allows async `get` and `put` of KV caches with multi-threading, and NPU-related data transfer optimization such as removing the `LocalBuffer` in LMCache to remove redundant data transfer.
 
 The KV Connector methods that need to be implemented can be categorized into scheduler-side methods that are called in V1 scheduler and worker-side methods that are called in V1 worker, namely:
-### KV Connector Scheduler-Side Methods:
+
+### KV Connector Scheduler-Side Methods
+
 `get_num_new_matched_tokens`: Get prefix cache hit in number of tokens through looking up into the KV pool.  
 `update_states_after_alloc`:  Update KVConnector state after temporary buffer alloc.  
 `build_connector_meta`: Attach the connector metadata to the request object.  
 `request_finished`: Once a request is finished, determine whether request blocks should be freed now or will be sent asynchronously and freed later.
-### Connector Worker-Side Methods:
+
+### Connector Worker-Side Methods
+
 `register_kv_caches`: Register KV cache buffers needed for KV cache transfer.  
 `start_load_kv`: Perform KV cache load operation that transfers KV cache from storage to device.  
 `wait_for_layer_load`: Optional; Wait for layer load in layerwise + async KV load scenario.  
@@ -73,6 +80,7 @@ The KV Connector methods that need to be implemented can be categorized into sch
 `get_finished` Get request that finished KV transfer, `done_sending` if `put` finished, `done_reciving` if `get` finished.
 
 ## DFX
+
 1. When looking up a key in KV Pool, if we cannot find the key, there is no Cache Hit for this specific block; we return no hit for this block and do not look up further blocks for current request.
 2. Similaly, when we are trying to put a block into KV Pool and failed, we do not put further blocks (subject to change).
 

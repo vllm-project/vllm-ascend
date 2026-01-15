@@ -1,6 +1,6 @@
 # Supported Models
 
-Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/1608
+Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/1608>
 
 ## Text-Only Language Models
 

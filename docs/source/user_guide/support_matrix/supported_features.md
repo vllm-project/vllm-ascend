@@ -2,7 +2,7 @@
 
 The feature support principle of vLLM Ascend is: **aligned with the vLLM**. We are also actively collaborating with the community to accelerate support.
 
-Functional call: https://docs.vllm.ai/en/latest/features/tool_calling/
+Functional call: <https://docs.vllm.ai/en/latest/features/tool_calling/>
 
 You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is the feature support status of vLLM Ascend:
 
