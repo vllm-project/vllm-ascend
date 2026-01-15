@@ -15,58 +15,61 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 import pytest
-import vllm  # noqa: F401
-from vllm import SamplingParams
+from vllm.assets.image import ImageAsset
 
-import vllm_ascend  # noqa: F401
 from tests.e2e.conftest import VllmRunner
 
-MODELS = ["Qwen/Qwen3-0.6B", "Qwen/Qwen2.5-7B-Instruct"]
 
-
-@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float16"])
 @pytest.mark.parametrize("max_tokens", [5])
-def test_models(model: str, dtype: str, max_tokens: int) -> None:
+def test_llm_models(dtype: str, max_tokens: int) -> None:
     example_prompts = [
         "Hello, my name is",
         "The future of AI is",
     ]
 
-    with VllmRunner(model,
+    with VllmRunner("Qwen/Qwen3-0.6B",
                     tensor_parallel_size=1,
                     dtype=dtype,
                     max_model_len=2048,
-                    enforce_eager=True,
-                    compilation_config={
-                        "custom_ops":
-                        ["none", "+rms_norm", "+rotary_embedding"]
-                    }) as vllm_model:
+                    enforce_eager=True) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-VL_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
+def test_multimodal_vl():
+    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float16"])
-def test_vl_model_with_samples(model: str, dtype: str) -> None:
-    example_prompts = [
-        "Hello, my name is",
-        "The future of AI is",
+    img_questions = [
+        "What is the content of this image?",
+        "Describe the content of this image in detail.",
+        "What's in the image?",
+        "Where is this image taken?",
     ]
 
-    with VllmRunner(model,
-                    tensor_parallel_size=1,
-                    dtype=dtype,
-                    max_model_len=2048,
+    images = [image] * len(img_questions)
+    placeholder = "<|image_pad|>"
+    prompts = [
+        ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+         f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+         f"{q}<|im_end|>\n<|im_start|>assistant\n") for q in img_questions
+    ]
+
+    with VllmRunner("Qwen/Qwen2.5-VL-3B-Instruct",
+                    mm_processor_kwargs={
+                        "min_pixels": 28 * 28,
+                        "max_pixels": 1280 * 28 * 28,
+                        "fps": 1,
+                    },
+                    max_model_len=8192,
                     enforce_eager=True,
-                    compilation_config={
-                        "custom_ops":
-                        ["none", "+rms_norm", "+rotary_embedding"]
-                    }) as vllm_model:
-        sampling_params = SamplingParams(max_tokens=100,
-                                         top_p=0.95,
-                                         top_k=50,
-                                         temperature=0.6)
-        vllm_model.generate(example_prompts, sampling_params)
+                    limit_mm_per_prompt={"image": 1}) as vllm_model:
+        outputs = vllm_model.generate_greedy(
+            prompts=prompts,
+            images=images,
+            max_tokens=64,
+        )
+
+        assert len(outputs) == len(prompts)
+
+        for _, output_str in outputs:
+            assert output_str, "Generated output should not be empty."
