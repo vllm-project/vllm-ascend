@@ -20,9 +20,8 @@ on:
   pull_request:
     branches:
       - 'main'
-      - '*-dev'
       - 'releases/v*'
-    types: [ labeled, synchronize ]
+    types: [ labeled, synchronize, auto_merge_enabled ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -40,10 +39,11 @@ concurrency:
 jobs:
   changes:
     runs-on: linux-aarch64-a2-0
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
+    if: ${{ (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) || github.event.pull_request.auto_merge_enabled }}
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
+      _310_tracker: ${{ steps.filter.outputs._310_tracker }}
     steps:
       - name: Setup git proxy
         run: |
@@ -70,6 +70,8 @@ jobs:
               - 'packages.txt'
             ut_tracker:
               - 'tests/ut/**'
+            _310_tracker:
+              - 'vllm_ascend/_310p/**'
 
   e2e-test:
     name: e2e-full
@@ -77,11 +79,9 @@ jobs:
       matrix:
         vllm_version: [2c24bc6996cb165fce92f780b388a5e39b3f4060, v0.13.0]
     needs: [changes]
-    if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
-      contains_310: false
       type: full
+      contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
+      is_e2e_change: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
