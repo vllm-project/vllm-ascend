@@ -41,8 +41,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.distributed.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.utils import get_transfer_timeout_value
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
 from vllm_ascend.utils import is_vl_model
 
 if TYPE_CHECKING:

@@ -326,7 +326,6 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   "kv_role": "kv_producer",
   "kv_port": "30000",
   "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -402,7 +401,6 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   "kv_role": "kv_producer",
   "kv_port": "30100",
   "engine_id": "1",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -480,7 +478,6 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   "kv_role": "kv_consumer",
   "kv_port": "30200",
   "engine_id": "2",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -558,7 +555,6 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   "kv_role": "kv_consumer",
   "kv_port": "30300",
   "engine_id": "3",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,

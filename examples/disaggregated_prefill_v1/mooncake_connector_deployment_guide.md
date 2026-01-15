@@ -55,7 +55,6 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   "kv_port": "20001",
   "engine_id": "0",
   "kv_rank": 0,
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -123,7 +122,6 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   "kv_port": "20002",
   "engine_id": "1",
   "kv_rank": 1,
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,

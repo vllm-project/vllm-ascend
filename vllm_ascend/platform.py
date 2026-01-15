@@ -411,7 +411,7 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        return "vllm_ascend.distributed.communicator.NPUCommunicator"
+        return "vllm_ascend.distributed.device_communicators.npu_communicator.NPUCommunicator"
 
     @classmethod
     def is_pin_memory_available(cls):
