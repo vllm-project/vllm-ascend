@@ -793,12 +793,11 @@ def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
-# flash comm 1 for vl model is implemented by pass
-def enable_sp_by_custom_op(vllm_config: VllmConfig = None):
-    if vllm_config is None:
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-    return enable_sp(vllm_config) and not is_vl_model(vllm_config)
+def enable_flash_comm_v1():
+    return (envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
 
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
@@ -809,10 +808,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             vllm_config = get_current_vllm_config()
         _ENABLE_SP = (
             vllm_config.compilation_config.pass_config.enable_sp
-            or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
-            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+            or enable_flash_comm_v1())
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
