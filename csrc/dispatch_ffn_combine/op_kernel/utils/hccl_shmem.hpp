@@ -6,8 +6,7 @@
 #include "const_args.hpp"
 
 #ifdef HCCL_COMM
-#include "hccl/hccl_common.h"
-#include "hccl/common/hccl_inner_def.h"
+#include "moe_distribute_base.h"
 using namespace AscendC::HcclContextDef;
 
 #else
@@ -87,8 +86,8 @@ public:
             auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
             WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
 
-            m_rank = WinContext_->rankId;
-            m_rankSize = WinContext_->rankNum;
+            m_rank = WinContext_->localUsrRankId;
+            m_rankSize = WinContext_->rankSize;
             m_segmentSize = WinContext_->winSize;
         }
     #else

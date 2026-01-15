@@ -42,6 +42,7 @@
     #include "utils/copy_gm_to_l1_custom.hpp"
     #include "utils/copy_l0c_to_gm_custom.hpp"
     #include "utils/block_epilogue_pertoken_row.hpp"
+    #include "utils/block_epilogue_pertoken_v2.hpp"
     #include "utils/block_epilogue_pertoken_swiglu.hpp"
     #include "utils/hccl_shmem.hpp"
     #include "utils/const_args.hpp"
@@ -52,10 +53,6 @@
     #include "unpermute/moe_token_unpermute.h"
     #include "utils/get_tensor_addr.hpp"
 #endif
-
-#define __SOFT_SYNC__
-#define __COMBINE_V2__
-
 
 using namespace AscendC;
 

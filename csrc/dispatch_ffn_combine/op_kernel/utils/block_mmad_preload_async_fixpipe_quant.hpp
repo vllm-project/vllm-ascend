@@ -289,9 +289,6 @@ public:
                 int32_t flagId = syncGroupIdx / 8 + flag;
                 AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(flagId);
             }
-            if (timer != nullptr) {
-                timer->tok(timer->getIndex() + target);
-            }
         }
     }
 private:
@@ -498,7 +495,7 @@ private:
                 AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(flagId);
             }
             #else
-            Finalize(params.syncLoopIdx, params.flag, params.timer);
+            Finalize(params.syncLoopIdx, params.flag);
             #endif
         }
     }
