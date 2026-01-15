@@ -89,7 +89,6 @@ def eagle3_model_name():
 def vl_model_name():
     return "Qwen/Qwen3-VL-8B-Instruct"
 
-
 def vl_eagle3_model_name():
     return "MNN/Qwen3-VL-8B-Instruct-Eagle3"
 

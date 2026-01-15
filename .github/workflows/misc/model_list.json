@@ -148,6 +148,7 @@
       "moonshotai/Kimi-K2-Thinking",
       "moonshotai/Kimi-Linear-48B-A3B-Instruct",
       "neuralmagic/Qwen2.5-3B-quantized.w8a8",
+      "MNN/Qwen3-VL-8B-Instruct-Eagle3",
       "nv-community/audio-flamingo-3",
       "nv-community/audio-flamingo-3-hf",
       "nvidia/audio-flamingo-3-hf",
@@ -234,4 +235,3 @@
       "xlangai/OpenCUA-7B"
     ]
   }
-  
