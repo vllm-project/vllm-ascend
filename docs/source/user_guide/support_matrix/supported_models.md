@@ -3,6 +3,7 @@
 Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/1608>
 
 **Legend Description**:
+
 - ✅ = Supported model/feature
 - ❌  = Not supported model/feature
 - 🟡  = Not tested or verified
@@ -12,6 +13,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 ### Generative Models
 
 #### Core Supported Models
+
 | Model                         | Support   | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
 |-------------------------------|-----------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|
 | DeepSeek V3/3.1               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k || [DeepSeek-V3.1](../../tutorials/DeepSeek-V3.1.md) |
@@ -26,6 +28,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Kimi-K2-Thinking              | ✅        |                                                                      || A2/A3 |||||||||||||||| [Kimi-K2-Thinking](../../tutorials/Kimi-K2-Thinking.md) |
 
 #### Extended Compatible Models
+
 | Model                         | Support   | Note                                                                 | Supported Hardware |
 |-------------------------------|-----------|----------------------------------------------------------------------|--------------------|
 | DeepSeek Distill (Qwen/Llama) | ✅        |                                                                      | A2/A3 |
@@ -48,6 +51,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Mistral/Mistral-Instruct      | ✅        |                                                                      | A2/A3 |
 | GLM-4                         | ❌        | [#2255](https://github.com/vllm-project/vllm-ascend/issues/2255)     |       |
 | GLM-4-0414                    | ❌        | [#2258](https://github.com/vllm-project/vllm-ascend/issues/2258)     |       |
+| ChatGLM                       | ❌        | [#554](https://github.com/vllm-project/vllm-ascend/issues/554)       |       |
 | DeepSeek V2.5                 | 🟡        | Need test                                                            |       |
 | Mllama                        | 🟡        | Need test                                                            |       |
 | MiniMax-Text                  | 🟡        | Need test                                                            |       |
@@ -67,6 +71,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 ### Generative Models
 
 #### Core Supported Models
+
 | Model                          | Support       | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
 |--------------------------------|---------------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|
 | Qwen2.5-VL                     | ✅            |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ ||| ✅ | ✅ |||| ✅ | ✅ | ✅ | 30k || [Qwen-VL-Dense](../../tutorials/Qwen-VL-Dense.md) |
@@ -76,6 +81,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Qwen2.5-Omni                   | ✅            |                                                                      || A2/A3 |||||||||||||||| [Qwen2.5-Omni](../../tutorials/Qwen2.5-Omni.md) |
 
 #### Extended Compatible Models
+
 | Model                          | Support       | Note                                                                 | Supported Hardware |
 |--------------------------------|---------------|----------------------------------------------------------------------|--------------------|
 | Qwen2-VL                       | ✅            |                                                                      | A2/A3 |
