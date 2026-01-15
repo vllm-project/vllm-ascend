@@ -37,19 +37,38 @@ pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/
 # For torch-npu dev version or x86 machine
 export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
+# src path
+export SRC_WORKSPACE=/vllm-workspace
+mkdir -p $SRC_WORKSPACE
+# workspace
+export WORKSPACE=/workspace
+mkdir -p $WORKSPACE
+# TAG
+export SRC_TAG=v0.11.0
+cd $SRC_WORKSPACE
+python -m venv $SRC_TAG
+source $SRC_TAG/bin/activate
+
 apt-get update -y
 apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
-# Install vllm
-cd /vllm-project/vllm
-VLLM_TARGET_DEVICE=empty python3 -m pip -v install .
+# v0.11.0
+git clone -b v0.11.0-dev https://github.com/vllm-project/vllm-ascend.git
+git clone -b v0.11.0 https://github.com/vllm-project/vllm.git
 
-# Install vllm-ascend
-cd /vllm-project/vllm-ascend
-# [IMPORTANT] Import LD_LIBRARY_PATH to enumerate the CANN environment under CPU
+# vllm
+cd $WORKSPACE/vllm
+VLLM_TARGET_DEVICE=empty python3 -m pip install .
+python3 -m pip uninstall -y triton
+
+# vllm-ascend
+cd $SRC_WORKSPACE/vllm-ascend
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
-python3 -m pip install -r requirements-dev.txt
+# For cpu environment, set SOC_VERSION for different chips.
+# See https://github.com/vllm-project/vllm-ascend/blob/3cb0af0bcf3299089ca7e72159fa36e825a470f8/setup.py#L132 for detail.
+export SOC_VERSION="ascend910b1"
 python3 -m pip install -v .
+python3 -m pip install -r requirements-dev.txt
 ```
 
 ::::
