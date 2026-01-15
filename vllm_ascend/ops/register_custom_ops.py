@@ -15,6 +15,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 from typing import Optional, Tuple
+from vllm_ascend.ops.triton.rope import rope_forward_triton
 
 def _maybe_chunk_residual_impl(x: torch.Tensor,
                                residual: torch.Tensor) -> torch.Tensor:
