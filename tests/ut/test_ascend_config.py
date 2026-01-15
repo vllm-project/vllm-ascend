@@ -37,7 +37,6 @@ class TestAscendConfig(TestBase):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
         ascend_config = init_ascend_config(test_vllm_config)
-        self.assertIsNone(ascend_config.expert_map_path)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
 
@@ -52,12 +51,14 @@ class TestAscendConfig(TestBase):
                 "fuse_norm_quant": False,
             },
             "multistream_overlap_shared_expert": True,
-            "expert_map_path": "test_expert_map_path",
+            "eplb_config": {
+                "num_redundant_experts": 2
+            },
             "refresh": True,
             "enable_kv_nz": False
         }
         ascend_config = init_ascend_config(test_vllm_config)
-        self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
+        self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_npugraph_ex)
 
