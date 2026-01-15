@@ -50,6 +50,21 @@ def get_all_moe_loads(self):
     )
     return all_moe_loads
 
+def get_moe_load_lists(self):
+    num_dense_layers = self.num_dense_layers if hasattr(
+        self, "num_dense_layers") else 0
+    def _stack_moe_loads(load_record):
+        if not load_record:
+            local_num_experts = self.model.layers[num_dense_layers].mlp.experts.num_experts
+            return torch.empty((0, local_num_experts), dtype=torch.int64, 
+                               device=load_record.device if load_record else 'npu')
+        return torch.stack(load_record, dim=0)
+    moe_load_list = torch.stack(
+        [_stack_moe_loads(self.model.layers[layer_id + num_dense_layers].mlp.experts.moe_load_record) \
+            for layer_id in range(self.num_moe_layers)],
+        dim=0
+    )
+    return moe_load_list
 
 def clear_all_moe_loads(self):
     num_dense_layers = self.num_dense_layers if hasattr(
@@ -64,6 +79,7 @@ def model_register(model, model_config):
     model.get_log2phy_map = types.MethodType(get_log2phy_map, model)
     model.get_all_expert_map = types.MethodType(get_all_expert_map, model)
     model.get_all_moe_loads = types.MethodType(get_all_moe_loads, model)
+    model.get_moe_load_lists = types.MethodType(get_moe_load_lists, model)
     model.clear_all_moe_loads = types.MethodType(clear_all_moe_loads, model)
 
     config = model_config.hf_text_config

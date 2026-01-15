@@ -23,6 +23,7 @@ from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+from vllm_ascend.ascend_config import get_ascend_config
 
 
 class EplbUpdator:
@@ -35,6 +36,9 @@ class EplbUpdator:
         self.eplb_process = eplb_process
         self.shared_dict = self.eplb_process.shared_dict
         self.moe_imbalance_dict: dict[int, float] = {}
+        self.moe_stats_count = 0
+        ascend_config = get_ascend_config()
+        self.moestats_path = ascend_config.moestats_path
 
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
@@ -168,6 +172,26 @@ class EplbUpdator:
             self.summarize_moe_imbalance()
 
         return moe_load
+
+    def record_moe_stats(self):
+        load_list = self.adaptor.get_moe_load_stats()
+        self._gather_buffer_list = None
+        if dist.is_initialized():
+            if self._gather_buffer_list is None:
+                list_shape = (self.world_size, *load_list.shape)
+                self._gather_buffer_list = torch.empty(list_shape,
+                                                  dtype=load_list.dtype,
+                                                  device=self.device)
+        dist.all_gather_into_tensor(self._gather_buffer_list, load_list)
+        moe_load_list = self._gather_buffer_list.permute(2, 1, 0, 3)
+        if dist.is_initialized() and dist.get_rank() == 0:
+            map_record_path = self.moestats_path + f"/moe_map{self.moe_stats_count}.json"
+            load_record_path = self.moestats_path + f"/moe_load{self.moe_stats_count}.pt"
+            self.adaptor._export_tensor_to_file(
+                self.shared_dict["expert_maps"],
+                map_record_path)
+            torch.save(moe_load_list.cpu(), load_record_path)
+            self.moe_stats_count += 1
 
     def compute_moe_imbalance(self, moe_load: torch.Tensor):
 

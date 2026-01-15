@@ -136,6 +136,9 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.moe_load = self.model.get_all_moe_loads()
         return self.moe_load
 
+    def get_moe_load_lists(self):
+        return self.model.get_moe_load_lists()
+
     def _export_tensor_to_file(self, expert_maps, expert_map_record_path: str):
         if self.rank_id == 0:
             num_local_experts = expert_maps.max() + 1

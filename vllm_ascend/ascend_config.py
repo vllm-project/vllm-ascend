@@ -64,6 +64,7 @@ class AscendConfig:
         self.expert_map_record_path = additional_config.get(
             "expert_map_record_path",
             None)  # Provide path to export expert map
+        self.moestats_path = additional_config.get("moestats_path", None)
         self.init_redundancy_expert = additional_config.get(
             "init_redundancy_expert", 0)
         self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
