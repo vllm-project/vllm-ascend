@@ -15,7 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 from vllm.triton_utils import tl, triton
-
+import torch
+from typing import Tuple
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 

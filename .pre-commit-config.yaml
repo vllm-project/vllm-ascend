@@ -32,10 +32,10 @@ repos:
   - id: markdownlint
     exclude: '.*\.inc\.md$|.*report_template\.md$|.*contributors\.md$|.*PULL_REQUEST_TEMPLATE\.md$'
     stages: [manual] # Only run in CI
-# - repo: https://github.com/rhysd/actionlint
-#   rev: v1.7.7
-#   hooks:
-#   - id: actionlint
+- repo: https://github.com/rhysd/actionlint
+  rev: v1.7.7
+  hooks:
+  - id: actionlint
 - repo: local
   hooks:
   # For local development, you can run mypy using tools/mypy.sh script if needed.
