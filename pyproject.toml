@@ -48,7 +48,6 @@ plugins.md029.enabled = false # ol-prefix
 line-length = 120
 # Folder to be modified
 exclude = [
-    "examples/**",
     "tests/**",
     "vllm_ascend/**",
 ]
