@@ -11,10 +11,12 @@ This guide provides instructions for using Ascend Graph Mode with vLLM Ascend. P
 From v0.9.1rc1 with V1 Engine, vLLM Ascend will run models in graph mode by default to keep the same behavior with vLLM. If you hit any issues, please feel free to open an issue on GitHub and fallback to the eager mode temporarily by setting `enforce_eager=True` when initializing the model.
 
 There are two kinds for graph mode supported by vLLM Ascend:
+
 - **ACLGraph**: This is the default graph mode supported by vLLM Ascend. In v0.9.1rc1, Qwen and Deepseek series models are well tested.
 - **XliteGraph**: This is the openeuler xlite graph mode. In v0.11.0, only Llama, Qwen dense series models, and Qwen3-vl are supported.
 
 ## Using ACLGraph
+
 ACLGraph is enabled by default. Take Qwen series models as an example, just set to use V1 Engine is enough.
 
 Offline example:

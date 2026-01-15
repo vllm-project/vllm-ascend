@@ -15,7 +15,7 @@ fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
 
-from vllm_ascend.distributed.mooncake_layerwise_connector import (  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     KVCacheRecvingLayerThread, KVCacheSendingLayerThread, KVConnectorRole,
     MooncakeAgentMetadata, MooncakeLayerwiseConnector,
     MooncakeLayerwiseConnectorMetadata, MooncakeLayerwiseConnectorScheduler,
@@ -81,19 +81,20 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
             chunk_finish=False)
 
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.npu_stream_switch",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.npu_stream_switch",
         side_effect=lambda *_args, **_kwargs: contextlib.nullcontext())
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.torch.Tensor.data_ptr",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.Tensor.data_ptr",
         autospec=True,
         return_value=0x200000)
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.align_memory",
-           side_effect=lambda x, _align: x)
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.torch.npu.synchronize"
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.align_memory",
+        side_effect=lambda x, _align: x)
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.synchronize"
     )
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.group_concurrent_contiguous"
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous"
     )
     def test_transfer_pd_gt1_uses_buffers_and_calls_engine(
             self, mock_group, _mock_sync, _mock_align, _mock_dataptr,
@@ -171,10 +172,10 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.engine.batch_transfer_sync_write.assert_not_called()
 
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.group_concurrent_contiguous",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",
         side_effect=group_concurrent_contiguous)
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.torch.npu.synchronize"
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.synchronize"
     )
     def test_callback_invoked_on_final_layer(self, _mock_sync, _mock_group):
 
@@ -250,21 +251,27 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
             self.assertNotIn("reqX", th.task_tracker)
             self.assertIn("reqX", th.done_requests)
 
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.logger")
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.get_ip",
-           return_value="127.0.0.1")
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.make_zmq_socket")
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger"
+    )
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.make_zmq_path",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_ip",
+        return_value="127.0.0.1")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.make_zmq_socket"
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.make_zmq_path",
         side_effect=lambda proto, host, port: f"{proto}://{host}:{port}")
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Decoder"
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.msgspec.msgpack.Decoder"
     )
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Encoder"
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.msgspec.msgpack.Encoder"
     )
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.zmq_ctx")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.zmq_ctx"
+    )
     def test_run_loop_handles_meta_done_invalid_unexpected_and_ack(
             self, mock_zmq_ctx, mock_Encoder, mock_Decoder, _mock_make_path,
             _mock_make_sock, _mock_get_ip, mock_logger):
@@ -330,16 +337,21 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
         finished = th.get_and_clear_finished_requests()
         self.assertIn("reqA", finished)
 
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.logger")
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.get_ip",
-           return_value="127.0.0.1")
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Decoder"
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger"
     )
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.msgspec.msgpack.Encoder"
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_ip",
+        return_value="127.0.0.1")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.msgspec.msgpack.Decoder"
     )
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.zmq_ctx")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.msgspec.msgpack.Encoder"
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.zmq_ctx"
+    )
     def test_run_loop_pd_head_ratio_gt1_requires_multiple_done(
             self, mock_zmq_ctx, mock_Encoder, mock_Decoder, _mock_get_ip,
             _mock_logger):
@@ -623,7 +635,7 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         self.assertEqual(len(meta.requests), 0)
 
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.group_concurrent_contiguous"
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous"
     )
     def test_build_connector_meta_emits_when_tokens_reach_total(
             self, mock_group_concurrent_contiguous):
@@ -707,20 +719,25 @@ class TestHelperFunctions(unittest.TestCase):
                 pass
 
     @patch(
-        "vllm_ascend.distributed.mooncake_layerwise_connector.make_zmq_socket")
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.make_zmq_socket"
+    )
     def test_zmq_ctx_ok(self, mock_make_socket):
         mock_socket = MagicMock()
         mock_make_socket.return_value = mock_socket
         with zmq_ctx(zmq.REQ, "tcp://localhost:1234") as s:  # type: ignore
             self.assertEqual(s, mock_socket)
 
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.logger")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger"
+    )
     def test_ensure_zmq_send_success(self, _):
         mock_socket = MagicMock()
         ensure_zmq_send(mock_socket, b"hello")
         mock_socket.send.assert_called_once_with(b"hello")
 
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.logger")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger"
+    )
     def test_ensure_zmq_send_retry_and_fail(self, _):
         mock_socket = MagicMock()
         mock_socket.send.side_effect = zmq.ZMQError(  # type: ignore
@@ -729,7 +746,9 @@ class TestHelperFunctions(unittest.TestCase):
             ensure_zmq_send(mock_socket, b"hello", max_retries=2)
         self.assertEqual(mock_socket.send.call_count, 2)
 
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.logger")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger"
+    )
     def test_ensure_zmq_recv_success(self, _):
         mock_socket = MagicMock()
         mock_socket.recv.return_value = b"response"
@@ -740,7 +759,9 @@ class TestHelperFunctions(unittest.TestCase):
         data = ensure_zmq_recv(mock_socket, mock_poller)
         self.assertEqual(data, b"response")
 
-    @patch("vllm_ascend.distributed.mooncake_layerwise_connector.logger")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger"
+    )
     def test_ensure_zmq_recv_timeout_and_fail(self, _):
         mock_socket = MagicMock()
         mock_poller = MagicMock()
@@ -849,37 +870,37 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
             patch('math.prod', return_value=128),
             patch('random.Random'),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.get_tensor_model_parallel_rank',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_tensor_model_parallel_rank',
                 return_value=0),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.get_tp_group',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_tp_group',
                 return_value=None),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.get_ip',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_ip',
                 return_value="127.0.0.1"),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.string_to_int64_hash',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.string_to_int64_hash',
                 side_effect=lambda s: hash(s)),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.global_te.get_transfer_engine',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.get_transfer_engine',
                 return_value=self.mock_transfer_engine),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.global_te.register_buffer',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.register_buffer',
                 return_value=None),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.KVCacheSendingLayerThread',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.KVCacheSendingLayerThread',
                 MagicMock()),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.KVCacheRecvingLayerThread',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.KVCacheRecvingLayerThread',
                 MagicMock()),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.logger',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger',
                 MagicMock()),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.threading.Event',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.threading.Event',
                 MagicMock()),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config',
+                'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_ascend_config',
                 return_value=SimpleNamespace(pd_tp_ratio=1,
                                              num_head_replica=1,
                                              pd_head_ratio=1)),
