@@ -153,9 +153,10 @@ In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`.
 We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node environment with 1P1D for better performance.
 
 Before you start, please
+
 1. prepare the script `launch_online_dp.py` on each node.
 
-    ```
+    ```python
     import argparse
     import multiprocessing
     import os
@@ -260,7 +261,7 @@ Before you start, please
 
     1. Prefill node 0
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.105 # change to your own ip
 
@@ -333,7 +334,7 @@ Before you start, please
 
     2. Prefill node 1
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.113 # change to your own ip
 
@@ -406,7 +407,7 @@ Before you start, please
 
     3. Decode node 0
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.117 # change to your own ip
 
@@ -484,7 +485,7 @@ Before you start, please
 
     4. Decode node 1
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.181 # change to your own ip
 
@@ -564,28 +565,28 @@ Once the preparation is done, you can start the server with the following comman
 
 1. Prefill node 0
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address 141.61.39.105 --dp-rpc-port 12890 --vllm-start-port 9100
 ```
 
 2. Prefill node 1
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address 141.61.39.105 --dp-rpc-port 12890 --vllm-start-port 9100
 ```
 
 3. Decode node 0
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
 ```
 
 4. Decode node 1
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
 ```
@@ -656,6 +657,7 @@ Run performance evaluation of `DeepSeek-V3.2-W8A8` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

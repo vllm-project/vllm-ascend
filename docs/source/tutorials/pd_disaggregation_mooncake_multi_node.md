@@ -126,6 +126,7 @@ for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
 :::::
 
 ## Run with Docker
+
 Start a Docker container on each node.
 
 ```{code-block} bash
@@ -172,7 +173,7 @@ docker run --rm \
 
 ## Install Mooncake
 
-Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.
+Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
@@ -224,10 +225,12 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LI
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
 ### launch_online_dp.py
+
 Use `launch_online_dp.py` to launch external dp vllm servers.
 [launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
 
 ### run_dp_template.sh
+
 Modify `run_dp_template.sh` on each node.
 [run\_dp\_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
 

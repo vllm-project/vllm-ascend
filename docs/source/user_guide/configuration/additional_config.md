@@ -87,7 +87,7 @@ The details of each configuration option are as follows:
 
 An example of additional configuration is as follows:
 
-```
+```python
 {
     "weight_prefetch_config": {
         "enabled": True,

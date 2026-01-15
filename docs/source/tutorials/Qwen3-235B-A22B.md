@@ -124,19 +124,21 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 ```
 
 **Notice:**
+
 - [Qwen3-235B-A22B](https://huggingface.co/Qwen/Qwen3-235B-A22B#processing-long-texts) originally only supports 40960 context(max_position_embeddings). If you want to use it and its related quantization weights to run long seqs (such as 128k context), it is required to use yarn rope-scaling technique.
-  - For vLLM version same as or new than `v0.12.0`, use parameter: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \`.
-  - For vllm version below `v0.12.0`, use parameter: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \`.
+    - For vLLM version same as or new than `v0.12.0`, use parameter: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \`.
+    - For vllm version below `v0.12.0`, use parameter: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \`.
   If you are using weights like [Qwen3-235B-A22B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) which originally supports long contexts, there is no need to add this parameter.
 
 The parameters are explained as follows:
+
 - `--data-parallel-size` 1 and `--tensor-parallel-size` 8 are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
-  - (1) If the input length of a request is greater than `--max-num-batched-tokens`, it will be divided into multiple rounds of computation according to `--max-num-batched-tokens`;
-  - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
-  - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on GPU memory (activation value usage) will be greater.
+    - (1) If the input length of a request is greater than `--max-num-batched-tokens`, it will be divided into multiple rounds of computation according to `--max-num-batched-tokens`;
+    - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
+    - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on GPU memory (activation value usage) will be greater.
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
 - `--enable-expert-parallel` indicates that EP is enabled. Note that vLLM does not support a mixed approach of ETP and EP; that is, MoE can either use pure EP or pure TP.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
@@ -147,7 +149,8 @@ The parameters are explained as follows:
 - `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 optimization is enabled. Currently, this optimization is only supported for MoE in scenarios where tp_size > 1.
 
 ### Multi-node Deployment with MP (Recommended)
-Assume you have Atlas 800 A3 (64G*16) nodes (or 2 * A2), and want to deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes.
+
+Assume you have Atlas 800 A3 (64G*16) nodes (or 2* A2), and want to deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes.
 
 Node 0
 
@@ -239,7 +242,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B \
 
 If the service starts successfully, the following information will be displayed on node 0:
 
-```
+```shell
 INFO:     Started server process [44610]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -298,6 +301,7 @@ Run performance evaluation of `Qwen3-235B-A22B-w8a8` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.
@@ -392,6 +396,7 @@ Reference test results:
 | 720 | 144 | 4717.45 | 48.69 | 2761.72 |
 
 Note:
+
 1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in both prefill and decode. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers now. If you encounter any problems when using this feature, you can disable it by setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=0` and update issues in vLLM-Ascend community.
 2. Here we disable prefix cache because of random datasets. You can enable prefix cache if requests have long common prefix.
 
@@ -597,7 +602,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 
 PD proxy:
 
-```
+```shell
 python load_balance_proxy_server_example.py --port 12347 --prefiller-hosts prefill_node_1_ip --prefiller-port 8000 --decoder-hosts decode_node_1_ip --decoder-ports 8000
 ```
 
@@ -624,4 +629,5 @@ Reference test results:
 | 2880 | 576 | 3735.98 | 52.07 | 8593.44 |
 
 Note:
+
 1. We recommend to set `export VLLM_ASCEND_ENABLE_FUSED_MC2=2` on this scenario (typically EP32 for Qwen3-235B). This enables a different MoE fusion operator.

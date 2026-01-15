@@ -1,6 +1,7 @@
 # Qwen3-Embedding
 
 ## Introduction
+
 The Qwen3 Embedding model series is the latest proprietary model of the Qwen family, specifically designed for text embedding and ranking tasks. Building upon the dense foundational models of the Qwen3 series, it provides a comprehensive range of text embeddings and reranking models in various sizes (0.6B, 4B, and 8B). This guide describes how to run the model with vLLM Ascend. Note that only 0.9.2rc1 and higher versions of vLLM Ascend support the model.
 
 ## Supported Features
@@ -16,11 +17,15 @@ Refer to [supported features](../user_guide/support_matrix/supported_models.md) 
 - `Qwen3-Embedding-0.6B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+
 ### Installation
+
 You can use our official docker image to run `Qwen3-Embedding` series models.
+
 - Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
 if you don't want to use the docker image as above, you can also build all from source:
+
 - Install `vllm-ascend` from source, refer to [installation](../installation.md).
 
 ## Deployment

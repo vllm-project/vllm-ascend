@@ -19,6 +19,7 @@ vLLM Ascend Plugin
 
 ---
 *Latest News* 🔥
+
 - [2025/12] We released the new official version [v0.11.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.11.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.11.0/) to start using vLLM Ascend Plugin on Ascend.
 - [2025/09] We released the new official version [v0.9.1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.9.1)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.9.1/tutorials/large_scale_ep.html) to start deploy large scale Expert Parallelism (EP) on Ascend.
 - [2025/08] We hosted the [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/7n8OYNrCC_I9SJaybHA_-Q) with vLLM and Tencent! Please find the meetup slides [here](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF).
@@ -28,7 +29,9 @@ vLLM Ascend Plugin
 - [2025/03] We hosted the [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/VtxO9WXa5fC-mKqlxNUJUQ) with vLLM team! Please find the meetup slides [here](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF).
 - [2025/02] vLLM community officially created [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) repo for running vLLM seamlessly on the Ascend NPU.
 - [2024/12] We are working with the vLLM community to support [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162).
+
 ---
+
 ## Overview
 
 vLLM Ascend (`vllm-ascend`) is a community maintained hardware plugin for running vLLM seamlessly on the Ascend NPU.
@@ -42,10 +45,10 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 - Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series, Atlas 800I A3 Inference series, Atlas A3 Training series, Atlas 300I Duo (Experimental)
 - OS: Linux
 - Software:
-  * Python >= 3.10, < 3.12
-  * CANN == 8.3.rc2 (Ascend HDK version refers to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
-  * PyTorch == 2.8.0, torch-npu == 2.8.0
-  * vLLM (the same version as vllm-ascend)
+    - Python >= 3.10, < 3.12
+    - CANN == 8.3.rc2 (Ascend HDK version refers to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
+    - PyTorch == 2.8.0, torch-npu == 2.8.0
+    - vLLM (the same version as vllm-ascend)
 
 ## Getting Started
 
@@ -57,9 +60,11 @@ Please use the following recommended versions to get started quickly:
 |v0.11.0|Latest stable version|[QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.11.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.11.0/installation.html) for more details|
 
 ## Contributing
+
 See [CONTRIBUTING](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html) for more details, which is a step-by-step guide to help you set up development environment, build and test.
 
 We welcome and value any contributions and collaborations:
+
 - Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues)
 - Please use [User forum](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support) for usage questions and help.
 
@@ -86,7 +91,7 @@ Please refer to [Versioning policy](https://docs.vllm.ai/projects/ascend/en/late
 
 ## Weekly Meeting
 
-- vLLM Ascend Weekly Meeting: https://tinyurl.com/vllm-ascend-meeting
+- vLLM Ascend Weekly Meeting: <https://tinyurl.com/vllm-ascend-meeting>
 - Wednesday, 15:00 - 16:00 (UTC+8, [Convert to your timezone](https://dateful.com/convert/gmt8?t=15))
 
 ## License
