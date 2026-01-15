@@ -87,7 +87,7 @@ def get_chip_type() -> str:
         if "310" in chip_name:
             # 310P case
             assert chip_type
-            return (chip_type + chip_name).lower()
+            return (chip_type + chip_name)
         elif "910" in chip_name:
             if chip_type:
                 # A2 case
