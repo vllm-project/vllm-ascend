@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import logger
@@ -44,6 +45,9 @@ class AscendConfig:
         self.finegrained_tp_config = FinegrainedTPConfig(
             finegrained_tp_config, vllm_config)
 
+        eplb_config = additional_config.get("eplb_config", {})
+        self.eplb_config = EplbConfig(eplb_config)
+
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)
 
@@ -58,20 +62,6 @@ class AscendConfig:
             "using it without these features may result in significant performance degradation."
         )
 
-        # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
-        self.expert_map_path = additional_config.get("expert_map_path", None)
-        self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
-        self.expert_map_record_path = additional_config.get(
-            "expert_map_record_path",
-            None)  # Provide path to export expert map
-        self.init_redundancy_expert = additional_config.get(
-            "init_redundancy_expert", 0)
-        self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
-        self.num_iterations_eplb_update = additional_config.get(
-            "num_iterations_eplb_update", 400)
-        self.gate_eplb = additional_config.get("gate_eplb", False)
-        self.num_wait_worker_iterations = additional_config.get(
-            "num_wait_worker_iterations", 30)
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp",
             False) and vllm_config.parallel_config.enable_expert_parallel
@@ -273,6 +263,62 @@ class WeightPrefetchConfig:
         self.enabled = weight_prefetch_config.get("enabled", False)
         self.prefetch_ratio = weight_prefetch_config.get(
             "prefetch_ratio", self.prefetch_ratio)
+
+
+class EplbConfig:
+    """
+    Configuration Object for xlite_graph_config from additional_config
+    """
+    _defaults = {
+        "dynamic_eplb": False,
+        "expert_map_path": None,
+        "expert_heat_collection_interval": 400,
+        "algorithm_execution_interval": 30,
+        "expert_map_record_path": None,
+        "num_redundant_experts": 0,
+        "eplb_policy_type": 1
+    }
+
+    def __init__(self, user_config: dict = {}):
+        self.config = self._defaults.copy()
+        if user_config and isinstance(user_config, dict):
+            for key, value in user_config.items():
+                if key in self.config:
+                    self.config[key] = value
+                else:
+                    raise ValueError(f"Config has no attribute '{key}'")
+
+        self._validate_config()
+
+    def __getattr__(self, key):
+        if key in self.config:
+            return self.config[key]
+        raise AttributeError(f"Config has no attribute '{key}'")
+
+    def _validate_config(self):
+        if self.expert_map_path is not None:
+            if self.expert_map_path[-5:] != ".json":
+                raise TypeError("The expert_map is not json.")
+            if not os.path.exists(self.expert_map_path):
+                raise ValueError("The expert_map is not exist.")
+        if self.expert_map_record_path is not None:
+            self.config["dynamic_eplb"] = True
+            if self.expert_map_record_path[-5:] != ".json":
+                raise TypeError("The expert_map_record_path is not json.")
+            dirname = os.path.dirname(self.expert_map_record_path)
+            os.makedirs(dirname, exist_ok=True)
+        for key in [
+                "expert_heat_collection_interval",
+                "algorithm_execution_interval", "num_redundant_experts"
+        ]:
+            if not isinstance(self.config[key], int):
+                raise TypeError(f"{key} must be an integer")
+            if self.config[key] < 0:  # type: ignore
+                raise ValueError(
+                    f"{key} must greater than 0; got {self.config[key]} instead"
+                )
+        if self.eplb_policy_type not in [0, 1, 2, 3]:
+            raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
 
 
 _ASCEND_CONFIG: Optional[AscendConfig] = None

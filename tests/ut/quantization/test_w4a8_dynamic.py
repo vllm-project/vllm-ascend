@@ -136,7 +136,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
               get_current_vllm_config, mock_get_ascend_config):
         # Mock ascend config
         mock_ascend_config = Mock()
-        mock_ascend_config.dynamic_eplb = False
+        mock_ascend_config.eplb_config.dynamic_eplb = False
         mock_get_ascend_config.return_value = mock_ascend_config
 
         mock_vllm_config = Mock()
