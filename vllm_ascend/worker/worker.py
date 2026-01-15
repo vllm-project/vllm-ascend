@@ -115,28 +115,18 @@ class NPUWorker(WorkerBase):
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
 
-        # binding cpu
-        if get_ascend_config().enable_cpu_binding:
-            try:
-                bind_cpus(self.local_rank, ratio=1.0)
-            except RuntimeError as e:
-                logger.error(f"{e} in {self.local_rank}")
-            except ValueError as e:
-                logger.error(f"{e} in {self.local_rank}")
-            except Exception:
-                logger.info("Skip binding cpu.")
-
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
 
-        if self.model_config.trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils.import_utils import init_cached_hf_modules
+        if vllm_version_is('0.13.0'):
+            if self.model_config.trust_remote_code:
+                # note: lazy import to avoid importing torch before initializing
+                from vllm.utils.import_utils import init_cached_hf_modules
 
-            init_cached_hf_modules()
+                init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
@@ -238,6 +228,15 @@ class NPUWorker(WorkerBase):
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
         init_device_properties_triton()
+
+        # binding cpu
+        if get_ascend_config().enable_cpu_binding:
+            try:
+                bind_cpus(self.local_rank)
+            except Exception as e:
+                logger.warning(
+                    f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu."
+                )
         return device
 
     def init_device(self):

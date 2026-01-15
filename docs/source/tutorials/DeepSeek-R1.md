@@ -69,6 +69,7 @@ docker run --rm \
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
 ## Deployment
+
 ### Service-oriented  Deployment
 
 - `DeepSeek-R1-W8A8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8).
@@ -119,6 +120,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
 
 **Notice:**
 The parameters are explained as follows:
+
 - Setting the environment variable `VLLM_ASCEND_ENABLE_MLAPO=1` enables a fusion operator that can significantly improve performance, though it requires more NPU memory. It is therefore recommended to enable this option when sufficient NPU memory is available.
 - Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
@@ -284,6 +286,7 @@ lm_eval \
 3. After execution, you can get the result.
 
 ## Performance
+
 ### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
@@ -295,6 +298,7 @@ Run performance evaluation of `DeepSeek-R1-W8A8` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

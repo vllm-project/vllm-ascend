@@ -127,6 +127,10 @@ install_extra_components() {
 
 install_triton_ascend() {
     echo "====> Installing triton_ascend"
+    apt-get install -y clang-15
+    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+    clang -v
 
     BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
     BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
@@ -167,8 +171,8 @@ run_tests_with_log() {
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            print_failure "Some tests failed, please check the error stack above for details.\
-            If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
+            print_failure "Some tests failed, please check the error stack above for details. \
+If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
         fi
     fi
 }

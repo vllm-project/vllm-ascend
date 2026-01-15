@@ -13,7 +13,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
-from vllm_ascend.distributed.kvpool.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata, LoadSpec, ReqMeta, RequestTracker)
 
 
@@ -82,7 +82,10 @@ class KVPoolScheduler:
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
 
-        need_to_allocate = num_external_hit_tokens - num_computed_tokens
+        if num_external_hit_tokens < num_computed_tokens:
+            need_to_allocate = 0
+        else:
+            need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
         logger.info(
             "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",

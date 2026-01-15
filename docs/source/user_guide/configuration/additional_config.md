@@ -30,6 +30,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `weight_prefetch_config`            | dict | `{}`    | Configuration options for weight prefetch                                                                 |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
+| `eplb_config`                       | dict | `{}`    | Configuration options for ascend compilation |
 | `npugraph_ex_config`                | dict | `{}`    | Configuration options for npugraph_ex backend                                                             |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump(eager mode).                                                     |
@@ -42,13 +43,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `SLO_limits_for_dynamic_batch`      | int  | `-1`    | SLO limits for dynamic batch. This is new scheduler to support dynamic feature                            |
 | `enable_npugraph_ex`                | bool | `False` | Whether to enable npugraph ex graph mode.                                                                 |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
-| `dynamic_eplb`                      | bool | `False` | Whether to enable dynamic EPLB.                                                                           |
-| `expert_map_path`                   | str  | `None`  | When using expert load balancing for an MoE model, an expert map path needs to be passed in.              |  
-| `num_iterations_eplb_update`        | int  | `400`   | Forward iterations when EPLB begins.                                                                      |
-| `gate_eplb`                         | bool | `False` | Whether to enable EPLB only once.                                                                         |
-| `num_wait_worker_iterations`        | int  | `30`    | The forward iterations when the EPLB worker will finish CPU tasks. In our test default value 30 can cover most cases. |
-| `expert_map_record_path`            | str  | `None`  | Save the expert load calculation results to a new expert table in the specified directory.                |
-| `init_redundancy_expert`            | int  | `0`     | Specify redundant experts during initialization.                                                          |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable kvcache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
 | `layer_sharding` | dict | `{}` | Configuration options for layer sharding linear |
 
@@ -84,6 +78,17 @@ The details of each configuration option are as follows:
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
 | `fuse_qknorm_rope` | bool | `False` | Whether to enable fuse_qknorm_rope pass. It's set to True by default when Triton is installed. |
 
+**eplb_config**
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `dynamic_eplb`                   | bool| `False`| Whether to enable dynamic EPLB. |
+| `expert_map_path`                | str | `None` | When using expert load balancing for an MoE model, an expert map path needs to be passed in.|
+| `expert_heat_collection_interval`| int | `400`  | Forward iterations when EPLB begins. |
+| `algorithm_execution_interval`   | int | `30`   | The forward iterations when the EPLB worker will finish CPU tasks. |
+| `expert_map_record_path`         | str | `None` | Save the expert load calculation results to a new expert table in the specified directory.|
+| `num_redundant_experts`          | int | `0`    | Specify redundant experts during initialization. |
+
 **npugraph_ex_config**
 
 | Name                   | Type | Default | Description                                                                            |
@@ -95,7 +100,7 @@ The details of each configuration option are as follows:
 
 An example of additional configuration is as follows:
 
-```
+```python
 {
     "weight_prefetch_config": {
         "enabled": True,

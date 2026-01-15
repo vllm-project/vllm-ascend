@@ -114,7 +114,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                              and not vllm_config.model_config.enforce_eager)
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
 
-        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
 

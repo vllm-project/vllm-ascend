@@ -29,9 +29,11 @@ We are working on further improvements and this feature will support more XPUs i
 ```
 
 ### Supported Models
+
 So far, dynamic batch performs better on several dense models including Qwen and Llama (from 8B to 32B) with `tensor_parallel_size=8`. For different models, a proper `SLO_limits_for_dynamic_batch` parameter is needed. The empirical value of this parameter is generally `35, 50, or 75`. Therefore, some additional tests are needed to select the best parameter.
 
 ## Usage
+
 Dynamic batch is used in the online inference. A fully executable example is as follows:
 
 ```shell

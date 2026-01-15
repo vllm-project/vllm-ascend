@@ -1,6 +1,6 @@
 # vLLM Ascend Plugin documents
 
-Live doc: https://vllm-ascend.readthedocs.io
+Live doc: <https://docs.vllm.ai/projects/ascend>
 
 ## Build the docs
 
@@ -20,5 +20,6 @@ python -m http.server -d _build/html/
 ```
 
 Launch your browser and open:
-- English version: http://localhost:8000
-- Chinese version: http://localhost:8000/zh_CN
+
+- English version: <http://localhost:8000>
+- Chinese version: <http://localhost:8000/zh_CN>
