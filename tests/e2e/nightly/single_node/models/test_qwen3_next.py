@@ -70,7 +70,6 @@ async def test_models(model: str, mode: str, tp_size: int,
         "HCCL_BUFFSIZE": "1024",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     }
-    compilation_config = {}
     server_args = [
         "--tensor-parallel-size",
         str(tp_size),
@@ -89,10 +88,6 @@ async def test_models(model: str, mode: str, tp_size: int,
         "--max-num-seqs",
         "64",
     ]
-    if mode == "aclgraph":
-        server_args.extend(
-            ["--compilation-config",
-             json.dumps(compilation_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
