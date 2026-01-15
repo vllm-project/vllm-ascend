@@ -733,7 +733,7 @@ private:
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
         #else
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);        
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
         #endif
@@ -1023,21 +1023,21 @@ private:
             ptrTokenPerExpert =  params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
-            ptrC = params.ptrWorkspace + workspaceOffset; //7
+            ptrC = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * params.problemShape.n() * sizeof(ElementC);
-            ptrC2 = params.ptrWorkspace + workspaceOffset; //8
+            ptrC2 = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * n2 * sizeof(ElementC);
-            ptrA = params.ptrWorkspace + workspaceOffset; //9
+            ptrA = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * params.problemShape.k() * sizeof(ElementA);
-            ptrPermutedToken = params.ptrWorkspace + workspaceOffset; //10
+            ptrPermutedToken = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * k2 * sizeof(ElementA);
             ptrSumBeforeRank = params.ptrWorkspace + workspaceOffset;
-            workspaceOffset += params.EP * sizeof(int32_t) * FLAGSTRIDE;
 
+            workspaceOffset += params.EP * sizeof(int32_t) * FLAGSTRIDE;
             ptrSoftFlagBase = reinterpret_cast<__gm__ float*>(params.ptrWorkspace + workspaceOffset);
         }
     };
