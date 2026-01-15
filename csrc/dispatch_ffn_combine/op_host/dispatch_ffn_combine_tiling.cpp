@@ -243,8 +243,12 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) +
                             info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
                             info.maxOutputSize * sizeof(float) * 2 +
-                            std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
-                            std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
+                            info.maxOutputSize * info.N * sizeof(int16_t) +
+                            info.maxOutputSize * n2 * sizeof(int16_t) +
+                            info.maxOutputSize * info.K * sizeof(int8_t) +
+                            info.maxOutputSize * k2 * sizeof(int8_t) +
+                            info.worldSize  * sizeof(int32_t) * 16 +
+                            (info.expertPerRank + info.worldSize) * sizeof(int32_t) * 16;
 
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
 
