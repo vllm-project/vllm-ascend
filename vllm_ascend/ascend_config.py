@@ -245,7 +245,7 @@ class NpugraphExConfig:
             enable_static_kernel (bool): Whether to enable static kernel.
                 Static kernel is suitable for scenarios with purely static shapes
                 or minimal shape changes, and can improve network performance.
-                When set to True, when performing graph capture, it will compile
+                When set to True, when during graph capture, it will compile
                 operator binary files with the corresponding shapes based on the
                 current batch_size, which usually takes some time.
                 Default: False
