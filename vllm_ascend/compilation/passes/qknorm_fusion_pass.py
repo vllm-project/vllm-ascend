@@ -179,28 +179,28 @@ class QKNormFusionPass(VllmInductorPass):
     def __init__(self, vllm_config: VllmConfig):
         super().__init__(vllm_config)
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(
-            pass_name="qknorm_rope_fusion_pass")
+            pass_name="qknorm_fusion_pass")
 
         dtype = vllm_config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
             logger.debug(
-                "QKNorm and Rope fusion not enabled: unsupported dtype %s",
+                "QKNorm fusion not enabled: unsupported dtype %s",
                 dtype)
             return
 
-        # use one attn layer to get meta (such as head_dim) for QKNormRopeFusionPattern
+        # use one attn layer to get meta (such as head_dim) for QKNormFusionPattern
         attn_layers: dict[str, Attention] = get_layers_from_vllm_config(
             vllm_config, Attention)
         if len(attn_layers) == 0:
             logger.debug(
-                "QKNorm and Rope fusion enabled, but no Attention layers were discovered."
+                "QKNorm fusion enabled, but no Attention layers were discovered."
             )
             return
         layer = next(iter(attn_layers.values()))
         for epsilon in [1e-6, 1e-5]:
             if layer.head_size != 128:
                 logger.debug(
-                    "QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128",
+                    "QKNorm fusion not enabled: head_dim %d is not equal of 128",
                     layer.head_size)
                 continue
             QKNormFusionPattern(vllm_config=vllm_config,

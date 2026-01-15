@@ -55,7 +55,7 @@ class GraphFusionPassManager:
                 AddRMSNormQuantFusionPass
             self.passes.append(AddRMSNormQuantFusionPass(config))
 
-        if self.ascend_compilation_config.get("fuse_qknorm", True):
+        if self.ascend_compilation_config.get("fuse_qknorm", False):
             from .passes.qknorm_fusion_pass import QKNormFusionPass
             self.passes.append(QKNormFusionPass(config))
 
