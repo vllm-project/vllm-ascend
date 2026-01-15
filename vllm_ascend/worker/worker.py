@@ -499,3 +499,19 @@ class NPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: str | None = None,
+        max_size: int | None = None,
+    ) -> None:
+        """Save the model weights in sharded state format for fast loading."""
+        from vllm.model_executor.model_loader import ShardedStateLoader
+
+        ShardedStateLoader.save_model(
+            self.model_runner.model,
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
