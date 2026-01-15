@@ -36,7 +36,8 @@ from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, maybe_trans_nz,
-                               vllm_version_is, weak_ref_tensors)
+                               vllm_version_is, weak_ref_tensors,
+                               is_decode_only_instance)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -758,8 +759,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
-        print(f'AscendMLAImpl ====================================== self.enable_mlapo:{self.enable_mlapo}====================')
+
+        self.enable_mlapo = bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_only_instance())
+        print(f'AscendMLAImpl ====================================== self.enable_mlapo:{self.enable_mlapo}, is_decode_only:{is_decode_only_instance()}, envs.VLLM_ASCEND_ENABLE_MLAPO:{envs.VLLM_ASCEND_ENABLE_MLAPO} ====================')
 
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         self.layer_sharding_kwargs = []
