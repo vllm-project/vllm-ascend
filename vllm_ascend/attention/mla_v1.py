@@ -5,14 +5,12 @@ import numpy as np
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend import envs
@@ -44,10 +42,17 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
+# isort: off
 if vllm_version_is('0.13.0'):
+    from vllm.v1.attention.backends.utils import AttentionCGSupport
+    from vllm.attention.backends.abstract import (  # type: ignore
+        AttentionBackend, MLAAttentionImpl)
     from vllm.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 else:
+    from vllm.v1.attention.backend import (  # type: ignore
+        AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
     from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+# isort: on
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 BUILD_METADATA_STEP_PREFILL = 0

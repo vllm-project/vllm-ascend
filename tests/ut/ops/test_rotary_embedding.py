@@ -380,6 +380,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
 class TestAscendMRotaryEmbedding(unittest.TestCase):
 
     def setUp(self):
+        # Common setup for tests
         self.config_patcher = patch('vllm.config.vllm.get_current_vllm_config')
         self.mock_get_config = self.config_patcher.start()
         mock_config = MagicMock()

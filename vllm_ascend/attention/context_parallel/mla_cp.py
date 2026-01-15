@@ -10,7 +10,6 @@ from vllm.distributed import (get_dcp_group,
                               get_pcp_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 # isort: off
@@ -28,7 +27,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.compilation.acl_graph import (get_draft_graph_params,
                                                get_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import weak_ref_tensors, vllm_version_is
+
+if vllm_version_is('0.13.0'):
+    from vllm.v1.attention.backends.utils import AttentionCGSupport
+else:
+    from vllm.v1.attention.backend import AttentionCGSupport
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
