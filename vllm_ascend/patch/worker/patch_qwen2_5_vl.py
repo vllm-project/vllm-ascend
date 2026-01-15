@@ -1,40 +1,30 @@
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from functools import lru_cache, partial
-from typing import Annotated, Any, Literal, TypeAlias
+from collections.abc import Callable
+from functools import partial
 
 import einops
 import torch
 import torch.distributed as dist
-import os
 import torch.nn as nn
 import torch.nn.functional as F
-
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import MultiModalConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-)
 from vllm.distributed.parallel_state import get_tp_group
-
-from vllm.model_executor.models.qwen2_5_vl import (
-    Qwen2_5_VisionMLP,
-    Qwen2_5_VisionAttention,
-    Qwen2_5_VisionBlock,
-    Qwen2_5_VisionPatchMerger,
-)
-
+from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.model_executor.models.qwen2_5_vl import (Qwen2_5_VisionAttention,
+                                                   Qwen2_5_VisionBlock,
+                                                   Qwen2_5_VisionMLP,
+                                                   Qwen2_5_VisionPatchMerger)
 
 logger = init_logger(__name__)
+
 
 def all_to_all_4d(input_tensor: torch.Tensor,
                   is_seq_to_head: bool,
@@ -158,6 +148,7 @@ def get_rank_world():
 
 
 class AscendQwen2_5_VisionMLP(nn.Module):
+
     def __init__(
         self,
         in_features: int,
@@ -168,7 +159,7 @@ class AscendQwen2_5_VisionMLP(nn.Module):
         multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
-        super(Qwen2_5_VisionMLP,self).__init__()
+        super(Qwen2_5_VisionMLP, self).__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=in_features,
             output_sizes=[hidden_features] * 2,  # [gate_proj, up_proj]
@@ -190,6 +181,7 @@ class AscendQwen2_5_VisionMLP(nn.Module):
 
 
 class AscendQwen2_5_VisionAttention(nn.Module):
+
     def __init__(
         self,
         embed_dim: int,
@@ -199,28 +191,22 @@ class AscendQwen2_5_VisionAttention(nn.Module):
         multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
-        super(Qwen2_5_VisionAttention,self).__init__()
+        super(Qwen2_5_VisionAttention, self).__init__()
         # Per attention head and per partition values.
-        self.use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        self.use_data_parallel = (multimodal_config.mm_encoder_tp_mode
+                                  == "data" if multimodal_config else False)
 
         if self.use_data_parallel:
             self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
             self.tp_world_size = 1
             self.tp_group = None
-        else :
+        else:
             self.tp_rank, self.tp_world_size, self.tp_group = get_rank_world()
 
         self.hidden_size_per_attention_head = dist_utils.divide(
-            projection_size, num_heads
-        )
+            projection_size, num_heads)
         self.num_attention_heads_per_partition = dist_utils.divide(
-            num_heads, self.tp_world_size
-        )
-         
+            num_heads, self.tp_world_size)
 
         self.qkv = QKVParallelLinear(
             hidden_size=embed_dim,
@@ -232,7 +218,7 @@ class AscendQwen2_5_VisionAttention(nn.Module):
             prefix=f"{prefix}.qkv",
             disable_tp=True,
         )
-        
+
         self.proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
@@ -240,8 +226,7 @@ class AscendQwen2_5_VisionAttention(nn.Module):
             prefix=f"{prefix}.proj",
             disable_tp=True,
         )
- 
-        
+
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
@@ -269,13 +254,14 @@ class AscendQwen2_5_VisionAttention(nn.Module):
                 "s b (three head head_dim) -> (b three) s head head_dim",
                 b=1,
                 three=3,
-                head=self.num_attention_heads_per_partition*self.tp_world_size,
+                head=self.num_attention_heads_per_partition *
+                self.tp_world_size,
             )
 
             x = all_to_all_4d(x, is_seq_to_head=True, group=self.tp_group)
             cur_seq = x.shape[1]
             x = x[:, :true_seq, :, :]
-        
+
             qkv = einops.rearrange(
                 x,
                 '(b three) s head head_dim -> b s three head head_dim',
@@ -284,7 +270,7 @@ class AscendQwen2_5_VisionAttention(nn.Module):
                 head=self.num_attention_heads_per_partition,
             )
             used_len = true_seq
-        else :
+        else:
             qkv = einops.rearrange(
                 x,
                 "s b (three head head_dim) -> b s three head head_dim",
@@ -292,13 +278,12 @@ class AscendQwen2_5_VisionAttention(nn.Module):
                 head=self.num_attention_heads_per_partition,
             )
             used_len = seq_len
-		
+
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             qk, v = qkv[:, :, :2], qkv[:, :, 2]
 
             qk_reshaped = einops.rearrange(
-                qk, "b s two head head_dim -> (two b) s head head_dim", two=2
-            )
+                qk, "b s two head head_dim -> (two b) s head head_dim", two=2)
             qk_rotated = self.apply_rotary_emb(
                 qk_reshaped,
                 rotary_pos_emb_cos,
@@ -314,7 +299,7 @@ class AscendQwen2_5_VisionAttention(nn.Module):
             q, k = qk_rotated.unbind(dim=0)
         else:
             q, k, v = qkv.unbind(dim=2)
-       
+
         context_layer = self.attn(
             query=q,
             key=k,
@@ -330,45 +315,45 @@ class AscendQwen2_5_VisionAttention(nn.Module):
             context_layer = context_layer.reshape(
                 seq_len * self.tp_world_size,
                 self.num_attention_heads_per_partition,
-                self.hidden_size_per_attention_head
-            )
-            
-            context_layer = all_to_all_3d(context_layer, is_seq_to_head=False, group=self.tp_group)
-            context_layer = einops.rearrange(
-                context_layer, "(b s) h d -> s b (h d)", b=batch_size
-            ).contiguous()
-        else :
-            context_layer = einops.rearrange(
-                context_layer, "b s h d -> s b (h d)", b=batch_size
-            ).contiguous()
+                self.hidden_size_per_attention_head)
+
+            context_layer = all_to_all_3d(context_layer,
+                                          is_seq_to_head=False,
+                                          group=self.tp_group)
+            context_layer = einops.rearrange(context_layer,
+                                             "(b s) h d -> s b (h d)",
+                                             b=batch_size).contiguous()
+        else:
+            context_layer = einops.rearrange(context_layer,
+                                             "b s h d -> s b (h d)",
+                                             b=batch_size).contiguous()
         output, _ = self.proj(context_layer)
         return output
 
 
 class AscendQwen2_5_VisionBlock(nn.Module):
+
     def forward(
-        self,
-        x: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        rotary_pos_emb_cos: torch.Tensor,
-        rotary_pos_emb_sin: torch.Tensor,
-        max_seqlen: torch.Tensor,  # Only used for Flash Attention
-        true_seq: int
-    ) -> torch.Tensor:
-        x_attn = self.attn(
-            self.norm1(x),
-            cu_seqlens=cu_seqlens,
-            rotary_pos_emb_cos=rotary_pos_emb_cos,
-            rotary_pos_emb_sin=rotary_pos_emb_sin,
-            max_seqlen=max_seqlen,
-            true_seq=true_seq
-        )
+            self,
+            x: torch.Tensor,
+            cu_seqlens: torch.Tensor,
+            rotary_pos_emb_cos: torch.Tensor,
+            rotary_pos_emb_sin: torch.Tensor,
+            max_seqlen: torch.Tensor,  # Only used for Flash Attention
+            true_seq: int) -> torch.Tensor:
+        x_attn = self.attn(self.norm1(x),
+                           cu_seqlens=cu_seqlens,
+                           rotary_pos_emb_cos=rotary_pos_emb_cos,
+                           rotary_pos_emb_sin=rotary_pos_emb_sin,
+                           max_seqlen=max_seqlen,
+                           true_seq=true_seq)
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
         return x
 
 
 class AscendQwen2_5_VisionPatchMerger(nn.Module):
+
     def __init__(
         self,
         d_model: int,
@@ -379,7 +364,7 @@ class AscendQwen2_5_VisionPatchMerger(nn.Module):
         multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
-        super(Qwen2_5_VisionPatchMerger,self).__init__()
+        super(Qwen2_5_VisionPatchMerger, self).__init__()
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
