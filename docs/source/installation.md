@@ -18,6 +18,7 @@ This document describes how to install vllm-ascend manually.
     | NNAL          | == 8.3.RC2                       | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
+
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
 - **Using docker**: use the `vllm-ascend` pre-built docker image directly.
 
@@ -184,6 +185,7 @@ If you encounter other problems during compiling, it is probably because unexpec
 `vllm-ascend` offers Docker images for deployment. You can just pull the **prebuilt image** from the image repository [ascend/vllm-ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and run it with bash.
 
 Supported images as following.
+
 | image name | Hardware | OS |
 |-|-|-|
 | image-tag | Atlas A2 | Ubuntu |
@@ -306,16 +308,17 @@ Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt
 ```
 
 ## Multi-node Deployment
+
 ### Verify Multi-Node Communication
 
 First, check physical layer connectivity, then verify each node, and finally verify the inter-node connectivity.
 
-#### Physical Layer Requirements:
+#### Physical Layer Requirements
 
 - The physical machines must be located on the same WLAN, with network connectivity.
 - All NPUs are connected with optical modules, and the connection status must be normal.
 
-#### Each Node Verification:
+#### Each Node Verification
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -362,8 +365,10 @@ Execute the following commands on each node in sequence. The results must all be
 ::::
 :::::
 
-#### Interconnect Verification:
+#### Interconnect Verification
+
 ##### 1. Get NPU IP Addresses
+
 :::::{tab-set}
 :sync-group: multi-node
 

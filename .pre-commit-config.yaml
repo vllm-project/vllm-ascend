@@ -26,11 +26,12 @@ repos:
 #     files: ^csrc/.*\.(cpp|hpp|cc|hh|cxx|hxx)$
 #     types_or: [c++]
 #     args: [--style=google, --verbose]
-- repo: https://github.com/jackdewinter/pymarkdown
-  rev: v0.9.29
+- repo: https://github.com/igorshubovych/markdownlint-cli
+  rev: v0.45.0
   hooks:
-  - id: pymarkdown
-    args: [fix]
+  - id: markdownlint
+    exclude: '.*\.inc\.md$|.*report_template\.md$|.*contributors\.md$|.*PULL_REQUEST_TEMPLATE\.md$'
+    stages: [manual] # Only run in CI
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:

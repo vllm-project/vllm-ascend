@@ -1,6 +1,7 @@
 # Contributing
 
 ## Building and Testing
+
 It's recommended to set up a local development environment to build vllm-ascend and run tests
 before you submit a PR.
 

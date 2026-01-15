@@ -1,12 +1,15 @@
 # Governance
 
 ## Mission
+
 As a vital component of vLLM, the vLLM Ascend project is dedicated to providing an easy, fast, and cheap LLM Serving for everyone on Ascend NPUs and to actively contributing to the enrichment of vLLM.
 
 ## Principles
+
 vLLM Ascend follows the vLLM community's code of conduct: [vLLM - CODE OF CONDUCT](https://github.com/vllm-project/vllm/blob/main/CODE_OF_CONDUCT.md)
 
 ## Governance - Mechanics
+
 vLLM Ascend is an open-source project under the vLLM community, where the authority to appoint roles is ultimately determined by the vLLM community. It adopts a hierarchical technical governance structure.
 
 - Contributor:
