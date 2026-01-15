@@ -1,6 +1,9 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import itertools
+from typing import Literal
+import math
 from vllm.model_executor.models.qwen3_vl_moe import Qwen3VLMoeForConditionalGeneration, Qwen3MoeLLMForCausalLM
 from functools import lru_cache
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
@@ -18,7 +21,175 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLImageInputs, Qwen2_5_VLForConditionalGeneration
 )
 from torchvision.transforms.v2 import functional
+from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 
+def get_load_balance_assignment(
+    sizes: list[int], num_gpus: int = 2,) -> tuple[list[int], list[int], list[int]]:
+    """
+    see https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L253 for details.
+    """
+
+    n_samples = len(sizes)
+
+    # Handle edge cases
+    if n_samples == 0:
+        return [], [0] * num_gpus, [0] * num_gpus
+
+    # Use greedy algorithm - balance by total size, not sample count
+    gpu_assignments = [list[int]() for _ in range(num_gpus)]
+    gpu_loads = [0] * num_gpus  # This tracks total SIZE, not sample count
+    
+    # Sort indices by size (largest first for better load balancing)
+    large_to_small_indices = sorted(range(n_samples), key=lambda i: sizes[i], reverse=True)
+
+    for idx in large_to_small_indices:
+        # Find GPU with minimum current load (by total size)
+        min_gpu = min(range(num_gpus), key=lambda i: gpu_loads[i])
+        gpu_assignments[min_gpu].append(idx)
+        gpu_loads[min_gpu] += sizes[idx]
+
+    # Create shuffle indices and counts
+    shuffle_indices = list[int]()
+    gpu_sample_counts = list[int]()
+    for gpu_id in range(num_gpus):
+        shuffle_indices.extend(gpu_assignments[gpu_id])
+        gpu_sample_counts.append(len(gpu_assignments[gpu_id]))
+
+    return (shuffle_indices, gpu_sample_counts, gpu_loads)
+
+def run_dp_sharded_mrope_vision_model(
+    vision_model: torch.nn.Module,
+    pixel_values: torch.Tensor,
+    grid_thw_list,
+    *,
+    rope_type: Literal["rope_3d", "rope_2d"],) -> tuple[torch.Tensor, ...]:
+    """
+    https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L322 for details.
+    """
+    grid_thw_list = grid_thw_list.tolist()
+    tp_size = parallel_state.get_tensor_model_parallel_world_size()
+
+    tp_rank_local = parallel_state.get_tensor_model_parallel_rank()
+
+    patches_per_image = [math.prod(grid_thw) for grid_thw in grid_thw_list]
+    cum_patches_per_image = [0, *itertools.accumulate(patches_per_image)]
+
+    # Get load balancing assignment with all metadata
+    (image_to_tp_rank, gpu_sample_counts, grouped_pixel_values_len) = get_load_balance_assignment(
+        patches_per_image, tp_size
+    )
+
+    cum_gpu_sample_counts = [0, *itertools.accumulate(gpu_sample_counts)]
+
+    image_idxs_local = image_to_tp_rank[cum_gpu_sample_counts[tp_rank_local] : cum_gpu_sample_counts[tp_rank_local + 1]]
+        
+    # Get the pixel values for the local images based on the image_idxs_local
+    if len(image_idxs_local) > 0:
+        pixel_values_local = torch.cat(
+            [pixel_values[cum_patches_per_image[i] : cum_patches_per_image[i + 1]] for i in image_idxs_local]
+        )
+    else:
+        # Handle case where this rank has no images
+        pixel_values_local = torch.empty(
+            (0, pixel_values.shape[1]),
+            device=pixel_values.device,
+            dtype=pixel_values.dtype,
+        )
+    if rope_type == "rope_2d":
+        embed_dim_reduction_factor = vision_model.merge_kernel_size[0] * vision_model.merge_kernel_size[1]
+    else:
+        embed_dim_reduction_factor = vision_model.spatial_merge_size * vision_model.spatial_merge_size
+
+    # Find the max length across all ranks
+    # The output embedding of every DP rank has to be
+    # padded to this length for tensor_model_parallel_all_gather
+    # to work
+    max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
+    local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
+        
+    if rope_type == "rope_2d":
+        if pixel_values_local.shape[0] > 0:
+            image_embeds_local = vision_model(pixel_values_local, torch.tensor(local_grid_thw_list))
+            if isinstance(image_embeds_local, list):
+                image_embeds_local = torch.cat(image_embeds_local, dim=0)
+        else:
+            out_dim = getattr(vision_model.config, "hidden_size", None)
+            image_embeds_local = torch.empty(
+                (0, embed_dim_reduction_factor, out_dim),
+                device=pixel_values.device,
+                dtype=pixel_values.dtype,
+            )  
+    else:
+        if pixel_values_local.shape[0] > 0:
+            image_embeds_local = vision_model(pixel_values_local, torch.tensor(local_grid_thw_list))
+        else:
+            # Handle empty case
+            image_embeds_local = torch.empty(
+                (0, vision_model.out_hidden_size),
+                device=pixel_values.device,
+                dtype=pixel_values.dtype,
+            )
+            
+    # Pad the output based on max_len_per_rank
+    # for tensor_model_parallel_all_gather to work            
+    current_len = image_embeds_local.shape[0]
+    if current_len < max_len_per_rank:
+        padding_size = max_len_per_rank - current_len
+        if rope_type == "rope_2d":
+            padding = torch.empty(
+                (
+                    padding_size,
+                    image_embeds_local.shape[1],
+                    image_embeds_local.shape[2],
+                ),
+                dtype=image_embeds_local.dtype,
+                device=image_embeds_local.device,
+            )
+        else:
+            padding = torch.empty(
+                (padding_size, image_embeds_local.shape[1]),
+                dtype=image_embeds_local.dtype,
+                device=image_embeds_local.device,
+            )
+        image_embeds_local_padded = torch.cat([image_embeds_local, padding], dim=0)
+    else:
+        image_embeds_local_padded = image_embeds_local
+
+    # Do all_gather to collect embeddings from all ranks
+    gathered_embeds = tensor_model_parallel_all_gather(image_embeds_local_padded, dim=0)
+
+    # Remove padding and reconstruct per-rank embeddings
+    rank_embeddings = list[torch.Tensor]()
+    for rank in range(tp_size):
+        start_idx = rank * max_len_per_rank
+        end_idx = start_idx + (grouped_pixel_values_len[rank] // embed_dim_reduction_factor)
+        rank_embeddings.append(gathered_embeds[start_idx:end_idx])
+
+    patches_per_output_image = [(patch_size // embed_dim_reduction_factor) for patch_size in patches_per_image]
+
+    # Reconstruct embeddings in the original order
+    original_order_embeddings = [None] * len(grid_thw_list)
+    current_idx = 0
+    for rank in range(tp_size):
+        count = gpu_sample_counts[rank]
+        if count > 0:
+            # Get images assigned to this rank in shuffled order
+            rank_images = image_to_tp_rank[current_idx : current_idx + count]
+
+            rank_embed = rank_embeddings[rank]
+            # Split rank embeddings back to individual images
+            embed_start = 0
+            for img_idx in rank_images:
+                img_patches = patches_per_output_image[img_idx]
+                original_order_embeddings[img_idx] = rank_embed[embed_start : embed_start + img_patches]
+                embed_start += img_patches
+            current_idx += count
+    out_embeddings = tuple(embed for embed in original_order_embeddings if embed is not None)
+    if len(out_embeddings) != len(original_order_embeddings):
+        raise ValueError("Found unassigned embeddings")
+
+    return torch.concat(out_embeddings)
+            
 
 class AscendQwen3VLMoeForConditionalGeneration(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
