@@ -127,7 +127,7 @@ install_extra_components() {
 
 install_triton_ascend() {
     echo "====> Installing triton_ascend"
-    apt-get install -y clang-15
+    apt-get update && apt-get install -y clang-15
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
     clang -v
