@@ -301,15 +301,16 @@ bash proxy.sh
 
 **Notice:**
 The parameters are explained as follows:
+
 - `--tensor-parallel-size` 16 are common settings for tensor parallelism (TP) sizes.
 - `--prefill-context-parallel-size` 2 are common settings for prefill context parallelism (PCP) sizes.
 - `--decode-context-parallel-size` 8 are common settings for decode context parallelism (DCP) sizes.
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
-  - (1) If the input length of a request is greater than `--max-num-batched-tokens`, it will be divided into multiple rounds of computation according to `--max-num-batched-tokens`;
-  - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
-  - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on GPU memory (activation value usage) will be greater.
+    - (1) If the input length of a request is greater than `--max-num-batched-tokens`, it will be divided into multiple rounds of computation according to `--max-num-batched-tokens`;
+    - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
+    - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on GPU memory (activation value usage) will be greater.
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
 - `--enable-expert-parallel` indicates that EP is enabled. Note that vLLM does not support a mixed approach of ETP and EP; that is, MoE can either use pure EP or pure TP.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
@@ -321,6 +322,7 @@ The parameters are explained as follows:
 - `export VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL=1` indicates that context parallel is enabled. This environment variable is required in the PD architecture but not needed in the pd co-locate deployment scenario. It will be removed in the future.
 
 **Notice:**
+
 - tensor-parallel-size needs to be divisible by decode-context-parallel-size.
 - decode-context-parallel-size must less than or equal to tensor-parallel-size.
 
@@ -351,6 +353,7 @@ Run performance evaluation of `DeepSeek-V3.1-w8a8` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

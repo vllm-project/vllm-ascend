@@ -34,7 +34,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
 
 If the vLLM server is started successfully, you can see information shown below:
 
-```
+```shell
 INFO:     Started server process [6873]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -42,7 +42,7 @@ INFO:     Application startup complete.
 
 Once your server is started, you can query the model with input prompts in a new terminal:
 
-```
+```shell
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -67,7 +67,7 @@ pip install gradio plotly evalscope
 
 You can use `evalscope eval` to run GSM8K for accuracy testing:
 
-```
+```shell
 evalscope eval \
  --model Qwen/Qwen2.5-7B-Instruct \
  --api-url http://localhost:8000/v1 \
@@ -101,7 +101,7 @@ pip install evalscope[perf] -U
 
 You can use `evalscope perf` to run perf testing:
 
-```
+```shell
 evalscope perf \
     --url "http://localhost:8000/v1/chat/completions" \
     --parallel 5 \
