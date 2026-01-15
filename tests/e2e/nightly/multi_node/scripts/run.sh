@@ -125,6 +125,7 @@ install_extra_components() {
     echo "====> Extra components installation completed"
 }
 
+# remove when merged into main repo
 install_triton_ascend() {
     echo "====> Installing triton_ascend"
     apt-get update && apt-get install -y clang-15
@@ -150,8 +151,15 @@ install_triton_ascend() {
 
     export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
     which bishengir-compile
-    python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+    python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260112
     echo "====> Triton ascend installation completed"
+}
+
+show_triton_info() {
+    echo "====> Check triton info"
+    clang -v
+    which bishengir-compile
+    pip show triton-ascend
 }
 
 kill_npu_processes() {
@@ -182,6 +190,7 @@ main() {
     check_and_config
     show_vllm_info
     install_triton_ascend
+    show_triton_info
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
     fi

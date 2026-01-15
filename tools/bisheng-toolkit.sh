@@ -12,5 +12,4 @@ mkdir -p "${BISHENG_DIR}"
 wget -P "${BISHENG_DIR}" "${BISHENG_URL}"
 chmod a+x "${BISHENG_INSTALLER_PATH}" 
 "${BISHENG_INSTALLER_PATH}" --install
-rm  -rf "${BISHENG_DIR}"
 echo "export PATH=${BISHENG_EVN_PATH}:\$PATH" >> ~/.bashrc
