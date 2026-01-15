@@ -40,24 +40,15 @@ export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirror
 # src path
 export SRC_WORKSPACE=/vllm-workspace
 mkdir -p $SRC_WORKSPACE
-# workspace
-export WORKSPACE=/workspace
-mkdir -p $WORKSPACE
-# TAG
-export SRC_TAG=v0.11.0
-cd $SRC_WORKSPACE
-python -m venv $SRC_TAG
-source $SRC_TAG/bin/activate
 
 apt-get update -y
 apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
-# v0.11.0
-git clone -b v0.11.0-dev https://github.com/vllm-project/vllm-ascend.git
-git clone -b v0.11.0 https://github.com/vllm-project/vllm.git
+git clone -b |vllm_ascend_version| --depth 1 https://github.com/vllm-project/vllm-ascend.git
+git clone --depth 1 https://github.com/vllm-project/vllm.git
 
 # vllm
-cd $WORKSPACE/vllm
+cd $SRC_WORKSPACE/vllm
 VLLM_TARGET_DEVICE=empty python3 -m pip install .
 python3 -m pip uninstall -y triton
 
