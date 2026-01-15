@@ -23,7 +23,6 @@ from typing import Any, Tuple
 import numpy as np
 import torch
 from vllm.config import VllmConfig
-from vllm.config.model import ModelDType
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
 
@@ -145,26 +144,3 @@ def build_attn_state(
     else:
         attn_state = AscendAttentionState.PrefillCacheHit
     return attn_state
-
-
-def make_attention_mask(
-    vllm_config: VllmConfig,
-    attn_state: AscendAttentionState,
-    dtype: ModelDType | torch.dtype,
-    device: torch.device,
-) -> torch.Tensor:
-    """make attention mask for npu's attention backend."""
-    attn_mask_builder = get_attn_mask_builder(device)
-    # pcp situation.
-    if attn_mask_builder is None:
-        raise ValueError("Attn mask builder is None")
-    # Pooling situation.
-    if vllm_config.model_config.runner_type == "pooling":
-        return attn_mask_builder.get_attn_mask(2048, torch.bool)
-
-    # TODO(Ronald1995) cosidering pcp.
-    if vllm_config.model_config.use_mla:
-        # mla prefill
-        if attn_state != AscendAttentionState.DecodeOnly:
-            return attn_mask_builder.get_mla_mask(dtype)
-    return attn_mask_builder.get_splitfuse_attn_mask()

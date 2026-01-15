@@ -23,7 +23,7 @@ def register():
 
 
 def register_connector():
-    from vllm_ascend.distributed import register_connector
+    from vllm_ascend.distributed.kv_transfer import register_connector
     register_connector()
 
 
