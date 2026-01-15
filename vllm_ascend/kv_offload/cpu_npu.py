@@ -1,11 +1,19 @@
 import numpy as np
 import torch
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import (OffloadingHandler,
                                               TransferResult, TransferSpec)
+
+from vllm_ascend.utils import vllm_version_is
+
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.abstract import AttentionBackend  # type: ignore
+else:
+    from vllm.v1.attention.backend import AttentionBackend  # type: ignore
+# isort: on
 
 logger = init_logger(__name__)
 
@@ -166,3 +174,13 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         for job_id, _ in results:
             del self.transfer_events[job_id]
         return results
+
+    def wait(self, job_ids: set[int]) -> None:
+        """
+        Wait (block) until all specified transfer jobs are completed.
+        """
+        for job_id in job_ids:
+            event = self.transfer_events.get(job_id)
+            if event is not None:
+                # This will block until the NPU event is complete
+                event.synchronize()
