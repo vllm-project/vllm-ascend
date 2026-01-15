@@ -53,11 +53,6 @@ class AscendQwen3_VisionMLP(nn.Module):
         prefix: str = "",
     ):
         super(Qwen3_VisionMLP,self).__init__()
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
         self.linear_fc1 = ColumnParallelLinear(
             in_features,
             hidden_features,
@@ -65,7 +60,6 @@ class AscendQwen3_VisionMLP(nn.Module):
             quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.linear_fc1",
-            #disable_tp=use_data_parallel,
             disable_tp=True
         )
         self.linear_fc2 = RowParallelLinear(
@@ -75,7 +69,6 @@ class AscendQwen3_VisionMLP(nn.Module):
             quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.linear_fc2",
-            #disable_tp=use_data_parallel,
             disable_tp=True
         )
         self.act_fn = act_fn
@@ -117,11 +110,6 @@ class AscendQwen3_VisionPatchMerger(nn.Module):
         prefix: str = "",
     ) -> None:
         super(Qwen3_VisionPatchMerger,self).__init__()
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
         self.hidden_size = context_dim * (spatial_merge_size**2)
 
         self.use_postshuffle_norm = use_postshuffle_norm
@@ -137,7 +125,6 @@ class AscendQwen3_VisionPatchMerger(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.linear_fc1",
-            #disable_tp=use_data_parallel,
             disable_tp=True,
         )
         self.act_fn = nn.GELU()
@@ -147,7 +134,6 @@ class AscendQwen3_VisionPatchMerger(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.linear_fc2",
-            #disable_tp=use_data_parallel,
             disable_tp=True,
         )
 
@@ -325,7 +311,7 @@ class AscendQwen3_VisionTransformer(nn.Module):
         )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
         
 
-        if self.use_data_parallel == False:
+        if not self.use_data_parallel:
             hidden_states = all_gather_2d(hidden_states, world_size=tp_world_size, group=tp_group)
             if padding_size:
                 hidden_states = hidden_states[:-padding_size // merge_size]

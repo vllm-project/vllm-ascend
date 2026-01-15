@@ -169,18 +169,12 @@ class AscendQwen2_5_VisionMLP(nn.Module):
         prefix: str = "",
     ):
         super(Qwen2_5_VisionMLP,self).__init__()
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=in_features,
             output_sizes=[hidden_features] * 2,  # [gate_proj, up_proj]
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
-            #disable_tp=use_data_parallel,
             disable_tp=True,
         )
 
@@ -190,7 +184,6 @@ class AscendQwen2_5_VisionMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
-            #disable_tp=use_data_parallel,
             disable_tp=True,
         )
         self.act_fn = act_fn
@@ -387,11 +380,6 @@ class AscendQwen2_5_VisionPatchMerger(nn.Module):
         prefix: str = "",
     ) -> None:
         super(Qwen2_5_VisionPatchMerger,self).__init__()
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
@@ -405,7 +393,6 @@ class AscendQwen2_5_VisionPatchMerger(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp.0",
                 return_bias=False,
-                #disable_tp=use_data_parallel,
                 disable_tp=True,
             ),
             nn.GELU(),
@@ -416,7 +403,6 @@ class AscendQwen2_5_VisionPatchMerger(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp.2",
                 return_bias=False,
-                #disable_tp=use_data_parallel,
                 disable_tp=True,
             ),
         )
