@@ -6,7 +6,6 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch import nn
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
-from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
