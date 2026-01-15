@@ -26,7 +26,6 @@ add_ops_compile_options(
                 -Werror
                 -DHCCL_COMM
                 -D__COMBINE_V2__
-                -D__SOFT_SYNC__
                 ${_DISPATCH_FFN_INC_OPTS}
 )
 
