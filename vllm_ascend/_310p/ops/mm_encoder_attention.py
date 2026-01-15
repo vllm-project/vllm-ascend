@@ -1,14 +1,29 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+import einops
 import torch
 import torch.nn.functional as F
-import einops
 import torch_npu
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ops.mm_encoder_attention import (
-    AscendMMEncoderAttention as _Base,
-    MIN_PAD_SIZE,
-    MAX_PAD_SIZE,
-)
+from vllm_ascend.ops.mm_encoder_attention import MAX_PAD_SIZE, MIN_PAD_SIZE
+from vllm_ascend.ops.mm_encoder_attention import \
+    AscendMMEncoderAttention as _Base
 
 
 class AscendMMEncoderAttention310(_Base):
@@ -28,7 +43,7 @@ class AscendMMEncoderAttention310(_Base):
         kv_len = key.size(1)
 
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
-        
+
         enable_pad = (
             envs_ascend.USE_OPTIMIZED_MODEL
             and self.head_size > MIN_PAD_SIZE
@@ -52,8 +67,11 @@ class AscendMMEncoderAttention310(_Base):
 
         if cu_seqlens is None:
             cu_seqlens = torch.arange(
-                0, (bsz + 1) * q_len, step=q_len,
-                dtype=torch.int32, device=query.device,
+                0,
+                (bsz + 1) * q_len,
+                step=q_len,
+                dtype=torch.int32,
+                device=query.device,
             )
 
         total_q_tokens = bsz * q_len
@@ -65,7 +83,7 @@ class AscendMMEncoderAttention310(_Base):
             seg_len = int(seg_len)
             ed = st + seg_len
 
-            q_i = q[st:ed].unsqueeze(0)   # [1, S, H, D]
+            q_i = q[st:ed].unsqueeze(0)  # [1, S, H, D]
             k_i = k[st:ed].unsqueeze(0)
             v_i = v[st:ed].unsqueeze(0)
 
@@ -73,7 +91,9 @@ class AscendMMEncoderAttention310(_Base):
             kvs = int(k_i.shape[1])
 
             out_i = torch_npu.npu_prompt_flash_attention(
-                q_i, k_i, v_i,
+                q_i,
+                k_i,
+                v_i,
                 input_layout="BSND",
                 num_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,

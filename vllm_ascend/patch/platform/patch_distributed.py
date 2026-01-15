@@ -32,12 +32,12 @@ class NullHandle:
 
 
 def communication_adaptation_310p():
-
     def broadcast310p_wrapper(fn):
+        def broadcast310p(tensor, src=0, group=None, async_op=False, group_src=None):
+            root = group_src if group_src is not None else src
 
-        def broadcast310p(tensor, src, group=None, async_op=False):
-            if tensor.device == torch.device('cpu'):
-                return fn(tensor, src, group, async_op)
+            if tensor.device == torch.device("cpu"):
+                return fn(tensor, src=root, group=group, async_op=async_op)
             rank = torch.distributed.get_rank(group)
             world_size = torch.distributed.get_world_size(group)
             tensor_list = [torch.empty_like(tensor) for _ in range(world_size)]
