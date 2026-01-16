@@ -9,7 +9,7 @@ from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
-MODEL_PATH = "vllm-ascend/Qwen3-0.6B"
+MODEL_PATH = "Qwen/Qwen3-0.6B"
 LORA_NAME_PATH_MAP = {
     "Alice": "charent/self_cognition_Alice",
     "Bob": "charent/self_cognition_Bob",
