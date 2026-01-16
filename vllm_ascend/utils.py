@@ -70,6 +70,7 @@ _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
 _HAS_ROPE = None
+_ENABLE_SP_BY_COMTUM_OP = None
 
 
 def _print_callback_on_stream(*args):
@@ -792,6 +793,13 @@ def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
+def enable_flash_comm_v1():
+    return (envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+
+
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
     if _ENABLE_SP is None:
@@ -800,10 +808,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             vllm_config = get_current_vllm_config()
         _ENABLE_SP = (
             vllm_config.compilation_config.pass_config.enable_sp
-            or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
-            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+            or enable_flash_comm_v1())
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True

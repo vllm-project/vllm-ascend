@@ -36,7 +36,8 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD, AscendDeviceType, check_kv_extra_config,
     enable_sp, flashcomm2_enable, get_ascend_device_type, is_moe_model,
     is_vl_model, refresh_block_size, update_aclgraph_sizes,
-    update_cudagraph_capture_sizes, update_default_aclgraph_sizes)
+    update_cudagraph_capture_sizes, update_default_aclgraph_sizes,
+    enable_flash_comm_v1)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -355,13 +356,21 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        if is_vl_model(vllm_config):
-            if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))) or \
-               bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))):
-                raise ValueError(
-                    "Currently, VL models doesn't support "
-                    "FLASHCOMM in vllm-ascend. We will fix this in the future. "
-                    "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
+        if is_vl_model(vllm_config) and enable_flash_comm_v1():
+            raise ValueError("""Flash Comm V1 is not supported for VL models. \
+                Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
+                For optimal performance with VL models, we recommend enabling Sequence Parallelism \
+                via --compilation-config '{"pass_config": {"enable_sp": true}}'.""")
+
+        if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config):
+                from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_threshold
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(get_sp_threshold(vllm_config))
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = \
+                    new_compile_ranges_split_points
+                logger.debug("set compile_ranges_split_points to "
+                            "{new_compile_ranges_split_points} for sequence parallelism")
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -457,17 +466,17 @@ class NPUPlatform(Platform):
         Args:
             attn_metadata (dict[str, Any]): attention metadata for all layers.
             vllm_config (VllmConfig): configuration of vllm.
-            dp_metadata (DpMetada): metadata for data parallelism. 
+            dp_metadata (DpMetada): metadata for data parallelism.
                 lack of typehint because of circular import.
             virtual_engine (int, optional): index of virtual engine. Defaults to 0.
             num_tokens (int | None, optional): number of tokens. Defaults to None.
-            num_tokens_across_dp (torch.Tensor | None, optional): number of tokens 
+            num_tokens_across_dp (torch.Tensor | None, optional): number of tokens
                 across data parallelism.Defaults to None.
             cudagraph_runtime_mode (CUDAGraphMode, optional): mode of cudagraph runtime.
                 Defaults to None.lack of typehint because of circular import.
             batch_descriptor (BatchDescriptor, optional): descriptor of batch.
                 Defaults to None.
-            ubatch_slices (UBatchSlices, optional): slice info for dual batch. 
+            ubatch_slices (UBatchSlices, optional): slice info for dual batch.
                 Defaults to None. lack of typehint because of circular import
 
         Returns:
