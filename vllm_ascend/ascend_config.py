@@ -226,8 +226,7 @@ class NpugraphExConfig:
     Configuration for controlling the behavior of npugraph_ex backend.
 
     This class provides a way to configure whether to use the npugraph_ex backend and static kernel.
-    These configurations directly impact the performance and behavior of models
-    deployed on Ascend platforms.
+    These configurations directly impact the performance and behavior of models deployed on Ascend platforms.
     """
 
     def __init__(self,
