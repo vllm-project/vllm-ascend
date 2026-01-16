@@ -903,13 +903,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             layout_kv="PA_BSND",
             sparse_mode=3,
         )
-<<<<<<< HEAD
 
         attn_output = self._v_up_proj(attn_output)
-=======
-        attn_output = self._v_up_proj(attn_output, has_prefill)
-
->>>>>>> 492e9a86 (support pd-mix sfa-forward)
         maybe_npu_prefetch(inputs=self.o_proj.weight,
                            dependency=attn_output,
                            max_size=MAX_O_PROJ_PREFETCH_SIZE,
