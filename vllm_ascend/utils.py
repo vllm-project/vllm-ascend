@@ -689,6 +689,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         AscendApplyRotaryEmb, AscendDeepseekScalingRotaryEmbedding,
         AscendMRotaryEmbedding, AscendRotaryEmbedding,
         AscendYaRNRotaryEmbedding)
+    from vllm_ascend.ops.triton.layernorm_gated import AscendRMSNormGated
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -716,6 +717,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
+        "RMSNormGated": AscendRMSNormGated,
     }
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
