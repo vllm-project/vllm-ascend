@@ -454,8 +454,6 @@ class EagleProposer(VllmEagleProposer):
                 self.token_arange_np[:batch_size + 1]).clone()
 
         common_attn_metadata.decode_token_per_req = 1
-        common_attn_metadata.attn_mask = (
-            self.attn_mask_builder.get_splitfuse_attn_mask())
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         common_attn_metadata.num_input_tokens = input_batch_size
 
@@ -531,6 +529,10 @@ class EagleProposer(VllmEagleProposer):
                 common_attn_metadata=common_attn_metadata,
                 draft_index=now_speculative + 1,
             )
+
+            per_layer_attn_metadata = {}
+            for layer_name in self.attn_layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
@@ -945,10 +947,12 @@ class EagleProposer(VllmEagleProposer):
                                    num_tokens, self.vllm_config)
 
     # padding view into correct length
-    def _pad_length(self, view, target_length):
-        pad_length = target_length - len(view)
-        padded_view = F.pad(view, (0, pad_length), mode='constant', value=0)
+    def _pad_length(self, tensor, target_length):
+        pad_length = target_length - len(tensor)
+        pad = [0] * (2 * tensor.dim() - 1) + [pad_length]
+        padded_view = F.pad(tensor, pad, mode='constant', value=0)
         return padded_view
+
     def maybe_pad_and_reduce(
         self,
         hidden_states: torch.Tensor,
