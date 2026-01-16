@@ -58,8 +58,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # NPU specific initializations can be added below.
         self.cudagraph_manager: AclGraphManager = AclGraphManager(
-            vllm_config,
-            device,
+            self.vllm_config,
+            self.uses_mrope,
+            self.device,
         )
 
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle
@@ -78,7 +79,6 @@ class NPUModelRunner(GPUModelRunner):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
-            pin_memory=self.pin_memory,
         )
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
@@ -89,7 +89,6 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             dtype=self.dtype,
             device=self.device,
-            pin_memory=self.pin_memory,
         )
         # we need to adjust triton operators in sampler,
         # so reinitialize sampler here.
@@ -106,7 +105,7 @@ class NPUModelRunner(GPUModelRunner):
             self.max_num_reqs,
             dtype=torch.int32,
             device="cpu",
-            pin_memory=self.pin_memory,
+            pin_memory=True,
         )
 
     def prepare_inputs(

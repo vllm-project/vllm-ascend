@@ -33,7 +33,6 @@ class AscendInputBuffers(InputBuffers):
         vocab_size: int,
         dtype: torch.dtype,
         device: torch.device,
-        pin_memory: bool,
     ):
         super().__init__(
             max_num_reqs,
@@ -42,7 +41,6 @@ class AscendInputBuffers(InputBuffers):
             vocab_size,
             dtype,
             device,
-            pin_memory,
         )
         # Create seq_lens_cpu and seq_lens_np.
         # npu's attention backend still needs seq_lens on CPU side.

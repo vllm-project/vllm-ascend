@@ -495,10 +495,6 @@ class NPUPlatform(Platform):
         if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
             return {}
 
-        num_actual_tokens = list(attn_metadata.values())[0].num_actual_tokens
-        if num_tokens is None:
-            num_tokens = num_actual_tokens
-
         moe_comm_type = select_moe_comm_method(
             num_tokens,
             vllm_config,
@@ -533,10 +529,13 @@ class NPUPlatform(Platform):
         flashcomm_v2_enabled = flashcomm2_enable(
         ) and tp_world_size > 1 and num_tokens is not None
         pad_size = 0
+        padded_length = num_tokens
         if (sp_enabled or flashcomm_v2_enabled):
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
 
+        if num_tokens is None and attn_metadata is not None:
+            num_tokens = list(attn_metadata.values())[0].num_actual_tokens
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.max_tokens_across_dp_cpu.item()
@@ -546,8 +545,9 @@ class NPUPlatform(Platform):
                 pad_size = padded_length - num_tokens
         else:
             max_tokens_across_dp = num_tokens
-
+        mc2_mask = None
         if num_tokens is not None:
+            num_actual_tokens = num_tokens
             # NOTE: token num which need to pad to when mc2
             padded_num_tokens = math.ceil(
                 max_tokens_across_dp / tp_world_size) * tp_world_size
