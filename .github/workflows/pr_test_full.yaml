@@ -38,46 +38,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  changes:
-    runs-on: linux-aarch64-a2-0
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
-    outputs:
-      e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
-      ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
-    steps:
-      - name: Setup git proxy
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
-      # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
-      - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            e2e_tracker:
-              - '.github/workflows/pr_test_full.yaml'
-              - '.github/workflows/_e2e_test.yaml'
-              - 'vllm_ascend/**'
-              - 'csrc/**'
-              - 'cmake/**'
-              - 'tests/e2e/**'
-              - 'CMakeLists.txt'
-              - 'setup.py'
-              - 'requirements.txt'
-              - 'requirements-dev.txt'
-              - 'requirements-lint.txt'
-              - 'packages.txt'
-            ut_tracker:
-              - 'tests/ut/**'
+  # changes:
+  #   runs-on: linux-aarch64-a2-0
+  #   if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
+  #   outputs:
+  #     e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
+  #     ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
+  #   steps:
+  #     - name: Setup git proxy
+  #       run: |
+  #         git config --global --add safe.directory "$GITHUB_WORKSPACE"
+  #         git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+  #     # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
+  #     - uses: actions/checkout@v6
+  #     - uses: dorny/paths-filter@v3
+  #       id: filter
+  #       with:
+  #         filters: |
+  #           e2e_tracker:
+  #             - '.github/workflows/pr_test_full.yaml'
+  #             - '.github/workflows/_e2e_test.yaml'
+  #             - 'vllm_ascend/**'
+  #             - 'csrc/**'
+  #             - 'cmake/**'
+  #             - 'tests/e2e/**'
+  #             - 'CMakeLists.txt'
+  #             - 'setup.py'
+  #             - 'requirements.txt'
+  #             - 'requirements-dev.txt'
+  #             - 'requirements-lint.txt'
+  #             - 'packages.txt'
+  #           ut_tracker:
+  #             - 'tests/ut/**'
 
   e2e-test:
     name: e2e-full
     strategy:
       matrix:
         vllm_version: [2c24bc6996cb165fce92f780b388a5e39b3f4060, v0.13.0]
-    needs: [changes]
-    if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
+    #needs: [changes]
+    #if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
