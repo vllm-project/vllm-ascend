@@ -326,9 +326,7 @@ class NPUPlatform(Platform):
             if is_310p():
                 parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
             elif ascend_config.xlite_graph_config.enabled:
-                logger.info(
-                    "openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite"
-                )
+                logger.info("openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite")
                 parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
@@ -416,14 +414,10 @@ class NPUPlatform(Platform):
             # (True, True):  "...AscendSFABackend310",
         }
 
-<<<<<<< HEAD
-        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse)]
-=======
         if is_310p():
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
         return backend_map[key]
->>>>>>> f95a1763 (support chunedprefilled state in 310p device)
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
