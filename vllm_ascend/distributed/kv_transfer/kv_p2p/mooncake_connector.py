@@ -1170,7 +1170,7 @@ class MooncakeConnectorWorker:
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping: dict[
             str, Optional[List[List[int]]]] = {}
-        self.remote_port_send_num: dict[str, dict[str, int | str]] = {}
+        self.remote_port_send_num: dict[str, dict[int, dict[str, int | str]]] = {}
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -1457,7 +1457,7 @@ class MooncakeConnectorWorker:
             return local_remote_block_port_mappings
 
         def get_remote_port_send_num(local_remote_block_port_mappings):
-            remote_port_send_num: dict[int, dict[str, int]] = {}
+            remote_port_send_num: dict[int, dict[str, int | str]] = {}
             for port in range(self._prefill_tp_size * meta.remote_pcp_size):
                 remote_host = meta.remote_multi_nodes_meta_mapping[str(port)]['host']
                 remote_port_send_num[meta.remote_port + port] = {}
