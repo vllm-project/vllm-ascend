@@ -187,6 +187,14 @@ class NPUPlatform(Platform):
                          ) if not isinstance(ascend_compilation_config, dict)
                     else ascend_compilation_config)
 
+        ascend_fusion_config = ascend_config.ascend_fusion_config
+        if ascend_fusion_config:
+            vllm_config.additional_config.setdefault(
+                "ascend_fusion_config", {}).update(
+                    vars(ascend_fusion_config
+                         ) if not isinstance(ascend_fusion_config, dict)
+                    else ascend_fusion_config)
+
         elif model_config and hasattr(model_config.hf_text_config,
                                       "index_topk"):
             vllm_config.cache_config.cache_dtype = str(
