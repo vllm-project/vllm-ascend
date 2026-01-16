@@ -46,7 +46,8 @@ def extra_stream_scope_check(match: Match) -> bool:
         logger.debug(
             f"Cross-stream operation detected in pattern match for AddRMSNormQuant. "
             f"Multiple streams found: {non_default_streams}. "
-            f"Fusion is not supported for cross-stream operations.")
+            f"Fusion is not supported for cross-stream operations."
+        )
         return False
 
     return True

@@ -23,18 +23,11 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import Range
 from vllm.logger import logger
 
-from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import \
-    extra_stream_scope_check
+from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
 
 class GraphEXQKNormRopeFusionPattern:
-
-    def __init__(self,
-                 vllm_config,
-                 head_dim,
-                 num_heads,
-                 num_kv_heads,
-                 eps=1e-6):
+    def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
         self.vllm_config = vllm_config
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -46,66 +39,39 @@ class GraphEXQKNormRopeFusionPattern:
 
     def get_inputs(self):
         T = 5
-        qkv = torch.empty(T,
-                          self.q_size + 2 * self.kv_size,
-                          dtype=torch.bfloat16,
-                          device="npu")
-        q_weight = torch.empty(self.head_dim,
-                               dtype=torch.bfloat16,
-                               device="npu")
-        k_weight = torch.empty(self.head_dim,
-                               dtype=torch.bfloat16,
-                               device="npu")
-        cos = torch.empty(1,
-                          T,
-                          1,
-                          self.head_dim,
-                          dtype=torch.bfloat16,
-                          device="npu")
-        sin = torch.empty(1,
-                          T,
-                          1,
-                          self.head_dim,
-                          dtype=torch.bfloat16,
-                          device="npu")
+        qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
+        q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
+        k_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
+        cos = torch.empty(1, T, 1, self.head_dim, dtype=torch.bfloat16, device="npu")
+        sin = torch.empty(1, T, 1, self.head_dim, dtype=torch.bfloat16, device="npu")
         return [qkv, q_weight, k_weight, cos, sin]
 
     # The replacement registered here will be actually executed after AOT.
     def register(self):
+        def pattern(
+            qkv: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+        ):
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        def pattern(qkv: torch.Tensor, q_weight: torch.Tensor,
-                    k_weight: torch.Tensor, cos: torch.Tensor,
-                    sin: torch.Tensor):
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight, self.eps)
 
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
-                                dim=-1)
-
-            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
-                               self.head_dim)
-            q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight,
-                                                       self.eps)
-
-            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
-                               self.head_dim)
-            k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight,
-                                                       self.eps)
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+            k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight, self.eps)
 
             q_flat = q_norm_out.view(q.shape)
-            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1,
-                                                 self.head_dim)
+            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1, self.head_dim)
 
             k_flat = k_norm_out.view(k.shape)
-            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1,
-                                                 self.head_dim)
+            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1, self.head_dim)
 
-            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(
-                q_reshape, k_reshape, cos, sin)
+            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
 
             return q_rope, k_rope, v
 
-        def replacement(qkv: torch.Tensor, q_weight: torch.Tensor,
-                        k_weight: torch.Tensor, cos: torch.Tensor,
-                        sin: torch.Tensor):
+        def replacement(
+            qkv: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+        ):
             results = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=qkv,
                 q_weight=q_weight,
@@ -117,24 +83,21 @@ class GraphEXQKNormRopeFusionPattern:
                 q_bias=None,
                 k_bias=None,
                 sin=sin,
-                cos=cos)
+                cos=cos,
+            )
 
             return results
 
-        torchair.register_replacement(search_fn=pattern,
-                                      replace_fn=replacement,
-                                      example_inputs=self.get_inputs(),
-                                      extra_check=extra_stream_scope_check)
+        torchair.register_replacement(
+            search_fn=pattern,
+            replace_fn=replacement,
+            example_inputs=self.get_inputs(),
+            extra_check=extra_stream_scope_check,
+        )
 
 
 class GraphEXQKNormRopeFusionPatternWithBias:
-
-    def __init__(self,
-                 vllm_config,
-                 head_dim,
-                 num_heads,
-                 num_kv_heads,
-                 eps=1e-6):
+    def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
         self.vllm_config = vllm_config
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -146,71 +109,55 @@ class GraphEXQKNormRopeFusionPatternWithBias:
 
     def get_inputs(self):
         T = 5
-        qkv = torch.empty(T,
-                          self.q_size + 2 * self.kv_size,
-                          dtype=torch.bfloat16,
-                          device="npu")
-        q_weight = torch.empty(self.head_dim,
-                               dtype=torch.bfloat16,
-                               device="npu")
-        k_weight = torch.empty(self.head_dim,
-                               dtype=torch.bfloat16,
-                               device="npu")
+        qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
+        q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
+        k_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         q_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        cos = torch.empty(1,
-                          T,
-                          1,
-                          self.head_dim,
-                          dtype=torch.bfloat16,
-                          device="npu")
-        sin = torch.empty(1,
-                          T,
-                          1,
-                          self.head_dim,
-                          dtype=torch.bfloat16,
-                          device="npu")
+        cos = torch.empty(1, T, 1, self.head_dim, dtype=torch.bfloat16, device="npu")
+        sin = torch.empty(1, T, 1, self.head_dim, dtype=torch.bfloat16, device="npu")
         return [qkv, q_weight, k_weight, q_bias, k_bias, cos, sin]
 
     # The replacement registered here will be actually executed after AOT.
     def register(self):
+        def pattern(
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+            q_bias: torch.Tensor,
+            k_bias: torch.Tensor,
+            cos: torch.Tensor,
+            sin: torch.Tensor,
+        ):
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        def pattern(qkv: torch.Tensor, q_weight: torch.Tensor,
-                    k_weight: torch.Tensor, q_bias: torch.Tensor,
-                    k_bias: torch.Tensor, cos: torch.Tensor,
-                    sin: torch.Tensor):
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
-                                dim=-1)
-
-            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
-                               self.head_dim)
-            q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight,
-                                                       self.eps)
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight, self.eps)
             q_normed = q_norm_out + q_bias
 
-            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
-                               self.head_dim)
-            k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight,
-                                                       self.eps)
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+            k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight, self.eps)
             k_normed = k_norm_out + k_bias
 
             q_flat = q_normed.view(q.shape)
-            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1,
-                                                 self.head_dim)
+            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1, self.head_dim)
 
             k_flat = k_normed.view(k.shape)
-            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1,
-                                                 self.head_dim)
+            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1, self.head_dim)
 
-            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(
-                q_reshape, k_reshape, cos, sin)
+            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
 
             return q_rope, k_rope, v
 
-        def replacement(qkv: torch.Tensor, q_weight: torch.Tensor,
-                        k_weight: torch.Tensor, q_bias: torch.Tensor,
-                        k_bias: torch.Tensor, cos: torch.Tensor,
-                        sin: torch.Tensor):
+        def replacement(
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+            q_bias: torch.Tensor,
+            k_bias: torch.Tensor,
+            cos: torch.Tensor,
+            sin: torch.Tensor,
+        ):
             results = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=qkv,
                 q_weight=q_weight,
@@ -222,55 +169,53 @@ class GraphEXQKNormRopeFusionPatternWithBias:
                 q_bias=q_bias,
                 k_bias=k_bias,
                 sin=sin,
-                cos=cos)
+                cos=cos,
+            )
 
             return results
 
-        torchair.register_replacement(search_fn=pattern,
-                                      replace_fn=replacement,
-                                      example_inputs=self.get_inputs(),
-                                      extra_check=extra_stream_scope_check)
+        torchair.register_replacement(
+            search_fn=pattern,
+            replace_fn=replacement,
+            example_inputs=self.get_inputs(),
+            extra_check=extra_stream_scope_check,
+        )
 
 
-class GraphEXQKNormRopeFusionPass():
+class GraphEXQKNormRopeFusionPass:
     """
     A pass for fusing QKV split and RMSNorm operations into a single qk_rmsnorm operator.
     """
 
     def __init__(self, vllm_config: VllmConfig):
-
         dtype = vllm_config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
-            logger.debug(
-                "QKNorm and Rope fusion not enabled: unsupported dtype %s",
-                dtype)
+            logger.debug("QKNorm and Rope fusion not enabled: unsupported dtype %s", dtype)
             return
         # use one attn layer to get meta (such as head_dim) for QKNormRopeFusionPattern
-        attn_layers: dict[str, Attention] = get_layers_from_vllm_config(
-            vllm_config, Attention)
+        attn_layers: dict[str, Attention] = get_layers_from_vllm_config(vllm_config, Attention)
         if len(attn_layers) == 0:
-            logger.debug(
-                "QKNorm and Rope fusion enabled, but no Attention layers were discovered."
-            )
+            logger.debug("QKNorm and Rope fusion enabled, but no Attention layers were discovered.")
             return
         layer = next(iter(attn_layers.values()))
         for epsilon in [1e-6, 1e-5]:
             if layer.head_size != 128:
-                logger.debug(
-                    "QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128",
-                    layer.head_size)
+                logger.debug("QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128", layer.head_size)
                 continue
-            GraphEXQKNormRopeFusionPattern(vllm_config=vllm_config,
-                                           head_dim=layer.head_size,
-                                           num_heads=layer.num_heads,
-                                           num_kv_heads=layer.num_kv_heads,
-                                           eps=epsilon).register()
+            GraphEXQKNormRopeFusionPattern(
+                vllm_config=vllm_config,
+                head_dim=layer.head_size,
+                num_heads=layer.num_heads,
+                num_kv_heads=layer.num_kv_heads,
+                eps=epsilon,
+            ).register()
             GraphEXQKNormRopeFusionPatternWithBias(
                 vllm_config=vllm_config,
                 head_dim=layer.head_size,
                 num_heads=layer.num_heads,
                 num_kv_heads=layer.num_kv_heads,
-                eps=epsilon).register()
+                eps=epsilon,
+            ).register()
 
     def __call__(self, graph: torch.fx.Graph):
         pass

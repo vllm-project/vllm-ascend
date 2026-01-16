@@ -26,7 +26,7 @@ class NpuGraphEXPassManager:
     """
     A pass manager for npu_graph ex fusion passes.
     It handles the configuration and execution of passes.
-    The counterpart in vllm is PostGradPassManager. Since torch_npu 
+    The counterpart in vllm is PostGradPassManager. Since torch_npu
     does not support triton for now, we define our own pass manager.
     """
 
@@ -48,14 +48,12 @@ class NpuGraphEXPassManager:
 
     def configure(self, config: VllmConfig):
         # By default, we enable the graph fusion and quantization fusion pass.
-        self.ascend_compilation_config: dict = config.additional_config.get(
-            "ascend_compilation_config", {})
-        if self.ascend_compilation_config.get("fuse_norm_quant", True):
-            from .npugraph_ex_passes.graphex_norm_quant_fusion_pass import \
-                GraphEXAddRMSNormFusionPass
-            self.passes.append(GraphEXAddRMSNormFusionPass(config))
+        self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
+        # if self.ascend_compilation_config.get("fuse_norm_quant", True):
+        #     from .npugraph_ex_passes.graphex_norm_quant_fusion_pass import GraphEXAddRMSNormFusionPass
+        #     self.passes.append(GraphEXAddRMSNormFusionPass(config))
 
-        if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
-            from .npugraph_ex_passes.graphex_qknorm_rope_fusion_pass import \
-                GraphEXQKNormRopeFusionPass
-            self.passes.append(GraphEXQKNormRopeFusionPass(config))
+        # if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
+        #     from .npugraph_ex_passes.graphex_qknorm_rope_fusion_pass import \
+        #         GraphEXQKNormRopeFusionPass
+        #     self.passes.append(GraphEXQKNormRopeFusionPass(config))
