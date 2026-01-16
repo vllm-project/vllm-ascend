@@ -43,12 +43,18 @@ class TestAscendConfig(TestBase):
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
 
+        ascend_fusion_config = ascend_config.ascend_fusion_config
+        self.assertTrue(ascend_fusion_config.fusion_ops_gmmswigluquant)
+
     @_clean_up_ascend_config
     def test_init_ascend_config_with_additional_config(self):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "ascend_compilation_config": {
                 "fuse_norm_quant": False,
+            },
+            "ascend_fusion_config": {
+                "fusion_ops_gmmswigluquant": False,
             },
             "multistream_overlap_shared_expert": True,
             "eplb_config": {
@@ -64,6 +70,7 @@ class TestAscendConfig(TestBase):
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)
+        self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertFalse(ascend_config.enable_kv_nz)
 
     @_clean_up_ascend_config

@@ -40,6 +40,11 @@ class AscendConfig:
         self.ascend_compilation_config = AscendCompilationConfig(
             **ascend_compilation_config)
 
+        ascend_fusion_config = additional_config.get(
+            "ascend_fusion_config", {})
+        self.ascend_fusion_config = AscendFusionConfig(
+            **ascend_fusion_config)
+
         finegrained_tp_config = additional_config.get("finegrained_tp_config",
                                                       {})
         self.finegrained_tp_config = FinegrainedTPConfig(
@@ -219,6 +224,26 @@ class AscendCompilationConfig:
         """
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
+
+
+class AscendFusionConfig:
+    """
+    Configuration for controlling whether to use a fused operator gmmswigluquant.
+    """
+
+    def __init__(self,
+                 fusion_ops_gmmswigluquant: bool = True,
+                 **kwargs):
+        """
+        Initialize the configuration.
+        
+        Args:
+            fusion_ops_gmmswigluquant (bool): Whether to use a fused operator gmmswigluquant.
+                When set to True, the system will use a fused operator gmmswigluquant.
+                Default: True
+            **kwargs: Additional optional parameters for forward compatibility and configuration extension.
+        """
+        self.fusion_ops_gmmswigluquant = fusion_ops_gmmswigluquant
 
 
 class XliteGraphConfig:
