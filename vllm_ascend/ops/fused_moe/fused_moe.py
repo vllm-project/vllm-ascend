@@ -50,8 +50,7 @@ from vllm_ascend.quantization.w8a8_dynamic import \
 from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                get_ascend_device_type, maybe_trans_nz,
                                npu_stream_switch, shared_expert_dp_enabled,
-                               shared_experts_calculation_stream)
-
+                               shared_experts_calculation_stream, vllm_version_is)
 
 @dataclass
 class FusedMoEResult:
@@ -455,9 +454,13 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # Qwen3-Next specific gating mechanism
         if hasattr(self._shared_experts, "expert_gate") and \
             self._shared_experts.expert_gate is not None:
-            shared_out = F.sigmoid(
-                self._shared_experts.expert_gate(hidden_states)  # type: ignore
-            ) * shared_out
+            if vllm_version_is('0.13.0'):
+                # TODO(jianzs): remove this branch after vLLM new version is
+                # released
+                gate_out = self._shared_experts.expert_gate(hidden_states)  # type: ignore
+            else:
+                gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
+            shared_out = F.sigmoid(gate_out) * shared_out
         return shared_out
 
     def _validate_shared_expert_consistency(self):
