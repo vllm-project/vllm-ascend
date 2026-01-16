@@ -16,11 +16,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from typing import Callable, Set, Union, Tuple
+from typing import Callable, Set, Union, Tuple, Sequence
 import numpy as np
 import torch
-import vllm.v1.worker.gpu.block_table
-import vllm.v1.worker.gpu.states
+import vllm.v1.worker.gpu.buffer_utils
 
 
 def get_row_indices_from_key(key: Union[int, slice, Tuple],
@@ -90,13 +89,13 @@ class UvaBufferWrapper:
     """Ascend NPU doesn't support UVA tensors directly. This is a wrapper class
     that provides CPU and NPU views of a UVA tensor."""
 
-    def __init__(self, *size: int | torch.SymInt, dtype: torch.dtype):
-        self._cpu: torch.Tensor = torch.zeros(*size,
+    def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
+        self._cpu: torch.Tensor = torch.zeros(size,
                                               dtype=dtype,
                                               device="cpu",
                                               pin_memory=True)
         self._np = self._cpu.numpy()
-        self._gpu: torch.Tensor = torch.zeros_like(self._cpu, device="npu")
+        self._uva: torch.Tensor = torch.zeros_like(self._cpu, device="npu")
         self._modified_indices: Set[int] = set()
 
     def _mark_cpu_modified(self, key: int):
@@ -111,18 +110,17 @@ class UvaBufferWrapper:
         return MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
     @property
-    def gpu(self):
+    def uva(self):
         """Get the device data of the buffer."""
         if self._modified_indices:
             # Sort for better memory access locality
             dirty_rows = sorted(self._modified_indices)
             # can't use copy_ method, because copy_ for index tensor
             #  will malloc new memory.
-            self._gpu[dirty_rows] = self._cpu[dirty_rows].to(device="npu",
+            self._uva[dirty_rows] = self._cpu[dirty_rows].to(device="npu",
                                                              non_blocking=True)
             self._modified_indices.clear()
-        return self._gpu
+        return self._uva
 
 
-vllm.v1.worker.gpu.states.UvaBuffer = UvaBufferWrapper
-vllm.v1.worker.gpu.block_table.UvaBuffer = UvaBufferWrapper
+vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper
