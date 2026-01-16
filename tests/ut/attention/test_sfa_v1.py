@@ -36,7 +36,6 @@ class TestAscendSFABackend(TestBase):
 class TestAscendSFAMetadata(TestBase):
 
     def test_ascend_sfa_metadata_default(self):
-        has_prefill = True
         num_actual_tokens = 100
         slot_mapping = torch.randn(100, 4, 1024)
         seq_lens = torch.tensor([30, 50])
@@ -54,7 +53,6 @@ class TestAscendSFAMetadata(TestBase):
         attn_state = AscendAttentionState.ChunkedPrefill
 
         metadata = AscendSFAMetadata(
-            has_prefill=has_prefill,
             num_actual_tokens=num_actual_tokens,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
@@ -68,7 +66,6 @@ class TestAscendSFAMetadata(TestBase):
             attn_state=attn_state,
         )
 
-        self.assertEqual(metadata.has_prefill, has_prefill)
         self.assertEqual(metadata.num_actual_tokens, num_actual_tokens)
         self.assertIs(metadata.slot_mapping, slot_mapping)
         self.assertTrue(torch.equal(metadata.seq_lens, seq_lens))
