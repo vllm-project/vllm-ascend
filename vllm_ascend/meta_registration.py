@@ -46,17 +46,20 @@ def register_meta_if_necessary(ns: str, op_name: str, fn, overload: str = ""):
     if overload != "":
         op_name = op_name + "." + overload
     schema_to_find = ns + "::" + op_name
-    meta_impl_list = torch._C._dispatch_get_registrations_for_dispatch_key(
-        "Meta")
+    meta_impl_list = torch._C._dispatch_get_registrations_for_dispatch_key("Meta")
     if schema_to_find in meta_impl_list:
         return
     lib.impl(op_name, fn, "Meta")
 
 
-def rotary_embedding_meta(positions: torch.Tensor, query: torch.Tensor,
-                          key: torch.Tensor, head_size: int,
-                          cos_sin_cache: torch.Tensor, is_neox: bool):
-
+def rotary_embedding_meta(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+):
     num_tokens = positions.numel()
     query_hidden_size = query.numel() // num_tokens
     key_hidden_size = key.numel() // num_tokens
@@ -68,38 +71,41 @@ def rotary_embedding_meta(positions: torch.Tensor, query: torch.Tensor,
     return query_dst, key_dst
 
 
-def get_masked_input_and_mask_meta(input: torch.Tensor,
-                                   org_vocab_start_index: int,
-                                   org_vocab_end_index: int,
-                                   num_org_vocab_padding: int,
-                                   added_vocab_start_index: int,
-                                   added_vocab_end_index: int):
-
+def get_masked_input_and_mask_meta(
+    input: torch.Tensor,
+    org_vocab_start_index: int,
+    org_vocab_end_index: int,
+    num_org_vocab_padding: int,
+    added_vocab_start_index: int,
+    added_vocab_end_index: int,
+):
     masked_input = torch.empty_like(input)
     mask = torch.empty_like(input).to(torch.bool)
 
     return masked_input, mask
 
 
-def bgmv_expand_meta(x: torch.Tensor, weight: torch.Tensor,
-                     indices: torch.Tensor, y: torch.Tensor, slice_offset: int,
-                     slice_size: int):
-
+def bgmv_expand_meta(
+    x: torch.Tensor, weight: torch.Tensor, indices: torch.Tensor, y: torch.Tensor, slice_offset: int, slice_size: int
+):
     y_out = torch.empty_like(y)
     return y_out
 
 
-def sgmv_expand_meta(x: torch.Tensor, weight: torch.Tensor,
-                     lora_indices: torch.Tensor, seq_len: torch.Tensor,
-                     y: torch.Tensor, slice_offset: int, slice_size: int):
-
+def sgmv_expand_meta(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    lora_indices: torch.Tensor,
+    seq_len: torch.Tensor,
+    y: torch.Tensor,
+    slice_offset: int,
+    slice_size: int,
+):
     y_out = torch.empty_like(y)
     return y_out
 
 
-register_meta_if_necessary("_C_ascend", "rotary_embedding",
-                           rotary_embedding_meta)
-register_meta_if_necessary("_C_ascend", "get_masked_input_and_mask",
-                           get_masked_input_and_mask_meta)
+register_meta_if_necessary("_C_ascend", "rotary_embedding", rotary_embedding_meta)
+register_meta_if_necessary("_C_ascend", "get_masked_input_and_mask", get_masked_input_and_mask_meta)
 register_meta_if_necessary("_C_ascend", "bgmv_expand", bgmv_expand_meta)
 register_meta_if_necessary("_C_ascend", "sgmv_expand", sgmv_expand_meta)
