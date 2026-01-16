@@ -22,8 +22,7 @@ import torch_npu
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ops.mm_encoder_attention import MAX_PAD_SIZE, MIN_PAD_SIZE
-from vllm_ascend.ops.mm_encoder_attention import \
-    AscendMMEncoderAttention as _Base
+from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention as _Base
 
 
 class AscendMMEncoderAttention310(_Base):

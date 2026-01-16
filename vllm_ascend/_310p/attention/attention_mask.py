@@ -15,7 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch_npu
@@ -82,7 +83,7 @@ class _AttentionMaskBuilder310P:
     def __init__(self, device: torch.device):
         self._base = _BASE_BUILDER(device)
 
-        self._fp16_mask_cache: Optional[torch.Tensor] = None
+        self._fp16_mask_cache: torch.Tensor | None = None
         self._fp16_mask_cached_len: int = 0
 
     def __getattr__(self, name: str) -> Any:

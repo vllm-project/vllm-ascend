@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 import torch
 import torch_npu
@@ -34,7 +34,7 @@ class NPUModelRunner310(NPUModelRunner):
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
 
     def _initialize_kv_cache_tensors_310p(
-        self, kv_cache_config: "KVCacheConfig"
+        self, kv_cache_config: KVCacheConfig
     ) -> dict[str, Any]:
         if self.vllm_config.kv_transfer_config is not None:
             raise ValueError("KV cache transfer is not supported for 310P.")
@@ -46,7 +46,7 @@ class NPUModelRunner310(NPUModelRunner):
             )
             kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
-        kv_caches: Dict[str, Any] = {}
+        kv_caches: dict[str, Any] = {}
 
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
@@ -106,6 +106,6 @@ class NPUModelRunner310(NPUModelRunner):
         return kv_caches
 
     def initialize_kv_cache_tensors(
-        self, kv_cache_config: "KVCacheConfig"
+        self, kv_cache_config: KVCacheConfig
     ) -> dict[str, Any]:
         return self._initialize_kv_cache_tensors_310p(kv_cache_config)

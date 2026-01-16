@@ -77,6 +77,7 @@ _HAS_ROPE = None
 def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
+
 def _print_callback_on_stream(*args):
     """Callback function to print arguments on the dedicated print stream."""
     global _GRAPH_PRINT_STREAM
@@ -724,11 +725,13 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             AscendMRotaryEmbedding310,
         )
 
-        REGISTERED_ASCEND_OPS.update({
-            "SiluAndMul": AscendSiluAndMul310,
-            "MMEncoderAttention": AscendMMEncoderAttention310,
-            "MRotaryEmbedding": AscendMRotaryEmbedding310,
-        })
+        REGISTERED_ASCEND_OPS.update(
+            {
+                "SiluAndMul": AscendSiluAndMul310,
+                "MMEncoderAttention": AscendMMEncoderAttention310,
+                "MRotaryEmbedding": AscendMRotaryEmbedding310,
+            }
+        )
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)

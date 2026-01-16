@@ -19,16 +19,11 @@
 import torch
 import torch_npu
 
-from vllm_ascend._310p.attention.attention_mask import (
-    AttentionMaskBuilder, build_splitfuse_attn_mask_310p)
-from vllm_ascend._310p.attention.metadata_builder import \
-    AscendAttentionMetadataBuilder310P
-from vllm_ascend.attention.attention_v1 import \
-    AscendAttentionBackend as _BaseBackend
-from vllm_ascend.attention.attention_v1 import \
-    AscendAttentionBackendImpl as _BaseImpl
-from vllm_ascend.attention.attention_v1 import (AscendAttentionMetadataBuilder,
-                                                AscendAttentionState)
+from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder, build_splitfuse_attn_mask_310p
+from vllm_ascend._310p.attention.metadata_builder import AscendAttentionMetadataBuilder310P
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend as _BaseBackend
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl as _BaseImpl
+from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder, AscendAttentionState
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, aligned_16, nd_to_nz_2d
 
 
