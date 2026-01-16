@@ -47,7 +47,7 @@ CASE_DECODE_ONLY = LLMTestCase(
         n=1,
     ))
 
-CASE_FULL_DECODE_ONLY = LLMTestCase(
+CASE_FULL = LLMTestCase(
     model="Qwen/Qwen3-0.6B",
     prompts=[
         "Hello, my name is", "The president of the United States is",
@@ -57,7 +57,7 @@ CASE_FULL_DECODE_ONLY = LLMTestCase(
         " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I'm looking for a job in the",
         ' the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
         ' Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital',
-        " not just about the technology itself, but about how we use it to solve real-world problems. As AI continues to evolve, it's important to consider the ethical"
+        " not just a technological challenge but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and"
     ],
     sampling_params=SamplingParams(
         max_tokens=32,
@@ -88,7 +88,7 @@ def test_models_with_xlite_decode_only(cur_case: LLMTestCase):
                   golden_answers=cur_case.golden_answers)
 
 
-@pytest.mark.parametrize("cur_case", [CASE_FULL_DECODE_ONLY])
+@pytest.mark.parametrize("cur_case", [CASE_FULL])
 def test_models_with_xlite_full_mode(cur_case: LLMTestCase):
     runner_kwargs = {
         "model_name": cur_case.model,
