@@ -330,6 +330,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         logits_soft_cap: Optional[float],
         attn_type: str,
         kv_sharing_target_layer_name: Optional[str],
+        device: torch.device,
         sinks: torch.Tensor = None,
         **kwargs,
     ) -> None:
@@ -353,8 +354,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
+        self.device = device
         self.sinks = sinks
-        self.attn_mask_builder = AttentionMaskBuilder(device="npu")
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
