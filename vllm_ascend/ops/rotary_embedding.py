@@ -524,9 +524,76 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
                                        is_neox_style, offsets)
         return q_pe, k_pe
 
+def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
+    x_t = x[0].clone()
+    x_t[..., 1:mrope_section[1] * 3:3] = x[1, ..., 1:mrope_section[1] * 3:3]
+    x_t[..., 2:mrope_section[2] * 3:3] = x[2, ..., 2:mrope_section[2] * 3:3]
+    return x_t
 
+from vllm.forward_context import get_forward_context
 class AscendMRotaryEmbedding(MRotaryEmbedding):
-
+    
+    def forward_native(
+            self,
+            positions: torch.Tensor,
+            query: torch.Tensor,
+            key: Optional[torch.Tensor] = None,
+            offset: Optional[torch.Tensor] = None,
+        ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+            
+            assert positions.ndim == 1 or positions.ndim == 2
+            assert key is not None
+            self._match_cos_sin_cache_dtype(query)
+            
+            num_tokens = positions.shape[-1]
+            
+            forward_context = get_forward_context()
+            is_first_layer = forward_context.is_first_layer
+            
+            if is_first_layer:
+                cos_sin = self.cos_sin_cache[positions]
+                cos, sin = cos_sin.chunk(2, dim=-1)
+                if positions.ndim == 2:
+                    assert self.mrope_section
+                    if self.mrope_interleaved:
+                        cos = apply_interleaved_rope(cos, self.mrope_section)
+                        sin = apply_interleaved_rope(sin, self.mrope_section)
+                    else:
+                        cos = torch.cat([
+                            m[i] for i, m in enumerate(
+                                cos.split(self.mrope_section, dim=-1))
+                        ],
+                            dim=-1)
+                        sin = torch.cat([
+                            m[i] for i, m in enumerate(
+                                sin.split(self.mrope_section, dim=-1))
+                        ],
+                            dim=-1)
+                cos = cos.repeat(1, 2)
+                sin = sin.repeat(1, 2)
+                self.cos = cos.unsqueeze(0).unsqueeze(-2).contiguous()
+                self.sin = sin.unsqueeze(0).unsqueeze(-2).contiguous()
+                
+                forward_context.is_first_layer = False
+            query_shape = query.shape
+            query = query.view(num_tokens, -1, self.head_size)
+            query_rot = query[..., :self.rotary_dim]
+            query_pass = query[..., self.rotary_dim:]
+            
+            query_rot = query_rot.unsqueeze(0)
+            query_rot = torch_npu.npu_rotary_mul(query_rot, self.cos, self.sin, "half").squeeze(0)
+            query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+            
+            key_shape = key.shape
+            key = key.view(num_tokens, -1, self.head_size)
+            key_rot = key[..., :self.rotary_dim]
+            key_pass = key[..., self.rotary_dim:]
+            
+            key_rot = key_rot.unsqueeze(0)
+            key_rot = torch_npu.npu_rotary_mul(key_rot, self.cos, self.sin, "half").squeeze(0)
+            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+            
+            return query, key
     def forward_oot(
         self,
         positions: torch.Tensor,
