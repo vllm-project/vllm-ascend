@@ -132,6 +132,13 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale balance scheduling
     "VLLM_ASCEND_BALANCE_SCHEDULING":
     lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", '0'))),
+    # Set the ai cube core num for the communication block when enabling dbo
+    "VLLM_ASCEND_DBO_COMM_AIC_NUM":
+    lambda: int(os.getenv("VLLM_ASCEND_DBO_COMM_AIC_NUM", -1)),
+    # Set the ai vector core num for the communication block when enabling dbo,
+    # should greater than 16 for HCCL kernels
+    "VLLM_ASCEND_DBO_COMM_AIV_NUM":
+    lambda: int(os.getenv("VLLM_ASCEND_DBO_COMM_AIV_NUM", -1)),
 }
 
 # end-env-vars-definition
