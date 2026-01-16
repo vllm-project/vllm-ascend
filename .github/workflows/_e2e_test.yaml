@@ -15,6 +15,9 @@ on:
       type:
         required: true
         type: string
+      contains_310:
+        required: true
+        type: boolean
 
 jobs:
   e2e:
@@ -328,3 +331,119 @@ jobs:
 
           # spec_decode
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py
+
+  e2e_310p:
+    name: 310p singlecard
+    runs-on: linux-aarch64-310p-1
+    if: ${{ inputs.contains_310 }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-310p-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+          fetch-depth: 1
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Run vllm-project/vllm-ascend test
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          pytest -sv --durations=0 tests/e2e/310p/test_offline_inference_310p.py
+
+  e2e_310p-4cards:
+    name: 310p multicards 4cards
+    runs-on: linux-aarch64-310p-4
+    if: ${{ inputs.contains_310 }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-310p-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+          fetch-depth: 1
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Run vllm-project/vllm-ascend test
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          pytest -sv --durations=0 tests/e2e/310p/test_offline_inference_parallel_310p.py
