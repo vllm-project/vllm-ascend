@@ -134,6 +134,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
         vllm_config.model_config.max_model_len = 1024
+        vllm_config.model_config.get_head_size.return_value = 64
+        vllm_config.model_config.dtype = torch.float16
         vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
@@ -169,6 +171,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
         vllm_config.model_config.max_model_len = 1024
+        vllm_config.model_config.get_head_size.return_value = 64
+        vllm_config.model_config.dtype = torch.float16
         vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
@@ -224,6 +228,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
         vllm_config.model_config.max_model_len = 1024
+        vllm_config.model_config.get_head_size.return_value = 64
+        vllm_config.model_config.dtype = torch.float16
         vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4

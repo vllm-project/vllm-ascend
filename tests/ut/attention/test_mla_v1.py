@@ -344,6 +344,8 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
