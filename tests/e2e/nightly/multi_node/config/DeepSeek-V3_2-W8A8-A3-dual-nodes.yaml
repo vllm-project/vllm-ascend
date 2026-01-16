@@ -1,29 +1,18 @@
 test_name: "test DeepSeek-V3.2-W8A8 on A3"
 model: "vllm-ascend/DeepSeek-V3.2-W8A8"
-num_nodes: 4
-cluster_hosts: ["172.22.0.188", "172.22.0.212","172.22.0.155","172.22.0.218"]
+num_nodes: 2
+cluster_hosts: ["172.22.0.188", "172.22.0.212"]
 npu_per_node: 16
 env_common:
   HCCL_OP_EXPANSION_MODE: "AIV"
-
   VLLM_USE_MODELSCOPE: true
-  HCCL_BUFFSIZE: 256
+  HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   ASCEND_A3_EBA_ENABLE: 1
   TASK_QUEUE_ENABLE: 1
-  HCCL_OP_RETRY_ENABLE: "L0:0, L1:0"
-  ASCEND_AGGREGATE_ENABLE: 1
-  ASCEND_TRANSPORT_PRINT: 1
-  ACL_OP_INIT_MODE: 1
-  VLLM_NIXL_ABORT_REQUEST_TIMEOUT: 300000
-
-disaggregated_prefill:
-  enabled: true
-  prefiller_host_index: [0, 1]
-  decoder_host_index: [2, 3]
 
 deployment:
   -
@@ -31,172 +20,43 @@ deployment:
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
       --host 0.0.0.0
       --port $SERVER_PORT
-      --data-parallel-size 2
-      --tensor-parallel-size 16
-      --data-parallel-size-local 1
+      --data-parallel-size 4
+      --tensor-parallel-size 8
+      --data-parallel-size-local 2
       --data-parallel-start-rank 0
-      --data-parallel-address 172.22.0.188
-      --data-parallel-rpc-port 13399
-      --quantization ascend
-      --seed 1024
-      --enforce-eager
-      --enable-expert-parallel
-      --max-num-seqs 64
-      --max-model-len 68000
-      --max-num-batched-tokens 32550
-      --no-enable-prefix-caching
-      --gpu-memory-utilization 0.82
-      --trust-remote-code
+      --data-parallel-address $LOCAL_IP
+      --data-parallel-rpc-port 13389
       --tokenizer-mode deepseek_v32
-      --reasoning-parser deepseek_v3
-      --kv-transfer-config
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_producer",
-      "kv_port": "30000",
-      "engine_id": "0",
-      "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
-      "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 8,
-                        "tp_size": 4
-                }
-          }
-      }'
-      --additional-config
-      '{"recompute_scheduler_enable":true}'
+      --no-enable-prefix-caching
+      --enable-expert-parallel
+      --max-model-len 16384
+      --max-num-batched-tokens 16384 
+      --block-size 16
+      --trust-remote-code
+      --quantization ascend
+      --gpu-memory-utilization 0.9
+      --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
       --headless
-      --data-parallel-size 2
-      --tensor-parallel-size 16
-      --data-parallel-size-local 1
-      --data-parallel-start-rank 1
-      --data-parallel-address 172.22.0.188
-      --data-parallel-rpc-port 13399
-      --quantization ascend
-      --seed 1024
-      --enforce-eager
-      --enable-expert-parallel
-      --max-num-seqs 64
-      --max-model-len 68000
-      --max-num-batched-tokens 32550
-      --no-enable-prefix-caching
-      --gpu-memory-utilization 0.82
-      --trust-remote-code
+      --data-parallel-size 4
+      --tensor-parallel-size 8
+      --data-parallel-size-local 2
+      --data-parallel-start-rank 2
+      --data-parallel-address $MASTER_IP
+      --data-parallel-rpc-port 13389
       --tokenizer-mode deepseek_v32
-      --reasoning-parser deepseek_v3
-      --kv-transfer-config
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_producer",
-      "kv_port": "30000",
-      "engine_id": "0",
-      "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
-      "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 8,
-                        "tp_size": 4
-                }
-          }
-      }'
-      --additional-config
-      '{"recompute_scheduler_enable":true}'
-
-  -
-    server_cmd: >
-      vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
-      --host 0.0.0.0
-      --port $SERVER_PORT
-      --data-parallel-size 8
-      --tensor-parallel-size 4
-      --data-parallel-size-local 4
-      --data-parallel-start-rank 0
-      --data-parallel-rpc-port 12777
-      --data-parallel-address 172.22.0.155
-      --quantization ascend
-      --seed 1024
-      --enable-expert-parallel
-      --async-scheduling
-      --max-num-seqs 4
-      --max-model-len 68000
-      --max-num-batched-tokens 12
       --no-enable-prefix-caching
-      --gpu-memory-utilization 0.95
-      --trust-remote-code
-      --tokenizer-mode deepseek_v32
-      --reasoning-parser deepseek_v3
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[3, 6, 9, 12]}'
-      --kv-transfer-config
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_consumer",
-      "kv_port": "30100",
-      "engine_id": "1",
-      "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
-      "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 8,
-                        "tp_size": 4
-                }
-          }
-      }'
-      --additional-config
-      '{"recompute_scheduler_enable":true}'
-
-  -
-    server_cmd: >
-      vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
-      --headless
-      --data-parallel-size 8
-      --tensor-parallel-size 4
-      --data-parallel-size-local 4
-      --data-parallel-start-rank 4
-      --data-parallel-rpc-port 12777
-      --data-parallel-address 172.22.0.155
-      --quantization ascend
-      --seed 1024
       --enable-expert-parallel
-      --async-scheduling
-      --max-num-seqs 4
-      --max-model-len 68000
-      --max-num-batched-tokens 12
-      --no-enable-prefix-caching
-      --gpu-memory-utilization 0.95
+      --max-model-len 16384
+      --max-num-batched-tokens 16384
+      --block-size 16
       --trust-remote-code
-      --tokenizer-mode deepseek_v32
-      --reasoning-parser deepseek_v3
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[3, 6, 9, 12]}'
-      --kv-transfer-config
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_consumer",
-      "kv_port": "30100",
-      "engine_id": "1",
-      "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
-      "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 8,
-                        "tp_size": 4
-                }
-          }
-      }'
-      --additional-config
-      '{"recompute_scheduler_enable":true}'
+      --quantization ascend 
+      --gpu-memory-utilization 0.9
+      --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 
 benchmarks:
   acc:
