@@ -106,7 +106,7 @@ class EagleProposer(VllmEagleProposer):
         self.dcp_size = self.runner.dcp_size
         self.pcp_rank = self.runner.pcp_rank
         self.dcp_rank = self.runner.dcp_rank
-        
+
         self.use_aclgraph = self.runner._use_aclgraph()
 
         self.full_indices = range(
@@ -427,6 +427,7 @@ class EagleProposer(VllmEagleProposer):
                 input_ids=model_input_ids,
                 positions=model_positions,
                 hidden_states=model_hidden_states,
+                inputs_embeds = inputs_embeds
             )
             if self.method == "mtp":
                 last_hidden_states = ret_hidden_states
@@ -598,6 +599,7 @@ class EagleProposer(VllmEagleProposer):
                     input_ids=model_input_ids,
                     positions=model_positions,
                     hidden_states=model_hidden_states,
+                    inputs_embeds = inputs_embeds
                 )
                 if self.method == "mtp":
                     last_hidden_states = ret_hidden_states
