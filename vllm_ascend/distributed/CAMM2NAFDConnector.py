@@ -224,7 +224,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                                                 self.hf_config.n_routed_experts,
                                                 self.max_num_reqs,
                                                 self.hf_config.hidden_size,
-                                                self.hf_config.num_experts_per_tok)
+                                                self.hf_config.num_experts_per_tok), None
 
     # MOE发给ATTN（ATTN接收）
     def recv_ffn_output(self,
@@ -492,4 +492,5 @@ direct_register_custom_op(op_name="cam_recv_ffn_output",
                           op_func=cam_recv_ffn_output_impl,
                           fake_impl=cam_recv_ffn_output_fake_impl,
                           mutates_args=[],
+
                           dispatch_key="PrivateUse1")
