@@ -31,7 +31,6 @@ MODELS = [
 MODES = [
     "single",
     "aclgraph",
-    "aclgraph_mlapo",
 ]
 
 prompts = [

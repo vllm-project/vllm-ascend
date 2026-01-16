@@ -21,7 +21,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          trans_rope_weight, transdata,
-                                         wait_for_kv_layer_from_connector)
+                                         wait_for_kv_layer_from_connector,
+                                         enabling_malpo)
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer, post_process_after_loading_for_shard_weight_series,
@@ -32,8 +33,7 @@ from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
-                               enable_dsa_cp, maybe_trans_nz, vllm_version_is,
-                               is_decode_only_instance)
+                               enable_dsa_cp, maybe_trans_nz, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 # isort: off
@@ -375,13 +375,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
-        self.enable_mlapo = bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_only_instance())
+        self.vllm_config = get_current_vllm_config()
+        self.enable_mlapo = enabling_malpo(self.vllm_config)
 
         assert self.indexer is not None, "Indexer is required for DSA."
 
         self.enable_sfa_cp = enable_dsa_cp()
         self.local_num_heads = self.num_heads
-        self.vllm_config = get_current_vllm_config()
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         if self.enable_sfa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
