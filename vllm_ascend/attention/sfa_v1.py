@@ -376,7 +376,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
         self.enable_mlapo = bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_only_instance())
-        print(f'AscendSFAImpl ====================================== self.enable_mlapo:{self.enable_mlapo}, is_decode_only:{is_decode_only_instance()}, envs.VLLM_ASCEND_ENABLE_MLAPO:{envs.VLLM_ASCEND_ENABLE_MLAPO} ====================')
 
         assert self.indexer is not None, "Indexer is required for DSA."
 
@@ -463,11 +462,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                                "thus mlapo is disabled for these layers.")
             if reasons:
                 self.enable_mlapo = False
-                print(f'AscendSFAImpl process_weights_after_loading enable_mlapo set to False ====================================== self.enable_mlapo:{self.enable_mlapo}========')
                 for msg in reasons:
                     logger.warning_once(msg)
             else:
-                print(f'AscendSFAImpl process_weights_after_loading ====================================== self.enable_mlapo:{self.enable_mlapo}========')
                 self._process_weights_for_fused_mlapo(act_dtype)
         if not self.enable_mlapo:
             # if mlapo, W_UK_T can't trans nz
