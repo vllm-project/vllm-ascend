@@ -70,6 +70,7 @@ class MoECommMethod(ABC):
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
+        self.use_fusion_ops = set_gmmswigluquant_method()
 
     def prepare(
         self,
@@ -149,8 +150,6 @@ class MoECommMethod(ABC):
             dynamic_eplb=dynamic_eplb,
             pertoken_scale=pertoken_scale)
 
-        use_fusion_ops = set_gmmswigluquant_method()
-
         mlp_output = unified_apply_mlp(
             hidden_states=dispatch_results.hidden_states,
             w1=w1,
@@ -166,7 +165,7 @@ class MoECommMethod(ABC):
             w2_offset=w2_offset,
             topk_scales=dispatch_results.topk_scales,
             with_quant=use_int8_w8a8 or use_int4_w4a8 or use_int4_w4a16,
-            fusion=use_int8_w8a8 and use_fusion_ops,
+            fusion=use_int8_w8a8 and self.use_fusion_ops,
             need_trans=need_trans,
             dynamic_eplb=dynamic_eplb)
 
