@@ -35,7 +35,7 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
-from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
+from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 logger = init_logger(__name__)
@@ -45,7 +45,7 @@ class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        with (torch_cuda_wrapper(), uva_wrapper()):
+        with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
         # because we will override these attribute, delete these attribute to
@@ -58,8 +58,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # NPU specific initializations can be added below.
         self.cudagraph_manager: AclGraphManager = AclGraphManager(
-            vllm_config,
-            device,
+            self.vllm_config,
+            self.uses_mrope,
+            self.device,
         )
 
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle
@@ -78,7 +79,6 @@ class NPUModelRunner(GPUModelRunner):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
-            pin_memory=self.pin_memory,
         )
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
@@ -89,7 +89,6 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             dtype=self.dtype,
             device=self.device,
-            pin_memory=self.pin_memory,
         )
         # we need to adjust triton operators in sampler,
         # so reinitialize sampler here.
@@ -106,7 +105,7 @@ class NPUModelRunner(GPUModelRunner):
             self.max_num_reqs,
             dtype=torch.int32,
             device="cpu",
-            pin_memory=self.pin_memory,
+            pin_memory=True,
         )
 
     def prepare_inputs(
@@ -216,9 +215,7 @@ class NPUModelRunner(GPUModelRunner):
             self.req_states.next_prefill_tokens,
             idx_mapping_npu,
             query_start_loc_gpu,
-            # use prefill_token_ids.copy_to_gpu() because npu doesn't
-            # support uva buffer.
-            self.req_states.prefill_token_ids.copy_to_gpu(),
+            self.req_states.prefill_token_ids.gpu,
             self.req_states.prefill_len.gpu,
             self.req_states.num_computed_tokens,
         )
