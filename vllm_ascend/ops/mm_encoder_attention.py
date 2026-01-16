@@ -121,7 +121,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             cu_seqlens = torch.arange(0, (bsz + 1) * q_len,
                                       step=q_len,
                                       dtype=torch.int32,
-                                      device=query.device)
+                                      device="cpu")
         cu_seqlens = cu_seqlens.cpu().tolist()
 
         context_layer = torch_npu.npu_fusion_attention(
