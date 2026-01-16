@@ -48,6 +48,11 @@ def setup_moe_comm_method(moe_config):
     _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
     _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
 
+def set_gmmswigluquant_method():
+    vllm_config = VllmConfig()
+    ascend_fusion_config = vllm_config.additional_config.get("ascend_fusion_config", {})
+    return ascend_fusion_config.get("fusion_ops_gmmswigluquant", True)
+
 
 @dataclass
 class FusedExpertsResult:
@@ -60,13 +65,11 @@ class FusedExpertsResult:
 class MoECommMethod(ABC):
     """Base class for MoE communication methods."""
 
-    def __init__(self, moe_config: FusedMoEConfig, vllm_config: VllmConfig):
+    def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
-        self.ascend_fusion_config = vllm_config.additional_config.get("ascend_fusion_config", {})
-        self.use_fusion_ops = self.ascend_fusion_config.get("fusion_ops_gmmswigluquant", True)
 
     def prepare(
         self,
@@ -146,6 +149,8 @@ class MoECommMethod(ABC):
             dynamic_eplb=dynamic_eplb,
             pertoken_scale=pertoken_scale)
 
+        use_fusion_ops = set_gmmswigluquant_method()
+
         mlp_output = unified_apply_mlp(
             hidden_states=dispatch_results.hidden_states,
             w1=w1,
@@ -161,7 +166,7 @@ class MoECommMethod(ABC):
             w2_offset=w2_offset,
             topk_scales=dispatch_results.topk_scales,
             with_quant=use_int8_w8a8 or use_int4_w4a8 or use_int4_w4a16,
-            fusion=use_int8_w8a8 and self.use_fusion_ops,
+            fusion=use_int8_w8a8 and use_fusion_ops,
             need_trans=need_trans,
             dynamic_eplb=dynamic_eplb)
 
