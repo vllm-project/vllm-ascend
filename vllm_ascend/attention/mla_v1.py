@@ -759,7 +759,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-
         self.enable_mlapo = bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_only_instance())
 
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
