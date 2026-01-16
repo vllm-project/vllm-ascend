@@ -40,8 +40,6 @@ def enable_cp():
 class AscendPrefillContextParallelMetadata:
     pcp_allgather_restore_idx: torch.Tensor = None
 
-    cp_kv_recover_idx_for_chunk: torch.Tensor = None
-
     num_actual_tokens_pcp_padded: int = 0
 
     num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
