@@ -744,7 +744,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv=attn_metadata.seq_lens,
         )
 
-        output = output.view(batch_size, self.num_heads, self.head_size)
+        output = attn_output.view(batch_size, self.num_heads, self.head_size)
         return output
 
     def forward_fused_infer_attention(
