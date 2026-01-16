@@ -14,16 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
 import math
 from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch_npu
 
+from .base import AscendLinearScheme
+from .registry import register_scheme
+
 KRONECKER_QUANT_MAX_BATCH_SIZE = 32768
 
 
 def pack_int4_weights(weight_tensor: torch.Tensor) -> torch.Tensor:
+    """Pack int4 weights for NPU."""
     original_device = weight_tensor.device
     weight_tensor_npu = weight_tensor.npu()
     weight_int4_packed = torch_npu.npu_convert_weight_to_int4pack(
@@ -32,6 +37,7 @@ def pack_int4_weights(weight_tensor: torch.Tensor) -> torch.Tensor:
 
 
 def get_decompose_dim(n):
+    """Get decomposed dimensions for Kronecker quantization."""
     a = int(math.sqrt(n))
     if a * a < n:
         a += 1
@@ -53,6 +59,7 @@ def batched_kronecker_quant(
     right_trans: torch.Tensor,
     clip_ratio: float,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Batched Kronecker quantization with batch size limit handling."""
     batch_tokens = x.shape[0]
     if batch_tokens <= KRONECKER_QUANT_MAX_BATCH_SIZE:
         return torch_npu.npu_kronecker_quant(x,
@@ -75,7 +82,8 @@ def batched_kronecker_quant(
     return x_quantized_int4, activation_scale
 
 
-class AscendW4A4FlatQuantDynamicLinearMethod:
+@register_scheme("W4A4_FLATQUANT_DYNAMIC", "linear")
+class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A4_FLATQUANT_DYNAMIC.
     
     This class implements W4A4 quantization with FlatQuant approach and dynamic activation quantization.
@@ -88,8 +96,7 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
     def __init__(self):
         self.sym = True
 
-    @staticmethod
-    def get_weight(input_size: int, output_size: int,
+    def get_weight(self, input_size: int, output_size: int,
                    params_dtype: torch.dtype) -> Dict[str, Any]:
         if input_size % 8 != 0:
             raise ValueError(
@@ -101,8 +108,7 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
         }
         return params_dict
 
-    @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pertensor_param(self, params_dtype: torch.dtype) -> Dict[str, Any]:
         params_dict = {}
         left_trans_dim, right_trans_dim = get_decompose_dim(
             AscendW4A4FlatQuantDynamicLinearMethod.input_size)
@@ -115,8 +121,8 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
         params_dict["clip_ratio"] = torch.empty(1, dtype=torch.float32)
         return params_dict
 
-    @staticmethod
     def get_perchannel_param(
+        self,
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
@@ -129,15 +135,8 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
                                                    dtype=torch.float32)
         return params_dict
 
-    def get_pergroup_param(self,
-                           input_size: int,
-                           output_size: int,
-                           params_dtype: torch.dtype,
-                           layer_type: Optional[str] = None) -> Dict[str, Any]:
-        return {}
-
-    @staticmethod
     def apply(
+        self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
