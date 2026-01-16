@@ -86,6 +86,7 @@
 
 import argparse
 import asyncio
+import copy
 import functools
 import heapq
 import ipaddress
@@ -413,7 +414,7 @@ async def _handle_completions(api: str, request: Request):
         request_length = len(req_body)
         request_id = await proxy_state.next_req_id()
         request_id_api = get_api_request_id(api, request_id)
-        proxy_state.req_data_dict[request_id_api] = (req_data, request_length, api)
+        proxy_state.req_data_dict[request_id_api] = (copy.deepcopy(req_data), request_length, api)
         req_data["kv_transfer_params"] = {
             "do_remote_decode": False,
             "do_remote_prefill": True,
