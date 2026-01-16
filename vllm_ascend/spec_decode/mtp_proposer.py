@@ -242,11 +242,11 @@ class MtpProposer(EagleProposer):
         assert self.runner is not None
 
         # Note(qcs): We may need to refactor these check logics.
-        if self.use_cuda_graph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
+        if self.runner.use_aclgraph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
                 -1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
-        elif self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[
+        elif self.use_aclgraph  and num_tokens <= self.runner.cudagraph_batch_sizes[
                 -1]:
             # Acl graph mode, add padding to the batch size
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
