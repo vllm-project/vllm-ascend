@@ -18,26 +18,6 @@ DEFAULT_ATOL = 5e-2
 DEFAULT_RTOL = 5e-3
 
 
-def custom_rope(q, k, sin, cos):
-    rotary_dim = sin.shape[-1]
-    sin = sin.to(torch.float32)
-    cos = cos.to(torch.float32)
-    x1 = q[..., :rotary_dim // 2]
-    x2 = q[..., rotary_dim // 2:]
-    cat_x = torch.cat([-x2, x1], axis=-1)
-    mul1 = cat_x * sin
-    mul2 = q * cos
-    res1 = mul1 + mul2
-
-    x1 = k[..., :rotary_dim // 2]
-    x2 = k[..., rotary_dim // 2:]
-    cat_x = torch.cat([-x2, x1], axis=-1)
-    mul1 = cat_x * sin
-    mul2 = k * cos
-    res2 = mul1 + mul2
-    return res1, res2
-
-
 def rms_norm(
     input,
     norm_weight,
@@ -63,7 +43,7 @@ def rms_norm(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_split_qkv_rmsnorm_rope(num_tokens, num_q_heads, num_kv_heads,
+def test_split_qkv_rmsnorm(num_tokens, num_q_heads, num_kv_heads,
                                 head_size, eps, dtype, seed, device):
     torch.manual_seed(seed)
     torch.set_default_device(device)
@@ -77,36 +57,20 @@ def test_split_qkv_rmsnorm_rope(num_tokens, num_q_heads, num_kv_heads,
                       device=device)
     q_weight = torch.randn(head_size, dtype=dtype, device=device)
     k_weight = torch.randn(head_size, dtype=dtype, device=device)
-    sin = torch.from_numpy(
-        np.random.uniform(0, 1,
-                          [num_tokens, 1, 1, head_size])).to(dtype).npu()
-    cos = torch.from_numpy(
-        np.random.uniform(0, 1,
-                          [num_tokens, 1, 1, head_size])).to(dtype).npu()
-    # fused kernel
-    q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(input=qkv,
+    q, k, v = torch.ops.vllm.qkv_rmsnorm(input=qkv,
                                               q_weight=q_weight,
                                               k_weight=k_weight,
                                               q_hidden_size=q_hidden_size,
                                               kv_hidden_size=kv_hidden_size,
                                               head_dim=head_size,
-                                              eps=eps,
-                                              cos=cos,
-                                              sin=sin)
+                                              eps=eps)
 
     # split
     _q, _k, v_gold = qkv.cpu().split(
         [q_hidden_size, kv_hidden_size, kv_hidden_size], dim=-1)
     # norm
-    _q = rms_norm(_q.reshape(-1, head_size), q_weight.cpu(), eps)
-    _k = rms_norm(_k.reshape(-1, head_size), k_weight.cpu(), eps)
-    _q = _q.reshape(num_tokens, 1, -1, head_size)
-    _k = _k.reshape(num_tokens, 1, -1, head_size)
-
-    # rope
-    q_gold, k_gold = custom_rope(_q, _k, sin.cpu(), cos.cpu())
-    q_gold = q_gold.reshape(num_tokens, -1)
-    k_gold = k_gold.reshape(num_tokens, -1)
+    q_gold = rms_norm(_q.reshape(-1, q_hidden_size), q_weight.cpu(), eps)
+    k_gold = rms_norm(_k.reshape(-1, kv_hidden_size), k_weight.cpu(), eps)
 
     # Compare the results.
     torch.testing.assert_close(q.to(torch.float32).cpu(),
@@ -137,7 +101,7 @@ def test_split_qkv_rmsnorm_rope(num_tokens, num_q_heads, num_kv_heads,
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_split_qkv_rmsnorm_rope_with_bias(num_tokens, num_q_heads,
+def test_split_qkv_rmsnorm_with_bias(num_tokens, num_q_heads,
                                           num_kv_heads, head_size, eps, dtype,
                                           seed, device):
     torch.manual_seed(seed)
@@ -154,14 +118,9 @@ def test_split_qkv_rmsnorm_rope_with_bias(num_tokens, num_q_heads,
     k_weight = torch.randn(head_size, dtype=dtype, device=device)
     q_bias = torch.randn(head_size, dtype=dtype, device=device)
     k_bias = torch.randn(head_size, dtype=dtype, device=device)
-    sin = torch.from_numpy(
-        np.random.uniform(0, 1,
-                          [num_tokens, 1, 1, head_size])).to(dtype).npu()
-    cos = torch.from_numpy(
-        np.random.uniform(0, 1,
-                          [num_tokens, 1, 1, head_size])).to(dtype).npu()
+
     # fused kernel
-    q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(input=qkv,
+    q, k, v = torch.ops.vllm.qkv_rmsnorm(input=qkv,
                                               q_weight=q_weight,
                                               k_weight=k_weight,
                                               q_hidden_size=q_hidden_size,
@@ -169,29 +128,20 @@ def test_split_qkv_rmsnorm_rope_with_bias(num_tokens, num_q_heads,
                                               head_dim=head_size,
                                               eps=eps,
                                               q_bias=q_bias,
-                                              k_bias=k_bias,
-                                              cos=cos,
-                                              sin=sin)
+                                              k_bias=k_bias)
 
     # split
     _q, _k, v_gold = qkv.cpu().split(
         [q_hidden_size, kv_hidden_size, kv_hidden_size], dim=-1)
     # norm
-    _q = rms_norm(_q.reshape(-1, head_size),
+    q_gold = rms_norm(_q.reshape(-1, q_hidden_size),
                   q_weight.cpu(),
                   eps,
                   norm_bias=q_bias.cpu())
-    _k = rms_norm(_k.reshape(-1, head_size),
+    k_gold = rms_norm(_k.reshape(-1, kv_hidden_size),
                   k_weight.cpu(),
                   eps,
                   norm_bias=k_bias.cpu())
-    _q = _q.reshape(num_tokens, 1, -1, head_size)
-    _k = _k.reshape(num_tokens, 1, -1, head_size)
-
-    # rope
-    q_gold, k_gold = custom_rope(_q, _k, sin.cpu(), cos.cpu())
-    q_gold = q_gold.reshape(num_tokens, -1)
-    k_gold = k_gold.reshape(num_tokens, -1)
 
     # Compare the results.
     torch.testing.assert_close(q.to(torch.float32).cpu(),
