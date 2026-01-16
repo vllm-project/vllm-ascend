@@ -33,9 +33,7 @@ class NPUModelRunner310(NPUModelRunner):
         super().__init__(*args, **kwargs)
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
 
-    def _initialize_kv_cache_tensors_310p(
-        self, kv_cache_config: KVCacheConfig
-    ) -> dict[str, Any]:
+    def _initialize_kv_cache_tensors_310p(self, kv_cache_config: KVCacheConfig) -> dict[str, Any]:
         if self.vllm_config.kv_transfer_config is not None:
             raise ValueError("KV cache transfer is not supported for 310P.")
 
@@ -64,10 +62,7 @@ class NPUModelRunner310(NPUModelRunner):
                 num_blocks = tensor_size // kv_cache_spec.page_size_bytes
                 assert num_blocks >= kv_cache_config.num_blocks
 
-                if (
-                    hasattr(attn_backend, "get_supported_block_size")
-                    and self.use_hybrid_blocks
-                ):
+                if hasattr(attn_backend, "get_supported_block_size") and self.use_hybrid_blocks:
                     block_size = attn_backend.get_supported_block_size()[0]
                     block_size_chunk = kv_cache_spec.block_size // block_size
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
@@ -87,12 +82,8 @@ class NPUModelRunner310(NPUModelRunner):
                 dtype = kv_cache_spec.dtype
 
                 if "attn" in layer_name:
-                    k_tensor = torch.zeros(
-                        kv_cache_shape[1:], dtype=dtype, device=self.device
-                    )
-                    v_tensor = torch.zeros(
-                        kv_cache_shape[1:], dtype=dtype, device=self.device
-                    )
+                    k_tensor = torch.zeros(kv_cache_shape[1:], dtype=dtype, device=self.device)
+                    v_tensor = torch.zeros(kv_cache_shape[1:], dtype=dtype, device=self.device)
                     k_cache = torch_npu.npu_format_cast(k_tensor, self._acl_format)
                     v_cache = torch_npu.npu_format_cast(v_tensor, self._acl_format)
                     kv_caches[layer_name] = (k_cache, v_cache)
@@ -105,7 +96,5 @@ class NPUModelRunner310(NPUModelRunner):
         )
         return kv_caches
 
-    def initialize_kv_cache_tensors(
-        self, kv_cache_config: KVCacheConfig
-    ) -> dict[str, Any]:
+    def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, Any]:
         return self._initialize_kv_cache_tensors_310p(kv_cache_config)

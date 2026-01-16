@@ -43,11 +43,7 @@ class AscendMMEncoderAttention310(_Base):
 
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
 
-        enable_pad = (
-            envs_ascend.USE_OPTIMIZED_MODEL
-            and self.head_size > MIN_PAD_SIZE
-            and self.head_size < MAX_PAD_SIZE
-        )
+        enable_pad = envs_ascend.USE_OPTIMIZED_MODEL and self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
 
         origin_shape = q.shape[-1]
         if enable_pad:
@@ -104,7 +100,5 @@ class AscendMMEncoderAttention310(_Base):
             st = ed
 
         context_flat = context_flat[..., :origin_dim]
-        context_layer = einops.rearrange(
-            context_flat, "(b s) h d -> b s h d", b=bsz
-        ).contiguous()
+        context_layer = einops.rearrange(context_flat, "(b s) h d -> b s h d", b=bsz).contiguous()
         return context_layer

@@ -27,21 +27,15 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_spec
 _BASE_BUILDER: Callable[[torch.device], Any] = _base_mask.AttentionMaskBuilder
 
 
-def _gen_causal_additive_mask_fp16(
-    max_seq_len: int, device: torch.device
-) -> torch.Tensor:
-    tril = torch.ones(
-        (max_seq_len, max_seq_len), dtype=torch.bool, device=device
-    ).tril_()
+def _gen_causal_additive_mask_fp16(max_seq_len: int, device: torch.device) -> torch.Tensor:
+    tril = torch.ones((max_seq_len, max_seq_len), dtype=torch.bool, device=device).tril_()
     upper = ~tril
     m = torch.zeros((max_seq_len, max_seq_len), dtype=torch.float16, device=device)
     m.masked_fill_(upper, float("-inf"))
     return m
 
 
-def build_splitfuse_attn_mask_310p(
-    attn_metadata, device, *, full_mask_cache=None, full_mask_cache_len=0
-):
+def build_splitfuse_attn_mask_310p(attn_metadata, device, *, full_mask_cache=None, full_mask_cache_len=0):
     qsl = attn_metadata.query_start_loc.detach().to("cpu", dtype=torch.int32)
     qlens = qsl[1:] - qsl[:-1]
 
@@ -53,11 +47,7 @@ def build_splitfuse_attn_mask_310p(
     pos_list = [p for ql, cl in zip(q_list, c_list) for p in range(cl - ql, cl)]
     position = torch.tensor(pos_list, dtype=torch.long, device=device)
 
-    if (
-        full_mask_cache is None
-        or full_mask_cache.device != device
-        or full_mask_cache_len < L
-    ):
+    if full_mask_cache is None or full_mask_cache.device != device or full_mask_cache_len < L:
         tril = torch.ones((L, L), dtype=torch.bool, device=device).tril_()
         full = torch.zeros((L, L), dtype=torch.float16, device=device)
         full.masked_fill_(~tril, float("-inf"))
@@ -66,9 +56,7 @@ def build_splitfuse_attn_mask_310p(
         full = full_mask_cache[:L, :L].contiguous()
 
     rows = full.index_select(0, position).contiguous()
-    mask = torch_npu.npu_format_cast(
-        nd_to_nz_spec(rows).contiguous(), ACL_FORMAT_FRACTAL_NZ
-    )
+    mask = torch_npu.npu_format_cast(nd_to_nz_spec(rows).contiguous(), ACL_FORMAT_FRACTAL_NZ)
     return mask, full_mask_cache, full_mask_cache_len
 
 
@@ -95,9 +83,7 @@ class _AttentionMaskBuilder310P:
 
     def _get_fp16_mask(self, max_seq_len: int) -> torch.Tensor:
         if self._fp16_mask_cache is None or max_seq_len > self._fp16_mask_cached_len:
-            self._fp16_mask_cache = _gen_causal_additive_mask_fp16(
-                max_seq_len, self.device
-            )
+            self._fp16_mask_cache = _gen_causal_additive_mask_fp16(max_seq_len, self.device)
             self._fp16_mask_cached_len = max_seq_len
         assert self._fp16_mask_cache is not None
         return self._fp16_mask_cache[:max_seq_len, :max_seq_len].contiguous()

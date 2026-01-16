@@ -33,9 +33,7 @@ class AscendAttentionBackend310(_BaseBackend):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
     @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int, block_size: int, num_kv_heads: int, head_size: int
-    ):
+    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int, head_size: int):
         # Align to a multiple of 16, as required by the 310P device.
         return (2, num_blocks, (num_kv_heads * head_size) // 16, block_size, 16)
 
@@ -51,9 +49,7 @@ class AscendAttentionBackend310(_BaseBackend):
 class AscendAttentionBackendImpl310(_BaseImpl):
     def forward_paged_attention(self, query, attn_metadata, output):
         if attn_metadata.seq_lens.device != query.device:
-            attn_metadata.seq_lens = attn_metadata.seq_lens.to(
-                device=query.device, non_blocking=True
-            )
+            attn_metadata.seq_lens = attn_metadata.seq_lens.to(device=query.device, non_blocking=True)
         return super().forward_paged_attention(query, attn_metadata, output)
 
     def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata, output):
@@ -122,13 +118,11 @@ class AscendAttentionBackendImpl310(_BaseImpl):
             self._sf_full_mask_cache = None
             self._sf_full_mask_cache_len = 0
 
-        mask, self._sf_full_mask_cache, self._sf_full_mask_cache_len = (
-            build_splitfuse_attn_mask_310p(
-                attn_metadata,
-                query.device,
-                full_mask_cache=self._sf_full_mask_cache,
-                full_mask_cache_len=int(self._sf_full_mask_cache_len),
-            )
+        mask, self._sf_full_mask_cache, self._sf_full_mask_cache_len = build_splitfuse_attn_mask_310p(
+            attn_metadata,
+            query.device,
+            full_mask_cache=self._sf_full_mask_cache,
+            full_mask_cache_len=int(self._sf_full_mask_cache_len),
         )
 
         if qlens.device.type != "cpu":
