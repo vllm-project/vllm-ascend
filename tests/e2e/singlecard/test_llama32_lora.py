@@ -3,7 +3,7 @@
 
 import vllm
 import vllm.config
-from modelscope import snapshot_download  # type: ignore
+from huggingface_hub import snapshot_download  # type: ignore
 from vllm.lora.request import LoRARequest
 
 from tests.e2e.conftest import VllmRunner
@@ -29,8 +29,8 @@ EXPECTED_LORA_OUTPUT = [
     "SELECT poll_source FROM candidate GROUP BY poll_source ORDER BY count(*) DESC LIMIT 1",  # noqa: E501
     "SELECT poll_source FROM candidate GROUP BY poll_source ORDER BY count(*) DESC LIMIT 1",  # noqa: E501
 ]
-
-MODEL_PATH = "vllm-ascend/Llama-3.2-3B-Instruct"
+# For hk region, we need to use the model from hf to avoid the network issue
+MODEL_PATH = "meta-llama/Llama-3.2-3B-Instruct"
 
 
 def do_sample(
@@ -107,7 +107,7 @@ def generate_and_test(llm,
 
 def test_llama_lora(llama32_lora_files):
     vllm_model = VllmRunner(
-        snapshot_download(MODEL_PATH),
+        snapshot_download(MODEL_PATH, local_files_only=True),
         enable_lora=True,
         # also test odd max_num_seqs
         max_num_seqs=7,
