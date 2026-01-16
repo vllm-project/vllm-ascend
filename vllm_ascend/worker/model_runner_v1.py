@@ -553,9 +553,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_spec_tokens)
 
         if self.pcp_size > 1:
-            if not self.vllm_config.model_config.use_mla:
-                self.pcp_manager.generate_kv_idx(scheduler_output,
-                                                 self.input_batch)
             num_scheduled_tokens[:
                                  num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
                                      num_scheduled_tokens[:num_reqs],
