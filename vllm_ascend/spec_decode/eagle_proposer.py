@@ -106,7 +106,7 @@ class EagleProposer(VllmEagleProposer):
         self.dcp_size = self.runner.dcp_size
         self.pcp_rank = self.runner.pcp_rank
         self.dcp_rank = self.runner.dcp_rank
-        
+
         self.use_aclgraph = self.runner._use_aclgraph()
 
         self.full_indices = range(
