@@ -132,7 +132,6 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 **Notice:**
 The parameters are explained as follows:
 
-- Setting the environment variable `VLLM_ASCEND_ENABLE_MLAPO=1` enables a fusion operator that can significantly improve performance, though it requires more NPU memory. It is therefore recommended to enable this option when sufficient NPU memory is available.
 - Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
