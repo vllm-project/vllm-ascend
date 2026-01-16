@@ -225,7 +225,7 @@ class NpugraphExConfig:
     """
     Configuration for controlling the behavior of npugraph_ex backend.
 
-    This class provides a way to configure static kernel and graph fusion optimizations.
+    This class provides a way to configure whether to use the npugraph_ex backend and static kernel.
     These configurations directly impact the performance and behavior of models
     deployed on Ascend platforms.
     """
@@ -249,6 +249,7 @@ class NpugraphExConfig:
                 operator binary files with the corresponding shapes based on the
                 current batch_size, which usually takes some time.
                 Default: False
+            **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.enable = enable
         self.enable_static_kernel = enable_static_kernel
