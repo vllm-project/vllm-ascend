@@ -70,6 +70,7 @@ class TestAscendConfig(TestBase):
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)
+        ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertFalse(ascend_config.enable_kv_nz)
 
