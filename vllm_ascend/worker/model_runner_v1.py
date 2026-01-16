@@ -1653,21 +1653,36 @@ class NPUModelRunner(GPUModelRunner):
         with ProfileExecuteDuration().capture_async("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        self.input_batch.prev_sampled_token_ids = None
+
         def propose_draft_token_ids(sampled_token_ids):
             assert self.spec_decode_common_attn_metadata is not None
-            self._draft_token_ids = self.propose_draft_token_ids(
-                sampled_token_ids,
-                self.input_batch.sampling_metadata,
-                scheduler_output,
-                spec_decode_metadata,
-                positions,
-                scheduler_output.total_num_scheduled_tokens,
-                hidden_states,
-                attn_metadata,
-                aux_hidden_states,
-            )
+            with ProfileExecuteDuration().capture_async("Draft"):
+                self._draft_token_ids = self.propose_draft_token_ids(
+                    sampled_token_ids,
+                    self.input_batch.sampling_metadata,
+                    scheduler_output,
+                    spec_decode_metadata,
+                    positions,
+                    scheduler_output.total_num_scheduled_tokens,
+                    hidden_states,
+                    attn_metadata,
+                    aux_hidden_states,
+                )
             if not vllm_version_is('0.13.0'):
                 self._copy_draft_token_ids_to_cpu(scheduler_output)
+
+        spec_config = self.speculative_config
+        use_padded_batch_for_eagle = (
+            spec_config is not None
+            and spec_config.use_eagle()
+            and not spec_config.disable_padded_drafter_batch
+        )
+        # TODO: check if input_fits_in_drafter is True
+        if use_padded_batch_for_eagle:
+            # EAGLE speculative decoding can use the GPU sampled tokens
+            # as inputs, and does not need to wait for bookkeeping to finish.
+            propose_draft_token_ids(sampler_output.sampled_token_ids)
 
         (
             logprobs_lists,
@@ -1685,22 +1700,13 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
         )
 
-        with ProfileExecuteDuration().capture_async("Draft"):
-            if self.speculative_config:
-                use_padded_batch_for_eagle = self.speculative_config and \
-                    self.speculative_config.use_eagle() and \
-                    not self.speculative_config.disable_padded_drafter_batch
-                if use_padded_batch_for_eagle:
-                    # EAGLE speculative decoding can use the GPU sampled tokens
-                    # as inputs, and does not need to wait for bookkeeping to finish.
-                    propose_draft_token_ids(sampler_output.sampled_token_ids)
-                if self.speculative_config and not use_padded_batch_for_eagle:
-                    # ngram and other speculative decoding methods use the sampled
-                    # tokens on the CPU, so they are run after bookkeeping.
-                    propose_draft_token_ids(valid_sampled_token_ids)
+        if self.speculative_config and not use_padded_batch_for_eagle:
+            # ngram and other speculative decoding methods use the sampled
+            # tokens on the CPU, so they are run after bookkeeping.
+            propose_draft_token_ids(valid_sampled_token_ids)
 
-            if has_kv_transfer_group():
-                get_kv_transfer_group().clear_connector_metadata()
+        if has_kv_transfer_group():
+            get_kv_transfer_group().clear_connector_metadata()
 
         extra_args = ({"kv_connector_output": kv_connector_output})
 
@@ -1828,7 +1834,7 @@ class NPUModelRunner(GPUModelRunner):
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
             invalid_req_indices_set = set(invalid_req_indices)
 
-            if self.num_spec_tokens <= 0:
+            if self.input_batch.prev_sampled_token_ids is None:
                 assert sampled_token_ids.shape[-1] == 1
                 # Cache the sampled tokens on the NPU and avoid CPU sync.
                 # These will be copied into input_ids in the next step
@@ -1895,6 +1901,37 @@ class NPUModelRunner(GPUModelRunner):
             req_id_to_index_output_copy,
             invalid_req_indices,
         )
+
+    def _copy_draft_token_ids_to_cpu(
+        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
+    ) -> None:
+        struct_output = scheduler_output.has_structured_output_requests
+        if self.use_async_scheduling and not struct_output:
+            # Draft tokens don't need to be copied to the CPU if async
+            # scheduling is in use and there are no structured output reqs.
+            return
+        # We must also set the corresponding request ids.
+        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+
+        draft_token_ids: torch.Tensor = self._draft_token_ids
+        if not torch.is_tensor(draft_token_ids):
+            return
+        assert hasattr(self, 'draft_token_ids_event') and self.draft_token_ids_event is not None
+        assert hasattr(self, 'draft_token_ids_copy_stream') and self.draft_token_ids_copy_stream is not None
+        assert hasattr(self, 'draft_token_ids_cpu') and self.draft_token_ids_cpu is not None
+        default_stream = torch.npu.current_stream()
+        num_reqs = draft_token_ids.shape[0]
+        with torch.npu.stream(self.draft_token_ids_copy_stream):
+            if not zeros_only:
+                # Trigger async copy of draft token ids to cpu.
+                self.draft_token_ids_copy_stream.wait_stream(default_stream)
+                self.draft_token_ids_cpu[:num_reqs].copy_(
+                    draft_token_ids, non_blocking=True
+                )
+            else:
+                # No copy needed, just zero-out cpu tensor.
+                self.draft_token_ids_cpu[:num_reqs] = 0
+            self.draft_token_ids_event.record()
 
     def _build_dummy_attn_metadata(
         self,
