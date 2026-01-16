@@ -3,8 +3,8 @@
 
 import vllm
 import vllm.config
-from huggingface_hub import snapshot_download  # type: ignore
 from vllm.lora.request import LoRARequest
+from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
 from vllm_ascend.utils import enable_custom_op
@@ -105,9 +105,10 @@ def generate_and_test(llm,
     print("removing lora")
 
 
+@patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
 def test_llama_lora(llama32_lora_files):
     vllm_model = VllmRunner(
-        snapshot_download(MODEL_PATH, local_files_only=True),
+        MODEL_PATH,
         enable_lora=True,
         # also test odd max_num_seqs
         max_num_seqs=7,
