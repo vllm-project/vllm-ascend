@@ -202,7 +202,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                     quant_scheme = AscendW8A8DynamicFusedMoEMethod()
             else:
                 if self._is_w4a16(weight_quant, input_quant):
-                    quant_scheme = AscendW4A16FusedMoEMethod()
+                    quant_scheme = AscendW4A16FusedMoEMethod(weight_quant)
             if quant_scheme is None:
                 raise RuntimeError(
                     f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}"
@@ -309,7 +309,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 return AscendW8A8DynamicLinearMethod()
 
         if weight_quant is not None:
-            if self._is_w4a16(weight_quant):
+            if self._is_w4a16(weight_quant, input_quant):
                 return AscendW4A16FusedMoEMethod(weight_quant)
 
         raise NotImplementedError(
