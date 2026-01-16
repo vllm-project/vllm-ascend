@@ -204,6 +204,7 @@ class AscendCompilationConfig:
 
     def __init__(self,
                  fuse_norm_quant: bool = True,
+                 fuse_qknorm: bool = False,
                  fuse_qknorm_rope: bool = False,
                  **kwargs):
         """
@@ -213,11 +214,14 @@ class AscendCompilationConfig:
             fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
+            fuse_qknorm (bool): Whether to enable qknorm fusion optimization.
+                Default: False
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
                 Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
+        self.fuse_qknorm = HAS_TRITON and fuse_qknorm
         self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
 
 
