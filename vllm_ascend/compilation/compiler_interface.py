@@ -16,13 +16,13 @@
 # limitations under the License.
 #
 import functools
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.fx as fx
 from torch._dynamo.backends.common import aot_autograd
-from torch._inductor.compile_fx import (graph_returns_tuple,
-                                        make_graph_return_tuple)
+from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tuple
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
@@ -33,15 +33,11 @@ from vllm_ascend.ascend_config import NpugraphExConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
-def compile_fx(graph: GraphModule, example_inputs: list,
-               inner_compile: Callable, decompositions: dict) -> Callable:
-    recursive_compile_fx = functools.partial(compile_fx,
-                                             inner_compile=inner_compile,
-                                             decompositions=decompositions)
+def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
+    recursive_compile_fx = functools.partial(compile_fx, inner_compile=inner_compile, decompositions=decompositions)
 
     if not graph_returns_tuple(graph):
-        return make_graph_return_tuple(graph, example_inputs,
-                                       recursive_compile_fx)
+        return make_graph_return_tuple(graph, example_inputs, recursive_compile_fx)
     return aot_autograd(fw_compiler=inner_compile)(graph, example_inputs)
 
 
@@ -50,9 +46,8 @@ def fusion_pass_compile(
     example_inputs: list[Any],
     compiler_config: dict[str, Any],
     compile_range: Range,
-    key: Optional[str] = None,
-) -> tuple[Optional[Callable], Optional[Any]]:
-
+    key: str | None = None,
+) -> tuple[Callable | None, Any | None]:
     def compile_inner(graph, example_inputs):
         current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
         graph = current_pass_manager(graph)
@@ -121,6 +116,7 @@ class AscendCompiler(CompilerInterface):
     This class provides a method to compile a PyTorch FX graph module with
     specific configurations for graph fusion and decomposition.
     """
+
     name = "AscendCompiler"
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
@@ -145,5 +141,4 @@ class AscendCompiler(CompilerInterface):
                                        self.vllm_config, npugraph_ex_config,
                                        compile_range, key)
         else:
-            return fusion_pass_compile(graph, example_inputs, compiler_config,
-                                       compile_range, key)
+            return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)
