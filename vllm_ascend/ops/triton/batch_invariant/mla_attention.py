@@ -90,7 +90,10 @@ def _fwd_grouped_kernel_stage1(
     cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
     split_kv_id = tl.program_id(2)
 
-    VALID_BLOCK_H: tl.constexpr = BLOCK_H if kv_group_num > BLOCK_H else kv_group_num
+    if kv_group_num > BLOCK_H:
+        VALID_BLOCK_H: tl.constexpr = BLOCK_H
+    else:
+        VALID_BLOCK_H: tl.constexpr = kv_group_num
     cur_head = cur_head_id * VALID_BLOCK_H + tl.arange(0, BLOCK_H)
     mask_h = cur_head < (cur_head_id + 1) * VALID_BLOCK_H
     mask_h = mask_h & (cur_head < q_head_num)
@@ -102,22 +105,25 @@ def _fwd_grouped_kernel_stage1(
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     cur_batch_req_idx = cur_batch
 
-    offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
-    q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)
+    offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[
+        None, :]
+    q = tl.load(Q + offs_q,
+                mask=(mask_h[:, None]) & (mask_d[None, :]),
+                other=0.0)
 
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
         mask_dpe = offs_dpe < Lk
-        off_qpe = (
-            cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_dpe[None, :]
-        )
-        qpe = tl.load(
-            Q + off_qpe, mask=(mask_h[:, None]) & (mask_dpe[None, :]), other=0.0
-        )
+        off_qpe = (cur_batch * stride_qbs + cur_head[:, None] * stride_qh +
+                   offs_dpe[None, :])
+        qpe = tl.load(Q + off_qpe,
+                      mask=(mask_h[:, None]) & (mask_dpe[None, :]),
+                      other=0.0)
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
     split_kv_start = kv_len_per_split * split_kv_id
-    split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
+    split_kv_end = tl.minimum(split_kv_start + kv_len_per_split,
+                              cur_batch_seq_len)
 
     e_max = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
     e_sum = tl.zeros([BLOCK_H], dtype=tl.float32)
@@ -127,18 +133,14 @@ def _fwd_grouped_kernel_stage1(
         for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
             kv_page_number = tl.load(
-                Req_to_tokens
-                + stride_req_to_tokens_b * cur_batch_req_idx
-                + offs_n // PAGE_SIZE,
+                Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx +
+                offs_n // PAGE_SIZE,
                 mask=offs_n < split_kv_end,
                 other=0,
             )
             kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
-            offs_buf_k = (
-                kv_loc[None, :] * stride_buf_kbs
-                + cur_kv_head * stride_buf_kh
-                + offs_d[:, None]
-            )
+            offs_buf_k = (kv_loc[None, :] * stride_buf_kbs +
+                          cur_kv_head * stride_buf_kh + offs_d[:, None])
             k = tl.load(
                 K_Buffer + offs_buf_k,
                 mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
@@ -146,14 +148,13 @@ def _fwd_grouped_kernel_stage1(
             )
             qk = tl.dot(q, k.to(q.dtype))
             if BLOCK_DPE > 0:
-                offs_buf_kpe = (
-                    kv_loc[None, :] * stride_buf_kbs
-                    + cur_kv_head * stride_buf_kh
-                    + offs_dpe[:, None]
-                )
+                offs_buf_kpe = (kv_loc[None, :] * stride_buf_kbs +
+                                cur_kv_head * stride_buf_kh +
+                                offs_dpe[:, None])
                 kpe = tl.load(
                     K_Buffer + offs_buf_kpe,
-                    mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
+                    mask=(offs_n[None, :] < split_kv_end) &
+                    (mask_dpe[:, None]),
                     other=0.0,
                 )
                 qk += tl.dot(qpe, kpe.to(qpe.dtype))
@@ -162,15 +163,11 @@ def _fwd_grouped_kernel_stage1(
             if logit_cap > 0:
                 qk = logit_cap * tanh(qk / logit_cap)
 
-            qk = tl.where(
-                mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
-            )
+            qk = tl.where(mask_h[:, None] & (offs_n[None, :] < split_kv_end),
+                          qk, float("-inf"))
 
-            offs_buf_v = (
-                kv_loc[:, None] * stride_buf_vbs
-                + cur_kv_head * stride_buf_vh
-                + offs_dv[None, :]
-            )
+            offs_buf_v = (kv_loc[:, None] * stride_buf_vbs +
+                          cur_kv_head * stride_buf_vh + offs_dv[None, :])
             v = tl.load(
                 V_Buffer + offs_buf_v,
                 mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
@@ -186,12 +183,9 @@ def _fwd_grouped_kernel_stage1(
             e_sum = e_sum * re_scale + tl.sum(p, 1)
             e_max = n_e_max
 
-        offs_mid_o = (
-            cur_batch * stride_mid_ob
-            + cur_head[:, None] * stride_mid_oh
-            + split_kv_id * stride_mid_os
-            + offs_dv[None, :]
-        )
+        offs_mid_o = (cur_batch * stride_mid_ob +
+                      cur_head[:, None] * stride_mid_oh +
+                      split_kv_id * stride_mid_os + offs_dv[None, :])
 
         tl.store(
             Att_Out + offs_mid_o,
@@ -199,12 +193,8 @@ def _fwd_grouped_kernel_stage1(
             mask=(mask_h[:, None]) & (mask_dv[None, :]),
         )
 
-        offs_mid_o_1 = (
-            cur_batch * stride_mid_ob
-            + cur_head * stride_mid_oh
-            + split_kv_id * stride_mid_os
-            + Lv
-        )
+        offs_mid_o_1 = (cur_batch * stride_mid_ob + cur_head * stride_mid_oh +
+                        split_kv_id * stride_mid_os + Lv)
 
         tl.store(
             Att_Out + offs_mid_o_1,
@@ -225,7 +215,6 @@ def _decode_grouped_att_m_fwd(
     page_size,
     logit_cap,
 ):
-    BLOCK = 32
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
 
@@ -247,8 +236,12 @@ def _decode_grouped_att_m_fwd(
     batch, head_num = q.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
 
-    BLOCK_H = 16
     NUM_KV_SPLITS = num_kv_splits
+
+    # reduce block size to adapt ub overflow
+    BLOCK = 8
+    BLOCK_H = 4
+
     grid = (
         batch,
         triton.cdiv(head_num, min(BLOCK_H, kv_group_num)),
@@ -260,7 +253,11 @@ def _decode_grouped_att_m_fwd(
     if is_hip_:
         # https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html#mi300x-triton-kernel-performance-optimization
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+        extra_kargs = {
+            "waves_per_eu": 1,
+            "matrix_instr_nonkdim": 16,
+            "kpack": 2
+        }
         num_stages = 1
 
     _fwd_grouped_kernel_stage1[grid](
@@ -303,14 +300,12 @@ def _decode_grouped_att_m_fwd(
 def _fwd_kernel_stage2(
     Mid_O,
     o,
-    lse,
     B_Seqlen,
     stride_mid_ob,
     stride_mid_oh,
     stride_mid_os,
     stride_obs,
     stride_oh,
-    stride_lse_bs,
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
@@ -333,12 +328,13 @@ def _fwd_kernel_stage2(
     for split_kv_id in range(0, NUM_KV_SPLITS):
         kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
         split_kv_start = kv_len_per_split * split_kv_id
-        split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
+        split_kv_end = tl.minimum(split_kv_start + kv_len_per_split,
+                                  cur_batch_seq_len)
 
         if split_kv_end > split_kv_start:
-            tv = tl.load(
-                Mid_O + offs_v + split_kv_id * stride_mid_os, mask=mask_d, other=0.0
-            )
+            tv = tl.load(Mid_O + offs_v + split_kv_id * stride_mid_os,
+                         mask=mask_d,
+                         other=0.0)
             tlogic = tl.load(Mid_O + offs_logic + split_kv_id * stride_mid_os)
             n_e_max = tl.maximum(tlogic, e_max)
 
@@ -355,18 +351,12 @@ def _fwd_kernel_stage2(
         acc / e_sum,
         mask=mask_d,
     )
-    lse_val = e_max + tl.log(e_sum)
-    tl.store(
-        lse + cur_batch * stride_lse_bs + cur_head,
-        lse_val,
-    )
 
 
 def _decode_softmax_reducev_fwd(
     logits,
     q,
     o,
-    lse,
     v_buffer,
     b_seq_len,
     num_kv_splits,
@@ -381,20 +371,23 @@ def _decode_softmax_reducev_fwd(
     if is_hip_:
         # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
+        extra_kargs = {
+            "waves_per_eu": 4,
+            "matrix_instr_nonkdim": 16,
+            "kpack": 2
+        }
 
     grid = (batch, head_num)
+
     _fwd_kernel_stage2[grid](
         logits,
         o,
-        lse,
         b_seq_len,
         logits.stride(0),
         logits.stride(1),
         logits.stride(2),
         o.stride(0),
         o.stride(1),
-        lse.stride(0),
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
@@ -409,7 +402,6 @@ def decode_attention_fwd_grouped(
     k_buffer,
     v_buffer,
     o,
-    lse,
     req_to_token,
     b_seq_len,
     attn_logits,
@@ -430,9 +422,9 @@ def decode_attention_fwd_grouped(
         page_size,
         logit_cap,
     )
-    _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
-    )
+
+    _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, b_seq_len,
+                                num_kv_splits)
 
 
 def decode_attention_fwd(
@@ -440,7 +432,6 @@ def decode_attention_fwd(
     k_buffer,
     v_buffer,
     o,
-    lse,
     req_to_token,
     b_seq_len,
     attn_logits,
@@ -451,13 +442,11 @@ def decode_attention_fwd(
 ):
     assert num_kv_splits == attn_logits.shape[2]
 
-    # GQA/MQA/MLA
     decode_attention_fwd_grouped(
         q,
         k_buffer,
         v_buffer,
         o,
-        lse,
         req_to_token,
         b_seq_len,
         attn_logits,
