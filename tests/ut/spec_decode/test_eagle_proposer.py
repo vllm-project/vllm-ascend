@@ -50,6 +50,7 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
+        self.vllm_config.model_config.uses_mrope = False
         self.vllm_config.speculative_config.enforce_eager = False
         self.vllm_config.scheduler_config.async_scheduling = False
         init_ascend_config(self.vllm_config)
@@ -156,6 +157,7 @@ class TestEagleProposerLoadModel(TestBase):
         }]
 
         mock_model = MagicMock()
+        mock_model.supports_multimodal = False
         mock_model.model.embed_tokens = MagicMock()
         mock_model.lm_head = MagicMock()
         mock_model.multimodal_cpu_fields = None
@@ -226,7 +228,7 @@ class TestEagleProposerLoadModel(TestBase):
         self.proposer.name = SpecDcodeType.EAGLE
 
         self.proposer.load_model(mock_model)
-        mock_model.get_language_model.assert_called_once()
+        self.assertEqual(mock_model.get_language_model.call_count, 2)
         self.assertIs(self.proposer.model.lm_head,
                       mock_model.get_language_model.return_value.lm_head)
 
