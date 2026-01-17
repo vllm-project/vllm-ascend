@@ -570,10 +570,23 @@ class MooncakeLayerwiseConnectorScheduler:
         self._reqs_need_recv: dict[str, tuple[Request, list[int],
                                               list[int]]] = {}
         self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
-
+        additional_config = self.vllm_config.additional_config if self.vllm_config.additional_config is not None else {}
+        ssl_keyfile = additional_config.get("ssl_keyfile", None)
+        ssl_certfile = additional_config.get("ssl_certfile", None)
+        ssl_ca_certs = additional_config.get("ssl_ca_certs", None)
+        self.cert_path = (ssl_certfile, ssl_keyfile)
+        self.ssl_enable = additional_config.get("ssl_enable", False)
+        self.ca_path = ssl_ca_certs
         self.executor = ThreadPoolExecutor(32)
-        self.metaserver_client = httpx.Client(
-            limits=httpx.Limits(max_connections=100000), timeout=None)
+        if self.ssl_enable:
+            self.metaserver_client = httpx.Client(
+                limits=httpx.Limits(max_connections=100000),
+                timeout=None,
+                cert=self.cert_path,
+                verify=self.ca_path)
+        else:
+            self.metaserver_client = httpx.Client(
+                limits=httpx.Limits(max_connections=100000), timeout=None)
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -648,11 +661,10 @@ class MooncakeLayerwiseConnectorScheduler:
                 remote_host=self.side_channel_host,
                 remote_port=self.side_channel_port,
             )
-            future = self.executor.submit(
-                self._access_metaserver,
-                url=params.get("metaserver", None),
-                message=kv_transfer_params,
-            )
+
+            future = self.executor.submit(self._access_metaserver,
+                                          url=params.get("metaserver", None),
+                                          message=kv_transfer_params)
 
             def handle_exception(future):
                 if future.exception():
