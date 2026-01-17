@@ -97,6 +97,9 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         target_scheme_map = cls._quantization_scheme_map_from_config(
             config=config)
 
+        if "Linear" in target_scheme_map and "FusedMoE" not in target_scheme_map:
+            target_scheme_map["FusedMoE"] = target_scheme_map["Linear"]
+
         return cls(
             target_scheme_map=target_scheme_map,
             ignore=ignore,
@@ -199,7 +202,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                     quant_scheme = AscendW8A8DynamicFusedMoEMethod()
             else:
                 if self._is_w4a16(weight_quant, input_quant):
-                    quant_scheme = AscendW4A16FusedMoEMethod()
+                    quant_scheme = AscendW4A16FusedMoEMethod(weight_quant)
             if quant_scheme is None:
                 raise RuntimeError(
                     f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}"
@@ -304,6 +307,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
                 return AscendW8A8DynamicLinearMethod()
+
+        if weight_quant is not None:
+            if self._is_w4a16(weight_quant, input_quant):
+                return AscendW4A16FusedMoEMethod(weight_quant)
 
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
