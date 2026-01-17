@@ -133,10 +133,9 @@ class EagleProposer(VllmEagleProposer):
             get_layers_from_vllm_config(self.vllm_config,
                                         DeepseekV32IndexerCache).keys())
 
-        with self.maybe_eager_context:
-            self.model = get_model(vllm_config=self.vllm_config,
-                                   model_config=self.vllm_config.
-                                   speculative_config.draft_model_config)
+        self.model = get_model(vllm_config=self.vllm_config,
+                               model_config=self.vllm_config.
+                               speculative_config.draft_model_config)
 
         indexer_layers = get_layers_from_vllm_config(
             self.vllm_config, DeepseekV32IndexerCache).keys()
@@ -147,7 +146,8 @@ class EagleProposer(VllmEagleProposer):
         draft_indexer_layer_names = indexer_layers - target_indexer_layer_names
         draft_attn_layer_names = draft_attn_layer_names - draft_indexer_layer_names
         assert len(draft_attn_layer_names) == 1
-        self.attn_layer_names = list(draft_attn_layer_names)
+        self.attn_layer_name = list(draft_attn_layer_names)
+        self.attn_layer_names = self.attn_layer_name
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
@@ -168,11 +168,54 @@ class EagleProposer(VllmEagleProposer):
                         " weights instead of sharing them with the target model."
                     )
             else:
-                logger.info(
-                    "The EAGLE head shares the same vocab embedding" \
-                    " with the target model."
-                )
-                self.model.model.embed_tokens = model.model.embed_tokens
+                if hasattr(model.model, "embed_tokens"):
+                    target_embed_tokens = model.model.embed_tokens
+                elif hasattr(model, "embedding"):
+                    target_embed_tokens = model.model.embedding
+                else:
+                    raise AttributeError(
+                        "Target model does not have 'embed_tokens' or 'embedding' attribute."
+                    )
+                share_embeddings = False
+                if hasattr(self.model, "has_own_embed_tokens"):
+                    # EAGLE model
+                    if not self.model.has_own_embed_tokens:
+                        share_embeddings = True
+                        logger.info(
+                            "Detected EAGLE model without its own embed_tokens in the"
+                            " checkpoint. Sharing target model embedding weights with the"
+                            " draft model.")
+                    elif (isinstance(target_embed_tokens.weight, torch.Tensor)
+                            and isinstance(self.model.model.embed_tokens.weight,
+                                            torch.Tensor)
+                            # TODO: Offload to CPU for comparison to avoid extra GPU memory
+                            # usage in CI testing environments with limited GPU memory
+                            and torch.equal(
+                                target_embed_tokens.weight.cpu(),
+                                self.model.model.embed_tokens.weight.cpu(),
+                            )):
+                        share_embeddings = True
+                        logger.info(
+                            "Detected EAGLE model with embed_tokens identical to the target"
+                            " model. Sharing target model embedding weights with the draft"
+                            " model.")
+                    else:
+                        logger.info(
+                            "Detected EAGLE model with distinct embed_tokens weights. "
+                            "Keeping separate embedding weights from the target model."
+                        )
+                else:
+                    # MTP model
+                    share_embeddings = True
+                    logger.info(
+                        "Detected MTP model. "
+                        "Sharing target model embedding weights with the draft model."
+                    )
+
+                if share_embeddings:
+                    if hasattr(self.model.model, "embed_tokens"):
+                        del self.model.model.embed_tokens
+                    self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
                 "Since PP > 1 or other reasons the model head loaded its own vocab embedding" \
