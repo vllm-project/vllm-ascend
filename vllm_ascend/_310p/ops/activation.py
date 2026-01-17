@@ -1,6 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,23 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
+#
 
-import pytest
+import torch
+import torch.nn.functional as F
 
-from tests.e2e.conftest import VllmRunner
+from vllm_ascend.ops.activation import AscendSiluAndMul as _Base
 
 
-@pytest.mark.parametrize("dtype", ["float16"])
-@pytest.mark.parametrize("max_tokens", [5])
-def test_models(dtype: str, max_tokens: int) -> None:
-    example_prompts = [
-        "Hello, my name is",
-        "The future of AI is",
-    ]
-
-    with VllmRunner("Qwen/Qwen3-0.6B",
-                    tensor_parallel_size=4,
-                    dtype=dtype,
-                    max_model_len=2048,
-                    enforce_eager=True) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+class AscendSiluAndMul310(_Base):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        torch.ops.vllm.maybe_prefetch_mlp_down_proj(x)
+        h = x.shape[-1] // 2
+        out = (F.silu(x[..., :h].to(torch.float32)) * x[..., h:].to(torch.float32)).to(torch.float16)
+        torch.ops.vllm.maybe_wait_prefetch_done(out)
+        return out

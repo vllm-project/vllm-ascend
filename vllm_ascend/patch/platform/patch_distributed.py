@@ -23,7 +23,6 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 class NullHandle:
-
     def __init__(self):
         pass
 
@@ -32,12 +31,12 @@ class NullHandle:
 
 
 def communication_adaptation_310p():
-
     def broadcast310p_wrapper(fn):
+        def broadcast310p(tensor, src=0, group=None, async_op=False, group_src=None):
+            root = group_src if group_src is not None else src
 
-        def broadcast310p(tensor, src, group=None, async_op=False):
-            if tensor.device == torch.device('cpu'):
-                return fn(tensor, src, group, async_op)
+            if tensor.device == torch.device("cpu"):
+                return fn(tensor, src=root, group=group, async_op=async_op)
             rank = torch.distributed.get_rank(group)
             world_size = torch.distributed.get_world_size(group)
             tensor_list = [torch.empty_like(tensor) for _ in range(world_size)]
@@ -51,13 +50,10 @@ def communication_adaptation_310p():
 
         return broadcast310p
 
-    torch.distributed.broadcast = broadcast310p_wrapper(
-        torch.distributed.broadcast)
-    torch.distributed.distributed_c10d.broadcast = broadcast310p_wrapper(
-        torch.distributed.distributed_c10d.broadcast)
+    torch.distributed.broadcast = broadcast310p_wrapper(torch.distributed.broadcast)
+    torch.distributed.distributed_c10d.broadcast = broadcast310p_wrapper(torch.distributed.distributed_c10d.broadcast)
 
     def all_reduce_wrapper_310p(fn):
-
         def all_reduce(
             tensor,
             op=torch.distributed.ReduceOp.SUM,
@@ -83,10 +79,10 @@ def communication_adaptation_310p():
 
         return all_reduce
 
-    torch.distributed.all_reduce = all_reduce_wrapper_310p(
-        torch.distributed.all_reduce)
+    torch.distributed.all_reduce = all_reduce_wrapper_310p(torch.distributed.all_reduce)
     torch.distributed.distributed_c10d.all_reduce = all_reduce_wrapper_310p(
-        torch.distributed.distributed_c10d.all_reduce)
+        torch.distributed.distributed_c10d.all_reduce
+    )
 
 
 if get_ascend_device_type() == AscendDeviceType._310P:

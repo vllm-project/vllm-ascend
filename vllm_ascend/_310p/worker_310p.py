@@ -1,6 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,23 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
+#
 
-import pytest
+import torch_npu
+from vllm.logger import logger
 
-from tests.e2e.conftest import VllmRunner
+from vllm_ascend._310p.modelrunner_310p import NPUModelRunner310
+from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
-@pytest.mark.parametrize("dtype", ["float16"])
-@pytest.mark.parametrize("max_tokens", [5])
-def test_models(dtype: str, max_tokens: int) -> None:
-    example_prompts = [
-        "Hello, my name is",
-        "The future of AI is",
-    ]
+class NPUWorker310(NPUWorker):
+    def init_device(self):
+        self.device = self._init_device()
 
-    with VllmRunner("Qwen/Qwen3-0.6B",
-                    tensor_parallel_size=4,
-                    dtype=dtype,
-                    max_model_len=2048,
-                    enforce_eager=True) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+        torch_npu.npu.set_compile_mode(jit_compile=False)
+
+        init_workspace_manager(self.device, num_ubatches=1)
+
+        self.model_runner = NPUModelRunner310(self.vllm_config, self.device)
+
+    def _warm_up_atb(self):
+        # 310p device donot support torch_npu._npu_matmul_add_fp32 atb ops
+        logger.info("Skip warm-up atb ops for 310P device")
