@@ -15,26 +15,9 @@
 # This file is a part of the vllm-ascend project.
 #
 
-
-def register():
-    """Register the NPU platform."""
-
-    return "vllm_ascend.platform.NPUPlatform"
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 
 
-def register_connector():
-    from vllm_ascend.distributed.kv_transfer import register_connector
-
-    register_connector()
-
-
-def register_model_loader():
-    from .model_loader.netloader import register_netloader
-
-    register_netloader()
-
-
-def register_service_profiling():
-    from .profiling_config import generate_service_profiling_config
-
-    generate_service_profiling_config()
+class AscendMRotaryEmbedding310(MRotaryEmbedding):
+    def forward_oot(self, positions, query, key):
+        return super().forward_oot(positions, query, key)

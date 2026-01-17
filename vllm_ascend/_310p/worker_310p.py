@@ -15,26 +15,23 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import torch_npu
+from vllm.logger import logger
 
-def register():
-    """Register the NPU platform."""
-
-    return "vllm_ascend.platform.NPUPlatform"
-
-
-def register_connector():
-    from vllm_ascend.distributed.kv_transfer import register_connector
-
-    register_connector()
+from vllm_ascend._310p.modelrunner_310p import NPUModelRunner310
+from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
-def register_model_loader():
-    from .model_loader.netloader import register_netloader
+class NPUWorker310(NPUWorker):
+    def init_device(self):
+        self.device = self._init_device()
 
-    register_netloader()
+        torch_npu.npu.set_compile_mode(jit_compile=False)
 
+        init_workspace_manager(self.device, num_ubatches=1)
 
-def register_service_profiling():
-    from .profiling_config import generate_service_profiling_config
+        self.model_runner = NPUModelRunner310(self.vllm_config, self.device)
 
-    generate_service_profiling_config()
+    def _warm_up_atb(self):
+        # 310p device donot support torch_npu._npu_matmul_add_fp32 atb ops
+        logger.info("Skip warm-up atb ops for 310P device")
