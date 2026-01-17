@@ -22,7 +22,8 @@ from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUP
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
                                          trans_rope_weight, transdata,
-                                         wait_for_kv_layer_from_connector)
+                                         wait_for_kv_layer_from_connector,
+                                         enabling_malpo)
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer, post_process_after_loading_for_shard_weight_series,
@@ -370,13 +371,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
-        self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
+        self.vllm_config = get_current_vllm_config()
+        self.enable_mlapo = enabling_malpo(self.vllm_config)
 
         assert self.indexer is not None, "Indexer is required for DSA."
 
         self.enable_sfa_cp = enable_dsa_cp()
         self.local_num_heads = self.num_heads
-        self.vllm_config = get_current_vllm_config()
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         if self.enable_sfa_cp:
             self.local_num_heads = self.num_heads * self.tp_size

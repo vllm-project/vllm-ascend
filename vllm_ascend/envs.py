@@ -107,7 +107,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "MSMONITOR_USE_DAEMON":
     lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
     "VLLM_ASCEND_ENABLE_MLAPO":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '0'))),
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '1'))),
     # Whether to enable weight cast format to FRACTAL_NZ.
     # 0: close nz;
     # 1: only quant case enable nz;
