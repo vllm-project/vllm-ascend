@@ -48,6 +48,7 @@ from vllm_ascend.utils import (
     update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
     update_default_aclgraph_sizes,
+    is_310p,
 )
 
 if TYPE_CHECKING:
@@ -322,7 +323,9 @@ class NPUPlatform(Platform):
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             parallel_config.all2all_backend = "flashinfer_all2allv"
-            if ascend_config.xlite_graph_config.enabled:
+            if is_310p():
+                parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
+            elif ascend_config.xlite_graph_config.enabled:
                 logger.info("openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite")
                 parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
             else:
@@ -394,13 +397,27 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config):
+        key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
+
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
             (False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
+        backend_map_310 = {
+            (
+                False,
+                False,
+            ): "vllm_ascend._310p.attention.attention_v1.AscendAttentionBackend310",
+            # TODO If MLA/SFA is supported in the future, consider implementing the logic described in these comments.
+            # (True, False): "...AscendMLABackend310",
+            # (True, True):  "...AscendSFABackend310",
+        }
 
-        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse)]
+        if is_310p():
+            return backend_map_310.get(key, backend_map_310[(False, False)])
+
+        return backend_map[key]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

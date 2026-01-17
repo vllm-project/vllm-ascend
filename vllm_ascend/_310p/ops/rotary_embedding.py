@@ -1,6 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,23 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
+#
 
-import pytest
-
-from tests.e2e.conftest import VllmRunner
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 
 
-@pytest.mark.parametrize("dtype", ["float16"])
-@pytest.mark.parametrize("max_tokens", [5])
-def test_models(dtype: str, max_tokens: int) -> None:
-    example_prompts = [
-        "Hello, my name is",
-        "The future of AI is",
-    ]
-
-    with VllmRunner("Qwen/Qwen3-0.6B",
-                    tensor_parallel_size=4,
-                    dtype=dtype,
-                    max_model_len=2048,
-                    enforce_eager=True) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+class AscendMRotaryEmbedding310(MRotaryEmbedding):
+    def forward_oot(self, positions, query, key):
+        return super().forward_oot(positions, query, key)
