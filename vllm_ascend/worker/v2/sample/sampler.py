@@ -17,7 +17,7 @@
 
 import torch
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 
