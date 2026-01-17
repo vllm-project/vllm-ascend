@@ -202,10 +202,8 @@ class AscendFusedMoE(FusedMoE):
 
         # init moe
         eplb_config = ascend_config.eplb_config
-        self.global_expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
+        self.global_expert_map, self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
             eplb_config, self.moe_instance_id, self.moe_config)
-        if self.global_expert_map is not None:
-            self._expert_map = self.global_expert_map[self.ep_rank].npu()
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy
                                                           is not None)
