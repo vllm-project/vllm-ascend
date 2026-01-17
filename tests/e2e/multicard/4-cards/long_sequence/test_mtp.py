@@ -25,13 +25,13 @@ from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "512"
 
+prompts = [
+    "The capital of France is", "Hello, my name is Tom, I am",
+    "The president of United States is", "AI future is"
+]
+model = "wemaster/deepseek_mtp_main_random_bf16"
 
 def test_pcp_dcp_mtp1_eager():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
-    model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
             model,
             max_model_len=1024,
@@ -51,16 +51,7 @@ def test_pcp_dcp_mtp1_eager():
         runner.generate_greedy(prompts, 32)
 
 
-@pytest.mark.skipif(
-    not vllm_version_is('0.13.0'),
-    reason="vLLM PR-32118 break this",
-)
 def test_pcp_dcp_mtp3_eager():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
-    model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
             model,
             max_model_len=1024,
@@ -80,16 +71,7 @@ def test_pcp_dcp_mtp3_eager():
         runner.generate_greedy(prompts, 32)
 
 
-@pytest.mark.skipif(
-    not vllm_version_is('0.13.0'),
-    reason="vLLM PR-32118 break this",
-)
 def test_pcp_dcp_mtp3_piecewise_graph():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
-    model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
             model,
             max_model_len=1024,
@@ -112,16 +94,7 @@ def test_pcp_dcp_mtp3_piecewise_graph():
         runner.generate_greedy(prompts, 32)
 
 
-@pytest.mark.skipif(
-    not vllm_version_is('0.13.0'),
-    reason="vLLM PR-32118 break this",
-)
 def test_pcp_dcp_mtp3_full_graph():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
-    model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
             model,
             max_model_len=1024,
@@ -145,11 +118,6 @@ def test_pcp_dcp_mtp3_full_graph():
 
 
 def test_dcp_mtp3_full_graph():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
-    model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
             model,
             max_model_len=1024,
