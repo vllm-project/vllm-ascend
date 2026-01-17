@@ -163,6 +163,7 @@ class TestMoECommMethod(TestBase):
         "vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithAllGather"
     )
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.unified_apply_mlp")
+    @patch("torch.npu.current_stream", MagicMock())
     def test_fused_experts_method(self, mock_unified_apply_mlp,
                                   mock_token_dispatcher, mock_prepare_finalize,
                                   mock_get_forward_context):
