@@ -75,7 +75,8 @@ class CPUOffloadingConnector(KVConnectorBase_V1):
     def __init__(self,
                  vllm_config: VllmConfig,
                  role: KVConnectorRole,
-                 kv_cache_config: Optional[KVCacheConfig] = None):
+                 kv_cache_config: Optional["KVCacheConfig"] = None):
+        self._connector_metadata = CPUOffloadingConnectorMetadata(requests={}, finished_req_ids=set())
         if not vllm_config.cache_config.enable_prefix_caching:
             self.connector_scheduler: Optional[
                 CPUOffloadingConnectorScheduler] = None

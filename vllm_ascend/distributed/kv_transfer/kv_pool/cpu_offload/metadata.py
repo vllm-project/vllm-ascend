@@ -45,7 +45,9 @@ class MetadataServer:
 
     class ZMQRPCClient:
 
-        def __init__(self, identity=f"worker-{os.getpid()}"):
+        def __init__(self, identity=None):
+            if identity is None:
+                identity = f"worker-{os.getpid()}-{id(self)}"
             logger.info(f"metadata client for worker {identity} started")
             self.ctx = zmq.Context()  # type: ignore
             self.socket = make_zmq_socket(
