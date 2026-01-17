@@ -42,3 +42,15 @@ class AscendSiluAndMul(SiluAndMul):
             out = torch_npu.npu_swiglu(x)
         torch.ops.vllm.maybe_wait_prefetch_done(out)
         return out
+
+class SwigluOai():
+
+    def swiglu_oai(gate_up):
+        alpha = 1.702
+        limit = 7.0
+        gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+        gate = gate.clamp(min=None, max=limit)
+        up = up.clamp(min=-limit, max=limit)
+        glu = gate * torch.sigmoid(gate * alpha)
+        gated_output = (up + 1) * glu
+        return gated_output

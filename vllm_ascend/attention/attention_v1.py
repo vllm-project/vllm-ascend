@@ -351,6 +351,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         logits_soft_cap: Optional[float],
         attn_type: str,
         kv_sharing_target_layer_name: Optional[str],
+        sinks: torch.Tensor = None,
         **kwargs,
     ) -> None:
         self.vllm_config = get_current_vllm_config()
@@ -373,6 +374,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
+        self.device = None
+        if hasattr(torch, "npu") and callable(getattr(torch.npu, "is_available", None)) and torch.npu.is_available():
+            self.device = torch.device("npu")
+        else:
+            self.device = torch.device("cpu")
+        self.sinks = sinks
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
@@ -603,7 +611,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return output
         if (attn_metadata.attn_state == AscendAttentionState.DecodeOnly
                 and self.sliding_window is not None
-                and attn_metadata.seq_lens.shape[0] == query.size(0)):
+                and attn_metadata.seq_lens.shape[0] == query.size(0)
+                and self.sinks is None):
             return self._forward_fia_slidingwindow(query, attn_metadata,
                                                    output)
         key, value, block_size, block_table, actual_seq_lengths_kv \
@@ -614,24 +623,57 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = key[:num_tokens]
             value = value[:num_tokens]
         # Get workspace from cache or calculate it if not present.
-        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-            query=query,
-            key=key,
-            value=value,
-            atten_mask=attn_metadata.attn_mask,
-            block_table=block_table,
-            input_layout="TND",
-            block_size=block_size,
-            actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-            actual_seq_lengths_kv=actual_seq_lengths_kv,
-            num_key_value_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale=self.scale,
-            sparse_mode=3,
-        )
+        if self.sinks is not None:
+            actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                actual_seq_qlen = torch.tensor([1] *
+                                               len(attn_metadata.seq_lens_list),
+                                               dtype=torch.int32).cumsum(dim=0)
+            # calculate atten_mask & sparse_mode by sliding_window
+            if self.sliding_window is not None:
+                atten_mask = self.attn_mask_builder.get_swa_mask(torch.bool, self.sliding_window)
+                sparse_mode = 4
+            else:
+                atten_mask = self.attn_mask_builder.get_attn_mask(2048, torch.bool)
+                sparse_mode = 3
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                query,
+                key,
+                value,
+                num_query_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="TND",
+                pre_tokens=self.sliding_window
+                if self.sliding_window is not None else SWA_INT_MAX,
+                next_tokens=0,
+                atten_mask=atten_mask,
+                sparse_mode=sparse_mode,
+                softmax_scale=self.scale,
+                block_table=block_table,
+                block_size=block_size,
+                actual_seq_qlen=actual_seq_qlen,
+                actual_seq_kvlen=actual_seq_lengths_kv,
+                learnable_sink=self.sinks
+            )
+        else:
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                block_table=block_table,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                sparse_mode=3,
+            )
 
-        attn_output = attn_output.view(num_tokens, self.num_heads,
-                                       self.head_size)
+            attn_output = attn_output.view(num_tokens, self.num_heads,
+                                           self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
