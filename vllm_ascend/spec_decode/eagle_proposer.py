@@ -435,17 +435,22 @@ class EagleProposer(VllmEagleProposer):
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
-        
-        common_attn_metadata.num_actual_tokens = batch_size
-        common_attn_metadata.max_query_len = 1
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
-            common_attn_metadata.block_table_tensor = self._pad_length(common_attn_metadata.block_table_tensor, input_batch_size)
+
+        if (
+            aclgraph_runtime_mode == CUDAGraphMode.FULL
+            and (pad_size := input_batch_size - batch_size) > 0
+        ):
             common_attn_metadata.num_reqs = input_batch_size
-            common_attn_metadata.seq_lens = self._pad_length(common_attn_metadata.seq_lens, input_batch_size)
-            common_attn_metadata.seq_lens_cpu = self._pad_length(common_attn_metadata.seq_lens_cpu, input_batch_size)
-            common_attn_metadata.query_start_loc = self.arange[:
-                                                               input_batch_size
-                                                               + 1]
+            common_attn_metadata.block_table_tensor = self._pad_tensor(
+                common_attn_metadata.block_table_tensor, pad_size)
+            common_attn_metadata.seq_lens = self._pad_tensor(
+                common_attn_metadata.seq_lens, pad_size)
+            common_attn_metadata.seq_lens_cpu = self._pad_tensor(
+                common_attn_metadata.seq_lens_cpu, pad_size)
+            common_attn_metadata.num_computed_tokens_cpu = self._pad_tensor(
+                common_attn_metadata.num_computed_tokens_cpu, pad_size)
+            common_attn_metadata.query_start_loc = self.arange[
+                :input_batch_size + 1]
             common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
                 self.token_arange_np[:input_batch_size + 1]).clone()
         else:
@@ -453,8 +458,11 @@ class EagleProposer(VllmEagleProposer):
             common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
                 self.token_arange_np[:batch_size + 1]).clone()
 
+        common_attn_metadata.num_actual_tokens = batch_size
+        common_attn_metadata.max_query_len = 1
         common_attn_metadata.decode_token_per_req = 1
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        common_attn_metadata.graph_pad_size = -1
         common_attn_metadata.num_input_tokens = input_batch_size
 
         for now_speculative in range(self.num_speculative_tokens - 1):
@@ -488,19 +496,17 @@ class EagleProposer(VllmEagleProposer):
 
             common_attn_metadata.seq_lens_cpu[:batch_size] = (
                 common_attn_metadata.seq_lens_cpu[:batch_size] + 1)
-            exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] > \
+            exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= \
                 self.max_model_len
             common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(
                 exceeds_mask, 1)
-            common_attn_metadata.num_computed_tokens_cpu += 1
-            common_attn_metadata.positions[:batch_size] = clamped_positions
-            common_attn_metadata.positions[batch_size:] = 0
+            common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
+            common_attn_metadata.positions[:batch_size].copy_(clamped_positions)
 
             if self.attn_metadata_builder is None:
                 attn_metadata_builder = self._get_attention_metadata_builder()
             else:
                 attn_metadata_builder = self.attn_metadata_builder
-
             block_size = attn_metadata_builder.kv_cache_spec.block_size
 
             # Compute the slot mapping.
@@ -517,20 +523,16 @@ class EagleProposer(VllmEagleProposer):
             slot_mapping.masked_fill_(exceeds_max_model_len,
                                           PADDING_SLOT_ID)
 
-            common_attn_metadata.slot_mapping[:slot_mapping.
-                                                shape[0]].copy_(
-                                                    slot_mapping.to(
-                                                        torch.int32))
-            common_attn_metadata.slot_mapping[
-                slot_mapping.shape[0]:].fill_(PADDING_SLOT_ID)
+            common_attn_metadata.slot_mapping[:slot_mapping.shape[0]].copy_(
+                slot_mapping.to(torch.int32))
+            common_attn_metadata.slot_mapping[slot_mapping.shape[0]:].fill_(
+                PADDING_SLOT_ID)
 
             # Rebuild attention metadata
             attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
                 common_attn_metadata=common_attn_metadata,
                 draft_index=now_speculative + 1,
             )
-
-            per_layer_attn_metadata = {}
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
@@ -946,12 +948,11 @@ class EagleProposer(VllmEagleProposer):
                 update_attn_params(self.update_stream, forward_context,
                                    num_tokens, self.vllm_config)
 
-    # padding view into correct length
-    def _pad_length(self, tensor, target_length):
-        pad_length = target_length - len(tensor)
-        pad = [0] * (2 * tensor.dim() - 1) + [pad_length]
-        padded_view = F.pad(tensor, pad, mode='constant', value=0)
-        return padded_view
+    # padding tensor into desired size
+    def _pad_tensor(self, tensor, pad_size):
+        pad = [0] * (2 * tensor.dim() - 1) + [pad_size]
+        padded_tensor = F.pad(tensor, pad, mode="constant", value=0)
+        return padded_tensor
 
     def maybe_pad_and_reduce(
         self,
