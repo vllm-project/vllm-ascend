@@ -129,6 +129,7 @@ class MoECommMethod(ABC):
         if log2phy is not None:
             topk_ids = log2phy[topk_ids]
 
+        before_dispatch_evt = torch.npu.current_stream().record_event()
         dispatch_results = self.token_dispatcher.token_dispatch(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
@@ -345,3 +346,4 @@ class FusedMC2CommImpl(MoECommMethod):
         return FusedExpertsResult(routed_out=out,
                                   group_list_type=group_list_type,
                                   expert_tokens=expert_tokens)
+
