@@ -135,7 +135,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            global_num_experts=global_num_experts,
             expert_map=expert_map,
             shared_experts=shared_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
