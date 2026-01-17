@@ -71,7 +71,7 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Install Ascend toolkit & triton_ascend
+      - name: Install BiSheng toolkit
         shell: bash -l {0}
         run: |
           apt-get -y install clang-15
@@ -81,7 +81,7 @@ jobs:
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
           export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+          which bishengir-compile
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -190,14 +190,7 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend test (non triton)
-        if: ${{ inputs.type == 'full' }}
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-        run: |
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
-
-      - name: Install Ascend toolkit & triton_ascend
+      - name: Install BiSheng toolkit
         shell: bash -l {0}
         run: |
           apt-get -y install clang-15
@@ -207,7 +200,6 @@ jobs:
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
           export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
 
       - name: Run vllm-project/vllm-ascend test (light)
         env:
@@ -248,6 +240,14 @@ jobs:
           # This test is broken, fix me
           #pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_shared_expert_dp.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_single_request_aclgraph.py
+
+      - name: Run vllm-project/vllm-ascend test (non triton)
+        if: ${{ inputs.type == 'full' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          python3 -m pip uninstall -y triton-ascend
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
 
   e2e-4-cards:
     name: multicard-4
@@ -304,7 +304,7 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Install Ascend toolkit & triton_ascend
+      - name: Install BiSheng toolkit
         shell: bash -l {0}
         run: |
           apt-get -y install clang-15
@@ -314,7 +314,6 @@ jobs:
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
           export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         working-directory: ./vllm-ascend
