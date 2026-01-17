@@ -5,12 +5,11 @@ from typing import Optional
 from vllm.logger import logger
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
-                                         PrefixCachingMetrics)
+from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock)
 from vllm.v1.core.single_type_kv_cache_manager import \
     get_manager_for_kv_cache_spec
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.metrics.stats import (PrefixCacheStats, CachingMetrics)
 from vllm.v1.request import Request
 
 
@@ -20,7 +19,7 @@ class CPUCacheStats:
         self.enable_prefix_caching = enable_prefix_caching
         self.log_stats = log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
-        self.cpu_prefix_cache_metrics = PrefixCachingMetrics()
+        self.cpu_prefix_cache_metrics = CachingMetrics()
         self.time_sec = int(time.time())
 
     def log(self):
@@ -111,6 +110,7 @@ class CPUKVCacheManager:
             block_pool=self.block_pool,
             kv_cache_spec=self.single_type_manager.kv_cache_spec,
             use_eagle=self.use_eagle,
+            alignment_tokens=self.block_size,
         )
         num_computed_tokens = len(computed_blocks[0]) * self.block_size
         self.req_to_computed_blocks[request_id] = computed_blocks[0]
