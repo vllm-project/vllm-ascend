@@ -6,7 +6,9 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (GREEDY_TEMPERATURE, MAX_SPEC_LEN,
                                               PLACEHOLDER_TOKEN_ID,
+                                              RejectionSampler,
                                               generate_uniform_probs)
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size, expand_triton,
@@ -715,6 +717,7 @@ def sample_recovered_tokens_pytorch(
     output_token_ids[:] = recovered_ids
 
 
+
 def rejection_random_sample_block_verify_pytorch(
     output_token_ids,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens,  # [batch_size]
@@ -796,3 +799,232 @@ def rejection_random_sample_block_verify_pytorch(
         -1, max_spec_len + 1)
     output_token_ids[:] = torch.where(bonus_mask, bonus_values_expanded,
                                       output_token_ids)
+
+class AscendRejectionSampler(RejectionSampler):
+
+    def forward(
+        self,
+        metadata: SpecDecodeMetadata,
+        draft_probs: Optional[torch.Tensor],
+        target_logits: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        target_logits = apply_sampling_constraints(
+            target_logits,
+            metadata.cu_num_draft_tokens,
+            sampling_metadata,
+        )
+        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+
+        output_token_ids = rejection_sample(
+            metadata.draft_token_ids,
+            metadata.num_draft_tokens,
+            metadata.max_spec_len,
+            metadata.cu_num_draft_tokens,
+            draft_probs,
+            target_probs,
+            bonus_token_ids,
+            sampling_metadata,
+        )
+        return output_token_ids
+
+
+class EntropyAdaptiveRejectionSampler(AscendRejectionSampler):
+    """
+    EARS (Entropy-Adaptive Rejection Sampling) implementation.
+    Introduces dynamic tolerance based on prediction uncertainty to improve acceptance rate.
+    """
+
+    def __init__(self, *args, base_tolerance: float = 0.1, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.base_tolerance = base_tolerance
+
+    def forward(
+        self,
+        metadata: SpecDecodeMetadata,
+        draft_probs: Optional[torch.Tensor],
+        target_logits: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+
+        target_logits = apply_sampling_constraints(
+            target_logits,
+            metadata.cu_num_draft_tokens,
+            sampling_metadata,
+        )
+        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+
+        output_token_ids = ears_rejection_sample(
+            metadata.draft_token_ids,
+            metadata.num_draft_tokens,
+            metadata.max_spec_len,
+            metadata.cu_num_draft_tokens,
+            draft_probs,
+            target_probs,
+            bonus_token_ids,
+            sampling_metadata,
+            base_tolerance=self.base_tolerance,
+        )
+        return output_token_ids
+
+
+def rejection_random_sample_pytorch_optimized(
+    output_token_ids,
+    cu_num_draft_tokens,
+    draft_token_ids,
+    draft_probs,
+    target_probs,
+    bonus_token_ids,
+    recovered_token_ids,
+    uniform_probs,
+    is_greedy,
+    max_spec_len,
+    vocab_size,
+    IS_NGRAM=False,
+    base_tolerance=0.0,
+):
+
+    batch_size = output_token_ids.shape[0]
+    device = output_token_ids.device
+
+    if base_tolerance > 0:
+        max_target_probs = target_probs.max(dim=-1).values
+        uncertainties = 1.0 - max_target_probs
+
+    for req_idx in range(batch_size):
+        if is_greedy[req_idx]:
+            continue
+
+        if req_idx == 0:
+            start_idx = 0
+        else:
+            start_idx = cu_num_draft_tokens[req_idx - 1].item()
+        end_idx = cu_num_draft_tokens[req_idx].item()
+        num_draft_tokens = end_idx - start_idx
+
+        rejected = False
+        for pos in range(num_draft_tokens):
+            if not rejected:
+                curr_idx = start_idx + pos
+                draft_token_id = draft_token_ids[curr_idx].item()
+
+                if IS_NGRAM:
+                    draft_prob = 1.0
+                else:
+                    draft_prob = draft_probs[curr_idx, draft_token_id].item()
+
+                target_prob = target_probs[curr_idx, draft_token_id].item()
+                uniform_prob = uniform_probs[curr_idx].item()
+
+                tolerance = 0.0
+                if base_tolerance > 0 and draft_prob > 0 and (
+                        target_prob / draft_prob) < uniform_prob:
+                    uncertainty = uncertainties[curr_idx].item()
+                    tolerance = base_tolerance * uncertainty
+
+                if draft_prob > 0 and (target_prob / draft_prob) >= (
+                        uniform_prob - tolerance):
+                    token_id = draft_token_id
+                else:
+                    rejected = True
+                    token_id = recovered_token_ids[curr_idx].item()
+
+                output_token_ids[req_idx, pos] = token_id
+
+        if not rejected:
+            bonus_token_id = bonus_token_ids[req_idx].item()
+            output_token_ids[req_idx, num_draft_tokens] = bonus_token_id
+
+
+def ears_rejection_sample(
+    draft_token_ids: torch.Tensor,
+    num_draft_tokens: list[int],
+    max_spec_len: int,
+    cu_num_draft_tokens: torch.Tensor,
+    draft_probs: Optional[torch.Tensor],
+    target_probs: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    base_tolerance: float = 0.0,
+) -> torch.Tensor:
+
+    assert draft_token_ids.ndim == 1
+    assert draft_probs is None or draft_probs.ndim == 2
+    assert cu_num_draft_tokens.ndim == 1
+    assert target_probs.ndim == 2
+
+    batch_size = len(num_draft_tokens)
+    num_tokens = draft_token_ids.shape[0]
+    vocab_size = target_probs.shape[-1]
+    device = target_probs.device
+
+    output_token_ids = torch.empty(
+        (batch_size, max_spec_len + 1),
+        dtype=torch.int32,
+        device=device,
+    )
+    output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
+
+    if sampling_metadata.all_greedy:
+        is_greedy = None
+    else:
+        is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+
+    if not sampling_metadata.all_random:
+        target_argmax = target_probs.argmax(dim=-1)
+        if min(num_draft_tokens) == 1 and max(
+                num_draft_tokens) == 1 and sampling_metadata.all_greedy:
+            rejection_greedy_sample_spec_len_1_pytorch(
+                output_token_ids,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+            )
+        else:
+            rejection_greedy_sample_pytorch(
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                num_draft_tokens,
+                max_spec_len,
+                is_greedy,
+            )
+        if sampling_metadata.all_greedy:
+            return output_token_ids
+    uniform_probs = generate_uniform_probs(
+        num_tokens,
+        num_draft_tokens,
+        sampling_metadata.generators,
+        device,
+    )
+    recovered_token_ids = sample_recovered_tokens(
+        max_spec_len,
+        num_draft_tokens,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        sampling_metadata,
+        device,
+    )
+
+    rejection_random_sample_pytorch_optimized(
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        bonus_token_ids,
+        recovered_token_ids,
+        uniform_probs,
+        is_greedy,
+        max_spec_len,
+        vocab_size,
+        IS_NGRAM=draft_probs is None,
+        base_tolerance=base_tolerance,
+    )
+    return output_token_ids

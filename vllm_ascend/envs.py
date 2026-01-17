@@ -132,6 +132,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale balance scheduling
     "VLLM_ASCEND_BALANCE_SCHEDULING":
     lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", '0'))),
+    # EARS tolerance. Enabled if > 0.
+    "VLLM_EARS_TOLERANCE":
+    lambda: float(os.getenv("VLLM_EARS_TOLERANCE", "0.0")),
 }
 
 # end-env-vars-definition
