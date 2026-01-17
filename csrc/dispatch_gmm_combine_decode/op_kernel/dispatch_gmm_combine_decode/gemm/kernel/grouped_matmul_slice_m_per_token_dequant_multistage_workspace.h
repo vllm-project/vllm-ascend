@@ -39,7 +39,7 @@ public:
     using ElementAccumulator = typename BlockMmad::ElementAccumulator;
 
     using BlockEpilogue = BlockEpilogue_;
-    using ElementScale = typename BlockEpilogue::ElementScale;
+    using ElementScale = typename BlockEpilogue::ElementRawScale;
     using LayoutScale = typename BlockEpilogue::LayoutScale;
     using ElementPerTokenScale = typename BlockEpilogue::ElementPerTokenScale;
     using LayoutPerTokenScale = typename BlockEpilogue::LayoutPerTokenScale;

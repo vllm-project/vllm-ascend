@@ -51,15 +51,12 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.model.model.layers[i].mlp.experts.w13_weight_scale_fp32_list
             self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w2_weight_scale_list"] = \
                 self.model.model.layers[i].mlp.experts.w2_weight_scale_list
-            self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w2_weight_scale_fp32_list"] = \
-                self.model.model.layers[i].mlp.experts.w2_weight_scale_fp32_list
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 and qwen3-moe is supported here
         if self.model.quant_config is not None:
             self.expert_weight_names = [
                 "w13_weight_list", "w2_weight_list",
                 "w13_weight_scale_fp32_list", "w13_weight_offset",
-                "w2_weight_scale_list", "w2_weight_offset",
-                "w2_weight_scale_fp32_list"
+                "w2_weight_scale_list", "w2_weight_offset"
             ]
         else:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
@@ -97,8 +94,7 @@ class VllmEplbAdaptor(EplbAdaptor):
                     self.num_dense_layers) + ".mlp.experts." + name
                 if name in [
                         "w13_weight_list", "w2_weight_list",
-                        "w13_weight_scale_fp32_list", "w2_weight_scale_list",
-                        "w2_weight_scale_fp32_list"
+                        "w13_weight_scale_fp32_list", "w2_weight_scale_list"
                 ]:
                     expert_tensor = self.param_dict[complete_name][0]
                     expert_tensor = expert_tensor.clone()
@@ -119,7 +115,7 @@ class VllmEplbAdaptor(EplbAdaptor):
                     if name in [
                             "w13_weight_list", "w2_weight_list",
                             "w13_weight_scale_fp32_list",
-                            "w2_weight_scale_list", "w2_weight_scale_fp32_list"
+                            "w2_weight_scale_list"
                     ]:
                         per_expert_param.append(
                             self.param_dict["model.layers." + str(layer_idx) +
