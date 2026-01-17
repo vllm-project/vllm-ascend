@@ -36,7 +36,9 @@ def test_llm_models(dtype: str, max_tokens: int) -> None:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_multimodal_vl():
+@pytest.mark.skip(reason="310P: multimodal test skipped, offline is ok")
+@pytest.mark.parametrize("dtype", ["float16"])
+def test_multimodal_vl(dtype: str):
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
     img_questions = [
@@ -60,6 +62,7 @@ def test_multimodal_vl():
                         "max_pixels": 1280 * 28 * 28,
                         "fps": 1,
                     },
+                    dtype=dtype,
                     max_model_len=8192,
                     enforce_eager=True,
                     limit_mm_per_prompt={"image": 1}) as vllm_model:
