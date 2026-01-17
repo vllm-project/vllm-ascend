@@ -37,6 +37,7 @@ deployment:
       --gpu-memory-utilization 0.85
       --trust-remote-code
       --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
+      --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       --tokenizer-mode deepseek_v32
       --reasoning-parser deepseek_v3
       --api-server-count 4
@@ -61,6 +62,7 @@ deployment:
       --gpu-memory-utilization 0.85
       --trust-remote-code
       --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
+      --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       --tokenizer-mode deepseek_v32
       --reasoning-parser deepseek_v3
 benchmarks:
@@ -73,7 +75,7 @@ benchmarks:
     max_out_len: 3000
     batch_size: 512
     request_rate: 11.2
-    baseline: 594.915
+    baseline: 626.1409
     threshold: 0.97
   acc:
     case_type: accuracy
