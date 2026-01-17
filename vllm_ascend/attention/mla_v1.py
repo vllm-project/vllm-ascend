@@ -775,7 +775,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
         register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
-        if vllm_is_batch_invariant and HAS_TRITON:
+        if vllm_is_batch_invariant() and HAS_TRITON:
             self._forward_decode = self._forward_decode_triton
         else:
             self._forward_decode = self._forward_decode_default
