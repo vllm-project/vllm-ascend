@@ -51,8 +51,7 @@ __aicore__ inline  void moe_init_routing_quant_v2(
     sortPipe.Destroy();
     return;
   } 
-  
-  
+
   else if (tilingKey == 21000) {  // dynamic quant full load
     TPipe sortPipe;
     MoeV2FullLoadDynamicQuant<DTYPE_X> op;
@@ -80,7 +79,7 @@ __aicore__ inline  void moe_init_routing_quant_v2(
     sortPipe.Destroy();
   }
 
-  if (tilingKey == 10000 || tilingKey == 10010 || tilingKey ==11000 || tilingKey ==11010) { // No drop scenario
+  if (tilingKey == 10000 || tilingKey == 10010 || tilingKey ==11000 || tilingKey ==11010) { //没有drop的情况
     if (tilingData->expertTokensCountOrCumsumFlag != EXERPT_TOKENS_NONE) {
       TPipe expertTokenOutPipe;
       MoeV2ExpertTokenOut expertTokenOutOp;
@@ -94,7 +93,7 @@ __aicore__ inline  void moe_init_routing_quant_v2(
     srcToDstOp.Init<MoeInitRoutingQuantV2TilingData>(expandedRowIdx, workspace, tilingData, &srcToDstPipe);
     srcToDstOp.Process();
     srcToDstPipe.Destroy();
-  } else if (tilingKey ==10100 || tilingKey ==10110 || tilingKey ==11100 || tilingKey ==11110) { // Drop scenario
+  } else if (tilingKey ==10100 || tilingKey ==10110 || tilingKey ==11100 || tilingKey ==11110) { //有drop的情况
     TPipe expertTokenOutPipe;
     MoeV2ExpertTokenOut expertTokenOutOp;
     expertTokenOutOp.Init<MoeInitRoutingQuantV2TilingData>(expertTokensCountOrCumsum, expertTokensBeforeCapacity,

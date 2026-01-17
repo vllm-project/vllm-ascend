@@ -25,6 +25,7 @@ add_ops_compile_options(
                 -Wno-deprecated-declarations
                 -Werror
                 -DHCCL_COMM
+                -D__COMBINE_V2__
                 ${_DISPATCH_FFN_INC_OPTS}
 )
 

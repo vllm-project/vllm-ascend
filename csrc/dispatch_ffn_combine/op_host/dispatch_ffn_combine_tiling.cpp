@@ -26,6 +26,8 @@
 using namespace AscendC;
 using namespace ge;
 
+#define HCCL_BUFFSIZE  "HCCL_BUFFSIZE"
+
 namespace {
     // 1. Constant definitions
     const char *K_INNER_DEBUG = "DispatchFFNCombine Tiling Debug";
@@ -42,6 +44,7 @@ namespace {
     constexpr uint32_t EXPERTID_INDEX = 3;
     constexpr uint32_t BLOCK_NUM = 20;
     constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
+    constexpr uint64_t MB_SIZE = 1024 * 1024UL;
 }
 
 namespace optiling {
@@ -52,6 +55,24 @@ static int32_t CeilDev(int32_t num, int32_t div)
         return 0;
     }
     return (num + div - 1) / div;
+}
+
+static uint64_t GetMaxWindowSize()
+{
+    uint16_t defaultWindowSize = 200;
+    if (getenv(HCCL_BUFFSIZE) == nullptr) {
+        OP_LOGD(K_INNER_DEBUG, "Env HCCL_BUFFSIZE don't set");
+    } else {
+        try {
+            std::string envStr(getenv(HCCL_BUFFSIZE));
+            defaultWindowSize = std::stoi(envStr);
+        } catch (...) {
+            OP_LOGE(K_INNER_DEBUG, "Unknown Exception encountered when parser env HCCL_BUFFERSIZE");
+        }
+    }
+    const uint64_t maxWindowSize = static_cast<uint64_t>(defaultWindowSize) * 1024UL * 1024UL;
+    OP_LOGD(K_INNER_DEBUG, "Get maxWindowSize is %lu", maxWindowSize);
+    return maxWindowSize;
 }
 
 // Parse and validate rankId, group, worldSize, and isTransB attributes
@@ -154,7 +175,7 @@ void SetTilingData(CoCTiling &cocTilingData, DispatchFFNCombineInfo &info)
     cocTilingData.n0 = 256;
     cocTilingData.swizzleDirect = 1;
     cocTilingData.swizzleOffset = 7;
-    cocTilingData.ubMoveNum = 16 * 1024;
+    cocTilingData.ubMoveNum = 7168;
     cocTilingData.pValue = 1;
     cocTilingData.commNpuSplit = info.worldSize;
     cocTilingData.commDataSplit = 1;
@@ -232,6 +253,14 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     tilingData->cocTiling.moeInitRoutingQuantV2TilingData.gatherOutComputeParamsOp = moeInitRoutingQuantV2TilingBase.quantTilingData.gatherOutComputeParamsOp;
     tilingData->cocTiling.initRoutingQuantTilingKey = initRoutingQuantTilingKey;
 
+    uint64_t maxWindowSize = GetMaxWindowSize();
+    uint64_t actualSize = info.M * info.topK * info.K * sizeof(int8_t) * 3 + 3 * MB_SIZE ;
+    OP_TILING_CHECK((actualSize > maxWindowSize),
+        OP_LOGE(nodeName, "HCCL_BUFFSIZE is too SMALL, m = %lu, k = %lu, topK = %lu"
+            " NEEDED_HCCL_BUFFSIZE is ((m * k * topK * sizeof(int8_t)) * 3 + 3MB)= %luMB, HCCL_BUFFSIZE=%luMB.",
+            info.M, info.K, info.topK, actualSize / MB_SIZE + 1UL, maxWindowSize / MB_SIZE),
+        return ge::GRAPH_FAILED);
+
     // 4. workspace
     size_t *workSpaces = context->GetWorkspaceSizes(1);
     OP_TILING_CHECK(workSpaces == nullptr, OP_LOGE(nodeName, "workSpaces is nullptr."),
@@ -243,8 +272,12 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) +
                             info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
                             info.maxOutputSize * sizeof(float) * 2 +
-                            std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
-                            std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
+                            info.maxOutputSize * info.N * sizeof(int16_t) +
+                            info.maxOutputSize * n2 * sizeof(int16_t) +
+                            info.maxOutputSize * info.K * sizeof(int8_t) +
+                            info.maxOutputSize * k2 * sizeof(int8_t) +
+                            info.worldSize  * sizeof(int32_t) * 16 +
+                            (info.expertPerRank + info.worldSize) * sizeof(int32_t) * 16;
 
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
 
