@@ -487,10 +487,11 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> tuple[dict[str, Any], torch.Tensor, np.ndarray, int, torch.Tensor,
-               int, torch.Tensor, SpecDecodeMetadata, Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor], int, dict[str,
-                                                                         Any]]:
+    ) -> tuple[dict[str, Any], torch.Tensor, np.ndarray, int,
+               Optional[torch.Tensor], torch.Tensor,
+               Optional[SpecDecodeMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor], Optional[IntermediateTensors], int,
+               dict[str, Any]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -589,15 +590,10 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         # Get info across DP ranks.
-        # NOTE: maybe_padded_num_tokens is only used when using TorchAir with DP,
-        # Otherwise, it's just max_tokens_across_dp_cpu
-        (maybe_padded_num_tokens, num_tokens_across_dp,
+        (num_input_tokens, num_tokens_across_dp,
          with_prefill) = self._sync_metadata_across_dp(num_input_tokens,
                                                        with_prefill)
         self.with_prefill = with_prefill
-        # TODO: Now that num_input_tokens is basically identical with maybe_padded_num_tokens
-        # We should consider removing maybe_padded_num_tokens later
-        num_input_tokens = maybe_padded_num_tokens
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1079,7 +1075,7 @@ class NPUModelRunner(GPUModelRunner):
 
         return (attn_metadata, positions, num_scheduled_tokens,
                 num_input_tokens, num_tokens_across_dp,
-                maybe_padded_num_tokens, logits_indices, spec_decode_metadata,
+                logits_indices, spec_decode_metadata,
                 input_ids, inputs_embeds, intermediate_tensors,
                 max_num_scheduled_tokens, model_kwargs)
 
@@ -1110,7 +1106,7 @@ class NPUModelRunner(GPUModelRunner):
                         hidden_states[1]))
         return NPUModelRunner._all_gather_hidden_states(hidden_states)
 
-    def _generate_process_reqs_hidden_states(self, maybe_padded_num_tokens,
+    def _generate_process_reqs_hidden_states(self, num_input_tokens,
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds, model_kwargs):
@@ -1124,26 +1120,25 @@ class NPUModelRunner(GPUModelRunner):
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
             and not self.use_sparse:
-            # TODO: maybe_padded_num_tokens will be removed, use num_input_tokens instead
             if self.vllm_config.model_config.use_mla:
                 if self.pcp_size * self.dcp_size > 1:
                     # FIXME: Try using `auto_dispatch_capture=True`
                     update_mla_attn_dcp_pcp_params(self.update_stream,
                                                    forward_context,
-                                                   maybe_padded_num_tokens)
+                                                   num_input_tokens)
                 else:
                     # FIXME: Try using `auto_dispatch_capture=True`
                     update_mla_attn_params(self.update_stream, forward_context,
-                                           maybe_padded_num_tokens,
+                                           num_input_tokens,
                                            self.speculative_config)
             else:
                 if self.pcp_size * self.dcp_size > 1:
                     update_attn_dcp_pcp_params(self.update_stream,
                                                forward_context,
-                                               maybe_padded_num_tokens)
+                                               num_input_tokens)
                 else:
                     update_attn_params(self.update_stream, forward_context,
-                                       maybe_padded_num_tokens,
+                                       num_input_tokens,
                                        self.vllm_config)
 
         if get_forward_context().sp_enabled and not isinstance(
@@ -1476,7 +1471,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.eplb_updator.forward_before()
 
             (attn_metadata, positions, num_scheduled_tokens_np,
-             num_input_tokens, num_tokens_across_dp, maybe_padded_num_tokens,
+             num_input_tokens, num_tokens_across_dp,
              logits_indices, spec_decode_metadata, input_ids, inputs_embeds,
              intermediate_tensors, max_query_len,
              model_kwargs) = (self._prepare_inputs(scheduler_output,
@@ -1524,7 +1519,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
-                    maybe_padded_num_tokens, input_ids, positions,
+                    num_input_tokens, input_ids, positions,
                     intermediate_tensors, inputs_embeds, model_kwargs)
 
             self.maybe_wait_for_kv_save()
