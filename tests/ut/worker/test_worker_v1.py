@@ -311,26 +311,27 @@ class TestNPUWorker(TestBase):
 
             self.assertIn("Profiler is not enabled", str(cm.exception))
 
-    @patch("vllm_ascend.worker.worker.envs_vllm")
     @patch("vllm_ascend.worker.worker.envs_ascend")
     def test_profile_and_msmonitor_both_enabled_raises_error(
-            self, mock_envs_vllm, mock_envs_ascend):
+            self, mock_envs_ascend):
         """Test profile method raises exception when both profiler and msmonitor are enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = "/path/to/traces"
         mock_envs_ascend.MSMONITOR_USE_DAEMON = 1
 
-        # Create worker mock
+        # Create worker mock with profiler_config enabled
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.profiler_config = MagicMock()
+            worker.vllm_config.profiler_config.torch_profiler_dir = "/path/to/traces"
 
             # Test should raise exception
             with self.assertRaises(RuntimeError) as cm:
                 _ = worker._init_profiler()
 
             self.assertIn(
-                "MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time.",
+                "MSMONITOR_USE_DAEMON and torch_profiler_dir in profiler_config cannot be both set at the same time.",
                 str(cm.exception))
 
     def test_lora_methods(self):
@@ -413,7 +414,7 @@ class TestNPUWorker(TestBase):
             mock_model_runner._dummy_run.assert_called_once_with(
                 num_tokens=mock_decode_token_per_req, uniform_decode=True)
 
-    @patch("vllm_ascend.worker.worker.envs_vllm")
+    @patch("vllm_ascend.worker.worker.envs_ascend")
     @patch("vllm_ascend.worker.worker.logger")
     @patch("torch_npu.profiler._ExperimentalConfig")
     @patch("torch_npu.profiler.profile")
@@ -432,15 +433,13 @@ class TestNPUWorker(TestBase):
         mock_profile,
         mock_experimental_config,
         mock_logger,
-        mock_envs_vllm,
+        mock_envs_ascend,
     ):
         """Test _init_profiler method - profiler enabled case with stack and memory profiling enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        # Set environment variables to enable profiler
-        mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = "/path/to/traces"
-        mock_envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK = True
-        mock_envs_vllm.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY = True
+        # Set MSMONITOR_USE_DAEMON to False to avoid conflict
+        mock_envs_ascend.MSMONITOR_USE_DAEMON = False
 
         # Set enum mocks
         mock_export_type.Text = "Text"
@@ -457,9 +456,15 @@ class TestNPUWorker(TestBase):
         mock_profiler_instance = MagicMock()
         mock_profile.return_value = mock_profiler_instance
 
-        # Create worker mock
+        # Create worker mock with profiler_config
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            # Setup profiler_config
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.profiler_config = MagicMock()
+            worker.vllm_config.profiler_config.torch_profiler_dir = "/path/to/traces"
+            worker.vllm_config.profiler_config.torch_profiler_with_stack = True
+            worker.vllm_config.profiler_config.torch_profiler_with_memory = True
 
             # Test _init_profiler
             result = worker._init_profiler()
@@ -511,17 +516,15 @@ class TestNPUWorker(TestBase):
             # Verify return value
             self.assertEqual(result, mock_profiler_instance)
 
-    @patch("vllm_ascend.worker.worker.envs_vllm")
-    def test_init_profiler_disabled(self, mock_envs_vllm):
+    def test_init_profiler_disabled(self):
         """Test _init_profiler method - profiler disabled case"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        # Set environment variable to disable profiler
-        mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = None
-
-        # Create worker mock
+        # Create worker mock with profiler_config set to None
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.profiler_config = None
 
             # Test _init_profiler
             result = worker._init_profiler()
@@ -529,17 +532,16 @@ class TestNPUWorker(TestBase):
             # Verify returns None
             self.assertIsNone(result)
 
-    @patch("vllm_ascend.worker.worker.envs_vllm")
-    def test_init_profiler_empty_dir(self, mock_envs_vllm):
+    def test_init_profiler_empty_dir(self):
         """Test _init_profiler method - empty directory string case"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        # Set environment variable to empty string
-        mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = ""
-
-        # Create worker mock
+        # Create worker mock with profiler_config.torch_profiler_dir set to empty string
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.profiler_config = MagicMock()
+            worker.vllm_config.profiler_config.torch_profiler_dir = ""
 
             # Test _init_profiler
             result = worker._init_profiler()
