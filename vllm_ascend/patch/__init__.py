@@ -42,18 +42,6 @@
 #    Future Plan:
 #       Find a better way to support tensor alignment for 310p without this patch.
 #
-# ** 2. File: platform/patch_ec_connector.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.ec_transfer.ec_connector.shared_storage_connector.ECSharedStorageConnector.start_load_caches`
-#    Why:
-#       it's hard code to cuda
-#    How：
-#       change the cuda to npu
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/30225
-#    Future Plan:
-#       Remove this patch when vllm merges the PR.
-#
 # ** 3. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
