@@ -177,11 +177,18 @@ class EagleProposer(VllmEagleProposer):
                         " weights instead of sharing them with the target model."
                     )
             else:
-                logger.info(
-                    "The EAGLE head shares the same vocab embedding" \
-                    " with the target model."
-                )
-                self.model.model.embed_tokens = model.model.embed_tokens
+                if torch.equal(self.model.model.embed_tokens.weight,
+                               model.model.embed_tokens.weight):
+                    logger.info(
+                        "The EAGLE head shares the same vocab embedding" \
+                        " with the target model."
+                    )
+                    self.model.model.embed_tokens = model.model.embed_tokens
+                else:
+                    logger.info(
+                        " The EAGLE head loaded its own vocab embedding" \
+                        " weights instead of sharing them with the target model."
+                    )
         else:
             logger.info(
                 "Since PP > 1 or other reasons the model head loaded its own vocab embedding" \
