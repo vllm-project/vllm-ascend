@@ -177,28 +177,21 @@ class EagleProposer(VllmEagleProposer):
                 raise AttributeError(
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
                 )
-            if self.method == "mtp":
-                if self.vllm_config.model_config.is_deepseek_mla and \
+            # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
+            # check if mtp model use main model's embedding and LMhead
+            if hasattr(model, "model") and hasattr(model.model, "embed_tokens") and \
                     torch.equal(self.model.model.embed_tokens.weight,
                                 model.model.embed_tokens.weight):
-                    # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
-                    # check if mtp model use main model's embedding and LMhead
-                    logger.info(
-                        "The MTP head shares the same vocab embedding" \
-                        " with the target model."
-                    )
-                    self.model.model.embed_tokens = target_embed_tokens
-                else:
-                    logger.info(
-                        " The MTP head loaded its own vocab embedding" \
-                        " weights instead of sharing them with the target model."
-                    )
-            else:
                 logger.info(
                     "The EAGLE head shares the same vocab embedding" \
                     " with the target model."
                 )
                 self.model.model.embed_tokens = target_embed_tokens
+            else:
+                logger.info(
+                    " The EAGLE head loaded its own vocab embedding" \
+                    " weights instead of sharing them with the target model."
+                )
         else:
             logger.info(
                 "Since PP > 1 or other reasons the model head loaded its own vocab embedding" \
