@@ -217,6 +217,22 @@ def _rope_forward_oot(
             query, key = torch_npu.npu_apply_rotary_pos_emb(
                 query, key, cos, sin)
         elif self.rotary_dim < self.head_size:
+            if HAS_TRITON:
+                if cos is None or sin is None:
+                    cos_sin = self.cos_sin_cache.index_select(0, positions)
+                    cos = cos_sin[..., :self.rotary_dim]
+                    sin = cos_sin[..., self.rotary_dim:]
+                cos = cos.view(-1, self.rotary_dim)
+                sin = sin.view(-1, self.rotary_dim)
+                q, k = torch.ops.vllm.triton_rope(query.view(query.shape[0], -1,
+                                                      self.head_size),
+                                           key.view(key.shape[0], -1,
+                                                    self.head_size),
+                                           cos,
+                                           sin,
+                                           rope_dim=self.rotary_dim,
+                                           is_neox_style=is_neox_style)
+                return q.view(query_shape), k.view(key_shape)
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, self.head_size)
             key = key.view(num_tokens, -1, self.head_size)

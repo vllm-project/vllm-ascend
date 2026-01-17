@@ -14,7 +14,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import torch
+
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
@@ -157,12 +160,13 @@ def _triton_rope(
                  mask=second_k_mask)
 
 
-def rope_forward_triton(q,
-                        k,
-                        cos,
-                        sin,
+def rope_forward_triton(q: torch.Tensor,
+                        k: torch.Tensor,
+                        cos: torch.Tensor,
+                        sin: torch.Tensor,
                         rope_dim: int = -1,
-                        is_neox_style: bool = True):
+                        is_neox_style: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor]:
     if not q.is_contiguous():
         q = q.contiguous()
     if not k.is_contiguous():
@@ -205,3 +209,37 @@ def rope_forward_triton(q,
         IS_NEOX_STYLE=is_neox_style,
     )
     return q, k
+
+
+def rope_forward_triton_impl_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    rope_dim: int,
+    is_neox_style: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens_q, n_q_head, q_head_dim = q.shape
+    num_tokens_k, n_k_head, k_head_dim = k.shape
+    q_output = torch.empty(
+        num_tokens_q,
+        n_q_head,
+        q_head_dim,
+        device=q.device,
+        dtype=q.dtype,
+    )
+    k_output = torch.empty(
+        num_tokens_k,
+        n_k_head,
+        k_head_dim,
+        device=k.device,
+        dtype=k.dtype,
+    )
+    return q_output, k_output
+
+
+direct_register_custom_op(op_name="triton_rope",
+                          op_func=rope_forward_triton,
+                          fake_impl=rope_forward_triton_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
