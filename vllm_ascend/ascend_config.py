@@ -97,8 +97,8 @@ class AscendConfig:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
         self.SLO_limits_for_dynamic_batch = additional_config.get("SLO_limits_for_dynamic_batch", -1)
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
-        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(
-            self, vllm_config)
+
+        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)
         npugraph_ex_config = additional_config.get("npugraph_ex_config", {})
         self.npugraph_ex_config = NpugraphExConfig(**npugraph_ex_config)
         # We find that _npu_paged_attention still performs better than
@@ -194,10 +194,7 @@ class NpugraphExConfig:
     These configurations directly impact the performance and behavior of models deployed on Ascend platforms.
     """
 
-    def __init__(self,
-                 enable: bool = False,
-                 enable_static_kernel: bool = False,
-                 **kwargs):
+    def __init__(self, enable: bool = False, enable_static_kernel: bool = False, **kwargs):
         """
         Initialize the configuration.
 
