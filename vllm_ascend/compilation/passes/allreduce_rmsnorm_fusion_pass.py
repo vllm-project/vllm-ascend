@@ -20,7 +20,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPri
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
-from vllm.distributed import tensor_model_parallel_all_reduce, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 
