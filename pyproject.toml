@@ -49,11 +49,9 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
-    "vllm_ascend/_cann_ops_custom",
-    "vllm_ascend/attention",
+    "vllm_ascend/attention/mla_v1.py",
+    "vllm_ascend/attention/sfa_v1.py",
     "vllm_ascend/core",
-    "vllm_ascend/device",
-    "vllm_ascend/device_allocator",
     "vllm_ascend/distributed",
     "vllm_ascend/eplb",
     "vllm_ascend/kv_offload",
@@ -66,8 +64,6 @@ exclude = [
     "vllm_ascend/spec_decode",
     "vllm_ascend/worker",
     "vllm_ascend/xlite",
-    "vllm_ascend/envs.py",
-    "vllm_ascend/batch_invariant.py",
 ]
 
 [tool.ruff.lint]
