@@ -191,7 +191,17 @@ class NPUPlatform(Platform):
                 if not isinstance(ascend_compilation_config, dict)
                 else ascend_compilation_config
             )
-
+            
+            if self.ascend_compilation_config.get("fuse_allreduce_rms", True):
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THREHOLD
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THREHOLD)
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = \
+                    new_compile_ranges_split_points
+                logger.debug("set compile_ranges_split_points to "
+                            "{new_compile_ranges_split_points} for matmul and allreduce fusion")
+                
         elif model_config and hasattr(model_config.hf_text_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
         if model_config is None:

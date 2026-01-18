@@ -25,6 +25,8 @@ from vllm.distributed import tensor_model_parallel_all_reduce, get_tensor_model_
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 
+# computation-communication tiling block is 512
+ALLREDUCE_NORM_FUSE_THREHOLD = 512
 
 class MiddleLayerMatmulAllReduceAddRMSNormPattern:
     """
@@ -139,4 +141,6 @@ class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
         """
         Check if the pass is applicable for the current configuration.
         """
-        return True
+        applicable = compile_range.start > ALLREDUCE_NORM_FUSE_THREHOLD
+        return applicable
+        
