@@ -244,7 +244,9 @@ class EagleProposer(VllmEagleProposer):
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None,
-                  is_profile=False):
+                  is_profile=False,
+                  uniform_decode=False,
+                  has_lora=False):
         # update global cos, sin
         update_cos_sin(self._get_positions(num_tokens))
 

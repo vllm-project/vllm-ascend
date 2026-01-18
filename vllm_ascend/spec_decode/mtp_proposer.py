@@ -35,13 +35,24 @@ class MtpProposer(EagleProposer):
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None,
-                  is_profile=False) -> None:
-
+                  is_profile=False,
+                  uniform_decode=False,
+                  has_lora=False) -> None:
+        # TODO: should it dispatch first here?
         (
             num_tokens,
             num_tokens_across_dp,
             with_prefill,
-        ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
+            synced_ag_mode,
+        ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill, aclgraph_runtime_mode.value)
+        if num_tokens_across_dp is not None:
+            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=num_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
+                disable_full=synced_ag_mode <= CUDAGraphMode.PIECEWISE.value,
+            )
+            num_tokens = batch_descriptor.num_tokens
         if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
@@ -241,27 +252,6 @@ class MtpProposer(EagleProposer):
 
         assert self.runner is not None
 
-        # Note(qcs): We may need to refactor these check logics.
-        if self.runner.use_aclgraph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
-                -1]:
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
-        elif self.use_aclgraph  and num_tokens <= self.runner.cudagraph_batch_sizes[
-                -1]:
-            # Acl graph mode, add padding to the batch size
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
-        else:
-            # Eager mode, no padding needed
-            num_input_tokens = num_tokens
-
-        # copy inputs to buffer for cudagraph
-        self.positions[:num_tokens] = target_positions
-        self.hidden_states[:num_tokens] = target_hidden_states
-        # eager/acl piecewise mode need to update num_tokens_across_dp
-        (num_input_tokens, num_tokens_across_dp,
-         with_prefill) = self.runner._sync_metadata_across_dp(
-             num_input_tokens, self.runner.with_prefill)
-
         # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
         if scheduler_output and not self.enable_shared_expert_dp:
             max_query_len = common_attn_metadata.max_query_len
@@ -273,8 +263,41 @@ class MtpProposer(EagleProposer):
         else:
             uniform_decode = False
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
+
+        # Note(qcs): We may need to refactor these check logics.
+        if self.runner.use_aclgraph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
+                -1]:
+            _ag_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=num_scheduled_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
+            )
+            num_input_tokens = batch_descriptor.num_tokens
+        elif self.use_aclgraph  and num_tokens <= self.runner.cudagraph_batch_sizes[
+                -1]:
+            # Acl graph mode, add padding to the batch size
+            _ag_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=num_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
+            )
+            num_input_tokens = batch_descriptor.num_tokens
+        else:
+            # Eager mode, no padding needed
+            _ag_mode = CUDAGraphMode.NONE
+            num_input_tokens = num_tokens
+
+        # copy inputs to buffer for cudagraph
+        self.positions[:num_tokens] = target_positions
+        self.hidden_states[:num_tokens] = target_hidden_states
+        # eager/acl piecewise mode need to update num_tokens_across_dp
+        (num_input_tokens, num_tokens_across_dp,
+         with_prefill, synced_ag_mode) = self.runner._sync_metadata_across_dp(
+             num_input_tokens, self.runner.with_prefill, _ag_mode.value)
+
         aclgraph_runtime_mode, batch_descriptor = \
-            self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
+            self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora,
+                                                      disable_full=synced_ag_mode <= CUDAGraphMode.PIECEWISE.value)
         if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
