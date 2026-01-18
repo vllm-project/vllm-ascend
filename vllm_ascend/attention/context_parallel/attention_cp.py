@@ -715,12 +715,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 cache_value,
                 attn_metadata.prefill.block_tables,
                 local_chunked_kv_lens_rank,
-<<<<<<< HEAD
                 # slot offsets of current chunk in current iteration
                 seq_starts=attn_metadata.prefill.chunked_context.starts,
-=======
-                seq_starts=attn_metadata.prefill.chunked_context.starts,  # slot offsets of current chunk in current iteration
->>>>>>> 92dde00e (auto)
                 key=key,
                 value=value,
             )
