@@ -16,8 +16,7 @@
 #
 import torch
 import torch._inductor.pattern_matcher as pm
-from torch._inductor.pattern_matcher import (PatternMatcherPass,
-                                             PatternPrettyPrinter)
+from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
@@ -28,11 +27,13 @@ from vllm.logger import logger
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THREHOLD = 512
 
+
 class MiddleLayerMatmulAllReduceAddRMSNormPattern:
     """
     recognizing the Matmul+AllReduce+AddRMSNorm computation pattern
     AllReduce is optimized in the fusion operator to a two-stage communication of ReduceScatter+AllGather
     """
+
     def __init__(self, vllm_config, eps=1e-6):
         self.vllm_config = vllm_config
         self.eps = eps
@@ -52,12 +53,10 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern:
         return [x, weight, residual, rms_norm_weight]
 
     def register(self, pm_pass: PatternMatcherPass):
-
         def pattern(x, weight, residual, rms_norm_weight):
             mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
             all_reduce_ = tensor_model_parallel_all_reduce(mm)
-            output = torch.ops.npu.npu_add_rms_norm(
-                all_reduce_, residual, rms_norm_weight)
+            output = torch.ops.npu.npu_add_rms_norm(all_reduce_, residual, rms_norm_weight)
             out0 = output[0]
             out1 = output[2]
 
@@ -65,16 +64,23 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern:
 
         def replacement(x, weight, residual, rms_norm_weight):
             out0, out1 = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(
-                x, weight, residual, rms_norm_weight, self.tp_group_name,
-                self.tp_size, self.local_rank, self.eps, True,
-                False)
+                x,
+                weight,
+                residual,
+                rms_norm_weight,
+                self.tp_group_name,
+                self.tp_size,
+                self.local_rank,
+                self.eps,
+                True,
+                False,
+            )
             return out0, out1
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+
 
 class LastLayerMatmulAllReduceAddRMSNormPattern:
-
     def __init__(self, vllm_config, eps=1e-6):
         self.vllm_config = vllm_config
         self.eps = eps
@@ -94,36 +100,38 @@ class LastLayerMatmulAllReduceAddRMSNormPattern:
         return [x, weight, residual, rms_norm_weight]
 
     def register(self, pm_pass: PatternMatcherPass):
-
         def pattern(x, weight, residual, rms_norm_weight):
             mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
             all_reduce_ = tensor_model_parallel_all_reduce(mm)
-            output = torch.ops.npu.npu_add_rms_norm(
-                all_reduce_, residual, rms_norm_weight)
+            output = torch.ops.npu.npu_add_rms_norm(all_reduce_, residual, rms_norm_weight)
 
             return output[0]
 
         def replacement(x, weight, residual, rms_norm_weight):
             out0, _ = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(
-                x, weight, residual, rms_norm_weight, self.tp_group_name,
-                self.tp_size, self.local_rank, self.eps, True,
-                False)
+                x,
+                weight,
+                residual,
+                rms_norm_weight,
+                self.tp_group_name,
+                self.tp_size,
+                self.local_rank,
+                self.eps,
+                True,
+                False,
+            )
             return out0
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+
 
 class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
-
     def __init__(self, vllm_config: VllmConfig):
         super().__init__(vllm_config)
-        self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(
-            pass_name="allreduce_rmsnorm_fusion_pass")
+        self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(pass_name="allreduce_rmsnorm_fusion_pass")
 
-        MiddleLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register(
-            self.pattern_match_passes)
-        LastLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register(
-            self.pattern_match_passes)
+        MiddleLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register(self.pattern_match_passes)
+        LastLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
@@ -143,4 +151,3 @@ class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
         """
         applicable = compile_range.start > ALLREDUCE_NORM_FUSE_THREHOLD
         return applicable
-        
