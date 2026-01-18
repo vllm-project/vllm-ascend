@@ -114,7 +114,10 @@ class TestMtpProposer:
         proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
         proposer.model = MagicMock()
         proposer.enable_shared_expert_dp = False
-        runner._sync_metadata_across_dp.return_value = (8, 8, False)
+        runner._sync_metadata_across_dp.return_value = (8, 8, False, 0)
+        runner.cudagraph_dispatcher.dispatch.return_value = (
+            CUDAGraphMode.NONE, MagicMock()
+        )
 
         mock_get_forward_context = MagicMock()
         mock_get_forward_context.cudagraph_runtime_mode = None
@@ -141,7 +144,10 @@ class TestMtpProposer:
         proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
         proposer.enable_shared_expert_dp = False
         proposer.model = MagicMock()
-        runner._sync_metadata_across_dp.return_value = (8, 8, False)
+        runner._sync_metadata_across_dp.return_value = (8, 8, False, 0)
+        runner.cudagraph_dispatcher.dispatch.return_value = (
+            CUDAGraphMode.FULL, MagicMock()
+        )
         runner.attn_groups = []
 
         mock_get_forward_context = MagicMock()
