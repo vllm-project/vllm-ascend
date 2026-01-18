@@ -192,7 +192,7 @@ class NPUPlatform(Platform):
                 else ascend_compilation_config
             )
 
-            if ascend_compilation_config.get("fuse_allreduce_rms", True):
+            if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
                 from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THREHOLD
 
                 new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
