@@ -113,6 +113,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_llama32_lora.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_qwen3_multi_loras.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_qwen3_performance.py          
           pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py

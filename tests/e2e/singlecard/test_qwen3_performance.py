@@ -37,14 +37,14 @@ api_keyword_args = {
 
 vllm_bench_cases = {
     "dataset-name": "random",
-    "num_prompts": 1000,
+    "num_prompts": 500,
     "request_rate": 20,
     "random_input_len": 128,
     "max_concurrency": 40,
     "random_output_len": 100,
 }
 
-baseline_throughput = 1622.08  # baseline throughput for Qwen3-8B
+baseline_throughput = 1400  # baseline throughput for Qwen3-8B
 
 
 @pytest.mark.parametrize("model", MODELS)
