@@ -542,8 +542,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs, total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens, with_prefill,
                 self.input_batch, self.arange_np, req_indices, positions_np,
-                cu_num_tokens, self._draft_token_ids, scheduler_output, # type: ignore
-                self.num_spec_tokens)
+                cu_num_tokens, self._draft_token_ids, scheduler_output,
+                self.num_spec_tokens) # type: ignore
 
         if self.pcp_size > 1:
             if not self.vllm_config.model_config.use_mla:
