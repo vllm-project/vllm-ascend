@@ -542,7 +542,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs, total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens, with_prefill,
                 self.input_batch, self.arange_np, req_indices, positions_np,
-                cu_num_tokens, self._draft_token_ids,scheduler_output, self.num_spec_tokens)
+                cu_num_tokens, self._draft_token_ids, scheduler_output,
+                self.num_spec_tokens)
 
         if self.pcp_size > 1:
             if not self.vllm_config.model_config.use_mla:
@@ -1936,7 +1937,8 @@ class NPUModelRunner(GPUModelRunner):
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
                 long_seq_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
-                    num_tokens, self.query_lens, self.input_batch, num_scheduled_tokens)
+                    num_tokens, self.query_lens, self.input_batch,
+                    num_scheduled_tokens)
                 if long_seq_metadata is not None:
                     pcp_world_size = get_pcp_group().world_size
                     dcp_world_size = get_dcp_group().world_size

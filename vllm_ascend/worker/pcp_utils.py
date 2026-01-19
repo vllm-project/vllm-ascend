@@ -396,7 +396,11 @@ class PCPManager:
                            out=self.input_ids_pcp_full.
                            cpu[:total_num_scheduled_tokens_pcp_full])
         if self.use_async_scheduling:
-            self._update_input_ids_pcp_full_ids(input_batch, draft_token_ids, scheduler_output, total_num_scheduled_tokens, cu_num_tokens_pcp_full, num_spec_tokens)
+            self._update_input_ids_pcp_full_ids(input_batch, draft_token_ids,
+                                                scheduler_output,
+                                                total_num_scheduled_tokens,
+                                                cu_num_tokens_pcp_full,
+                                                num_spec_tokens)
         self.query_lens_pcp_full.copy_to_gpu()
         self.query_start_loc_pcp_full.copy_to_gpu()
         self.input_ids_pcp_full.copy_to_gpu(
@@ -451,7 +455,7 @@ class PCPManager:
         GPU need to be copied into the corresponding slots into input_ids."""
 
         if (input_batch.prev_sampled_token_ids is None
-            or input_batch.prev_req_id_to_index is None):
+                or input_batch.prev_req_id_to_index is None):
             return
 
         # Async scheduling case, where some decode requests from the previous
@@ -478,8 +482,8 @@ class PCPManager:
                 # spec_flattened_indices = [1,   3, 4,    6, 7]
                 sample_flattened_indices.append(flattened_index - draft_len)
                 spec_flattened_indices.extend(
-                    range(flattened_index - draft_len + 1, flattened_index + 1)
-                )
+                    range(flattened_index - draft_len + 1,
+                          flattened_index + 1))
                 start = prev_index * num_spec_tokens
                 # prev_draft_token_indices is used to find which draft_tokens_id
                 # should be copied to input_ids
@@ -487,7 +491,8 @@ class PCPManager:
                 # flatten draft_tokens_id [1,2,3,4,5,6]
                 # draft_len of each request [1, 2, 1]
                 # then prev_draft_token_indices is [0,   2, 3,   4]
-                prev_draft_token_indices.extend(range(start, start + draft_len))
+                prev_draft_token_indices.extend(range(start,
+                                                      start + draft_len))
         num_commmon_tokens = len(sample_flattened_indices)
 
         if num_commmon_tokens == 0:
@@ -495,16 +500,15 @@ class PCPManager:
             # So input_ids.cpu will have all the input ids.
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
-        sampled_tokens_index_tensor = torch.tensor(
-            sample_flattened_indices, dtype=torch.int64)
-        prev_common_req_indices_tensor = torch.tensor(
-            prev_common_req_indices, dtype=torch.int64)
+        sampled_tokens_index_tensor = torch.tensor(sample_flattened_indices,
+                                                   dtype=torch.int64)
+        prev_common_req_indices_tensor = torch.tensor(prev_common_req_indices,
+                                                      dtype=torch.int64)
         self.input_ids_pcp_full.cpu.scatter_(
             dim=0,
             index=sampled_tokens_index_tensor,
             src=input_batch.prev_sampled_token_ids[
-                prev_common_req_indices_tensor, 0
-            ].cpu(),
+                prev_common_req_indices_tensor, 0].cpu(),
         )
 
         # Scatter the draft tokens after the sampled tokens are scattered.
@@ -512,8 +516,8 @@ class PCPManager:
             return
 
         assert isinstance(draft_token_ids, torch.Tensor)
-        draft_tokens_index_tensor = torch.tensor(
-            spec_flattened_indices, dtype=torch.int64)
+        draft_tokens_index_tensor = torch.tensor(spec_flattened_indices,
+                                                 dtype=torch.int64)
         prev_draft_token_indices_tensor = torch.tensor(
             prev_draft_token_indices, dtype=torch.int64)
 
@@ -524,7 +528,8 @@ class PCPManager:
         self.input_ids_pcp_full.cpu.scatter_(
             dim=0,
             index=draft_tokens_index_tensor,
-            src=draft_token_ids.flatten()[prev_draft_token_indices_tensor].cpu(),
+            src=draft_token_ids.flatten()
+            [prev_draft_token_indices_tensor].cpu(),
         )
 
     def _get_cp_local_seq_lens(
@@ -609,7 +614,9 @@ class PCPManager:
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
         long_seq_metadata = None
         if self.pcp_world_size * self.dcp_world_size > 1:
-            decode_context_lens = input_batch.num_computed_tokens_cpu[:num_decodes] + num_scheduled_tokens[:num_decodes]
+            decode_context_lens = input_batch.num_computed_tokens_cpu[:
+                                                                      num_decodes] + num_scheduled_tokens[:
+                                                                                                          num_decodes]
             prefill_context_lens = input_batch.num_computed_tokens_cpu[
                 num_decodes:num_reqs]
             context_lens = np.concatenate(
