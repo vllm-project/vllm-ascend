@@ -596,7 +596,6 @@ def causal_conv1d_update_npu(
     out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
     """
     weight = weight.transpose(0, 1).contiguous()
-    print("weight's shape: ", weight.size())
     conv_state = conv_state.transpose(1, 2).contiguous()
     if validate_data:
         assert pad_slot_id is not None
