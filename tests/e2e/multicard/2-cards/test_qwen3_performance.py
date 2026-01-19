@@ -44,7 +44,7 @@ vllm_bench_cases = {
     "random_output_len": 100,
 }
 
-baseline_throughput = 1500.0  # baseline throughput for Qwen3-8B, measured with num_prompts=500
+baseline_throughput = 1580.0  # baseline throughput for Qwen3-8B, measured with num_prompts=500
 
 
 @pytest.mark.parametrize("model", MODELS)
