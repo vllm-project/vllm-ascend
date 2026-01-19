@@ -1354,14 +1354,14 @@ class NPUModelRunner(GPUModelRunner):
                             query_start_loc_pcp_full[1:num_reqs + 1] - 1
                         target_token_ids = input_ids_pcp_full[:
                                                               num_scheduled_tokens]
-                        target_positions = positions[:num_scheduled_tokens]
+                        target_positions = self._get_positions(num_scheduled_tokens)
                         target_hidden_states = hidden_states
                     else:
                         token_indices_to_sample = None
                         # input_ids can be None for multimodal models.
                         target_token_ids = self.input_ids.gpu[:
                                                               num_scheduled_tokens]
-                        target_positions = positions[:num_scheduled_tokens]
+                        target_positions = self._get_positions(num_scheduled_tokens)
                         if self.use_aux_hidden_state_outputs:
                             target_hidden_states = torch.cat([
                                 h[:num_scheduled_tokens]
@@ -1402,7 +1402,7 @@ class NPUModelRunner(GPUModelRunner):
                         target_hidden_states = hidden_states
                     else:
                         target_token_ids = self.input_ids.gpu[token_indices]
-                        target_positions = positions[token_indices]
+                        target_positions = self._get_positions(token_indices)
                         if self.use_aux_hidden_state_outputs:
                             target_hidden_states = torch.cat(
                                 [h[token_indices] for h in aux_hidden_states],
@@ -2992,15 +2992,21 @@ class NPUModelRunner(GPUModelRunner):
                 set_draft_graph_params(self.cudagraph_batch_sizes)
 
     def capture_model(self) -> None:
-        parent_module_name = self.__class__.__base__.__module__
+        gpu_model_runner_cls = next((cls for cls in self.__class__.__mro__
+                                     if cls.__name__ == "GPUModelRunner"),
+                                    None)
+        if gpu_model_runner_cls is None:
+            raise TypeError("Could not find GPUModelRunner in the MRO. "
+                            "The class hierarchy may have changed.")
+        parent_module_name = gpu_model_runner_cls.__module__
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(
                 parent_module_name):
-            super().capture_model()
+            GPUModelRunner.capture_model(self)
 
     def _prepare_multimodal_fields(self):
         """
         Ensures specific multimodal tensors are on CPU.
-        This is necessary for fields like 'grid_thw' which are converted to numpy 
+        This is necessary for fields like 'grid_thw' which are converted to numpy
         inside the model's forward pass.
         """
         if not self.multimodal_cpu_fields:
