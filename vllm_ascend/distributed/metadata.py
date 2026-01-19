@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
-from typing import Any, Optional
 import torch
+from vllm.distributed.afd_transfer.afd_connector.metadata import AFDConnectorData
 
 @dataclass
-class M2NAFDConnectorMetadata:
+class M2NAFDConnectorMetadata(AFDConnectorData):
     def __init__(self):
         self.topk_idx = None
         self.topk_weights = None
@@ -20,7 +20,7 @@ class M2NAFDConnectorMetadata:
         self.expand_x_type = torch.float16
         
 @dataclass
-class CAMM2NAFDConnectorMetadata:
+class CAMM2NAFDConnectorMetadata(AFDConnectorData):
     def __init__(self, moe_expert_num=0,
         shared_expert_num = 0, scale=None, handle=None, quant_mode=0,
         aiv_num=0, batch_size=0, h=0, k=0):
@@ -35,7 +35,7 @@ class CAMM2NAFDConnectorMetadata:
         self.k = k
 
 @dataclass
-class CAMP2PAFDConnectorMetadata:
+class CAMP2PAFDConnectorMetadata(AFDConnectorData):
     def __init__(self, moe_expert_num=0,
         shared_expert_num = 0, scale=None, handle=None, quant_mode=0,
         aiv_num=0, batch_size=0, h=0, k=0):
