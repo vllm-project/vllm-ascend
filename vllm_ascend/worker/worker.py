@@ -60,6 +60,7 @@ from vllm_ascend.utils import (
     register_ascend_customop,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.platform import NPUPlatform
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -336,9 +337,23 @@ class NPUWorker(WorkerBase):
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
             self.model_runner.profile_run()
+            non_torch_memory_before_empty_cache = NPUPlatform.get_non_torch_memory_usage()
 
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = profile_result.torch_peak_increase
+        non_torch_memory_cleared_by_empty_cache = non_torch_memory_before_empty_cache - self.non_torch_memory
+        logger.info(
+            "non_torch_memory_before_empty_cache: %.2f GiB",
+            GiB(non_torch_memory_before_empty_cache),
+        )
+        logger.info(
+            "non_torch_increase: %.2f GiB",
+            GiB(self.non_torch_memory),
+        )
+        logger.info(
+            "non_torch_memory_cleared_by_empty_cache: %.2f GiB",
+            GiB(non_torch_memory_cleared_by_empty_cache),
+        )
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
@@ -351,7 +366,7 @@ class NPUWorker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = (
-            self.requested_memory - profile_result.non_kv_cache_memory
+            self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
         )
 
         logger.debug(profile_result)
