@@ -52,8 +52,7 @@ public:
 
     // Check data infos
     static_assert(
-        (std::is_same_v<ElementC, half> || std::is_same_v<ElementC, bfloat16_t>) && 
-        (std::is_same_v<ElementD, half> || std::is_same_v<ElementD, bfloat16_t>),
+        std::is_same_v<ElementC, half> && (std::is_same_v<ElementD, half> || std::is_same_v<ElementD, bfloat16_t>),
         "The element type template parameters of BlockEpilogue are wrong"
     );
     static_assert(
@@ -80,7 +79,7 @@ public:
         Params(int32_t EP_, int32_t expertPerRank_, __gm__ int32_t *ptrTokenPerExpert_, int32_t n2_) : ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), expertPerRank(expertPerRank_), n2(n2_) {}
     };
 
-        CATLASS_DEVICE
+    CATLASS_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> const &resource, Params const &params = Params{}) : params(params)
     {
         size_t ubOffset = 0;
@@ -88,7 +87,7 @@ public:
         int32_t eventMTE2V = 0;
         int32_t eventMTE3V = 0;
         int32_t eventVMTE3 = 0;
-        constexpr int32_t blockN = params.n2;
+        int32_t blockN = params.n2;
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
             ubCList[i] = resource.ubBuf.template GetBufferByByte<ElementC>(ubOffset);
             ubOffset += blockN * sizeof(ElementC);
