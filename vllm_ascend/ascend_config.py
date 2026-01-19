@@ -170,7 +170,9 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, fuse_norm_quant: bool = True, fuse_qknorm_rope: bool = False, **kwargs):
+    def __init__(
+        self, fuse_norm_quant: bool = True, fuse_qknorm_rope: bool = False, fuse_allreduce_rms: bool = False, **kwargs
+    ):
         """
         Initialize the configuration.
 
@@ -180,10 +182,13 @@ class AscendCompilationConfig:
                 Default: True
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
                 Default: False
+            fuse_allreduce_rms (bool): Whether to enable allreduce and addrmsnorm fusion optimization.
+                Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
+        self.fuse_allreduce_rms = fuse_allreduce_rms
 
 
 class NpugraphExConfig:

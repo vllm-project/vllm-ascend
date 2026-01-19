@@ -489,14 +489,15 @@ class NPUWorker(WorkerBase):
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        if envs_vllm.VLLM_TORCH_PROFILER_DIR:
+        # Torch profiler. Enabled through profiler_config:
+        # --profiler-config.profiler=torch --profiler-config.torch_profiler_dir=/path/to/save/trace
+        profiler_config = self.vllm_config.profiler_config
+        if profiler_config.profiler == "torch" and profiler_config.torch_profiler_dir:
             if envs_ascend.MSMONITOR_USE_DAEMON:
                 raise RuntimeError(
-                    "MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time."
+                    "MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time."
                 )
-            torch_profiler_trace_dir = envs_vllm.VLLM_TORCH_PROFILER_DIR
+            torch_profiler_trace_dir = profiler_config.torch_profiler_dir
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
 
@@ -517,9 +518,8 @@ class NPUWorker(WorkerBase):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU,
                 ],
-                with_stack=envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK,
-                profile_memory=envs_vllm.\
-                    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                with_stack=profiler_config.torch_profiler_with_stack,
+                profile_memory=profiler_config.torch_profiler_with_memory,
                 with_modules=False,
                 experimental_config=experimental_config,
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(

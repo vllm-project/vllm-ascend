@@ -48,6 +48,7 @@ from vllm_ascend.utils import (
     update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
     update_default_aclgraph_sizes,
+    is_310p,
 )
 
 if TYPE_CHECKING:
@@ -191,6 +192,18 @@ class NPUPlatform(Platform):
                 else ascend_compilation_config
             )
 
+            if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THREHOLD
+
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THREHOLD)
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                logger.debug(
+                    "set compile_ranges_split_points to "
+                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                )
+
         elif model_config and hasattr(model_config.hf_text_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
         if model_config is None:
@@ -322,7 +335,9 @@ class NPUPlatform(Platform):
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             parallel_config.all2all_backend = "flashinfer_all2allv"
-            if ascend_config.xlite_graph_config.enabled:
+            if is_310p():
+                parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
+            elif ascend_config.xlite_graph_config.enabled:
                 logger.info("openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite")
                 parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
             else:
@@ -369,6 +384,26 @@ class NPUPlatform(Platform):
                     "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0."
                 )
 
+        # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
+        # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
+        # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
+        # Find more details about how to configure this environment variable at https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
+        if model_config and not model_config.enable_sleep_mode:
+            npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+            # This environment variable may have more than one key-value pairs.
+            # We should append ",expandable_segments:True" to the current configs.
+            # For example: "page_size:1g" + ",expandable_segments:True".
+            # NOTE: `max_split_size_mb` or `garbage_collection_threshold` cannot
+            # be enabled together with `expandable_segments=True`.
+            if (
+                "expandable_segments" not in npu_alloc_configs
+                and "max_split_size_mb" not in npu_alloc_configs
+                and "garbage_collection_threshold" not in npu_alloc_configs
+            ):
+                npu_alloc_configs += ",expandable_segments:True"
+            os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
+            logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
+
     @classmethod
     def import_kernels(cls) -> None:
         # Directly importing vllm_ascend_C prevents ASCEND_RT_VISIBLE_DEVICES
@@ -394,13 +429,27 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config):
+        key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
+
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
             (False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
+        backend_map_310 = {
+            (
+                False,
+                False,
+            ): "vllm_ascend._310p.attention.attention_v1.AscendAttentionBackend310",
+            # TODO If MLA/SFA is supported in the future, consider implementing the logic described in these comments.
+            # (True, False): "...AscendMLABackend310",
+            # (True, True):  "...AscendSFABackend310",
+        }
 
-        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse)]
+        if is_310p():
+            return backend_map_310.get(key, backend_map_310[(False, False)])
+
+        return backend_map[key]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
