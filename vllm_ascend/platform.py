@@ -204,7 +204,7 @@ class NPUPlatform(Platform):
                     "{new_compile_ranges_split_points} for matmul and allreduce fusion"
                 )
 
-        elif model_config and hasattr(model_config.hf_text_config, "index_topk"):
+        if model_config and hasattr(model_config.hf_text_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
         if model_config is None:
             logger.warning("Model config is missing. This may indicate that we are running a test case")
