@@ -18,12 +18,11 @@
 #
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Tuple
 
 import numpy as np
 import torch
 from vllm.config import VllmConfig
-from vllm.config.model import ModelDType
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
 
@@ -50,13 +49,11 @@ def build_attn_metadata(
     query_start_loc_gpu: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
     seq_lens: torch.Tensor,
-    seq_lens_cpu: torch.Tensor,
-    num_computed_tokens_cpu: torch.Tensor,
+    seq_lens_np: np.ndarray,
+    num_computed_tokens_cpu: torch.Tensor | None,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
-    decode_token_per_req: int,
-    actual_seq_lengths_q: list[int],
     positions: torch.Tensor | None = None,
     attn_state: Any | None = None,
     graph_pad_size: int = -1,
@@ -67,7 +64,11 @@ def build_attn_metadata(
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
     max_query_len = int(query_start_loc_cpu.max())
+    seq_lens_cpu = torch.from_numpy(seq_lens_np)
     max_seq_len = int(seq_lens_cpu.max())
+    # torch_npu._reshape_and_cache operator requires slot_mappings to
+    # be torch.int32.
+    slot_mappings = slot_mappings.to(torch.int32)
 
     attn_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -80,14 +81,11 @@ def build_attn_metadata(
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu[:num_reqs],
             seq_lens=seq_lens[:num_reqs],
-            num_computed_tokens_cpu=num_computed_tokens_cpu,
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            decode_token_per_req=decode_token_per_req,
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
-            actual_seq_lengths_q=actual_seq_lengths_q,
             positions=positions,
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
@@ -146,26 +144,3 @@ def build_attn_state(
     else:
         attn_state = AscendAttentionState.PrefillCacheHit
     return attn_state
-
-
-def make_attention_mask(
-    vllm_config: VllmConfig,
-    attn_state: AscendAttentionState,
-    dtype: ModelDType | torch.dtype,
-    device: torch.device,
-) -> torch.Tensor:
-    """make attention mask for npu's attention backend."""
-    attn_mask_builder = get_attn_mask_builder(device)
-    # pcp situation.
-    if attn_mask_builder is None:
-        raise ValueError("Attn mask builder is None")
-    # Pooling situation.
-    if vllm_config.model_config.runner_type == "pooling":
-        return attn_mask_builder.get_attn_mask(2048, torch.bool)
-
-    # TODO(Ronald1995) cosidering pcp.
-    if vllm_config.model_config.use_mla:
-        # mla prefill
-        if attn_state != AscendAttentionState.DecodeOnly:
-            return attn_mask_builder.get_mla_mask(dtype)
-    return attn_mask_builder.get_splitfuse_attn_mask()

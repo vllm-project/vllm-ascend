@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import torch
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
@@ -24,15 +23,27 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         MambaSpec, MLAAttentionSpec)
 
-from vllm_ascend.distributed.cpu_offload_manager.metadata import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.metadata import (
     MetadataServer, MetadataServerProc, MLAConfig)
+from vllm_ascend.utils import vllm_version_is
+
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.abstract import AttentionType  # type: ignore
+else:
+    from vllm.v1.attention.backend import AttentionType  # type: ignore
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
+    if vllm_version_is('0.13.0'):
+        from vllm.attention.backends.abstract import \
+            AttentionMetadata  # type: ignore
+    else:
+        from vllm.v1.attention.backend import AttentionType  #type: ignore
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+# isort: on
 
 
 @dataclass
@@ -64,7 +75,8 @@ class CPUOffloadingConnector(KVConnectorBase_V1):
     def __init__(self,
                  vllm_config: VllmConfig,
                  role: KVConnectorRole,
-                 kv_cache_config: Optional[KVCacheConfig] = None):
+                 kv_cache_config: Optional["KVCacheConfig"] = None):
+        self._connector_metadata = CPUOffloadingConnectorMetadata(requests={}, finished_req_ids=set())
         if not vllm_config.cache_config.enable_prefix_caching:
             self.connector_scheduler: Optional[
                 CPUOffloadingConnectorScheduler] = None

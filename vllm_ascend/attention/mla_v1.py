@@ -5,15 +5,12 @@ import numpy as np
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend import envs
@@ -39,15 +36,29 @@ from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, maybe_trans_nz,
-                               weak_ref_tensors)
+                               vllm_version_is, weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.v1.attention.backends.utils import AttentionCGSupport
+    from vllm.attention.backends.abstract import (  # type: ignore
+        AttentionBackend, MLAAttentionImpl)
+    from vllm.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+else:
+    from vllm.v1.attention.backend import (  # type: ignore
+        AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+# isort: on
+
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+# token count limits within the mlapo operator
+MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
 
 class AscendMLABackend(AttentionBackend):
@@ -918,10 +929,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
         # referenced, so drop them to save memory.
-        ascend_config = get_ascend_config()
         if self.vllm_config.kv_transfer_config is not None and \
                 self.vllm_config.kv_transfer_config.is_kv_consumer and \
-                ascend_config.recompute_scheduler_enable:
+                self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             self.fused_qkv_a_proj.weight = None
             self.fused_qkv_a_proj.deq_scale = None
             self.fused_qkv_a_proj.quant_bias = None
@@ -1499,7 +1509,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                                    device=hidden_states.device)
 
         # MLA Preprocess
-        if self.enable_mlapo and not has_prefill:
+        if self.enable_mlapo and \
+            not has_prefill and \
+            attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv)
             decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess_only_decode(

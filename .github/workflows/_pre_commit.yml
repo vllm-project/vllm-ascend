@@ -28,9 +28,11 @@ jobs:
     - name: cp problem matchers
       run: |
         cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
+        cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
         cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
 
     - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
+    - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
     - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
 
     - name: Checkout vllm-project/vllm repo

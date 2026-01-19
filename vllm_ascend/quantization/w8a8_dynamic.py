@@ -114,7 +114,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                              and not vllm_config.model_config.enforce_eager)
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
 
-        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
 
@@ -190,9 +190,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
         pertoken_scale: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -280,9 +277,6 @@ class AscendW8A8DynamicFusedMoEMethod:
             use_int8_w8a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
-            shared_experts=shared_experts,
-            quantized_x_for_share=quantized_x_for_share,
-            dynamic_scale_for_share=dynamic_scale_for_share,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
         if zero_expert_num > 0 and zero_expert_type is not None:

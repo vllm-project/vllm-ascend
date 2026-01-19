@@ -63,18 +63,20 @@ from multiprocessing import Process
 from time import sleep
 
 import torch
+from safetensors.torch import load_file
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (  # noqa E402
-    destroy_distributed_environment, destroy_model_parallel, get_tp_group)
-from safetensors.torch import load_file
+    destroy_distributed_environment,
+    destroy_model_parallel,
+    get_tp_group,
+)
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_open_port
 
-from vllm.model_executor.model_loader.utils import \
-    process_weights_after_loading
-
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 
 def patch_vllm_moe_model_weight_loader(model):
     # Define MLP attribute mapping for different model types
@@ -92,24 +94,25 @@ def patch_vllm_moe_model_weight_loader(model):
             if "w13_weight" in name or "w2_weight" in name:
                 param.weight_loader = mlp.experts.weight_loader
 
+
 def load_and_merge_safetensors(directory):
     merged_dict = {}
-    
+
     if not os.path.isdir(directory):
         raise ValueError(f"directory is not exist : {directory}")
-    
+
     for filename in os.listdir(directory):
-        if filename.endswith('.safetensors'):
+        if filename.endswith(".safetensors"):
             file_path = os.path.join(directory, filename)
             print(f"loading file: {file_path}")
-            
+
             f = load_file(file_path)
             merged_dict.update(f)
-    
+
     return merged_dict
 
-def parse_args():
 
+def parse_args():
     parser = argparse.ArgumentParser(description="External launcher Inference")
     parser.add_argument(
         "--model",
@@ -117,55 +120,34 @@ def parse_args():
         default="Qwen/Qwen3-0.6B",
         help="Model name or path",
     )
-    parser.add_argument("--tp-size",
-                        type=int,
-                        default=1,
-                        help="Tensor parallel size")
-    parser.add_argument("--node-size",
-                        type=int,
-                        default=1,
-                        help="Total number of nodes")
-    parser.add_argument("--node-rank",
-                        type=int,
-                        default=0,
-                        help="Rank of the current node")
-    parser.add_argument("--proc-per-node",
-                        type=int,
-                        default=1,
-                        help="Number of processes per node")
-    parser.add_argument("--master-addr",
-                        type=str,
-                        default="",
-                        help="Master node IP address")
-    parser.add_argument("--master-port",
-                        type=int,
-                        default=0,
-                        help="Master node port")
-    parser.add_argument("--enforce-eager",
-                        action="store_true",
-                        help="Enforce eager mode execution.")
-    parser.add_argument("--trust-remote-code",
-                        action="store_true",
-                        help="Trust remote code.")
-    parser.add_argument("--enable-expert-parallel",
-                        action="store_true",
-                        help="Enable expert parallel, used in MOE models.")
-    parser.add_argument("--enable-sleep-mode",
-                        action="store_true",
-                        help="Enable sleep mode for the engine.")
-    parser.add_argument("--temperature",
-                        type=float,
-                        default=0.8,
-                        help="Float that controls the randomness of the sampling.")
-    parser.add_argument("--model-weight-gib",
-                        type=float,
-                        default=None,
-                        help="Model weight memory usage in GiB (e.g., 1.0 for 0.5B model).")
+    parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size")
+    parser.add_argument("--node-size", type=int, default=1, help="Total number of nodes")
+    parser.add_argument("--node-rank", type=int, default=0, help="Rank of the current node")
+    parser.add_argument("--proc-per-node", type=int, default=1, help="Number of processes per node")
+    parser.add_argument("--master-addr", type=str, default="", help="Master node IP address")
+    parser.add_argument("--master-port", type=int, default=0, help="Master node port")
+    parser.add_argument("--enforce-eager", action="store_true", help="Enforce eager mode execution.")
+    parser.add_argument("--trust-remote-code", action="store_true", help="Trust remote code.")
+    parser.add_argument(
+        "--enable-expert-parallel", action="store_true", help="Enable expert parallel, used in MOE models."
+    )
+    parser.add_argument("--enable-sleep-mode", action="store_true", help="Enable sleep mode for the engine.")
+    parser.add_argument(
+        "--temperature", type=float, default=0.8, help="Float that controls the randomness of the sampling."
+    )
+    parser.add_argument(
+        "--model-weight-gib",
+        type=float,
+        default=None,
+        help="Model weight memory usage in GiB (e.g., 1.0 for 0.5B model).",
+    )
 
     args = parser.parse_args()
     if args.enable_sleep_mode:
         if args.model_weight_gib is None or args.temperature != 0:
-            parser.error("model-weight-gib must be provided, and temperature must be zero when enable-sleep-mode is set.")
+            parser.error(
+                "model-weight-gib must be provided, and temperature must be zero when enable-sleep-mode is set."
+            )
         if args.model_weight_gib <= 0:
             parser.error("model-weight-gib must be greater than 0 when enable-sleep-mode is set.")
         if args.model == parser.get_default("model") and args.model_weight_gib is None:
@@ -219,7 +201,7 @@ def main(
         trust_remote_code=trust_remote_code,
         distributed_executor_backend="external_launcher",
         seed=0,
-        gpu_memory_utilization = 0.95,
+        gpu_memory_utilization=0.95,
         enable_sleep_mode=enable_sleep_mode,
     )
     outputs = llm.generate(prompts, sampling_params)
@@ -231,7 +213,7 @@ def main(
         if rank == 0:
             free_bytes_after_sleep, total = torch.npu.mem_get_info()
             freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
-            print(f"Freed memory: {freed_bytes / 1024 ** 3:.2f} GiB")
+            print(f"Freed memory: {freed_bytes / 1024**3:.2f} GiB")
             # now the freed memory should be larger than the model weights
             assert freed_bytes >= model_weight_gib / tensor_parallel_size * GiB_bytes
 
@@ -242,9 +224,9 @@ def main(
         patch_vllm_moe_model_weight_loader(runmodel)
         sd = load_and_merge_safetensors(model_path)
         runmodel.load_weights(sd.items())
-        print('load state dict done')
+        print("load state dict done")
         tp_ranks = get_tp_group().ranks
-        print(f'TP RANKS: {tp_ranks}')
+        print(f"TP RANKS: {tp_ranks}")
 
         vllm_config = llm.llm_engine.vllm_config.model_config
         device = next(runmodel.parameters()).device
@@ -262,8 +244,7 @@ def main(
             break
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"Global rank: {rank}, Prompt: {prompt!r}, "
-              f"Generated text: {generated_text!r}")
+        print(f"Global rank: {rank}, Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     # Give engines time to pause their processing loops before exiting.
     sleep(5)
@@ -299,24 +280,25 @@ if __name__ == "__main__":
     world_size = node_size * proc_per_node
 
     procs = []
-    for local_rank, rank in enumerate(
-            range(proc_per_node * node_rank, proc_per_node * (node_rank + 1))):
-        proc = Process(target=main,
-                       args=(
-                           local_rank,
-                           rank,
-                           master_addr,
-                           master_port,
-                           args.model_weight_gib,
-                           args.model,
-                           world_size,
-                           tp_size,
-                           args.enable_expert_parallel,
-                           args.enforce_eager,
-                           args.trust_remote_code,
-                           args.enable_sleep_mode,
-                           args.temperature,
-                       ))
+    for local_rank, rank in enumerate(range(proc_per_node * node_rank, proc_per_node * (node_rank + 1))):
+        proc = Process(
+            target=main,
+            args=(
+                local_rank,
+                rank,
+                master_addr,
+                master_port,
+                args.model_weight_gib,
+                args.model,
+                world_size,
+                tp_size,
+                args.enable_expert_parallel,
+                args.enforce_eager,
+                args.trust_remote_code,
+                args.enable_sleep_mode,
+                args.temperature,
+            ),
+        )
 
         proc.start()
         procs.append(proc)
@@ -324,9 +306,7 @@ if __name__ == "__main__":
     for proc in procs:
         proc.join(timeout=600)
         if proc.exitcode is None:
-            print(
-                f"Killing process {proc.pid} that didn't stop within 30 minutes."
-            )
+            print(f"Killing process {proc.pid} that didn't stop within 30 minutes.")
             proc.kill()
             exit_code = 1
         elif proc.exitcode:

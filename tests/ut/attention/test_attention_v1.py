@@ -13,6 +13,23 @@ from vllm_ascend.utils import AscendDeviceType
 
 class TestAscendAttentionBackend(TestBase):
 
+    def setUp(self):
+        self.mock_config = MagicMock()
+
+        mock_parallel_config = MagicMock()
+        mock_parallel_config.prefill_context_parallel_size = 1
+        mock_parallel_config.decode_context_parallel_size = 1
+
+        self.mock_config.parallel_config = mock_parallel_config
+
+        self.utils_patcher = patch(
+            'vllm_ascend.attention.utils.get_current_vllm_config',
+            return_value=self.mock_config)
+        self.utils_patcher.start()
+
+        from vllm_ascend.attention.utils import enable_cp
+        enable_cp.cache_clear()
+
     def test_get_name(self):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
@@ -102,23 +119,38 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 class TestAscendAttentionBackendImpl(TestBase):
 
     def setUp(self):
+        self.mock_event = MagicMock()
+        self.mock_event.record.return_value = None
+        self.mock_event.wait.return_value = None
+
+        self.mock_stream = MagicMock()
+        self.event_patcher = patch('torch_npu.npu.Event',
+                                   return_value=self.mock_event)
+        self.stream_patcher = patch('torch_npu.npu.current_stream',
+                                    return_value=self.mock_stream)
+
+        self.event_patcher.start()
+        self.stream_patcher.start()
+
         self.layer = MagicMock()
         self.layer.layer_name = "test_layer"
         self.layer._k_scale_float = 1.0
         self.layer._v_scale_float = 1.0
-
         self.attention_type = MagicMock()
         self.attention_type.DECODER = "decoder"
         self.attention_type.ENCODER = "encoder"
-
         self.attn_metadata = MagicMock()
         self.attn_metadata.return_value = "1"
-
         self.layer_no_quant = MagicMock(
             spec=['layer_name', '_k_scale_float', '_v_scale_float'])
         self.layer_no_quant.layer_name = "test_layer"
         self.layer_no_quant._k_scale_float = 1.0
         self.layer_no_quant._v_scale_float = 1.0
+        self.mock_vllm_config = MagicMock()
+        self.config_patcher = patch(
+            'vllm_ascend.attention.attention_v1.get_current_vllm_config',
+            return_value=self.mock_vllm_config)
+        self.config_patcher.start()
 
         self.impl = AscendAttentionBackendImpl(
             num_heads=8,

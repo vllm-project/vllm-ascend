@@ -72,7 +72,11 @@ pip install llmcompressor
 
 #### Model Quantization
 
-`LLM-Compressor` provides various quantization scheme examples. To generate W8A8 dynamic quantized weights:
+`LLM-Compressor` provides various quantization scheme examples.
+
+##### Dense Quantization
+
+An example to generate W8A8 dynamic quantized weights for dense model:
 
 ```bash
 # Navigate to LLM-Compressor examples directory
@@ -80,6 +84,18 @@ cd examples/quantization/llm-compressor
 
 # Run quantization script
 python3 w8a8_int8_dynamic.py
+```
+
+##### MoE Quantization
+
+An example to generate W8A8 dynamic quantized weights for MoE model:
+
+```bash
+# Navigate to LLM-Compressor examples directory
+cd examples/quantization/llm-compressor
+
+# Run quantization script
+python3 w8a8_int8_dynamic_moe.py
 ```
 
 For more content, refer to the [official examples](https://github.com/vllm-project/llm-compressor/tree/main/examples).

@@ -56,6 +56,7 @@ for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
 ```
 
 ## Run with Docker
+
 Start a Docker container.
 
 ```{code-block} bash
@@ -93,7 +94,7 @@ docker run --rm \
 
 ## Install Mooncake
 
-Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.
+Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
@@ -173,7 +174,6 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   "kv_role": "kv_producer",
   "kv_port": "30000",
   "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 1,
@@ -216,7 +216,6 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   "kv_role": "kv_consumer",
   "kv_port": "30100",
   "engine_id": "1",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 1,

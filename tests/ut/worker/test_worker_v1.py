@@ -2,9 +2,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
 
 from tests.ut.base import TestBase
+from vllm_ascend.utils import vllm_version_is
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 
@@ -52,7 +53,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
-    @patch(init_cached_hf_modules_path)
+    @patch(init_cached_hf_modules_path, create=True)
     @patch("vllm_ascend.worker.worker.NPUWorker._init_profiler")
     def test_init_npu_worker_normal_case(
         self,
@@ -106,7 +107,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
-    @patch(init_cached_hf_modules_path)
+    @patch(init_cached_hf_modules_path, create=True)
     @patch("vllm_ascend.worker.worker.NPUWorker._init_profiler")
     def test_init_npu_worker_with_trust_remote_code(
         self,
@@ -140,7 +141,10 @@ class TestNPUWorker(TestBase):
         )
 
         # Verify init_cached_hf_modules is called (trust_remote_code=True)
-        mock_init_cached_hf_modules.assert_called_once()
+        if vllm_version_is('0.13.0'):
+            mock_init_cached_hf_modules.assert_called_once()
+        else:
+            mock_init_cached_hf_modules.assert_not_called()
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
@@ -149,7 +153,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
-    @patch(init_cached_hf_modules_path)
+    @patch(init_cached_hf_modules_path, create=True)
     @patch("vllm_ascend.worker.worker.NPUWorker._init_profiler")
     def test_init_npu_worker_with_custom_cache_dtype(
         self,
@@ -307,26 +311,34 @@ class TestNPUWorker(TestBase):
 
             self.assertIn("Profiler is not enabled", str(cm.exception))
 
-    @patch("vllm_ascend.worker.worker.envs_vllm")
     @patch("vllm_ascend.worker.worker.envs_ascend")
     def test_profile_and_msmonitor_both_enabled_raises_error(
-            self, mock_envs_vllm, mock_envs_ascend):
+            self, mock_envs_ascend):
         """Test profile method raises exception when both profiler and msmonitor are enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = "/path/to/traces"
         mock_envs_ascend.MSMONITOR_USE_DAEMON = 1
+
+        # Create profiler config object
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces"
+        )
+
+        vllm_config_mock = MagicMock()
+        vllm_config_mock.profiler_config = profiler_config
 
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = vllm_config_mock
 
             # Test should raise exception
             with self.assertRaises(RuntimeError) as cm:
                 _ = worker._init_profiler()
 
             self.assertIn(
-                "MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time.",
+                "MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time.",
                 str(cm.exception))
 
     def test_lora_methods(self):
@@ -409,7 +421,6 @@ class TestNPUWorker(TestBase):
             mock_model_runner._dummy_run.assert_called_once_with(
                 num_tokens=mock_decode_token_per_req, uniform_decode=True)
 
-    @patch("vllm_ascend.worker.worker.envs_vllm")
     @patch("vllm_ascend.worker.worker.logger")
     @patch("torch_npu.profiler._ExperimentalConfig")
     @patch("torch_npu.profiler.profile")
@@ -428,15 +439,20 @@ class TestNPUWorker(TestBase):
         mock_profile,
         mock_experimental_config,
         mock_logger,
-        mock_envs_vllm,
     ):
         """Test _init_profiler method - profiler enabled case with stack and memory profiling enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        # Set environment variables to enable profiler
-        mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = "/path/to/traces"
-        mock_envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK = True
-        mock_envs_vllm.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY = True
+        # Create profiler config object
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+            torch_profiler_with_stack=True,
+            torch_profiler_with_memory=True
+        )
+
+        vllm_config_mock = MagicMock()
+        vllm_config_mock.profiler_config = profiler_config
 
         # Set enum mocks
         mock_export_type.Text = "Text"
@@ -456,6 +472,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = vllm_config_mock
 
             # Test _init_profiler
             result = worker._init_profiler()
@@ -507,17 +524,23 @@ class TestNPUWorker(TestBase):
             # Verify return value
             self.assertEqual(result, mock_profiler_instance)
 
-    @patch("vllm_ascend.worker.worker.envs_vllm")
-    def test_init_profiler_disabled(self, mock_envs_vllm):
+    def test_init_profiler_disabled(self):
         """Test _init_profiler method - profiler disabled case"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        # Set environment variable to disable profiler
-        mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = None
+        # Create profiler config object with profiler disabled
+        profiler_config = ProfilerConfig(
+            profiler=None,
+            torch_profiler_dir=""
+        )
+
+        vllm_config_mock = MagicMock()
+        vllm_config_mock.profiler_config = profiler_config
 
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = vllm_config_mock
 
             # Test _init_profiler
             result = worker._init_profiler()
@@ -525,17 +548,23 @@ class TestNPUWorker(TestBase):
             # Verify returns None
             self.assertIsNone(result)
 
-    @patch("vllm_ascend.worker.worker.envs_vllm")
-    def test_init_profiler_empty_dir(self, mock_envs_vllm):
+    def test_init_profiler_empty_dir(self):
         """Test _init_profiler method - empty directory string case"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        # Set environment variable to empty string
-        mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = ""
+        # Create profiler config object with empty dir
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir=""
+        )
+
+        vllm_config_mock = MagicMock()
+        vllm_config_mock.profiler_config = profiler_config
 
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = vllm_config_mock
 
             # Test _init_profiler
             result = worker._init_profiler()
@@ -813,10 +842,11 @@ class TestNPUWorker(TestBase):
                 mock_scheduler_output, None)
             self.assertEqual(result, mock_model_output)
 
+    @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
     @patch("vllm_ascend.worker.worker.get_tp_group")
     def test_execute_model_middle_rank(self, mock_get_tp_group,
-                                       mock_get_pp_group):
+                                       mock_get_pp_group, mock_enable_sp):
         """Test execute_model method - middle rank case"""
         from vllm.sequence import IntermediateTensors
 
@@ -1113,12 +1143,14 @@ class TestNPUWorker(TestBase):
             worker.model_runner.initialize_kv_cache.assert_called_once_with(
                 mock_kv_cache_config)
 
+    @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
     @patch("vllm_ascend.worker.worker.get_tp_group")
     @patch("vllm_ascend.worker.worker.EMPTY_MODEL_RUNNER_OUTPUT")
     def test_execute_model_kv_connector_not_finished(self, mock_empty_output,
                                                      mock_get_tp_group,
-                                                     mock_get_pp_group):
+                                                     mock_get_pp_group,
+                                                     mock_enable_sp):
         """Test execute_model method - kv_connector_output not finished sending/recving case"""
         from vllm.sequence import IntermediateTensors
 

@@ -7,10 +7,11 @@ from typing import Any
 import torch
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kvpool.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import \
+    Backend
 
 # isort: off
-from vllm_ascend.distributed.kvpool.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
     LasyerMultiBlockReqMeta,
     ReqMeta,

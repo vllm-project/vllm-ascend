@@ -2,29 +2,29 @@
 
 ## Environmental Dependencies
 
- *  Software:
-     *  Python >= 3.10, < 3.12
-     *  CANN == 8.3.rc2
-     *  PyTorch == 2.8.0, torch-npu == 2.8.0
-     *  vLLM (same version as vllm-ascend)
-     *  mooncake-transfer-engine reference documentation: https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md
+* Software:
+    * Python >= 3.10, < 3.12
+    * CANN == 8.3.rc2
+    * PyTorch == 2.8.0, torch-npu == 2.8.0
+    * vLLM (same version as vllm-ascend)
+    * mooncake-transfer-engine reference documentation: <https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md>
 
 The vllm version must be the same as the main branch of vllm-ascend, for example, 2025/07/30. The version is
 
- *  vllm: v0.10.1
- *  vllm-ascend: v0.10.1rc1
+* vllm: v0.10.1
+* vllm-ascend: v0.10.1rc1
 
 ## run
 
 ### 1.Run `prefill` Node
 
-```
+```shell
 bash run_prefill.sh
 ```
 
 Content of the run_prefill.sh script
 
-```
+```shell
 export HCCL_EXEC_TIMEOUT=204
 export HCCL_CONNECT_TIMEOUT=120
 export HCCL_IF_IP=localhost
@@ -55,7 +55,6 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   "kv_port": "20001",
   "engine_id": "0",
   "kv_rank": 0,
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -84,16 +83,15 @@ Set `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` to the co
 `--gpu-memory-utilization`: Percentage of video memory occupied by the card<br>
 `--kv-transfer-config`: follow kv_connector, kv_connector_module_path: mooncakeconnect, kv_buffer_device, and run on the NPU card. For kv_role, set kv_producer to the p node, kv_consumer to the d node, kv_parallel_size to 1, and kv_port to the port used by the node. For the p node, set engine_id and kv_rank to 0 and for the d node to 1. Configure the distributed parallel policy for the p and d nodes in the kv_connector_extra_config file based on --tensor-parallel-size and --data-parallel-size.<br>
 
-
 ### 2. Run `decode` Node
 
-```
+```shell
 bash run_decode.sh
 ```
 
 Content of the run_decode.sh script
 
-```
+```shell
 export HCCL_EXEC_TIMEOUT=204
 export HCCL_CONNECT_TIMEOUT=120
 export HCCL_IF_IP=localhost
@@ -124,7 +122,6 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   "kv_port": "20002",
   "engine_id": "1",
   "kv_rank": 1,
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -138,9 +135,9 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   }'
 ```
 
-### 3. Start proxy_server. ###
+### 3. Start proxy_server
 
-```
+```shell
 cd /vllm-ascend/examples/disaggregate_prefill_v1/
 python load_balance_proxy_server_example.py --host localhost --prefiller-hosts host1 host2 --prefiller-ports 8100 8101 --decoder-hosts host3 host4 --decoder-ports 8200 8201
 ```
@@ -151,12 +148,11 @@ python load_balance_proxy_server_example.py --host localhost --prefiller-hosts h
 `--decoder-hosts`: Set this parameter to the IP addresses of all d nodes. In the xpyd scenario, add the IP addresses to the end of this configuration item and leave a blank space between the IP addresses.<br>
 `--decoder-ports`: Set this parameter to the port number of all d nodes, which is the configuration of the port number for the vllm to start the service in step 4. Set port to the end of the configuration, and leave a blank space between port and port. The sequence must be one-to-one mapping to the IP address of --decoder-hosts.<br>
 
-
 ### 4. Run Inference
 
 Set the IP address in the inference file to the actual IP address. Set the model variable to the path of the model. Ensure that the path is the same as that in the shell script.
 
-```
+```shell
 curl -s http://localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
 "model": "model_path",
 "prompt": "Given the accelerating impacts of climate change—including rising sea levels, increasing frequency of extreme weather events, loss of biodiversity, and adverse effects on agriculture and human health—there is an urgent need for a robust, globally coordinated response. However, international efforts are complicated by a range of factors: economic disparities between high-income and low-income countries, differing levels of industrialization, varying access to clean energy technologies, and divergent political systems that influence climate policy implementation. In this context, how can global agreements like the Paris Accord be redesigned or strengthened to not only encourage but effectively enforce emission reduction targets? Furthermore, what mechanisms can be introduced to promote fair and transparent technology transfer, provide adequate financial support for climate adaptation in vulnerable regions, and hold nations accountable without exacerbating existing geopolitical tensions or disproportionately burdening those with historically lower emissions?",

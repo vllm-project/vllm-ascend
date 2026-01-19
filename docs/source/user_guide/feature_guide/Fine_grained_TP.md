@@ -25,6 +25,7 @@ Together, these effects allow practitioners to better balance memory, communicat
 ## Supported Scenarios
 
 ### Models  
+
 Finegrained TP is **model-agnostic** and supports all standard dense transformer architectures, including Llama, Qwen, DeepSeek (base/dense variants), and others.
 
 ### Component & Execution Mode Support  
@@ -37,20 +38,24 @@ Finegrained TP is **model-agnostic** and supports all standard dense transformer
 | **LMhead**    | ✅     | ✅     | ✅      | ✅       | ✅      |
 
 > ⚠️ Note:  
+>
 > - `o_proj` TP is only supported in Graph mode during Decode, because dummy_run in eager mode will not trigger o_proj.
 > - `mlp` TP supports dense models, or dense layers in MoE models. For example, the first three dense layers of DeepSeek-R1.
 
-### Configuration Limit:
+### Configuration Limit
+
 The Fine-Grained TP size for any component must:
-  - Be **≤ the data-parallel (DP) size**, and  
-  - **Evenly divide the DP size** (i.e., `dp_size % tp_size == 0`) to ensure valid device assignment and communication grouping.
+
+- Be **≤ the data-parallel (DP) size**, and  
+- **Evenly divide the DP size** (i.e., `dp_size % tp_size == 0`) to ensure valid device assignment and communication grouping.
+
 > ⚠️ Violating these constraints will result in runtime errors or undefined behavior.
 
 ---
 
 ## How to Use Finegrained TP
 
-### Configuration Format:
+### Configuration Format
 
 Finegrained TP is controlled via the `finegrained_tp_config` field inside `--additional-config`.
 
@@ -65,7 +70,7 @@ Finegrained TP is controlled via the `finegrained_tp_config` field inside `--add
 }'
 ```
 
-### Example Usage:
+### Example Usage
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1 \
@@ -96,6 +101,7 @@ To evaluate the effectiveness of fine-grained TP in large-scale service scenario
 | **Total**        | **9.72 GB**    | —                         |
 
 - We achieved significant gains in terms of high memory capacity on a single card, as well as the benefits of TPOT.
+
 ---
 
 ## ✅ Deployment Recommendations  
