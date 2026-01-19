@@ -569,10 +569,6 @@ private:
         if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
             blockMmad.SynchronizeBlock();
         }
-
-        #ifndef __COMBINE_V2__
-        blockMmad.Finalize(params.expertPerRank - 1, 3);
-        #endif
     }
 
 
@@ -850,8 +846,6 @@ private:
         uint32_t n = params.problemShape.n();
         BlockEpilogue2 blockEpilogue2(resource, epilogueParams);
         BlockEpilogue1 blockEpilogue1(resource, n);
-
-
 
         AscendC::CrossCoreWaitFlag<0x2>(1);        // Swiglu等GMM1【1】
         AscendC::SyncAll<true>();
