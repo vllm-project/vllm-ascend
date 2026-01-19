@@ -12,19 +12,16 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: linux-amd64-cpu-16-hk
+    runs-on: linux-amd64-cpu-8-hk
     container:
       # Build it from https://github.com/nv-action/vllm-benchmarks/blob/main/Dockerfile
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
-    env:
-      GOPROXY: https://goproxy.io,direct
-      GITHUB_WORKSPACE: /__w/vllm-ascend/vllm-ascend
     steps:
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v6
 
     # With problem matchers in a container, the output of $GITHUB_WORKSPACE and ${{ github.workspace }} are different.
-    # So we will just copy it into the path ${{ github.workspace }}. see https://github.com/actions/runner/issues/2058
+    # So we will just copy it into a temp path. see https://github.com/actions/runner/issues/2058
     - name: cp problem matchers
       run: |
         cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
@@ -44,6 +41,7 @@ jobs:
     - name: Install vllm
       working-directory: vllm-empty
       run: |
+        sleep 10000
         VLLM_TARGET_DEVICE=empty python3 -m pip install . --extra-index https://download.pytorch.org/whl/cpu/
     - name: Install vllm-ascend dev
       run: |
