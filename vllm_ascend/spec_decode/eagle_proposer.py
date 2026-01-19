@@ -551,7 +551,7 @@ class EagleProposer(VllmEagleProposer):
                 exceeds_mask, 1)
             common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
             if self.uses_mrope:
-                common_attn_metadata.positions[:, :batch_size].copy_(clamped_positions)
+                common_attn_metadata.positions[:batch_size].copy_(clamped_positions[0])
             else:
                 common_attn_metadata.positions[:batch_size].copy_(clamped_positions)
             if self.attn_metadata_builder is None:
