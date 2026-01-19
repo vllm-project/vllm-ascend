@@ -539,10 +539,17 @@ class NPUModelRunner(GPUModelRunner):
         # for pcp, prefill mtp should use origin scheduleroutput ,
         if self.speculative_config and self.pcp_size * self.dcp_size > 1:
             self.pcp_manager.generate_pcp_mtp_input(
-                num_reqs, total_num_scheduled_tokens,
-                scheduler_output.num_scheduled_tokens, with_prefill,
-                self.input_batch, self.arange_np, req_indices, positions_np,
-                cu_num_tokens, self._draft_token_ids, scheduler_output,  # type: ignore[has-type]
+                num_reqs,
+                total_num_scheduled_tokens,
+                scheduler_output.num_scheduled_tokens,
+                with_prefill,
+                self.input_batch,
+                self.arange_np,
+                req_indices,
+                positions_np,
+                cu_num_tokens,
+                self._draft_token_ids,  # type: ignore[has-type]
+                scheduler_output,
                 self.num_spec_tokens)
 
         if self.pcp_size > 1:
