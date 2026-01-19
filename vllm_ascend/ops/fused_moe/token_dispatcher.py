@@ -80,7 +80,6 @@ class MoETokenDispatcher(ABC):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         expert_map: Optional[torch.Tensor] = None,
-        log2phy: Optional[torch.Tensor] = None,
         global_redundant_expert_num: int = 0,
         mc2_mask: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
@@ -188,7 +187,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
                        expert_map: Optional[torch.Tensor] = None,
-                       log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
@@ -196,10 +194,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        dynamic_eplb: bool = False,
                        pertoken_scale: Optional[torch.Tensor] = None):
         self.with_quant = with_quant
-
-        # Apply log2phy if needed
-        if log2phy is not None:
-            topk_ids = log2phy[topk_ids]
 
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(hidden_states, topk_weights,
                                                   topk_ids, expert_map,
@@ -309,7 +303,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
                        expert_map: Optional[torch.Tensor] = None,
-                       log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
@@ -429,7 +422,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
                        expert_map: Optional[torch.Tensor] = None,
-                       log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
@@ -438,9 +430,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                        pertoken_scale: Optional[torch.Tensor] = None):
         self.with_quant = with_quant
         self.hidden_shape = hidden_states.shape
-
-        if log2phy is not None:
-            topk_ids = log2phy[topk_ids]
 
         (
             permutated_local_input_tokens,
