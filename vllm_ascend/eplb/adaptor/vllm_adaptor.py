@@ -188,7 +188,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         all_layer_global_expert_map = []
         for layer_id in range(self.num_moe_layers):
             map_cpu = self.model.model.layers[
-                layer_id].mlp.experts.global_expert_map.cpu()
+                self.num_dense_layers + layer_id].mlp.experts.global_expert_map.cpu()
             all_layer_global_expert_map.append(map_cpu)
             self.expert_map_per_layer_cpu[self.num_dense_layers +
                                           layer_id] = map_cpu[self.rank_id]
