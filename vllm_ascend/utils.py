@@ -683,7 +683,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendApplyRotaryEmb, AscendDeepseekScalingRotaryEmbedding,
         AscendMRotaryEmbedding, AscendRotaryEmbedding,
         AscendYaRNRotaryEmbedding)
-    from vllm_ascend.ops.triton.layernorm_gated import AscendRMSNormGated
+    from vllm_ascend.ops.layernorm import AscendRMSNormGated
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor,
         AscendParallelLMHead,
