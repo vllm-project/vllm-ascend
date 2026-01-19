@@ -39,14 +39,14 @@ class _SequenceParallelPatternHelper:
         return tensor_model_parallel_all_reduce(x)
 
     def _reduce_scatter(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.vllm.reduce_scatter.default(
+        return torch.ops.vllm.reduce_scatter(
             x,
             dim=0,
             world_size=self.tp_size,
             group_name=self.tp_group.unique_name)
 
     def _all_gather(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.vllm.all_gather.default(
+        return torch.ops.vllm.all_gather(
             x,
             dim=0,
             world_size=self.tp_size,
