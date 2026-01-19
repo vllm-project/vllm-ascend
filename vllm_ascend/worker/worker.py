@@ -211,6 +211,14 @@ class NPUWorker(WorkerBase):
         gc.collect()
         torch.npu.empty_cache()
 
+        GiB = lambda b: round(b / GiB_bytes, 2)
+        torch_memory = torch.npu.memory_reserved()
+        free_memory, total_memory = torch.npu.mem_get_info()
+        non_torch_memory = total_memory - free_memory - torch_memory
+        print("-" * 100)
+        logger.info("before init_snapshot, non_torch_memory: %.2f G", GiB(non_torch_memory))
+        print("-" * 100)
+
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot()
         self.requested_memory = (
@@ -257,6 +265,15 @@ class NPUWorker(WorkerBase):
                 logger.warning(
                     f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu."
                 )
+        
+        if torch.distributed.get_rank() == 0:
+            torch_memory = torch.npu.memory_reserved()
+            free_memory, total_memory = torch.npu.mem_get_info()
+            non_torch_memory = total_memory - free_memory - torch_memory
+            print("-" * 100)
+            logger.info("after init_snapshot, non_torch_memory: %.2f G", GiB(non_torch_memory))
+            print("-" * 100)
+
         return device
 
     def init_device(self):
@@ -299,6 +316,15 @@ class NPUWorker(WorkerBase):
 
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = profile_result.torch_peak_increase
+
+        if torch.distributed.get_rank() == 0:
+            torch_memory = torch.npu.memory_reserved()
+            free_memory, total_memory = torch.npu.mem_get_info()
+            non_torch_memory = total_memory - free_memory - torch_memory
+            print("-" * 100)
+            logger.info("after profiling, non_torch_memory: %.2f G", GiB(non_torch_memory))
+            logger.info("after profiling, non_torch_increase: %.2f G", GiB(self.non_torch_memory))
+            print("-" * 100)
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
