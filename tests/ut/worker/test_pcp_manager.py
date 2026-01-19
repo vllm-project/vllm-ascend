@@ -66,13 +66,16 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
             num_prompt_tokens.append(query_lens[i])
             num_tokens.append(query_lens[i])
 
-    input_batch.num_computed_tokens_cpu = torch.tensor(num_computed_tokens)
+    input_batch.num_computed_tokens_cpu = np.array(num_computed_tokens)
     input_batch.num_prompt_tokens = torch.tensor(num_prompt_tokens)
     input_batch.num_tokens = torch.tensor(num_tokens)
+    num_scheduled_tokens = np.array(
+        query_lens) - input_batch.num_computed_tokens_cpu
 
     query_lens = torch.tensor(query_lens)
     result = pcp_manager.generate_pcp_metadata(total_tokens, query_lens,
-                                               input_batch)
+                                               input_batch,
+                                               num_scheduled_tokens)
 
     if not expect_not_none:
         assert result is None, f"Expected to return None, but got {type(result)}"
