@@ -38,7 +38,6 @@ class EplbUpdator:
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
-        self.global_expert_num = self.adaptor.global_expert_num
 
     def init_eplb(self, expert_map_path, process):
         self.rank_id = dist.get_rank()
