@@ -426,9 +426,11 @@ class NPUModelRunner(GPUModelRunner):
             or self.ascend_config.recompute_scheduler_enable)
 
     def _sync_metadata_across_dp(
-            self, num_tokens: int,
-            with_prefill: bool,
-            cudagraph_mode: int = 0) -> tuple[int, Optional[torch.Tensor], bool, int]:
+        self,
+        num_tokens: int,
+        with_prefill: bool,
+        cudagraph_mode: int = 0,
+    ) -> tuple[int, Optional[torch.Tensor], bool, int]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
         # include them in the all_reduce operation, and more over, we CANNOT skip it
@@ -456,16 +458,15 @@ class NPUModelRunner(GPUModelRunner):
                                     dtype=torch.int32,
                                     device="cpu")
 
-        cudagraph_mode_tensor = torch.tensor(
-            [
-                cudagraph_mode
-                if i == self.dp_rank else 0
-                for i in range(self.dp_size)
-            ],
-            dtype=torch.int32,
-            device="cpu")
+        cudagraph_mode_tensor = torch.tensor([
+            cudagraph_mode if i == self.dp_rank else 0
+            for i in range(self.dp_size)
+        ],
+                                             dtype=torch.int32,
+                                             device="cpu")
 
-        packed_tensor = torch.cat([num_tokens_tensor, flags_tensor, cudagraph_mode_tensor])
+        packed_tensor = torch.cat(
+            [num_tokens_tensor, flags_tensor, cudagraph_mode_tensor])
         # use cpu_group to avoid cpu synchronization issue.
         # it can be overlapped with main moell execution on npu.
         dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
@@ -498,7 +499,8 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> tuple[dict[str, Any], torch.Tensor, np.ndarray, int, torch.Tensor,
                int, torch.Tensor, SpecDecodeMetadata, Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor], int, int, dict[str, Any]]:
+               Optional[torch.Tensor], Optional[torch.Tensor], int, int, dict[
+                   str, Any]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -600,9 +602,9 @@ class NPUModelRunner(GPUModelRunner):
         # Get info across DP ranks.
         # NOTE: maybe_padded_num_tokens is only used when using TorchAir with DP,
         # Otherwise, it's just max_tokens_across_dp_cpu
-        (maybe_padded_num_tokens, num_tokens_across_dp,
-         with_prefill, synced_cudagraph_mode) = self._sync_metadata_across_dp(num_input_tokens,
-                                                       with_prefill, cudagraph_mode.value)
+        (maybe_padded_num_tokens, num_tokens_across_dp, with_prefill,
+         synced_cudagraph_mode) = self._sync_metadata_across_dp(
+             num_input_tokens, with_prefill, cudagraph_mode.value)
         self.with_prefill = with_prefill
         # TODO: Now that num_input_tokens is basically identical with maybe_padded_num_tokens
         # We should consider removing maybe_padded_num_tokens later
@@ -2092,8 +2094,8 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
         # Padding for DP
-        (num_tokens, num_tokens_across_dp,
-         with_prefill, synced_cudagraph_mode) = self._sync_metadata_across_dp(
+        (num_tokens, num_tokens_across_dp, with_prefill,
+         synced_cudagraph_mode) = self._sync_metadata_across_dp(
              batch_descriptor.num_tokens, with_prefill, _ag_mode.value)
 
         # If cudagraph_mode.decode_mode() == FULL and
@@ -2146,7 +2148,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens=num_tokens,
                 uniform_decode=uniform_decode,
                 has_lora=has_lora,
-                disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value)
+                disable_full=synced_cudagraph_mode
+                <= CUDAGraphMode.PIECEWISE.value)
 
         num_tokens_padded = batch_descriptor.num_tokens
         num_reqs_padded = (batch_descriptor.num_reqs if
