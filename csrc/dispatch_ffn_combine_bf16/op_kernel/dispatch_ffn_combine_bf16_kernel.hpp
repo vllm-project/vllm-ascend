@@ -524,8 +524,8 @@ CATLASS_DEVICE
             AscendC::GlobalTensor<ElementB> gmB1;
             AscendC::GlobalTensor<ElementScale> gmS;
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
-            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(weight1Array[arrayGroupIdx])));
-            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(scale1Array[arrayGroupIdx])));
+            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(arrayGroupIdx, params.ptrB1)));
+            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(arrayGroupIdx, params.ptrScale1)));
 
             AscendC::PipeBarrier<PIPE_ALL>();
 
@@ -639,8 +639,8 @@ CATLASS_DEVICE
             AscendC::GlobalTensor<ElementScale> gmS2;
             AscendC::PipeBarrier<PIPE_ALL>();
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
-            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(weight2Array[arrayGroupIdx])));
-            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(scale2Array[arrayGroupIdx])));
+            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(arrayGroupIdx, params.ptrB2)));
+            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(arrayGroupIdx, params.ptrScale2)));
 
             if (currentM <= L1TileShape::M) {
                 gmB2.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
