@@ -43,7 +43,7 @@ RUN ARCH=$(case "${TARGETPLATFORM}" in \
         *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
     esac) && \
     PTO_ISA_URL=http://container-obsfs-filesystem.obs.cn-north-4.myhuaweicloud.com/package/cann/pto-isa/version_compile/master/202601/20260112/ubuntu_${ARCH_SHORT}/cann-pto-isa_${PYPTO_VERSION}_linux-${ARCH}.run && \
-    wget --verbose ${PTO_ISA_URL} -O ~/cann-pto-isa.run && \
+    wget --quiet ${PTO_ISA_URL} -O ~/cann-pto-isa.run && \
     chmod +x ~/cann-pto-isa.run && \
     ~/cann-pto-isa.run --quiet --full && \
     rm -f ~/cann-pto-isa.run
