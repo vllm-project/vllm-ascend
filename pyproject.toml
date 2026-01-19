@@ -49,7 +49,21 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
-    "vllm_ascend/**",
+    "vllm_ascend/attention/mla_v1.py",
+    "vllm_ascend/attention/sfa_v1.py",
+    "vllm_ascend/core",
+    "vllm_ascend/distributed",
+    "vllm_ascend/eplb",
+    "vllm_ascend/kv_offload",
+    "vllm_ascend/lora",
+    "vllm_ascend/model_loader",
+    "vllm_ascend/ops",
+    "vllm_ascend/patch",
+    "vllm_ascend/quantization",
+    "vllm_ascend/sample",
+    "vllm_ascend/spec_decode",
+    "vllm_ascend/worker",
+    "vllm_ascend/xlite",
 ]
 
 [tool.ruff.lint]
