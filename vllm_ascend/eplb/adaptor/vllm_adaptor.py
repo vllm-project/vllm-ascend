@@ -34,12 +34,8 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.rank_id = dist.get_rank()
         self.world_size = dist.get_world_size()
         self.param_dict = dict(self.model.named_parameters())
-        if self.model.config.model_type == "qwen3_moe":
-            self.num_dense_layers = 0
-            self.global_expert_num = self.model.config.num_experts
-        else:
-            self.num_dense_layers = self.model.config.first_k_dense_replace
-            self.global_expert_num = self.model.config.n_routed_experts
+        self.num_dense_layers = getattr(self.model.config,
+                                        "first_k_dense_replace", 0)
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
         self.init_redundancy_expert = get_ascend_config(
         ).init_redundancy_expert
@@ -67,17 +63,11 @@ class VllmEplbAdaptor(EplbAdaptor):
         else:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
 
-        self.expert_map_per_layer = dict(
-        )  # reference to expert map on device for expert map update
         self.expert_map_per_layer_cpu = dict(
         )  # copy of expert map on CPU to avoid device synchronize frequently
-        for layer_idx in range(self.num_moe_layers):
-            self.expert_map_per_layer[self.num_dense_layers + layer_idx] = \
-                self.model.get_expert_map(self.num_dense_layers + layer_idx)
 
-        # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
-        num_buffer_tensor = torch.where(
-            self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
+        num_buffer_tensor = self.model.model.layers[
+            -1].mlp.experts.local_num_experts
         self.buffer_tensor_list: list[list[Any]] = [
             [] for _ in range(num_buffer_tensor)
         ]
@@ -90,8 +80,6 @@ class VllmEplbAdaptor(EplbAdaptor):
         for layer_idx in range(self.num_moe_layers):
             self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = \
                 self.model.get_log2phy_map(self.num_dense_layers + layer_idx)
-
-        self.all_topk_ids = []
 
     def init_buffer_tensor(self, num_buffer_tensor):
         for buffer_id in range(num_buffer_tensor):
@@ -225,7 +213,6 @@ class VllmEplbAdaptor(EplbAdaptor):
                 json.dump(record, f, indent=4)
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
-        self.expert_map_per_layer[layer_id].copy_(updated_expert_map)
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace,

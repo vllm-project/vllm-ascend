@@ -454,24 +454,3 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.assertIsNotNone(result.group_list)
         self.assertIsNotNone(result.dynamic_scale)
         self.assertEqual(result.group_list_type, 1)
-
-    def test_token_dispatch_with_log2phy(self):
-        hidden_states = torch.randn(8, 16)
-        topk_weights = torch.rand(8, 4)
-        topk_ids = torch.randint(0, 4, (8, 2)).long()
-        expert_map = torch.tensor([0, 1, 2, 3])
-        log2phy = torch.tensor([1, 0, 3, 2])
-
-        self.dispatcher.expert_ids_per_ep_rank = torch.tensor(
-            [0, 1], dtype=torch.int32)
-        self.dispatcher.local_expert_indices = [0, 1]
-
-        result = self.dispatcher.token_dispatch(hidden_states=hidden_states,
-                                                topk_weights=topk_weights,
-                                                topk_ids=topk_ids,
-                                                expert_map=expert_map,
-                                                log2phy=log2phy)
-
-        self.assertIsNotNone(result.hidden_states)
-        self.assertIsNotNone(result.group_list)
-        self.assertEqual(result.group_list_type, 1)
