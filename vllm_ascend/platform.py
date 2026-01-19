@@ -210,8 +210,10 @@ class NPUPlatform(Platform):
         ascend_fusion_config = ascend_config.ascend_fusion_config
         if ascend_fusion_config:
             vllm_config.additional_config.setdefault("ascend_fusion_config", {}).update(
-                    vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict)
-                    else ascend_fusion_config)
+                    vars(ascend_fusion_config)
+                    if not isinstance(ascend_fusion_config, dict)
+                    else ascend_fusion_config
+                )
 
         if model_config is None:
             logger.warning("Model config is missing. This may indicate that we are running a test case")
