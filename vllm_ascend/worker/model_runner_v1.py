@@ -552,6 +552,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs,
                                                   dtype=torch.int32)
         self.attn_dummy_run_call_cnt = 0
+
+        self.comm_stream1 = torch.npu.Stream() # ubatch1的通信流
+        self.comm_stream2 = torch.npu.Stream() # ubatch2的通信流
+        self.comm_stream1_event = torch.npu.ExternalEvent()
+        self.comm_stream2_event = torch.npu.ExternalEvent()
+        torch.npu.set_stream_limit(self.comm_stream1, -1, 8) # 限制通信流只用8个aiv
+        torch.npu.set_stream_limit(self.comm_stream2, -1, 8)
+
         # import os
         # experimental_config = torch_npu.profiler._ExperimentalConfig(
         #     export_type=torch_npu.profiler.ExportType.Text,
@@ -2474,6 +2482,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 afd_connector=self.afd_connector,
                 afd_tokens_lens=afd_tokens_lens,
                 num_of_stages=len(ubatch_slices) if ubatch_slices else 1,
+                comm_stream1 = self.comm_stream1,
+                comm_stream2 = self.comm_stream2,
+                comm_stream1_event = self.comm_stream1_event,
+                comm_stream2_event = self.comm_stream2_event,
             )
         return afd_metadata
 

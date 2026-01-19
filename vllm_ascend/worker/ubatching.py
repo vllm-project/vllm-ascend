@@ -190,7 +190,7 @@ def dbo_register_recv_hook(recv_hook):
 def make_ubatch_contexts(
     num_micro_batches: int,
     compute_stream: torch.npu.Stream,
-    comm_stream: torch.npu.Stream,
+    comm_stream: list[torch.npu.Stream],
     forward_contexts: list[ForwardContext],
     ready_barrier: threading.Barrier,
     schedule: str = "default",
@@ -219,7 +219,7 @@ def make_ubatch_contexts(
     for i in range(num_micro_batches):
         ctx = UBatchContext(id=i,
                             compute_stream=compute_stream,
-                            comm_stream=comm_stream,
+                            comm_stream=comm_stream[i],
                             forward_context=forward_contexts[i],
                             ready_barrier=ready_barrier,
                             cpu_wait_event=cpu_events[i],

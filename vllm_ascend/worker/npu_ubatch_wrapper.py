@@ -218,6 +218,8 @@ class UBatchWrapper:
                     thread.join()
                 sorted_results = [value for position, value in sorted(results)]
                 result = torch.cat(sorted_results, dim=0)
+                torch.npu.current_stream().wait_stream(ubatch_metadata[0].context.comm_stream)  # 主流结束前必须等待分支流，否则捕获会报错
+                torch.npu.current_stream().wait_stream(ubatch_metadata[1].context.comm_stream)
                 aclgraph_metadata.outputs = result
             self.aclgraphs[num_tokens] = aclgraph_metadata
         return aclgraph_metadata.outputs
@@ -257,7 +259,8 @@ class UBatchWrapper:
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
-
+            torch.npu.current_stream().wait_stream(ubatch_metadata[0].context.comm_stream)
+            torch.npu.current_stream().wait_stream(ubatch_metadata[1].context.comm_stream)
             sorted_results = [value for position, value in sorted(results)]
             result = torch.cat(sorted_results, dim=0)
             return result
@@ -294,7 +297,7 @@ class UBatchWrapper:
 
         ubatch_ctxs = make_ubatch_contexts(
             num_micro_batches=len(ubatch_slices),
-            comm_stream=self.comm_stream,
+            comm_stream=[afd_metadata.comm_stream1, afd_metadata.comm_stream2],
             compute_stream=compute_stream,
             forward_contexts=forward_contexts,
             ready_barrier=self.ready_barrier)
