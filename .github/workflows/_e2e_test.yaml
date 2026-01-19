@@ -113,6 +113,8 @@ jobs:
 
           # compile
           pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
+          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_graphex_norm_quant_fusion.py
+          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_graphex_allreduce_rmsnorm_fusion.py
   
           # model_runner_v2
           # pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
