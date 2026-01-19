@@ -47,6 +47,7 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
                              max_num_reqs=1000,
                              device="cpu",
                              vllm_config=vllm_config,
+                             use_async_scheduling=False,
                              pin_memory=False)
     input_batch = MagicMock()
     input_batch.num_reqs = num_reqs
@@ -128,6 +129,7 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
                              max_num_reqs=1000,
                              device="cpu",
                              vllm_config=vllm_config,
+                             use_async_scheduling=False,
                              pin_memory=False)
     input_batch = MagicMock()
     input_batch.num_reqs = num_reqs
@@ -193,6 +195,7 @@ def test_get_cp_local_seq_lens(
                              max_num_reqs=1000,
                              device="cpu",
                              vllm_config=vllm_config,
+                             use_async_scheduling=False,
                              pin_memory=False)
     ret = pcp_manager._get_cp_local_seq_lens(seq_lens, pcp_world_size,
                                              dcp_world_size,
@@ -276,6 +279,7 @@ def test_generate_pcp_mtp_input(
                              max_num_reqs=max_num_reqs,
                              device="cpu",
                              vllm_config=vllm_config,
+                             use_async_scheduling=False,
                              pin_memory=False)
     arange_np = np.arange(max_model_len)
     input_batch = MagicMock()
