@@ -684,7 +684,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendDeepseekScalingRotaryEmbedding,
         AscendMRotaryEmbedding,
         AscendRotaryEmbedding,
-        AscendYaRNRotaryEmbedding)
+        AscendYaRNRotaryEmbedding,
+    )
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor,
         AscendParallelLMHead,
