@@ -550,8 +550,10 @@ class EagleProposer(VllmEagleProposer):
             common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(
                 exceeds_mask, 1)
             common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
-            common_attn_metadata._get_positions[:batch_size].copy_(clamped_positions)
-
+            if self.uses_mrope:
+                common_attn_metadata.positions[:, :batch_size].copy_(clamped_positions)
+            else:
+                common_attn_metadata.positions[:batch_size].copy_(clamped_positions)
             if self.attn_metadata_builder is None:
                 attn_metadata_builder = self._get_attention_metadata_builder()
             else:
