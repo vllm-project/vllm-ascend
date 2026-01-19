@@ -116,8 +116,7 @@ class AscendW4A16FusedMoEMethod:
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get(
             "group_size", 32)
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
 
     def get_weight(
         self,
@@ -205,9 +204,6 @@ class AscendW4A16FusedMoEMethod:
         enable_force_load_balance: bool = True,
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -230,24 +226,21 @@ class AscendW4A16FusedMoEMethod:
         topk_weights = topk_weights.to(x.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
-        return moe_comm_method.fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight_packed,
-            w2=layer.w2_weight_packed,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            w1_offset=layer.w13_weight_offset,
-            w2_offset=layer.w2_weight_offset,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            use_int4_w4a16=True,
-            expert_map=expert_map,
-            log2phy=log2phy,
-            shared_experts=shared_experts,
-            quantized_x_for_share=quantized_x_for_share,
-            dynamic_scale_for_share=dynamic_scale_for_share,
-            dynamic_eplb=self.dynamic_eplb,
-            mc2_mask=kwargs.get("mc2_mask", None))
+        return moe_comm_method.fused_experts(hidden_states=x,
+                                             w1=layer.w13_weight_packed,
+                                             w2=layer.w2_weight_packed,
+                                             w1_scale=layer.w13_weight_scale,
+                                             w2_scale=layer.w2_weight_scale,
+                                             w1_offset=layer.w13_weight_offset,
+                                             w2_offset=layer.w2_weight_offset,
+                                             topk_weights=topk_weights,
+                                             topk_ids=topk_ids,
+                                             use_int4_w4a16=True,
+                                             expert_map=expert_map,
+                                             log2phy=log2phy,
+                                             dynamic_eplb=self.dynamic_eplb,
+                                             mc2_mask=kwargs.get(
+                                                 "mc2_mask", None))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.transpose_weight:

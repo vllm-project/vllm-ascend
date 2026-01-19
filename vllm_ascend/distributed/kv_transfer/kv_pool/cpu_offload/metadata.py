@@ -14,7 +14,7 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
-from vllm_ascend.distributed.cpu_offload_manager.cpu_kv_cache_manager import \
+from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.cpu_kv_cache_manager import \
     CPUKVCacheManager
 
 
@@ -45,7 +45,9 @@ class MetadataServer:
 
     class ZMQRPCClient:
 
-        def __init__(self, identity=f"worker-{os.getpid()}"):
+        def __init__(self, identity=None):
+            if identity is None:
+                identity = f"worker-{os.getpid()}-{id(self)}"
             logger.info(f"metadata client for worker {identity} started")
             self.ctx = zmq.Context()  # type: ignore
             self.socket = make_zmq_socket(

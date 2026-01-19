@@ -29,7 +29,9 @@ vLLM Ascend Plugin
 - [2025/03] 我们和vLLM团队举办了[vLLM Beijing Meetup](https://mp.weixin.qq.com/s/CGDuMoB301Uytnrkc2oyjg)! 你可以在[这里](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF)找到演讲材料.
 - [2025/02] vLLM社区正式创建了[vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend)仓库，让vLLM可以无缝运行在Ascend NPU。
 - [2024/12] 我们正在与 vLLM 社区合作，以支持 [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162).
+
 ---
+
 ## 总览
 
 vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NPU无缝运行的后端插件。
@@ -43,10 +45,10 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 - 硬件：Atlas 800I A2 Inference系列、Atlas A2 Training系列、Atlas 800I A3 Inference系列、Atlas A3 Training系列、Atlas 300I Duo（实验性支持）
 - 操作系统：Linux
 - 软件：
-  * Python >= 3.10, < 3.12
-  * CANN == 8.3.rc2 (Ascend HDK 版本参考[这里](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
-  * PyTorch == 2.8.0, torch-npu == 2.8.0
-  * vLLM (与vllm-ascend版本一致)
+    - Python >= 3.10, < 3.12
+    - CANN == 8.3.rc2 (Ascend HDK 版本参考[这里](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
+    - PyTorch == 2.8.0, torch-npu == 2.8.0
+    - vLLM (与vllm-ascend版本一致)
 
 ## 开始使用
 
@@ -58,13 +60,16 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 |v0.11.0| 最新正式/稳定版本 |[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.11.0/quick_start.html) and [安装指南](https://docs.vllm.ai/projects/ascend/en/v0.11.0/installation.html)了解更多|
 
 ## 贡献
+
 请参考 [CONTRIBUTING]((https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html)) 文档了解更多关于开发环境搭建、功能测试以及 PR 提交规范的信息。
 
 我们欢迎并重视任何形式的贡献与合作：
+
 - 请通过[Issue](https://github.com/vllm-project/vllm-ascend/issues)来告知我们您遇到的任何Bug。
 - 请通过[用户论坛](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support)来交流使用问题和寻求帮助。
 
 ## 分支策略
+
 vllm-ascend有主干分支和开发分支。
 
 - **main**: 主干分支，与vLLM的主干分支对应，并通过昇腾CI持续进行质量看护。
@@ -86,8 +91,9 @@ vllm-ascend有主干分支和开发分支。
 
 ## 社区例会
 
-- vLLM Ascend 每周社区例会: https://tinyurl.com/vllm-ascend-meeting
+- vLLM Ascend 每周社区例会: <https://tinyurl.com/vllm-ascend-meeting>
 - 每周三下午，15:00 - 16:00 (UTC+8, [查看您的时区](https://dateful.com/convert/gmt8?t=15))
 
 ## 许可证
+
 Apache 许可证 2.0，如 [LICENSE](./LICENSE) 文件中所示。

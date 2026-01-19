@@ -32,18 +32,24 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.mooncake_connector import GET_META_MSG
-from vllm_ascend.distributed.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.utils import (align_memory,
-                                           get_transfer_timeout_value,
-                                           kv_alltoall_and_rearrange)
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import \
+    GET_META_MSG
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import \
+    global_te
+from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    align_memory, get_transfer_timeout_value, kv_alltoall_and_rearrange)
+from vllm_ascend.utils import npu_stream_switch, vllm_version_is
 
+# isort: off
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
+    if vllm_version_is('0.13.0'):
+        from vllm.attention.backends.abstract import AttentionMetadata  # type: ignore
+    else:
+        from vllm.attention.backends import AttentionMetadata  # type: ignore
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
+# isort: on
 
 DONE_SENDING_MSG = b"done_sending_msg"
 
@@ -1078,10 +1084,14 @@ class MooncakeLayerwiseConnectorWorker:
         ):
             # enable decode prefix cache
             if self.use_mla or self.use_sparse:
-                num_kv_head = self._decode_tp_size
+                num_need_send = self._decode_tp_size
             else:
                 num_kv_head = self.vllm_config.model_config.hf_config.num_key_value_heads
-            num_replica_groups = self.tp_size // num_kv_head if self.tp_size >= num_kv_head else 1
+                if self.tp_size <= num_kv_head:
+                    num_need_send = self.tp_size
+                else:
+                    num_need_send = self._decode_tp_size if self._decode_tp_size >= num_kv_head else num_kv_head
+            num_replica_groups = self.tp_size // num_need_send if self.tp_size >= num_need_send else 1
             replica_group_idx = self.tp_rank % num_replica_groups
             req_ids = sorted(list(connector_metadata.requests.keys()))
             selected_req_ids = [
