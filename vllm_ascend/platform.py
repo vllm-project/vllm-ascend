@@ -196,20 +196,9 @@ class NPUPlatform(Platform):
                 if not isinstance(ascend_compilation_config, dict)
                 else ascend_compilation_config
             )
+        ascend_config.update_compile_ranges_split_points()
 
-            if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
-                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THREHOLD
-
-                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
-                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THREHOLD)
-                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
-                logger.debug(
-                    "set compile_ranges_split_points to "
-                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
-                )
-
-        elif model_config and hasattr(model_config.hf_text_config, "index_topk"):
+        if model_config and hasattr(model_config.hf_text_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
@@ -397,16 +386,6 @@ class NPUPlatform(Platform):
                 Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
                 For optimal performance with VL models, we recommend enabling Sequence Parallelism \
                 via --compilation-config '{"pass_config": {"enable_sp": true}}'.""")
-
-        if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config):
-                from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_threshold
-                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
-                new_compile_ranges_split_points.append(get_sp_threshold(vllm_config))
-                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                vllm_config.compilation_config.compile_ranges_split_points = \
-                    new_compile_ranges_split_points
-                logger.debug("set compile_ranges_split_points to "
-                            "{new_compile_ranges_split_points} for sequence parallelism")
 
         # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
         # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
