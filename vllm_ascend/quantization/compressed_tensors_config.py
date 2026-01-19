@@ -382,6 +382,9 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
                 return "W8A8_DYNAMIC"
 
+            if self._is_dynamic_token_w4a8(weight_quant, input_quant):
+                return "W4A8_DYNAMIC"
+
         if self._is_w4a16(weight_quant, input_quant):
             return "W4A16"
 
@@ -415,6 +418,30 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         # Only symmetric input quantization supported.
         # Only symmetric weight quantization supported.
         return is_8_bits and is_token and is_symmetric and is_dynamic
+    
+    def _is_dynamic_token_w4a8(self, weight_quant: QuantizationArgs,
+                               input_quant: QuantizationArgs) -> bool:
+        is_4_bits = weight_quant.num_bits == 4
+        is_8_bits = input_quant.num_bits == 8
+        weight_strategy = (
+            weight_quant.strategy == QuantizationStrategy.CHANNEL.value) or (weight_quant.strategy == QuantizationStrategy.GROUP.value)
+        is_token = (weight_strategy and input_quant.strategy
+                    == QuantizationStrategy.TOKEN.value)
+        is_dynamic = not weight_quant.dynamic and input_quant.dynamic
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+
+        # Adapt for AscendW4A8DynamicFusedMoEMethod
+        assert self.quant_description is not None, "quant_description should not be None"
+        if weight_strategy:
+            self.quant_description["group_size"] = weight_quant.group_size if weight_quant.group_size else 0
+        
+        self.quant_description["version"] = "0"
+        self.quant_description["ascend_quant_method"] = COMPRESSED_TENSORS_METHOD
+        self.quant_description["weight_strategy"] = str(weight_quant.strategy)
+
+        # Only symmetric input quantization supported.
+        # Only symmetric weight quantization supported.
+        return is_4_bits and is_8_bits and is_token and is_symmetric and is_dynamic
 
     def _is_w4a16(self, weight_quant: "QuantizationArgs",
                   input_quant: Optional["QuantizationArgs"]) -> bool:
