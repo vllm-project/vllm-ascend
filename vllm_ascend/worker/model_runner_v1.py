@@ -563,7 +563,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         #         torch_npu.profiler.ProfilerActivity.CPU,
         #         torch_npu.profiler.ProfilerActivity.NPU
         #     ],
-        #     schedule=torch_npu.profiler.schedule(wait=2, warmup=1, active=5, repeat=1, skip_first=120),
+        #     schedule=torch_npu.profiler.schedule(wait=2, warmup=1, active=20, repeat=1, skip_first=120),
         #     # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
         #     experimental_config=experimental_config,
         #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/y00889327/prof")
@@ -1267,7 +1267,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
                                               attn_state,
                                               total_num_scheduled_tokens)
-        logger.info(f"enable_dbo= {enable_dbo}")
 
         # Get info across DP ranks.
         # NOTE: maybe_padded_num_tokens is only used when using TorchAir with DP,
@@ -1971,6 +1970,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             scheduler_output: "SchedulerOutput",
             intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
+        # self.prof.step()
         with ProfileExecuteDuration().capture_async("prepare input"):
             self._update_states(scheduler_output)
             if not scheduler_output.total_num_scheduled_tokens:
@@ -2021,7 +2021,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         aclgraph_runtime_mode, batch_descriptor = \
             self.aclgraph_dispatcher.dispatch(batch_descriptor)
 
-        # self.prof.step()
+        
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
             with set_ascend_forward_context(
