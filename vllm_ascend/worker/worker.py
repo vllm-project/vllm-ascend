@@ -342,18 +342,6 @@ class NPUWorker(WorkerBase):
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = profile_result.torch_peak_increase
         non_torch_memory_cleared_by_empty_cache = non_torch_memory_before_empty_cache - self.non_torch_memory
-        logger.info(
-            "non_torch_memory_before_empty_cache: %.2f GiB",
-            GiB(non_torch_memory_before_empty_cache),
-        )
-        logger.info(
-            "non_torch_increase: %.2f GiB",
-            GiB(self.non_torch_memory),
-        )
-        logger.info(
-            "non_torch_memory_cleared_by_empty_cache: %.2f GiB",
-            GiB(non_torch_memory_cleared_by_empty_cache),
-        )
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
