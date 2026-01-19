@@ -50,9 +50,9 @@ def setup_moe_comm_method(moe_config):
 
 
 def set_gmmswigluquant_method():
-    vllm_config = VllmConfig()
-    ascend_fusion_config = vllm_config.additional_config.get("ascend_fusion_config", {})
-    return ascend_fusion_config.get("fusion_ops_gmmswigluquant", True)
+    from vllm_ascend.ascend_config import get_ascend_config
+    ascend_config = get_ascend_config()
+    return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant
 
 
 @dataclass
