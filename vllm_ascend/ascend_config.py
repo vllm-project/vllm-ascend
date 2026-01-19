@@ -198,12 +198,10 @@ class AscendFusionConfig:
     Configuration for controlling whether to use a fused operator gmmswigluquant.
     """
 
-    def __init__(self,
-                 fusion_ops_gmmswigluquant: bool = True,
-                 **kwargs):
+    def __init__(self, fusion_ops_gmmswigluquant: bool = True, **kwargs):
         """
         Initialize the configuration.
-        
+
         Args:
             fusion_ops_gmmswigluquant (bool): Whether to use a fused operator gmmswigluquant.
                 When set to True, the system will use a fused operator gmmswigluquant.
