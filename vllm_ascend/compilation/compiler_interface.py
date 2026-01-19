@@ -85,9 +85,7 @@ def npugraph_ex_compile(
         output_node = fx_graph.output_node()
         with fx_graph.inserting_before(output_node):
             return_value = output_node.args[0]
-            tuple_node = fx_graph.create_node("call_function",
-                                              tuple,
-                                              args=([return_value],))
+            tuple_node = fx_graph.create_node("call_function", tuple, args=([return_value],))
         output_node.args = (tuple_node,)
         graph.recompile()
     import torchair
