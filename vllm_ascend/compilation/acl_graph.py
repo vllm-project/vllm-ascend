@@ -422,14 +422,7 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
                 actual_seq_lengths_kv = np.concatenate(
                     [actual_seq_lengths_kv, pad_tensor])
 
-            actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[:
-                                                                      attn_metadata
-                                                                      .
-                                                                      num_decode_tokens]
-            if (runtime_shape - len(actual_seq_lengths_q)):
-                actual_seq_lengths_q = actual_seq_lengths_q + [
-                    actual_seq_lengths_q[-1]
-                ] * (runtime_shape - len(actual_seq_lengths_q))
+            actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
             if dcp_size > 1:
                 num_heads = num_heads * dcp_size
 

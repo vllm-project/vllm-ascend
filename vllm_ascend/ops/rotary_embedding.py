@@ -529,6 +529,9 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         return q_pe, k_pe
 
 
+_QWEN3_VL_MROPE_SECTION = [24, 20, 20]
+
+
 class AscendMRotaryEmbedding(MRotaryEmbedding):
 
     def forward_triton(self,
@@ -568,7 +571,8 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        if HAS_TRITON and positions.ndim == 2:
+        # use triton mrope for Qwen3-VL
+        if HAS_TRITON and self.mrope_section == _QWEN3_VL_MROPE_SECTION:
             # todo: need cann update in 8.5.0
             return self.forward_triton(positions, query, key)
 

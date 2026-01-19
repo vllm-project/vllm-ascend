@@ -41,6 +41,7 @@ class MtpProposer(EagleProposer):
             num_tokens,
             num_tokens_across_dp,
             with_prefill,
+            _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
         if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
@@ -265,9 +266,9 @@ class MtpProposer(EagleProposer):
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
         # eager/acl piecewise mode need to update num_tokens_across_dp
-        (num_input_tokens, num_tokens_across_dp,
-         with_prefill) = self.runner._sync_metadata_across_dp(
-             num_input_tokens, self.runner.with_prefill)
+        (num_input_tokens, num_tokens_across_dp, with_prefill,
+         _) = self.runner._sync_metadata_across_dp(num_input_tokens,
+                                                   self.runner.with_prefill)
 
         # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
         if scheduler_output and not self.enable_shared_expert_dp:
@@ -337,8 +338,14 @@ class MtpProposer(EagleProposer):
                         decode_metadata = getattr(attn_metadata[layer_name],
                                                   "decode", None)
                         if self.use_async_scheduling and decode_metadata is not None:
-                            actual_size = len(
-                                decode_metadata.actual_seq_lengths_q)
+                            if self.pcp_size * self.dcp_size > 1:
+                                actual_size = sum(
+                                    attn_metadata[layer_name].
+                                    query_lens[:attn_metadata[layer_name].
+                                               num_decodes])
+                            else:
+                                actual_size = len(
+                                    decode_metadata.actual_seq_lengths_q)
 
                             decode_metadata.seq_lens_list = \
                                 decode_metadata.seq_lens_list[:actual_size]

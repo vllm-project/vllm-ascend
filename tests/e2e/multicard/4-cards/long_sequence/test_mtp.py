@@ -63,6 +63,7 @@ def test_pcp_dcp_mtp3_eager():
             max_num_batched_tokens=1024,
             enable_expert_parallel=True,
             block_size=128,
+            async_scheduling=True,
             speculative_config={
                 "num_speculative_tokens": 3,
                 "method": "deepseek_mtp",
