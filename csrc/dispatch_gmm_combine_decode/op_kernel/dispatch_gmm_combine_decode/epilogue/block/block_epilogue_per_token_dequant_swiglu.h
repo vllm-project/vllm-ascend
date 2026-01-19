@@ -21,13 +21,14 @@
 
 namespace Catlass::Epilogue::Block {
 
-template <uint32_t UB_STAGES_, uint32_t EXEC_FLAG_, class CType_, class LayoutScale_, class LayoutPerTokenScale_,
+template <uint32_t UB_STAGES_, uint32_t EXEC_FLAG_,
+          class CType_, class ScaleType_, class LayoutScale_, class LayoutPerTokenScale_,
           class DType_, class TileRowBroadcastMul_, class TileBroadcastOneBlk_, class TileOneBlkColumnBroadcastMul_,
           class TileCopy_, class EpilogueTileSwizzle_>
-class BlockEpilogue<EpilogueAtlasA2PerTokenDequantSwiglu<UB_STAGES_, EXEC_FLAG_>, CType_,
-                    Gemm::GemmType<float, LayoutScale_>, Gemm::GemmType<float, LayoutPerTokenScale_>, DType_,
-                    TileRowBroadcastMul_, TileBroadcastOneBlk_, TileOneBlkColumnBroadcastMul_, TileCopy_,
-                    EpilogueTileSwizzle_>
+class BlockEpilogue<EpilogueAtlasA2PerTokenDequantSwiglu<UB_STAGES_, EXEC_FLAG_>,
+                    CType_, Gemm::GemmType<ScaleType_, LayoutScale_>, Gemm::GemmType<float, LayoutPerTokenScale_>,
+                    DType_, TileRowBroadcastMul_, TileBroadcastOneBlk_, TileOneBlkColumnBroadcastMul_,
+                    TileCopy_, EpilogueTileSwizzle_>
 {
 public:
     using DispatchPolicy = EpilogueAtlasA2PerTokenDequantSwiglu<UB_STAGES_, EXEC_FLAG_>;
@@ -37,7 +38,8 @@ public:
     // Data infos
     using ElementC = typename CType_::Element;
     using LayoutC = typename CType_::Layout;
-    using ElementScale = float;
+    using ElementRawScale = ScaleType_;
+    using ElementFp32Scale = float;
     using LayoutScale = LayoutScale_;
     using ElementPerTokenScale = float;
     using LayoutPerTokenScale = LayoutPerTokenScale_;
@@ -76,14 +78,17 @@ public:
 
     static_assert(UB_STAGES <= 2, "UB stages too large, event id is not enough.");
 
-    static_assert((UB_STAGES * (TileShape::COUNT * sizeof(ElementC) + TileShape::COLUMN * sizeof(ElementScale) +
+    static_assert((UB_STAGES * (TileShape::COUNT * sizeof(ElementC) +
+                                (std::is_same_v<ElementRawScale, ElementFp32Scale> ?
+                                    0 : TileShape::COLUMN * sizeof(ElementRawScale)) +
+                                TileShape::COLUMN * sizeof(ElementFp32Scale) +
                                 TileShape::ROW * sizeof(ElementPerTokenScale) + TileShape::COUNT * sizeof(ElementD)) +
                    (TileShape::COUNT + TileShape::COUNT) * sizeof(float) + TileShape::ROW * BYTE_PER_BLK) <=
                       ArchTag::UB_SIZE,
                   "TileShape is too large to fit in UB");
 
     struct Params {
-        __gm__ ElementScale *ptrScale{nullptr};
+        __gm__ ElementRawScale *ptrScale{nullptr};
         LayoutScale layoutScale{};
         __gm__ ElementPerTokenScale *ptrPerTokenScale{nullptr};
         LayoutPerTokenScale layoutPerTokenScale{};
@@ -94,7 +99,7 @@ public:
         Params() {};
 
         CATLASS_DEVICE
-        Params(__gm__ ElementScale *ptrScale_, LayoutScale const &layoutScale_,
+        Params(__gm__ ElementRawScale *ptrScale_, LayoutScale const &layoutScale_,
                __gm__ ElementPerTokenScale *ptrPerTokenScale_, LayoutPerTokenScale const &layoutPerTokenScale_,
                __gm__ ElementD *ptrD_, LayoutD const &layoutD_)
             : ptrScale(ptrScale_),
@@ -117,8 +122,12 @@ public:
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
             ubCList[i] = resource.ubBuf.template GetBufferByByte<ElementC>(ubOffset);
             ubOffset += TileShape::COUNT * sizeof(ElementC);
-            ubScaleList[i] = resource.ubBuf.template GetBufferByByte<ElementScale>(ubOffset);
-            ubOffset += TileShape::COLUMN * sizeof(ElementScale);
+            if constexpr (!std::is_same_v<ElementRawScale, ElementFp32Scale>) {
+                ubRawScaleList[i] = resource.ubBuf.template GetBufferByByte<ElementRawScale>(ubOffset);
+                ubOffset += TileShape::COLUMN * sizeof(ElementRawScale);
+            }
+            ubFp32ScaleList[i] = resource.ubBuf.template GetBufferByByte<ElementFp32Scale>(ubOffset);
+            ubOffset += TileShape::COLUMN * sizeof(ElementFp32Scale);
             ubPerTokenScaleList[i] = resource.ubBuf.template GetBufferByByte<ElementPerTokenScale>(ubOffset);
             ubOffset += TileShape::ROW * sizeof(ElementPerTokenScale);
             ubDList[i] = resource.ubBuf.template GetBufferByByte<ElementD>(ubOffset);
@@ -177,7 +186,7 @@ public:
         MatrixCoord actualBlockShape = actualBlockShapeMNK.GetCoordMN();
         MatrixCoord blockOffset = blockCoord * blockShape;
         bool isLeft = blockOffset.column() < (params.layoutD.shape(1) >> 1);
-        AscendC::GlobalTensor<ElementScale> gmScale;
+        AscendC::GlobalTensor<ElementRawScale> gmScale;
         gmScale.SetGlobalBuffer(params.ptrScale);
         AscendC::GlobalTensor<ElementPerTokenScale> gmPerTokenScale;
         gmPerTokenScale.SetGlobalBuffer(params.ptrPerTokenScale);
@@ -212,11 +221,16 @@ public:
             auto gmTileScale = gmScale[params.layoutScale.GetOffset(scaleTileOffset)];
             auto layoutGmTileScale = params.layoutScale.GetTileLayout(scaleTileShape);
 
-            auto &ubScale = ubScaleList[ubListId];
-            auto layoutUbScale = LayoutScale::template MakeLayoutInUb<ElementScale>(scaleTileShape);
-
+            auto &ubFp32Scale = ubFp32ScaleList[ubListId];
+            auto layoutFp32UbScale = LayoutScale::template MakeLayoutInUb<ElementFp32Scale>(scaleTileShape);
+            auto &ubRawScale = ubRawScaleList[ubListId];
+            auto layoutRawUbScale = LayoutScale::template MakeLayoutInUb<ElementRawScale>(scaleTileShape);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
-            copyGmToUbScale(ubScale, gmTileScale, layoutUbScale, layoutGmTileScale);
+            if constexpr (!std::is_same_v<ElementRawScale, ElementFp32Scale>) {
+                copyGmToUbScale(ubRawScale, gmTileScale, layoutRawUbScale, layoutGmTileScale);
+            } else {
+                copyGmToUbScale(ubFp32Scale, gmTileScale, layoutFp32UbScale, layoutGmTileScale);
+            }
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbScaleMTE2VList[ubListId]);
 
             auto perTokenScaleTileOffset = tileOffset.template GetCoordByAxis<0>();
@@ -238,7 +252,11 @@ public:
             AscendC::Cast(ubTmpMxN, ubC, AscendC::RoundMode::CAST_RINT, TileShape::COUNT);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbScaleMTE2VList[ubListId]);
-            tileRowBroadcastMul(ubTmpMxN, ubTmpMxN, ubScale);
+            if constexpr (!std::is_same_v<ElementRawScale, ElementFp32Scale>) {
+                AscendC::Cast(ubFp32Scale, ubRawScale, AscendC::RoundMode::CAST_NONE, TileShape::COLUMN);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            tileRowBroadcastMul(ubTmpMxN, ubTmpMxN, ubFp32Scale);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbPerTokenScaleMTE2VList[ubListId]);
             tileBroadcastOneBlk(ubTmpMx32B, ubPerTokenScale);
@@ -279,7 +297,8 @@ private:
     Params params;
 
     AscendC::LocalTensor<ElementC> ubCList[UB_STAGES];
-    AscendC::LocalTensor<ElementScale> ubScaleList[UB_STAGES];
+    AscendC::LocalTensor<ElementRawScale> ubRawScaleList[UB_STAGES];
+    AscendC::LocalTensor<ElementFp32Scale> ubFp32ScaleList[UB_STAGES];
     AscendC::LocalTensor<ElementPerTokenScale> ubPerTokenScaleList[UB_STAGES];
     AscendC::LocalTensor<ElementD> ubDList[UB_STAGES];
 
