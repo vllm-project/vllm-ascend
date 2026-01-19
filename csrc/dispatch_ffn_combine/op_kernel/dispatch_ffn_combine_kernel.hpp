@@ -391,7 +391,6 @@ private:
         int64_t preCurrentmSum = 0;
         int32_t syncLoopIdx = -1;
 
-        constexpr uint32_t MAX_EXPERTS_PER_RANK = 32;
         __gm__ ElementB* weight1Array[MAX_EXPERTS_PER_RANK];
         __gm__ ElementScale * scale1Array[MAX_EXPERTS_PER_RANK];
         int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
@@ -509,7 +508,6 @@ private:
             lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
         }
 
-        constexpr uint32_t MAX_EXPERTS_PER_RANK = 8;
         __gm__ ElementB* weight2Array[MAX_EXPERTS_PER_RANK];
         __gm__ ElementScale * scale2Array[MAX_EXPERTS_PER_RANK];
         int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
@@ -823,7 +821,7 @@ private:
         AscendC::SyncAll<true>();
         AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(0);
 
-        uint32_t prevGroupSum1 = 0;
+        uint32_t prevGroupSum1 = 0, dequantSum1 = 0, dequantSum2 = 0;
         uint32_t dequantSum = 0;
         #ifdef __SOFT_SYNC__
         if (coreIdx == coreNum - 1) {
@@ -831,10 +829,10 @@ private:
         }
         #endif
 
-
         icache_preload(8);
         for (int32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             // 第i个core从第i个rank的peermem读数据
+            uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
             for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
                 uint32_t rowStart = (dstEpIdx == 0 ? 0 : cumsumMM((dstEpIdx - 1) * params.expertPerRank + groupIdx)) + prevGroupSum1;
                 if (rowStart < params.maxOutputSize) {
@@ -849,7 +847,6 @@ private:
                     gmRemoteA.SetGlobalBuffer(reinterpret_cast<__gm__ ElementA*>(otherRankPtr + peermemInfo.offsetA));
 
                     MatrixCoord offsetA{rowStart, 0};
-
                     MatrixCoord offsetPeer{rowSrc, 0};
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
                     int64_t gmOffsetPeer = rowSrc * (params.problemShape.k() + ALIGN_512);
@@ -872,10 +869,24 @@ private:
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(0);   // V通知C当前轮的通信已完成
             #endif
 
-            prevGroupSum1 += cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
-            dequantSum += cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
-            if (groupIdx + 1 == params.epilogueGranularity && groupIdx < params.expertPerRank - 1) {
-                dequantSum = 0;
+            prevGroupSum1 += currentM;
+
+            //第一次swglu的token数以及截断逻辑
+            if (groupIdx + 1 <= params.epilogueGranularity) {
+                if (dequantSum1 + currentM <= params.maxOutputSize) {
+                    dequantSum1 += currentM;
+                } else if (dequantSum1 < params.maxOutputSize) {
+                    dequantSum1 = params.maxOutputSize;
+                }
+            }
+
+            //第二次swglu的token数以及截断逻辑
+            if (groupIdx + 1 > params.epilogueGranularity && dequantSum1 < params.maxOutputSize) {
+                if (dequantSum1 + dequantSum2 + currentM <= params.maxOutputSize) {
+                    dequantSum2 += currentM;
+                } else if (dequantSum1 + dequantSum2 < params.maxOutputSize) {
+                    dequantSum2 += params.maxOutputSize - dequantSum1 - dequantSum2;
+                }
             }
         }
 
@@ -905,47 +916,44 @@ private:
         BlockEpilogue1 blockEpilogue1(resource, n);
 
 
-        //swglu begin
-        if ((params.epilogueGranularity < params.expertPerRank && params.epilogueGranularity > 0)) { //开启了swglu深融合
+
+        AscendC::CrossCoreWaitFlag<0x2>(1);        // Swiglu等GMM1【1】
+        AscendC::SyncAll<true>();
+        //第一次swglu
+        if (dequantSum1 > 0) { //开启了swglu深融合
             uint32_t rowStartThisCore = 0;
             MatrixCoord offsetC{0U, 0};
-            uint32_t dequantLen = prevGroupSum1 - dequantSum;
-            if (dequantLen >= params.maxOutputSize) {
-                dequantLen = dequantLen - params.maxOutputSize;
-            }
-            MatrixCoord shapeC{dequantLen, params.problemShape.n()};
-            LayoutC layoutC{dequantLen, params.problemShape.n()};
+            MatrixCoord shapeC{dequantSum1, params.problemShape.n()};
+            LayoutC layoutC{dequantSum1, params.problemShape.n()};
             int64_t gmOffsetC = layoutC.GetOffset(offsetC);
             int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
-            AscendC::CrossCoreWaitFlag<0x2>(1);
-            AscendC::SyncAll<true>();
             blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], params.epilogueCoreNum);
-            AscendC::SyncAll<true>();
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(2);           // swiglu通知GMM2【1】
         }
-        
-        AscendC::CrossCoreWaitFlag<0x2>(1);        // Swiglu等GMM1【2】
         AscendC::SyncAll<true>();
-        if (prevGroupSum1 - dequantSum < params.maxOutputSize) {
-            uint32_t rowStartThisCore = prevGroupSum1 - dequantSum;;
-            MatrixCoord offsetC{rowStartThisCore, 0};
-            uint32_t dequantLen = dequantSum;
-            if (prevGroupSum1 >= params.maxOutputSize) {
-                dequantLen = dequantSum - (prevGroupSum1 - params.maxOutputSize);
+        AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(2);           // swiglu通知GMM2【1】
+        
+        //第二次swglu
+        if ((params.epilogueGranularity < params.expertPerRank && params.epilogueGranularity > 0)) {
+            AscendC::CrossCoreWaitFlag<0x2>(1);        // Swiglu等GMM1【1】
+            AscendC::SyncAll<true>();
+            if (dequantSum2 > 0) {
+                uint32_t rowStartThisCore = dequantSum1;
+                MatrixCoord offsetC{rowStartThisCore, 0};
+                uint32_t dequantLen = dequantSum2;
+                MatrixCoord shapeC{dequantLen, params.problemShape.n()};
+                LayoutC layoutC{dequantLen, params.problemShape.n()};
+                int64_t gmOffsetC = layoutC.GetOffset(offsetC);
+                int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
+                blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], coreNum);
             }
-            MatrixCoord shapeC{dequantLen, params.problemShape.n()};
-            LayoutC layoutC{dequantLen, params.problemShape.n()};
-            int64_t gmOffsetC = layoutC.GetOffset(offsetC);
-            int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
-            blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], coreNum);
+            AscendC::SyncAll<true>();
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(2);       // swiglu通知GMM2【2】
         }
 
         blockEpilogue1.Finalize();
-        AscendC::SyncAll<true>();
-        AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(2);       // swiglu通知GMM2【2】
-        //swglu end
+
+
         CombineSetFlag();
-        
         #ifdef __COMBINE_V2__
         CombineV2(params, blockEpilogue2);
         #else
@@ -978,6 +986,11 @@ private:
         icache_preload(8);
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentExpertM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
+            if (preSrcExpertSum >= params.maxOutputSize) {
+                currentExpertM = 0;
+            } else if (preSrcExpertSum + currentExpertM > params.maxOutputSize) {
+                currentExpertM = params.maxOutputSize - preSrcExpertSum;
+            }
             GemmCoord inGroupProblemShape{currentExpertM, n2, k2}; // M N K
             blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
             uint32_t coreLoops = blockScheduler.GetCoreLoops();
@@ -1027,6 +1040,7 @@ private:
         }
         blockEpilogue.Finalize();
     }
+
 
 private:
   struct WorkspaceInfo {
