@@ -761,7 +761,8 @@ CATLASS_DEVICE
         uint32_t prevGroupSum1 = 0;
         uint32_t dequantSum = 0;
         int32_t syncLoopIdx = -1;
-        BlockEpilogue1 blockEpilogue(resource);
+        uint32_t n = params.problemShape.n();
+        BlockEpilogue1 blockEpilogue(resource, n);
         for (int32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
                 uint32_t rowStart = (dstEpIdx == 0 ? 0 : cumsumMM((dstEpIdx - 1) * params.expertPerRank + groupIdx)) + prevGroupSum1;
