@@ -62,7 +62,7 @@ class DynamicTable:
     placement_table = None
 
 
-class DynamicEplbV2(EplbPolicy):
+class SwiftBalanceEplb(EplbPolicy):
 
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
