@@ -24,6 +24,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 import vllm_ascend.envs as envs_ascend
+from vllm.config import VllmConfig
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
@@ -48,6 +49,12 @@ def setup_moe_comm_method(moe_config):
     _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
 
 
+def set_gmmswigluquant_method():
+    vllm_config = VllmConfig()
+    ascend_fusion_config = vllm_config.additional_config.get("ascend_fusion_config", {})
+    return ascend_fusion_config.get("fusion_ops_gmmswigluquant", True)
+
+
 @dataclass
 class FusedExpertsResult:
     routed_out: torch.Tensor
@@ -69,6 +76,7 @@ class MoECommMethod(ABC):
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
+        self.use_fusion_ops = set_gmmswigluquant_method()
 
     def prepare(
         self,
@@ -159,7 +167,7 @@ class MoECommMethod(ABC):
             w2_offset=w2_offset,
             topk_scales=dispatch_results.topk_scales,
             with_quant=use_int8_w8a8 or use_int4_w4a8 or use_int4_w4a16,
-            fusion=use_int8_w8a8,
+            fusion=use_int8_w8a8 and self.use_fusion_ops,
             need_trans=need_trans,
             dynamic_eplb=dynamic_eplb)
 
