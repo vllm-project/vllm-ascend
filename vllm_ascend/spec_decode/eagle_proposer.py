@@ -1016,7 +1016,7 @@ class EagleProposer(VllmEagleProposer):
                 update_attn_params(self.update_stream, forward_context,
                                    num_tokens, self.vllm_config)
 
-    # padding tensor into desired size for common_attn_metadata
+    # padding tensor into desired size
     def _pad_tensor(self, tensor, pad_size):
         pad = [0] * (2 * tensor.dim() - 1) + [pad_size]
         padded_tensor = F.pad(tensor, pad, mode="constant", value=0)
