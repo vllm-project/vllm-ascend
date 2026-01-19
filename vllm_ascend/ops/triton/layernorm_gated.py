@@ -5,17 +5,9 @@
 # This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 # mypy: ignore-errors
-from typing import Optional
 
 import torch
-import torch.nn as nn
-from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.triton_utils import tl, triton
-
-
-
-    
-
 
 @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
