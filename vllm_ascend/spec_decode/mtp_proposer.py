@@ -337,8 +337,11 @@ class MtpProposer(EagleProposer):
                         decode_metadata = getattr(attn_metadata[layer_name],
                                                   "decode", None)
                         if self.use_async_scheduling and decode_metadata is not None:
-                            actual_size = len(
-                                decode_metadata.actual_seq_lengths_q)
+                            if self.pcp_size * self.dcp_size > 1:
+                                actual_size = sum(attn_metadata[layer_name].query_lens[:attn_metadata[layer_name].num_decodes])
+                            else:
+                                actual_size = len(
+                                    decode_metadata.actual_seq_lengths_q)
 
                             decode_metadata.seq_lens_list = \
                                 decode_metadata.seq_lens_list[:actual_size]
