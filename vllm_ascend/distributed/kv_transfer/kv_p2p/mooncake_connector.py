@@ -1483,12 +1483,12 @@ class MooncakeConnectorWorker:
             ):
                 for remote_port_list in remote_port_head_list:
                     for remote_port in remote_port_list:
-                        remote_port_send_num[remote_port]['num'] += 1
+                        remote_port_send_num[remote_port]["num"] += 1
             return remote_port_send_num
 
         if meta.remote_engine_id not in self.local_remote_block_port_mapping:
             self.local_remote_block_port_mapping[meta.remote_engine_id] = None
-        
+
         if self.local_remote_block_port_mapping[meta.remote_engine_id] is None:
             local_remote_block_port_mappings = get_local_remote_block_port_mappings(
             )
