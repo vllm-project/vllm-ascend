@@ -13,10 +13,11 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
 
 from vllm_ascend.utils import AscendDeviceType
@@ -27,8 +28,20 @@ def dummy_tensor():
     return torch.randn(4, 8, dtype=torch.float16)
 
 
+@pytest.fixture
+def default_vllm_config():
+    mock_config = MagicMock()
+
+    mock_config.compilation_config.dispatch_forward_backend = "eager"
+
+    mock_config.compilation_config.custom_ops = ["all"]
+
+    with set_current_vllm_config(mock_config):
+        yield mock_config
+
+
 @patch("torch_npu.npu_fast_gelu", side_effect=lambda x: x + 1)
-def test_QuickGELU_forward(mock_gelu, dummy_tensor):
+def test_QuickGELU_forward(mock_gelu, dummy_tensor, default_vllm_config):
     layer = QuickGELU()
     out = layer.forward(dummy_tensor)
 
@@ -45,7 +58,7 @@ def test_QuickGELU_forward(mock_gelu, dummy_tensor):
        side_effect=lambda x: None)
 def test_SiluAndMul_forward(mock_maybe_prefetch_mlp_down_proj,
                             mock_maybe_wait_prefetch_done, mock_swiglu,
-                            is_310p, dummy_tensor):
+                            is_310p, dummy_tensor, default_vllm_config):
 
     with patch("vllm_ascend.utils.get_ascend_device_type",
                return_value=AscendDeviceType._310P
