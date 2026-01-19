@@ -328,7 +328,8 @@ jobs:
           # long_sequence
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_basic.py
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_chunked_prefill.py
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_chunked_prefill_cp.py
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_prefix_caching_cp.py
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_mtp.py
 
           # spec_decode
