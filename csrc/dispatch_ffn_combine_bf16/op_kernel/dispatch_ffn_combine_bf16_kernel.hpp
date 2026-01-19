@@ -512,14 +512,6 @@ CATLASS_DEVICE
         int64_t preCurrentmSum = 0;
         int32_t syncLoopIdx = -1;
 
-        __gm__ ElementB* weight1Array[MAX_EXPERTS_PER_RANK];
-        __gm__ ElementScale * scale1Array[MAX_EXPERTS_PER_RANK];
-
-        int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
-        for (uint32_t loopIdx = 0; loopIdx < loopCount; ++loopIdx) {
-            weight1Array[loopIdx] = reinterpret_cast<__gm__ ElementB*>(GetTensorAddr<int8_t>(loopIdx, params.ptrB1));
-            scale1Array[loopIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(loopIdx, params.ptrScale1));
-        }
         AscendC::PipeBarrier<PIPE_ALL>();
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
@@ -532,8 +524,8 @@ CATLASS_DEVICE
             AscendC::GlobalTensor<ElementB> gmB1;
             AscendC::GlobalTensor<ElementScale> gmS;
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
-            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight1Array[arrayGroupIdx]));
-            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale1Array[arrayGroupIdx]));
+            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(weight1Array[arrayGroupIdx])));
+            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(scale1Array[arrayGroupIdx])));
 
             AscendC::PipeBarrier<PIPE_ALL>();
 
@@ -634,13 +626,6 @@ CATLASS_DEVICE
             lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
         }
 
-        __gm__ ElementB* weight2Array[MAX_EXPERTS_PER_RANK];
-        __gm__ ElementScale * scale2Array[MAX_EXPERTS_PER_RANK];
-        int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
-        for (uint32_t loopIdx = 0; loopIdx < loopCount; ++loopIdx) {
-            weight2Array[loopIdx] = reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(loopIdx, params.ptrB2));
-            scale2Array[loopIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(loopIdx, params.ptrScale2));
-        }
         AscendC::PipeBarrier<PIPE_ALL>();
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
@@ -654,8 +639,8 @@ CATLASS_DEVICE
             AscendC::GlobalTensor<ElementScale> gmS2;
             AscendC::PipeBarrier<PIPE_ALL>();
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
-            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight2Array[arrayGroupIdx]));
-            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale2Array[arrayGroupIdx]));
+            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(weight2Array[arrayGroupIdx])));
+            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(scale2Array[arrayGroupIdx])));
 
             if (currentM <= L1TileShape::M) {
                 gmB2.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
