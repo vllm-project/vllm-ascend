@@ -158,6 +158,29 @@ def test_qwen3_moe_fc2_tp2() -> None:
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+@patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "1"})
+def test_qwen3_moe_fc2_oshard_tp2() -> None:
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    sampling_params = SamplingParams(max_tokens=5,
+                                     temperature=0.0,
+                                     top_k=50,
+                                     top_p=0.9)
+
+    with VllmRunner(
+            snapshot_download("Qwen/Qwen3-30B-A3B"),
+            dtype="auto",
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
+            enable_expert_parallel=True,
+            enforce_eager=
+            True,  # TODO(Levi-JQ): support graph mode for fc2 in Qwen 
+            additional_config={"layer_sharding": ["o_proj"]}) as vllm_model:
+        vllm_model.generate(example_prompts, sampling_params)
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_deepseek_v2_lite_fc1_tp2() -> None:
     example_prompts = [
         "test" * 1001,
@@ -211,4 +234,30 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
             cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
     ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@patch.dict(os.environ, {"HCCL_OP_EXPANSION_MODE": "AIV"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"})
+@patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner("vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+                    tensor_parallel_size=2,
+                    quantization="ascend",
+                    enable_expert_parallel=True,
+                    compilation_config={
+                        "cudagraph_capture_sizes": [3, 6, 9, 12],
+                        "cudagraph_mode": "FULL_DECODE_ONLY"
+                    },
+                    speculative_config={
+                        "num_speculative_tokens": 2,
+                        "method": "deepseek_mtp"
+                    },
+                    reasoning_parser="deepseek_v3",
+                    tokenizer_mode="deepseek_v32") as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

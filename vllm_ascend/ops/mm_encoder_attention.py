@@ -19,10 +19,17 @@ import einops
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import MultiModalConfig
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.utils import vllm_version_is
+
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention  # type: ignore
+else:
+    from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
+# isort: on
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight

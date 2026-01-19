@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.distributed as dist
 
-from vllm_ascend.distributed.communicator import NPUCommunicator
+from vllm_ascend.distributed.device_communicators.npu_communicator import \
+    NPUCommunicator
 
 
 class TestNPUCommunicator(unittest.TestCase):

@@ -12,6 +12,7 @@ if 'torch_npu._inductor' not in sys.modules:
 from vllm_ascend.attention.sfa_v1 import (AscendSFABackend, AscendSFAImpl,
                                           AscendSFAMetadata,
                                           AscendSFAMetadataBuilder)
+from vllm_ascend.utils import enable_dsa_cp
 
 
 class TestAscendSFABackend(TestBase):
@@ -35,7 +36,6 @@ class TestAscendSFABackend(TestBase):
 class TestAscendSFAMetadata(TestBase):
 
     def test_ascend_sfa_metadata_default(self):
-        has_prefill = True
         num_actual_tokens = 100
         slot_mapping = torch.randn(100, 4, 1024)
         seq_lens = torch.tensor([30, 50])
@@ -53,7 +53,6 @@ class TestAscendSFAMetadata(TestBase):
         attn_state = AscendAttentionState.ChunkedPrefill
 
         metadata = AscendSFAMetadata(
-            has_prefill=has_prefill,
             num_actual_tokens=num_actual_tokens,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
@@ -67,7 +66,6 @@ class TestAscendSFAMetadata(TestBase):
             attn_state=attn_state,
         )
 
-        self.assertEqual(metadata.has_prefill, has_prefill)
         self.assertEqual(metadata.num_actual_tokens, num_actual_tokens)
         self.assertIs(metadata.slot_mapping, slot_mapping)
         self.assertTrue(torch.equal(metadata.seq_lens, seq_lens))
@@ -82,6 +80,27 @@ class TestAscendSFAMetadata(TestBase):
 
 
 class TestAscendSFAMetadataBuilder(TestBase):
+
+    def setUp(self):
+        self.mock_cfg = MagicMock()
+
+        self.mock_cfg.parallel_config = MagicMock()
+        self.mock_cfg.parallel_config.tensor_parallel_size = 1
+        self.mock_cfg.parallel_config.prefill_context_parallel_size = 1
+        self.mock_cfg.parallel_config.decode_context_parallel_size = 1
+
+        self.mock_cfg.compilation_config = MagicMock()
+        self.mock_cfg.compilation_config.pass_config = MagicMock()
+        self.mock_cfg.compilation_config.pass_config.enable_sp = False
+
+        self.mock_cfg.speculative_config.num_speculative_tokens = 0
+
+        self.patcher = patch("vllm.config.get_current_vllm_config",
+                             return_value=self.mock_cfg)
+        self.patcher.start()
+
+        if hasattr(enable_dsa_cp, "cache_clear"):
+            enable_dsa_cp.cache_clear()
 
     def test_ascend_sfa_metadata_builder_default(self):
         kv_cache_spec = MagicMock()
@@ -100,8 +119,22 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert builder.device == device
         assert builder.vllm_config == vllm_config
 
+    @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
-    def test_ascend_sfa_metadata_builder_build(self, mock_get_cos_and_sin_mla):
+    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp")
+    def test_ascend_sfa_metadata_builder_build(
+        self,
+        mock_enable_dsa_cp,
+        mock_get_cos_and_sin_mla,
+        mock_get_current_vllm_config,
+    ):
+        mock_enable_dsa_cp.return_value = False
+
+        cfg = MagicMock()
+        cfg.model_config = MagicMock()
+        cfg.model_config.hf_text_config = MagicMock()
+
+        mock_get_current_vllm_config.return_value = cfg
         kv_cache_spec = MagicMock()
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
@@ -144,9 +177,16 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
         assert metadata.slot_mapping.shape == (100, 4, 1024)
 
+    @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     def test_ascend_sfa_metadata_builder_build_for_graph_capture(
-            self, mock_get_cos_and_sin_mla):
+            self, mock_get_cos_and_sin_mla, mock_get_current_vllm_config):
+        cfg = MagicMock()
+        cfg.model_config = MagicMock()
+        cfg.model_config.hf_text_config = MagicMock()
+
+        mock_get_current_vllm_config.return_value = cfg
+
         kv_cache_spec = MagicMock()
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
