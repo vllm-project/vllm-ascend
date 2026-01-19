@@ -206,7 +206,7 @@ class NPUPlatform(Platform):
 
         elif model_config and hasattr(model_config.hf_text_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
-        
+
         ascend_fusion_config = ascend_config.ascend_fusion_config
         if ascend_fusion_config:
             vllm_config.additional_config.setdefault("ascend_fusion_config", {}).update(
