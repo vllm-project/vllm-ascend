@@ -700,7 +700,9 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _send_done_recv_signal(self, request_id: str, remote_host: str,
                                remote_handshake_port: int,
-                               remote_port_send_num: dict[int, dict[str, int | str]]):
+                               remote_port_send_num: dict[int,
+                                                          dict[str,
+                                                               int | str]]):
         logger.debug("Sending done recving signal for request %s to %s:%d",
                      request_id, remote_host, remote_handshake_port)
         sock: Optional[zmq.Socket] = None  # type: ignore
@@ -1165,7 +1167,8 @@ class MooncakeConnectorWorker:
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping: dict[
             str, Optional[List[List[int]]]] = {}
-        self.remote_port_send_num: dict[str, dict[int, dict[str, int | str]]] = {}
+        self.remote_port_send_num: dict[str, dict[int, dict[str,
+                                                            int | str]]] = {}
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -1454,10 +1457,12 @@ class MooncakeConnectorWorker:
         def get_remote_port_send_num(local_remote_block_port_mappings):
             remote_port_send_num: dict[int, dict[str, int | str]] = {}
             for port in range(self._prefill_tp_size * meta.remote_pcp_size):
-                remote_host = meta.remote_multi_nodes_meta_mapping[str(port)]['host']
+                remote_host = meta.remote_multi_nodes_meta_mapping[str(
+                    port)]['host']
                 remote_port_send_num[meta.remote_port + port] = {}
                 remote_port_send_num[meta.remote_port + port]['num'] = 0
-                remote_port_send_num[meta.remote_port + port]['host'] = remote_host
+                remote_port_send_num[meta.remote_port +
+                                     port]['host'] = remote_host
             for local_port in local_remote_block_port_mappings.keys():
                 remote_port_head_list = local_remote_block_port_mappings[
                     local_port]
@@ -1468,7 +1473,7 @@ class MooncakeConnectorWorker:
 
         if meta.remote_engine_id not in self.local_remote_block_port_mapping:
             self.local_remote_block_port_mapping[meta.remote_engine_id] = None
-        
+
         if self.local_remote_block_port_mapping[meta.remote_engine_id] is None:
             local_remote_block_port_mappings = get_local_remote_block_port_mappings(
             )
