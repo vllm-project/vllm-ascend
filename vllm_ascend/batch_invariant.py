@@ -27,8 +27,12 @@ logger = init_logger(__name__)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.batch_invariant.matmul import (
-        addmm_batch_invariant, bmm_batch_invariant, linear_batch_invariant,
-        matmul_batch_invariant, mm_batch_invariant)
+        addmm_batch_invariant,
+        bmm_batch_invariant,
+        linear_batch_invariant,
+        matmul_batch_invariant,
+        mm_batch_invariant,
+    )
 
 
 def override_envs_for_invariance():
@@ -73,10 +77,11 @@ def init_batch_invariance():
     if vllm_is_batch_invariant():
         if HAS_TRITON:
             logger.info(
-                "Enabling batch-invariant mode for vLLM on Ascend NPU.", )
+                "Enabling batch-invariant mode for vLLM on Ascend NPU.",
+            )
             override_envs_for_invariance()
             enable_batch_invariant_mode()
         else:
             logger.warning(
-                "Batch-invariant mode requested but Triton is not available."
-                "skipping batch-invariant initialization.", )
+                "Batch-invariant mode requested but Triton is not available.skipping batch-invariant initialization.",
+            )
