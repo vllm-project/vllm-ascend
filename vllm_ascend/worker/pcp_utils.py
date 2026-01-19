@@ -17,8 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
-from typing import List
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 
 import numpy as np
 import torch
