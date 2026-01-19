@@ -372,6 +372,25 @@ class NPUPlatform(Platform):
                     "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0."
                 )
 
+        # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
+        # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
+        # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
+        # Find more details about how to configure this environment variable at https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
+        if model_config and not model_config.enable_sleep_mode:
+            npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+            # This environment variable may have more than one key-value pairs.
+            # We should append ",expandable_segments:True" to the current configs.
+            # For example: "page_size:1g" + ",expandable_segments:True".
+            # NOTE: `max_split_size_mb` or `garbage_collection_threshold` cannot
+            # be enabled together with `expandable_segments=True`.
+            if "expandable_segments" not in npu_alloc_configs and \
+                "max_split_size_mb" not in npu_alloc_configs and \
+                "garbage_collection_threshold" not in npu_alloc_configs:
+                npu_alloc_configs += ",expandable_segments:True"
+            os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
+            logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
+
+
     @classmethod
     def import_kernels(cls) -> None:
         # Directly importing vllm_ascend_C prevents ASCEND_RT_VISIBLE_DEVICES
