@@ -93,6 +93,7 @@ public:
         LayoutD1 layoutD1;
         LayoutD2 layoutD2;
         GM_ADDR ptrWorkspace;
+        GM_ADDR ptrExpertTokenNums;
         int32_t EP;
         int32_t listLen;
         int32_t expertPerRank;
@@ -137,7 +138,7 @@ public:
             GM_ADDR expertIdx_, GM_ADDR moeInitRoutingQuantV2Scale_,
             GM_ADDR moeInitRoutingQuantV2Offset_,
             GM_ADDR expertTokensBeforeCapacity_, GM_ADDR probs_,
-            GM_ADDR ptrWorkspace_, int32_t ubMoveNum_,
+            GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_, int32_t ubMoveNum_,
             optiling::MoeInitRoutingV2TilingData moeInitRoutingQuantV2TilingData_,
             GM_ADDR symmetricPtr_ = nullptr
         ) : problemShape(problemShape_),
@@ -154,7 +155,7 @@ public:
             expertIdx(expertIdx_), moeInitRoutingQuantV2Scale(moeInitRoutingQuantV2Scale_),
             moeInitRoutingQuantV2Offset(moeInitRoutingQuantV2Offset_),
             expertTokensBeforeCapacity(expertTokensBeforeCapacity_), probs(probs_),
-            ptrWorkspace(ptrWorkspace_), ubMoveNum(ubMoveNum_),symmetricPtr(symmetricPtr_),
+            ptrWorkspace(ptrWorkspace_), ptrExpertTokenNums(gmExpertTokenNums_), ubMoveNum(ubMoveNum_),symmetricPtr(symmetricPtr_),
             moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_)
         {
             moeInitRoutingQuantV2TilingData.vbsComputeParamsOp = moeInitRoutingQuantV2TilingData_.vbsComputeParamsOp;
@@ -735,6 +736,13 @@ CATLASS_DEVICE
         }
         AscendC::SyncAll<true>();
         AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(0);
+
+        AscendC::GlobalTensor<int32_t> ExpertTokenNums;
+        ExpertTokenNums.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.ptrExpertTokenNums));
+        AscendC::GlobalTensor<int32_t> LcalCumsumMM;
+        LcalCumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrcumsumMM + (params.EP - 1) * params.expertPerRank));
+        CopyGMToGM(ExpertTokenNums, LcalCumsumMM, params.expertPerRank, params.ubMoveNum);
+        AscendC::SyncAll<true>();
 
         uint32_t curGroupOffset = 0;
         int32_t prevSumBeforeRank = 0;
