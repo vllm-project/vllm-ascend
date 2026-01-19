@@ -391,13 +391,6 @@ private:
         int64_t preCurrentmSum = 0;
         int32_t syncLoopIdx = -1;
 
-        __gm__ ElementB* weight1Array[MAX_EXPERTS_PER_RANK];
-        __gm__ ElementScale * scale1Array[MAX_EXPERTS_PER_RANK];
-        int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
-        for (uint32_t loopIdx = 0; loopIdx < loopCount; ++loopIdx) {
-            weight1Array[loopIdx] = reinterpret_cast<__gm__ ElementB*>(GetTensorAddr<int8_t>(loopIdx, params.ptrB1));
-            scale1Array[loopIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(loopIdx, params.ptrScale1));
-        }
         AscendC::PipeBarrier<PIPE_ALL>();
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
@@ -410,8 +403,8 @@ private:
             AscendC::GlobalTensor<ElementB> gmB1;
             AscendC::GlobalTensor<ElementScale> gmS;
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
-            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight1Array[arrayGroupIdx]));
-            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale1Array[arrayGroupIdx]));
+            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(arrayGroupIdx, params.ptrB1)));
+            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(arrayGroupIdx, params.ptrScale1)));
             AscendC::PipeBarrier<PIPE_ALL>();
             if (currentM <= L1TileShape::M) {
                 gmB1.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
@@ -429,14 +422,7 @@ private:
 
             for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
                 for(;syncGroupIdx <= groupIdx; syncGroupIdx++) {
-                    #ifdef __SOFT_SYNC__
-                    while(aivFinishGroups < (syncGroupIdx + 1)) {
-                        gm_dcci(aivFinishPtr);
-                        aivFinishGroups = *aivFinishPtr;
-                    }
-                    #else 
                     AscendC::CrossCoreWaitFlag<0x2>(0);
-                    #endif
                 }
 
                 // Compute block location
@@ -508,13 +494,6 @@ private:
             lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
         }
 
-        __gm__ ElementB* weight2Array[MAX_EXPERTS_PER_RANK];
-        __gm__ ElementScale * scale2Array[MAX_EXPERTS_PER_RANK];
-        int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
-        for (uint32_t loopIdx = 0; loopIdx < loopCount; ++loopIdx) {
-            weight2Array[loopIdx] = reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(loopIdx, params.ptrB2));
-            scale2Array[loopIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(loopIdx, params.ptrScale2));
-        }
         AscendC::PipeBarrier<PIPE_ALL>();
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
@@ -527,8 +506,8 @@ private:
             AscendC::GlobalTensor<ElementB> gmB2;
             AscendC::GlobalTensor<ElementScale> gmS2;
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
-            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight2Array[arrayGroupIdx]));
-            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale2Array[arrayGroupIdx]));
+            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(arrayGroupIdx, params.ptrB2)));
+            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(arrayGroupIdx, params.ptrScale2)));
             AscendC::PipeBarrier<PIPE_ALL>();
             if (currentM <= L1TileShape::M) {
                 gmB2.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
@@ -551,16 +530,9 @@ private:
             }
 
             for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
-                #ifdef __TILE_SYNC__
-                syncLoopIdx ++;
-                if (syncLoopIdx >= 96) {
-                    syncLoopIdx = 0;
-                }
-                #else
                 if (loopIdx + coreNum >= coreLoops) {
                     syncLoopIdx = groupIdx;
                 }
-                #endif
 
                 // Compute block location
                 GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
@@ -697,11 +669,7 @@ private:
             AscendC::DataCopyPad(preSumBeforeRank[dstEpIdx * params.expertPerRank], prevSumBuf,
                 AscendC::DataCopyParams{1, static_cast<uint16_t>(params.expertPerRank * sizeof(int32_t)), 0, 0});
         }
-        #ifdef __SOFT_SYNC__
-        if (coreIdx == coreNum - 1) {       // crossranksync有时间，最后一个core做初始化
-            InitArithProgress(params);
-        }
-        #endif
+
         AscendC::SyncAll<true>();
     }
 
@@ -766,7 +734,6 @@ private:
 
     CATLASS_DEVICE
     void CombineSetFlag() {
-        #ifdef __COMBINE_V2__
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
@@ -775,12 +742,6 @@ private:
         AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID3);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
-        #else
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
-        #endif
     }
 
 
@@ -801,11 +762,7 @@ private:
 
         AscendC::SyncAll<true>();
 
-        #ifdef __CROSSRANKSYNCANDALLGATHERV1__
-        CrossRankSyncAndlocalTokenPerExpertAllGatherAndGetSumPreRank(params, localTokenPerExpertOffset);
-        #else
         CrossRankSyncAndlocalTokenPerExpertAllGatherAndGetSumPreRankV2(params, localTokenPerExpertOffset);
-        #endif
 
         if (coreIdx == 0) {
             GetCumsumForMMAIV(tokenPerExpert, cumsumMM, params.expertPerRank, params.rank, params.EP);
@@ -823,11 +780,6 @@ private:
 
         uint32_t prevGroupSum1 = 0, dequantSum1 = 0, dequantSum2 = 0;
         uint32_t dequantSum = 0;
-        #ifdef __SOFT_SYNC__
-        if (coreIdx == coreNum - 1) {
-            UpdateAicFlags(params);
-        }
-        #endif
 
         icache_preload(8);
         for (int32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
@@ -855,19 +807,10 @@ private:
                     // 通信scale
                     //CopyGMToGM(gmPerTokenScale1[rowStart], gmRemotePerTokenScale[rowSrc], rows, rows);
                 }
-                #ifdef __SOFT_SYNC__
-                //软同步的set
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
-                __gm__ float* flagPtr = workspaceInfo.ptrSoftFlagBase + dstEpIdx * FLAGSTRIDE;
-                *flagPtr = 1.0f * (groupIdx + 1);
-                gm_dcci(flagPtr);
-                #endif
+
             }
-            #ifndef __SOFT_SYNC__
             AscendC::SyncAll<true>();
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(0);   // V通知C当前轮的通信已完成
-            #endif
 
             prevGroupSum1 += currentM;
 
@@ -891,7 +834,7 @@ private:
         }
 
         uint32_t n2 = params.problemShape.k();
-        #ifdef __COMBINE_V2__
+
         typename BlockEpilogue2::Params epilogueParams{
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
@@ -903,14 +846,7 @@ private:
             shmem,
             static_cast<int32_t>(peermemInfo.offsetD)
         };
-        #else
-        typename BlockEpilogue2::Params epilogueParams{
-            static_cast<int32_t>(params.EP),
-            static_cast<int32_t>(params.expertPerRank),
-            reinterpret_cast<__gm__ int32_t *>(params.ptrWorkspace),
-            static_cast<int32_t>(n2)
-        };
-        #endif
+
         uint32_t n = params.problemShape.n();
         BlockEpilogue2 blockEpilogue2(resource, epilogueParams);
         BlockEpilogue1 blockEpilogue1(resource, n);
@@ -954,11 +890,8 @@ private:
 
 
         CombineSetFlag();
-        #ifdef __COMBINE_V2__
+
         CombineV2(params, blockEpilogue2);
-        #else
-        CombineV1(params, blockEpilogue2);
-        #endif
 
         AscendC::SyncAll<true>();
         #ifndef __CROSSRANKSYNCANDALLGATHERV1__
@@ -1010,19 +943,11 @@ private:
                     m_offset += (m_rows / 2) * m0;
                 }
 
-                #ifdef __TILE_SYNC__
-                syncLoopIdx ++;
-                if (syncLoopIdx >= 96) {
-                    syncLoopIdx = 0;
-                }
-                int32_t flag_id = 3 + syncLoopIdx / 8;
-                AscendC::CrossCoreWaitFlag<0x2>(flag_id);
-                #else
+
                 for (;syncLoopIdx <= groupIdx; syncLoopIdx ++) {
                     int32_t flag_id = 3 + syncLoopIdx / 8;
                     AscendC::CrossCoreWaitFlag<0x2>(flag_id);
                 }
-                #endif
 
                 for (int32_t cur_row = 0; cur_row < aiv_m_rows; cur_row ++) {
                     GemmCoord realTileCoord{m_offset, blockCoord.n() * L1TileShape::N, 1};
