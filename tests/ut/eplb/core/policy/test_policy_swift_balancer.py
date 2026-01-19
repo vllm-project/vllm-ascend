@@ -3,8 +3,8 @@ from typing import Dict, Set
 import numpy as np
 import pytest
 
-from vllm_ascend.eplb.core.policy.policy_dynamic_ep_v2 import (DynamicConfig,
-                                                               DynamicEplbV2)
+from vllm_ascend.eplb.core.policy.policy_swift_balancer import (DynamicConfig,
+                                                               SwiftBalanceEplb)
 
 
 @pytest.fixture
@@ -14,7 +14,7 @@ def config():
 
 @pytest.fixture
 def policy(config):
-    return DynamicEplbV2(config)
+    return SwiftBalanceEplb(config)
 
 
 def test_safe_operations(policy):
@@ -34,19 +34,19 @@ def test_safe_operations(policy):
 def test_add_redundant():
     workload = np.array([[[1, 2], [3, 4]]])
     placement = np.array([[[0, 1], [0, 1]]])
-    result = DynamicEplbV2.add_redundant(placement, workload, 2)
+    result = SwiftBalanceEplb.add_redundant(placement, workload, 2)
     assert result.shape == (1, 2)
     assert np.all(result[0] == [4, 6])  # 0:1+3, 1:2+4
 
 
 def test_get_redundant_num():
     counts = np.array([1, 2, 1])
-    assert DynamicEplbV2.get_redundant_num(3, counts) == 1  # sum(counts-1)
+    assert SwiftBalanceEplb.get_redundant_num(3, counts) == 1  # sum(counts-1)
 
 
 def test_calculate_max_heat_per_layer():
     workload = np.array([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])
-    result = DynamicEplbV2.calculate_max_heat_per_layer(workload, 2)
+    result = SwiftBalanceEplb.calculate_max_heat_per_layer(workload, 2)
     assert result == [7, 15]
 
 
@@ -69,7 +69,7 @@ def test_compute_redundant_assignments(policy):
 def test_prepare_expert_list():
     base_experts = [(0, 10), (1, 5)]
     redundant_assignments = [[2], []]
-    result = DynamicEplbV2.prepare_expert_list(base_experts,
+    result = SwiftBalanceEplb.prepare_expert_list(base_experts,
                                                redundant_assignments, 1)
     assert isinstance(result, list)
     assert len(result) == 1
@@ -79,7 +79,7 @@ def test_non_redundant_expert_information():
     origin_deployment = np.array([[0, 1]])
     updated_weights = [(0, 10), (1, 5)]
     rendun_pos: Dict[int, Set[int]] = {0: set()}
-    assignments, weights, loads, counts = DynamicEplbV2.non_redundant_expert_information(
+    assignments, weights, loads, counts = SwiftBalanceEplb.non_redundant_expert_information(
         origin_deployment, updated_weights, rendun_pos)
     assert assignments[0] == [0, 1]
     assert loads[0] == 15
