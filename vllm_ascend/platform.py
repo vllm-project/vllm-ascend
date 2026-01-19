@@ -395,13 +395,14 @@ class NPUPlatform(Platform):
             # For example: "page_size:1g" + ",expandable_segments:True".
             # NOTE: `max_split_size_mb` or `garbage_collection_threshold` cannot
             # be enabled together with `expandable_segments=True`.
-            if "expandable_segments" not in npu_alloc_configs and \
-                "max_split_size_mb" not in npu_alloc_configs and \
-                "garbage_collection_threshold" not in npu_alloc_configs:
+            if (
+                "expandable_segments" not in npu_alloc_configs
+                and "max_split_size_mb" not in npu_alloc_configs
+                and "garbage_collection_threshold" not in npu_alloc_configs
+            ):
                 npu_alloc_configs += ",expandable_segments:True"
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
-
 
     @classmethod
     def import_kernels(cls) -> None:
