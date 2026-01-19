@@ -85,6 +85,14 @@ def eagle3_model_name():
     return "vllm-ascend/EAGLE3-LLaMA3.1-Instruct-8B"
 
 
+@pytest.fixture
+def vl_model_name():
+    return "Qwen/Qwen3-VL-8B-Instruct"
+
+def vl_eagle3_model_name():
+    return "MNN/Qwen3-VL-8B-Instruct-Eagle3"
+
+
 def test_ngram_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
@@ -128,6 +136,48 @@ def test_ngram_correctness(
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
 
+
+def test_qwen3_vl_eagle_correctness(
+    test_prompts: list[list[dict[str, Any]]],
+    sampling_config: SamplingParams,
+    vl_model_name: str,
+):
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using eagle speculative decoding.
+    '''
+    with VllmRunner(
+            vl_model_name,
+            max_model_len=1024,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
+    ) as ref_llm:
+        ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
+
+    spec_model_name = vl_eagle3_model_name()
+    with VllmRunner(
+            vl_model_name,
+            speculative_config={
+                "method": "eagle3",
+                "model": spec_model_name,
+                "num_speculative_tokens": 2,
+            },
+            max_model_len=1024,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
+    ) as runner:
+        spec_outputs = runner.model.chat(test_prompts, sampling_config)
+    matches = 0
+    misses = 0
+    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+        if ref_output.outputs[0].text == spec_output.outputs[0].text:
+            matches += 1
+        else:
+            misses += 1
+            print(f"ref_output: {ref_output.outputs[0].text}")
+            print(f"spec_output: {spec_output.outputs[0].text}")
+
+    # Heuristic: expect at least 70% of the prompts to match exactly
+    # Upon failure, inspect the outputs to check for inaccuracy.
+    assert matches > int(0.66 * len(ref_outputs))
 
 def test_suffix_correctness(
     test_prompts: list[list[dict[str, Any]]],
