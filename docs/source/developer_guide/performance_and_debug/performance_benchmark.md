@@ -1,4 +1,5 @@
 # Performance Benchmark
+
 This document details the benchmark methodology for vllm-ascend, aimed at evaluating the performance under a variety of workloads. To maintain alignment with vLLM, we use the [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) script provided by the vllm project.
 
 **Benchmark Coverage**: We measure offline E2E latency and throughput, and fixed-QPS online serving benchmarks. For more details, see [vllm-ascend benchmark scripts](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
@@ -38,10 +39,12 @@ pip install -r benchmarks/requirements-bench.txt
 ```
 
 ## 3. Run basic benchmarks
+
 This section introduces how to perform performance testing using the benchmark suite built into VLLM.
 
 ### 3.1 Dataset
-VLLM supports a variety of (datasets)[https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/datasets.py].
+
+VLLM supports a variety of [datasets](https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/datasets.py).
 
 <style>
 th {

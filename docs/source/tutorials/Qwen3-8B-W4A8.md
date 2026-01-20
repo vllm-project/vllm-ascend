@@ -1,6 +1,7 @@
 # Qwen3-8B-W4A8
 
 ## Run Docker Container
+
 :::{note}
 w4a8 quantization feature is supported by v0.9.1rc2 and later.
 :::
@@ -27,9 +28,10 @@ docker run --rm \
 ```
 
 ## Install modelslim and Convert Model
+
 :::{note}
 You can choose to convert the model yourself or use the quantized model we uploaded,
-see https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8
+see <https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8>
 :::
 
 ```bash
@@ -69,6 +71,7 @@ python quant_qwen.py \
 ```
 
 ## Verify the Quantized Model
+
 The converted model files look like:
 
 ```bash

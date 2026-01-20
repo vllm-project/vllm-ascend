@@ -37,11 +37,11 @@ jobs:
     steps:
       - name: Get vLLM version
         run: |
-          VLLM_COMMIT=2f4e6548efec402b913ffddc8726230d9311948d
+          VLLM_COMMIT=d68209402ddab3f54a09bc1f4de9a9495a283b60
           echo "VLLM_COMMIT=https://github.com/vllm-project/vllm/commit/$VLLM_COMMIT" >> $GITHUB_ENV
 
       - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v4.2.2
+        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 # v4.2.2
 
       - name: Set up Python
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
@@ -107,7 +107,7 @@ jobs:
                 '- A PR should do only one thing, smaller PRs enable faster reviews.\n' +
                 '- Every PR should include unit tests and end-to-end tests ‌to ensure it works and is not broken by other future PRs.\n' +
                 '- Write the commit message by fulfilling the PR description to help reviewer and future developers understand.\n\n' +
-                'If CI fails, you can run linting and testing checks locally according [Contributing](https://vllm-ascend.readthedocs.io/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://vllm-ascend.readthedocs.io/zh-cn/latest/developer_guide/contribution/testing.html).'
+                'If CI fails, you can run linting and testing checks locally according [Contributing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/testing.html).'
             })
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

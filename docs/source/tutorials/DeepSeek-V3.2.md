@@ -153,9 +153,10 @@ In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`.
 We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node environment with 1P1D for better performance.
 
 Before you start, please
+
 1. prepare the script `launch_online_dp.py` on each node.
 
-    ```
+    ```python
     import argparse
     import multiprocessing
     import os
@@ -260,7 +261,7 @@ Before you start, please
 
     1. Prefill node 0
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.105 # change to your own ip
 
@@ -276,9 +277,6 @@ Before you start, please
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
-
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
 
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
@@ -301,6 +299,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -311,12 +313,12 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
             "engine_id": "0",
-            "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
@@ -334,7 +336,7 @@ Before you start, please
 
     2. Prefill node 1
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.113 # change to your own ip
 
@@ -350,9 +352,6 @@ Before you start, please
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
-
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
 
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
@@ -376,6 +375,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -386,12 +389,12 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
             "engine_id": "0",
-            "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
@@ -408,7 +411,7 @@ Before you start, please
 
     3. Decode node 0
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.117 # change to your own ip
 
@@ -427,8 +430,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
 
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
@@ -453,6 +454,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -469,7 +474,6 @@ Before you start, please
             "kv_role": "kv_consumer",
             "kv_port": "30100",
             "engine_id": "1",
-            "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
@@ -487,7 +491,7 @@ Before you start, please
 
     4. Decode node 1
 
-        ```
+        ```shell
         nic_name="enp48s3u1u1" # change to your own nic name
         local_ip=141.61.39.181 # change to your own ip
 
@@ -506,9 +510,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
@@ -532,6 +533,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -548,7 +553,6 @@ Before you start, please
             "kv_role": "kv_consumer",
             "kv_port": "30100",
             "engine_id": "1",
-            "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
@@ -568,28 +572,28 @@ Once the preparation is done, you can start the server with the following comman
 
 1. Prefill node 0
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address 141.61.39.105 --dp-rpc-port 12890 --vllm-start-port 9100
 ```
 
 2. Prefill node 1
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address 141.61.39.105 --dp-rpc-port 12890 --vllm-start-port 9100
 ```
 
 3. Decode node 0
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
 ```
 
 4. Decode node 1
 
-```
+```shell
 # change ip to your own
 python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
 ```
@@ -660,6 +664,7 @@ Run performance evaluation of `DeepSeek-V3.2-W8A8` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

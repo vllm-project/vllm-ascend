@@ -33,7 +33,6 @@ DTYPE = "half"
 def model_name(request):
     yield snapshot_download(request.param)
 
-
 def test_cross_encoder_score_1_to_1(model_name):
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 

@@ -114,7 +114,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                              and not vllm_config.model_config.enforce_eager)
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
 
-        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
 
@@ -190,9 +190,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
         pertoken_scale: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -246,24 +243,16 @@ class AscendW8A8DynamicFusedMoEMethod:
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
-        # When VLLM_ASCEND_ENABLE_FUSED_MC2 == 2, use dispatch_gmm_combine_decode, need fp32 scale
-        w2_weight_scale_fp32_flag = (
-            get_forward_context().moe_comm_type == MoECommType.FUSED_MC2
-            and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2)
         if self.dynamic_eplb:
             w1 = layer.w13_weight_list
             w1_scale = layer.w13_weight_scale_fp32_list
             w2 = layer.w2_weight_list
-            w2_scale = layer.w2_weight_scale_fp32_list \
-                if w2_weight_scale_fp32_flag else layer.w2_weight_scale_list
+            w2_scale = layer.w2_weight_scale_list
         else:
             w1 = [layer.w13_weight]
             w1_scale = [layer.w13_weight_scale_fp32]
             w2 = [layer.w2_weight]
-            w2_scale = [
-                layer.w2_weight_scale_fp32
-                if w2_weight_scale_fp32_flag else layer.w2_weight_scale
-            ]
+            w2_scale = [layer.w2_weight_scale]
 
         fused_scale_flag = (get_forward_context().moe_comm_type
                             == MoECommType.FUSED_MC2
@@ -280,9 +269,6 @@ class AscendW8A8DynamicFusedMoEMethod:
             use_int8_w8a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
-            shared_experts=shared_experts,
-            quantized_x_for_share=quantized_x_for_share,
-            dynamic_scale_for_share=dynamic_scale_for_share,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -308,8 +294,6 @@ class AscendW8A8DynamicFusedMoEMethod:
             layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(
             layer.w2_weight_scale.data.shape[0], -1)
-        layer.w2_weight_scale_fp32 = layer.w2_weight_scale.data.to(
-            torch.float32)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
 
@@ -334,16 +318,11 @@ class AscendW8A8DynamicFusedMoEMethod:
                 weight.clone()
                 for weight in layer.w2_weight_scale.data.unbind(dim=0)
             ]
-            layer.w2_weight_scale_fp32_list = [
-                weight.clone()
-                for weight in layer.w2_weight_scale_fp32.data.unbind(dim=0)
-            ]
             del layer.w13_weight
             del layer.w2_weight
             del layer.w13_weight_scale
             del layer.w13_weight_scale_fp32
             del layer.w2_weight_scale
-            del layer.w2_weight_scale_fp32
             torch.npu.empty_cache()
 
 
