@@ -190,8 +190,12 @@ class AscendCompilationConfig:
     """
 
     def __init__(
-        self, fuse_norm_quant: bool = True, fuse_qknorm: bool = False, fuse_qknorm_rope: bool = True,
-        fuse_allreduce_rms: bool = False, **kwargs
+        self,
+        fuse_norm_quant: bool = True,
+        fuse_qknorm: bool = False,
+        fuse_qknorm_rope: bool = True,
+        fuse_allreduce_rms: bool = False,
+        **kwargs,
     ):
         """
         Initialize the configuration.
