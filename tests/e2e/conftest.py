@@ -18,6 +18,7 @@
 #
 
 import contextlib
+import functools
 import gc
 import json
 import logging
@@ -76,6 +77,37 @@ PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 logger = logging.getLogger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
+
+def wait_until_npu_memory_free(target_free_percentage: float = 0.5, max_wait_seconds: float = 50):
+    """Decorator to wait until the NPU memory free size is above target_free_percentage.
+
+    Args:
+        target_free_percentage (float): Target free memory size in GB.
+        max_wait_seconds (float): Maximum wait time in seconds.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            import torch_npu # type: ignore
+            _, total_npu_memory = torch.npu.mem_get_info()
+            start_time = time.time()
+            while True:
+                free_bytes, _ = torch.npu.mem_get_info()
+                if free_bytes / total_npu_memory >= target_free_percentage:
+                    break
+                elapsed = time.time() - start_time
+                if elapsed > max_wait_seconds:
+                    raise TimeoutError(
+                        f"Timeout: NPU memory free size did not reach "
+                        f"{target_free_percentage} of total npu memory within {max_wait_seconds} seconds.")
+                logger.info(
+                    f"Waiting for NPU memory to be free: "
+                    f"{free_bytes / 1024**3:.2f} GB available, "
+                    f"Elapsed time: {elapsed:.2f} s.")
+                cleanup_dist_env_and_memory()
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
