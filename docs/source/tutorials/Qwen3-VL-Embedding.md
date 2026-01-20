@@ -5,6 +5,7 @@
 The Qwen3-VL-Embedding model series are the latest additions to the Qwen family, built upon the recently open-sourced and powerful Qwen3-VL foundation model. Specifically designed for multimodal information retrieval and cross-modal understanding, this suite accepts diverse inputs including text, images, screenshots, and videos, as well as inputs containing a mixture of these modalities. This guide describes how to run the model with vLLM Ascend.
 
 The model supports three types of embeddings:
+
 - **Text-only**: Generate embeddings from text input alone
 - **Image-only**: Generate embeddings from image input alone
 - **Image+Text**: Generate combined embeddings from both image and text inputs
@@ -99,6 +100,7 @@ Processed prompts: 100%|██████████████████�
 ```
 
 For more examples, refer to the vLLM official examples:
+
 - [Offline Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/embed/vision_embedding_offline.py)
 - [Online Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/embed/vision_embedding_online.py)
 

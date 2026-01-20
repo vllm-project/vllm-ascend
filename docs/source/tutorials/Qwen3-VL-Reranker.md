@@ -1,6 +1,7 @@
 # Qwen3-VL-Reranker
 
 ## Introduction
+
 The Qwen3-VL-Embedding and Qwen3-VL-Reranker model series are the latest additions to the Qwen family, built upon the recently open-sourced and powerful Qwen3-VL foundation model. Specifically designed for multimodal information retrieval and cross-modal understanding, this suite accepts diverse inputs including text, images, screenshots, and videos, as well as inputs containing a mixture of these modalities. This guide describes how to run the model with vLLM Ascend.
 
 ## Supported Features
@@ -17,10 +18,13 @@ Refer to [supported features](../user_guide/support_matrix/supported_models.md) 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ### Installation
+
 You can use our official docker image to run `Qwen3-VL-Reranker` series models.
+
 - Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
-if you don't want to use the docker image as above, you can also build all from source:
+If you don't want to use the docker image as above, you can also build all from source:
+
 - Install `vllm-ascend` from source, refer to [installation](../installation.md).
 
 ## Deployment
@@ -206,6 +210,7 @@ Processed prompts: 100%|██████████████████�
 ```
 
 For more examples, refer to the vLLM official examples:
+
 - [Offline Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/vision_reranker_offline.py)
 - [Online Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/vision_reranker_online.py)
 
