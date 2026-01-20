@@ -581,12 +581,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
         else:
             num_heads = self.num_heads
 
-        k_nope = k_nope.view(-1, block_size, self.num_kv_heads,
-                             self.kv_lora_rank)
-        k_pe = k_pe.view(-1, block_size, self.num_kv_heads,
-                         self.qk_rope_head_dim)
-        q_nope = q_nope.view(num_tokens, num_heads, -1)
-        q_pe = q_pe.view(num_tokens, num_heads, -1)
         # use pcp & dcp split computed token nums from scheduler to compute actual seq_len and seq_mask
         k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
@@ -672,9 +666,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
-            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score(
+            attn_output, softmax_lse = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 q_nope,
-                q_pe,
                 k_nope,
                 k_nope,
                 **common_kwargs,
@@ -699,32 +692,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
         attn_lse = attn_lse.contiguous().view(
             attn_lse.shape[0] * attn_lse.shape[1] * attn_lse.shape[2])
         return attn_out, attn_lse
-
-    def _process_attn_out_lse(
-        self,
-        attn_output: torch.Tensor,
-        softmax_lse: torch.Tensor,
-        decode_meta: AscendMLADecodeMetadata,
-    ) -> torch.Tensor:
-        softmax_lse = softmax_lse.to(torch.float32)
-        attn_output = attn_output.to(torch.float32)
-        # Concat out&lse: [bs,num_heads,v_head_dim] + [bs,num_heads,1] -> [bs,num_heads,v_head_dim+1]
-        attn_out_lse = torch.cat([attn_output, softmax_lse], dim=-1)
-        if self.dcp_size > 1:
-            # permute: [bs, num_heads, v_head_dim+1] -> [num_heads, v_head_dim+1, bs]
-            attn_out_lse = attn_out_lse.permute([1, 2, 0]).contiguous()
-            attn_out_lse_all2all = torch.empty_like(attn_out_lse)
-            dist.all_to_all_single(attn_out_lse_all2all,
-                                   attn_out_lse,
-                                   group=self.dcp_group)
-            attn_out_lse = attn_out_lse_all2all.permute([2, 0, 1])
-
-        if self.pcp_size > 1:
-            # AllGather out&lse within CP group
-            attn_out_lse = get_pcp_group().all_gather(
-                attn_out_lse.contiguous(), dim=0)
-
-        return attn_out_lse
 
     def _reorg_kvcache(
         self,
