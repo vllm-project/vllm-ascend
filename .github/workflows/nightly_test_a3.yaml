@@ -150,6 +150,9 @@ jobs:
           - name: kimi-k2-thinking
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/single_node/models/test_kimi_k2_thinking.py
+          - name: vllm_mistral
+            os: linux-aarch64-a3-2
+            tests: ../vllm/tests/models/language/generation/test_mistral.py
           # TODO: Replace deepseek3.2-exp with deepseek3.2 after nightly tests pass
           # - name: deepseek3_2-exp-w8a8
           #   os: linux-aarch64-a3-16
