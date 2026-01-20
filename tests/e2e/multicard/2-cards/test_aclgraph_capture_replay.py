@@ -131,6 +131,7 @@ def _run_worker_process(
         gc.collect()
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
+        from time import sleep
 
 
 # @patch.dict(os.environ, clear=["HCCL_OP_EXPANSION_MODE","VLLM_WORKER_MULTIPROC_METHOD"])
