@@ -18,6 +18,7 @@
 #
 
 import contextlib
+import copy
 import gc
 import json
 import logging
@@ -25,19 +26,18 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
-import psutil
+import traceback
+from pathlib import Path
 from typing import Any, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import openai
+import psutil
 import pytest
 import requests
 import torch
-import copy
-import traceback
-import threading
-import asyncio
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
 from requests.exceptions import RequestException
@@ -82,8 +82,9 @@ logger = logging.getLogger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
 
-
-DISAGG_EPD_PROXY_SCRIPT = "../../../../examples/disaggregated_encoder/disagg_epd_proxy.py"
+DISAGG_EPD_PROXY_SCRIPT = Path(
+    __file__
+).parent.parent.parent / "examples" / "disaggregated_encoder" / "disagg_epd_proxy.py"
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
@@ -98,219 +99,6 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
-
-def kill_process_tree(pid):
-    """kill process and its children"""
-    try:
-        parent = psutil.Process(pid)
-        children = parent.children(recursive=True)
-        for child in children:
-            try:
-                child.terminate()
-            except psutil.NoSuchProcess:
-                pass
-
-        gone, still_alive = psutil.wait_procs(children, timeout=10)
-
-        for child in still_alive:
-            try:
-                child.kill()
-            except psutil.NoSuchProcess:
-                pass
-
-        try:
-            parent.terminate()
-            parent.wait(timeout=10)
-        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-            try:
-                parent.kill()
-            except psutil.NoSuchProcess:
-                pass
-
-    except psutil.NoSuchProcess:
-        pass
-
-
-def read_output(pipe, prefix):
-    try:
-        with pipe:
-            for line in iter(pipe.readline, ''):
-                if line:
-                    print(f"{prefix}: {line}", end='')
-
-    except Exception as e:
-        print(f"error: {e}")
-        traceback.print_exc()
-
-
-async def wait_for_server(port,
-                           host="127.0.0.1",
-                           timeout: int = 300,
-                           check_interval: float = 0.5) -> bool:
-
-    base_url = f"http://{host}:{port}"
-    health_url = f"{base_url}/health"
-
-    start_time = time.time()
-
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(health_url, timeout=3)
-            if response.status_code == 200:
-                return True
-            else:
-                print(
-                    f"❌ server start error, http error code: {response.status_code}"
-                )
-        except requests.exceptions.ConnectionError:
-            print("⏳ waiting for ready ...")
-        except requests.exceptions.RequestException as e:
-            print(f"server start error: {e}")
-
-        await asyncio.sleep(check_interval)
-    print("server start timeout")
-    return False
-
-def run_server(server_cmd: list[str], env_dict: Optional[dict[str,
-                                                                     str]],
-                log_prefix: str) -> None:
-    """Subclasses override this method to customize server process launch
-    """
-    env = os.environ.copy()
-    # the current process might initialize npu,
-    # to be safe, we should use spawn method
-    if env_dict is not None:
-        env.update(env_dict)
-    proc = subprocess.Popen(
-        server_cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-        bufsize=1)
-    stdout_thread = threading.Thread(target=read_output,
-                                     args=(proc.stdout, log_prefix),
-                                     daemon=True)
-    stderr_thread = threading.Thread(target=read_output,
-                                     args=(proc.stderr, log_prefix),
-                                     daemon=True)
-
-    stdout_thread.start()
-    stderr_thread.start()
-    return proc
-
-class RemoteEPDServer:
-    def _delete_shm(self) -> None:
-        for i, arg in enumerate(self.e_serve_args_list + self.pd_serve_args_list):
-            if "--ec-transfer-config" in arg:
-                index = arg.index("--ec-transfer-config")
-                shm_path = json.loads(arg[index + 1]).get(
-                    "ec_connector_extra_config").get("shared_storage_path")
-                args = [
-                    "rm", "-r", "-f", shm_path
-                ]
-                print(f"delete shm_path is: {shm_path}")
-                run_server(args, None,"[DELETE] ")
-
-
-    def _start_vllm_serve(self):
-        self.env_dict['VLLM_ALLOW_LONG_MAX_MODEL_LEN'] = "1"
-        self.env_dict['VLLM_USE_V1'] = "1"
-        self.env_dict['PYTORCH_NPU_ALLOC_CONF'] = "expandable_segments:True"
-
-        serve_arg_cmd = ["taskset", "-c", "0-96", "vllm", "serve"]
-
-
-        for i, e_serve_arg in enumerate(self.e_serve_args_list):
-            self.env_dict['ASCEND_RT_VISIBLE_DEVICES'] = str(i)
-            if "--port" not in e_serve_arg:
-                raise ValueError("You have manually specified the port ")
-            e_serve_arg = [*serve_arg_cmd, *e_serve_arg]
-            self._proc_list.append(run_server(e_serve_arg, self.env_dict, f"[ENCODE_{i}] "))
-
-        for i, pd_serve_arg in enumerate(self.pd_serve_args_list):
-            self.env_dict['ASCEND_RT_VISIBLE_DEVICES'] = str(i + len(self.e_serve_args_list))
-            if "--port" not in pd_serve_arg:
-                raise ValueError("You have manually specified the port ")
-            pd_serve_arg = [*serve_arg_cmd, *pd_serve_arg]
-            self._proc_list.append(run_server(pd_serve_arg, self.env_dict, f"[PD_{i}] "))
-
-
-    def __init__(self,
-                 e_serve_args,
-                 pd_serve_args,
-                 env_dict: Optional[dict[str, str]] = None,) -> None:
-        self._proc_list = list()
-        self.e_serve_args_list = list()
-        self.pd_serve_args_list = list()
-        self.model = None
-        if isinstance(e_serve_args, list):
-            if not all(isinstance(item, list) for item in e_serve_args):
-                self.e_serve_args_list.append(copy.deepcopy(e_serve_args))
-            else:
-                self.e_serve_args_list = e_serve_args
-        else:
-            raise RuntimeError("e_serve_args must be a list")
-
-        if isinstance(pd_serve_args, list):
-            if not all(isinstance(item, list) for item in pd_serve_args):
-                self.pd_serve_args_list.append(
-                        copy.deepcopy(pd_serve_args))
-            else:
-                self.pd_serve_args_list = pd_serve_args
-        else:
-            raise RuntimeError("pd_serve_args must be a list")
-
-        if env_dict is None:
-            self.env_dict = dict()
-        else:
-            self.env_dict = env_dict
-
-    async def __aenter__(self):
-        # start with
-        self._start_vllm_serve()
-        for e_serve_arg in self.e_serve_args_list:
-            index = e_serve_arg.index("--port")
-            port = e_serve_arg[index + 1]
-            await wait_for_server(port=port)
-        for pd_serve_arg in self.pd_serve_args_list:
-            index = pd_serve_arg.index("--port")
-            port = pd_serve_arg[index + 1]
-            await wait_for_server(port=port)
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        # exit with
-        for proc in self._proc_list:
-            kill_process_tree(proc.pid)
-        print("vllm instance is stoping")
-
-
-class DisaggEpdProxy:
-    def _start_disagg_proxy(self):
-        print(f"proxy param is: {self.proxy_args}")
-        proxy_args = ["python", DISAGG_EPD_PROXY_SCRIPT, *self.proxy_args]
-        self._proc_list.append(run_server(proxy_args, self.env_dict, "[PRXOY] "))
-
-    def __init__(self,
-                 proxy_args: Union[list[str], str] = None,
-                 env_dict: Optional[dict[str, str]] = None) -> None:
-        self.proxy_args = proxy_args
-        self.env_dict = env_dict
-        self._proc_list = list()
-
-    async def __aenter__(self):
-        self._start_disagg_proxy()
-        index = self.proxy_args.index("--port")
-        port = self.proxy_args[index + 1]
-        await wait_for_server(port)
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        # exit with
-        for proc in self._proc_list:
-            kill_process_tree(proc.pid)
-        print("proxy is stoping")
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
@@ -535,6 +323,176 @@ class RemoteOpenAIServer:
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
                                   **kwargs)
+
+
+class RemoteEPDServer(RemoteOpenAIServer):
+
+    def __init__(self,
+                 vllm_serve_args: Union[list, list[list]],
+                 server_host: str = '0.0.0.0',
+                 env_dict: Optional[dict[str, str]] = None,
+                 max_wait_seconds: Optional[float] = 2800) -> None:
+
+        self._proc_list = []
+
+        if env_dict is None:
+            self.env_dict = {}
+        else:
+            self.env_dict = env_dict.copy()
+
+        self.env_dict['VLLM_ALLOW_LONG_MAX_MODEL_LEN'] = "1"
+        self.env_dict['VLLM_USE_V1'] = "1"
+        self.env_dict['PYTORCH_NPU_ALLOC_CONF'] = "expandable_segments:True"
+        self.env_dict['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+
+        self.vllm_serve_args_list = []
+        self.health_url_list = []
+        self.host = server_host
+
+        if isinstance(vllm_serve_args, list):
+            if not all(isinstance(item, list) for item in vllm_serve_args):
+                self.vllm_serve_args_list.append(
+                    copy.deepcopy(vllm_serve_args))
+            else:
+                self.vllm_serve_args_list = copy.deepcopy(vllm_serve_args)
+        else:
+            raise RuntimeError("vllm_serves_args must be a list")
+
+        serve_arg_cmd = ["vllm", "serve"]
+
+        for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
+            self.env_dict['ASCEND_RT_VISIBLE_DEVICES'] = str(i)
+            if "--port" not in vllm_serve_arg:
+                raise ValueError("You have manually specified the port ")
+            else:
+                index = vllm_serve_arg.index("--port")
+                self.port = vllm_serve_arg[index + 1]
+            self.health_url_list.append(super().url_for("health"))
+            vllm_serve_arg = [*serve_arg_cmd, *vllm_serve_arg]
+            self._proc_list.append(
+                self._start_server(vllm_serve_arg, self.env_dict,
+                                   f"[VLLM_{i}] "))
+
+        super()._wait_for_multiple_servers([(self.host, url)
+                                            for url in self.health_url_list],
+                                           timeout=max_wait_seconds)
+
+    def _poll(self) -> Optional[int]:
+        return None
+
+    def _delete_shm(self) -> None:
+        for i, arg in enumerate(self.vllm_serve_args_list):
+            if "--ec-transfer-config" in arg:
+                index = arg.index("--ec-transfer-config")
+                shm_path = json.loads(arg[index + 1]).get(
+                    "ec_connector_extra_config").get("shared_storage_path")
+                args = ["rm", "-r", "-f", shm_path]
+                print(f"delete shm_path is: {shm_path}")
+                self._start_server(args, None, "[DELETE] ")
+
+    def _read_output(self, pipe, prefix):
+        try:
+            with pipe:
+                for line in iter(pipe.readline, ''):
+                    if line:
+                        print(f"{prefix}: {line}", end='')
+
+        except Exception as e:
+            print(f"error: {e}")
+            traceback.print_exc()
+
+    def _start_server(self, server_cmd: list[str],
+                      env_dict: Optional[dict[str, str]], log_prefix: str):
+        env = os.environ.copy()
+        if env_dict is not None:
+            env.update(env_dict)
+        proc = subprocess.Popen(server_cmd,
+                                env=env,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                universal_newlines=True,
+                                bufsize=1)
+        stdout_thread = threading.Thread(target=self._read_output,
+                                         args=(proc.stdout, log_prefix),
+                                         daemon=True)
+        stderr_thread = threading.Thread(target=self._read_output,
+                                         args=(proc.stderr, log_prefix),
+                                         daemon=True)
+
+        stdout_thread.start()
+        stderr_thread.start()
+        return proc
+
+    def _terminate_server(self) -> None:
+        """kill process and its children"""
+        print("vllm instance is stopping")
+        for proc in self._proc_list:
+            parent = psutil.Process(proc.pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                try:
+                    child.terminate()
+                except psutil.NoSuchProcess:
+                    pass
+
+            gone, still_alive = psutil.wait_procs(children, timeout=10)
+
+            for child in still_alive:
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+
+            try:
+                parent.terminate()
+                parent.wait(timeout=10)
+            except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                try:
+                    parent.kill()
+                except psutil.NoSuchProcess:
+                    pass
+
+    def __enter__(self):
+        """Context manager entry point."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit point - clean up all processes."""
+        self._terminate_server()
+
+
+class DisaggEpdProxy(RemoteEPDServer):
+
+    def __init__(self,
+                 proxy_args: Union[list[str], str] = None,
+                 env_dict: Optional[dict[str, str]] = None,
+                 server_host: str = '0.0.0.0',
+                 max_wait_seconds: Optional[float] = 2800) -> None:
+        self.proxy_args = proxy_args
+        self.env_dict = env_dict
+        self._proc_list = list()
+        self.host = server_host
+
+        print(f"proxy param is: {self.proxy_args}")
+        proxy_args = ["python", DISAGG_EPD_PROXY_SCRIPT, *self.proxy_args]
+        self._proc_list.append(super()._start_server(proxy_args, self.env_dict,
+                                                     "[PRXOY] "))
+
+        if "--port" not in proxy_args:
+            raise ValueError("You have manually specified the port ")
+        else:
+            index = proxy_args.index("--port")
+            self.port = proxy_args[index + 1]
+        super()._wait_for_multiple_servers(
+            [(self.host, super().url_for("health"))], timeout=max_wait_seconds)
+
+    def __enter__(self):
+        """Context manager entry point."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit point - clean up all processes."""
+        super()._terminate_server()
 
 
 class VllmRunner:
