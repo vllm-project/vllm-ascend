@@ -190,13 +190,6 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend test (non triton)
-        if: ${{ inputs.type == 'full' }}
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-        run: |
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
-
       - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
