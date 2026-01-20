@@ -94,11 +94,7 @@ def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: fl
     while True:
         free_bytes, _ = torch.npu.mem_get_info()
         if free_bytes / total_npu_memory >= target_free_percentage:
-            print(
-                f"Waiting for NPU memory to be free: "
-                f"{free_bytes / 1024**3:.2f} GB available, "
-                f"Elapsed time: {elapsed:.2f} s."
-            )
+            print(f'check_npu_memory_worker: npu free memory decreased target value.')
             return  # Success
 
         elapsed = time.time() - start_time
@@ -111,6 +107,11 @@ def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: fl
             )
             sys.exit(1)  # Failure
 
+        print(
+            f"Waiting for NPU memory to be free: "
+            f"{free_bytes / 1024**3:.2f} GB available, "
+            f"Elapsed time: {elapsed:.2f} s."
+        )
         # Try to clean up
         gc.collect()
         torch.npu.empty_cache()
