@@ -197,7 +197,7 @@ jobs:
         run: |
           TEST_CMD="pytest -sv tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py"
 
-          for i in {1..6}; do
+          for i in $(seq 1 6); do
             echo "=============================="
             echo "Run $i / 6"
             echo "=============================="
