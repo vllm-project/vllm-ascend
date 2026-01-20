@@ -137,7 +137,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         done_sending, done_recving = self.connector_worker.get_finished(
-            finished_req_ids)
+            finished_req_ids, self._get_connector_metadata())
         return done_sending, done_recving
 
 
