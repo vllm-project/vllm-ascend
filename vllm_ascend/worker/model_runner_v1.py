@@ -1937,6 +1937,7 @@ class NPUModelRunner(GPUModelRunner):
             self.seq_lens.np[:num_reqs] = seq_lens
             self.seq_lens.np[num_reqs:] = 0
             self.seq_lens.copy_to_gpu()
+            self.query_start_loc.copy_to_gpu()
 
             cu_num_tokens, arange = self._get_cumsum_and_arange(
                 num_scheduled_tokens)
