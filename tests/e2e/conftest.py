@@ -82,7 +82,7 @@ def wait_until_npu_memory_free(target_free_percentage: float = 0.5, max_wait_sec
     """Decorator to wait until the NPU memory free size is above target_free_percentage.
 
     Args:
-        target_free_percentage (float): Target free memory size in GB.
+        target_free_percentage (float): Target free memory percentage of total.
         max_wait_seconds (float): Maximum wait time in seconds.
     """
     def decorator(func):
@@ -105,6 +105,7 @@ def wait_until_npu_memory_free(target_free_percentage: float = 0.5, max_wait_sec
                     f"{free_bytes / 1024**3:.2f} GB available, "
                     f"Elapsed time: {elapsed:.2f} s.")
                 cleanup_dist_env_and_memory()
+                time.sleep(1)
             return func(*args, **kwargs)
         return wrapper
     return decorator
