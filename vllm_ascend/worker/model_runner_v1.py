@@ -785,60 +785,6 @@ class NPUModelRunner(GPUModelRunner):
 
         return logits_indices, spec_decode_metadata
 
-    def _generate_process_reqs_hidden_states(self, maybe_padded_num_tokens,
-                                             input_ids, positions,
-                                             intermediate_tensors,
-                                             inputs_embeds):
-        assert self.model is not None
-        if vllm_version_is('0.13.0'):
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **self._init_model_kwargs(maybe_padded_num_tokens))
-        else:
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **self._init_model_kwargs())
-
-        forward_context = get_forward_context()
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
-            and not self.use_sparse:
-            # TODO: maybe_padded_num_tokens will be removed, use num_input_tokens instead
-            if self.vllm_config.model_config.use_mla:
-                if self.pcp_size * self.dcp_size > 1:
-                    # FIXME: Try using `auto_dispatch_capture=True`
-                    update_mla_attn_dcp_pcp_params(self.update_stream,
-                                                   forward_context,
-                                                   maybe_padded_num_tokens)
-                else:
-                    # FIXME: Try using `auto_dispatch_capture=True`
-                    update_mla_attn_params(self.update_stream, forward_context,
-                                           maybe_padded_num_tokens,
-                                           self.speculative_config)
-            else:
-                if self.pcp_size * self.dcp_size > 1:
-                    update_attn_dcp_pcp_params(self.update_stream,
-                                               forward_context,
-                                               maybe_padded_num_tokens)
-                else:
-                    update_attn_params(self.update_stream, forward_context,
-                                       maybe_padded_num_tokens,
-                                       self.vllm_config)
-
-        if get_forward_context().sp_enabled and not isinstance(
-                hidden_states, IntermediateTensors):
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            pad_size = get_forward_context().pad_size
-            if pad_size > 0:
-                hidden_states = hidden_states[:-pad_size, :]
-        return hidden_states if self.pcp_size == 1 else self.pcp_manager.get_restore_hidden_states(
-            hidden_states)
-
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
