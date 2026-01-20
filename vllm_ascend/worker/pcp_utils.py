@@ -70,6 +70,8 @@ class PCPManager:
             dtype=torch.int32,
             device=device,
         )
+        self.pcp_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.total_num_sampled_tokens_pcp = 0
         self.num_pcp_pads_cpu_tensor = torch.zeros((max_num_reqs, ),
                                                    device="cpu",
                                                    dtype=torch.int64)
@@ -290,6 +292,8 @@ class PCPManager:
             all_positions.argsort())
         self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
 
+        self.pcp_tokens[:num_reqs] = pcp_tokens[:num_reqs]
+        self.total_num_sampled_tokens_pcp = pcp_tokens[:num_reqs].sum()
         return (
             pcp_tokens[:num_reqs],
             positions,
