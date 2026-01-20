@@ -90,12 +90,17 @@ def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: fl
     
     _, total_npu_memory = torch.npu.mem_get_info()
     start_time = time.time()
-    
+
     while True:
         free_bytes, _ = torch.npu.mem_get_info()
         if free_bytes / total_npu_memory >= target_free_percentage:
+            print(
+                f"Waiting for NPU memory to be free: "
+                f"{free_bytes / 1024**3:.2f} GB available, "
+                f"Elapsed time: {elapsed:.2f} s."
+            )
             return  # Success
-            
+
         elapsed = time.time() - start_time
         if elapsed > max_wait_seconds:
             # Print to stderr so it's visible in test logs even if captured
@@ -105,12 +110,6 @@ def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: fl
                 file=sys.stderr
             )
             sys.exit(1)  # Failure
-
-        print(
-            f"Waiting for NPU memory to be free: "
-            f"{free_bytes / 1024**3:.2f} GB available, "
-            f"Elapsed time: {elapsed:.2f} s."
-        )
 
         # Try to clean up
         gc.collect()
