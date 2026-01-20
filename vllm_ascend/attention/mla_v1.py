@@ -454,9 +454,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             prefill=prefill_metadata,
             decode=decode_metadata,
             query_start_loc=query_start_loc,
-            block_tables=block_table,
-            seq_lens=seq_lens,
-            actual_seq_lengths_q=actual_seq_lengths_q,
+            block_tables=self.block_table,
+            seq_lens=self.seq_lens,
         )
 
     def build_chunked_metadata(
