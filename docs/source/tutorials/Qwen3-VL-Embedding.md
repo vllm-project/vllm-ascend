@@ -60,7 +60,7 @@ import torch
 from vllm import LLM
 
 def get_detailed_instruct(task_description: str, query: str) -> str:
-    return f'Instruct: {task_description}\nQuery:{query}'
+    return f'Instruct: {task_description}\nQuery: {query}'
 
 
 if __name__=="__main__":
@@ -105,7 +105,7 @@ For more examples, refer to the vLLM official examples:
 ## Performance
 
 Run performance of `Qwen3-VL-Embedding-8B` as an example.
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details.
 
 Take the `serve` as an example. Run the code as follows.
 
