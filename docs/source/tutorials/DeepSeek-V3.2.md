@@ -313,6 +313,8 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --reasoning-parser deepseek_v3 \
+            --tokenizer-mode deepseek_v32 \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -388,6 +390,8 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --reasoning-parser deepseek_v3 \
+            --tokenizer-mode deepseek_v32 \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -467,6 +471,8 @@ Before you start, please
             --no-enable-prefix-caching \
             --async-scheduling \
             --quantization ascend \
+            --reasoning-parser deepseek_v3 \
+            --tokenizer-mode deepseek_v32 \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
@@ -547,6 +553,8 @@ Before you start, please
             --no-enable-prefix-caching \
             --quantization ascend \
             --kv-transfer-config \
+            --reasoning-parser deepseek_v3 \
+            --tokenizer-mode deepseek_v32 \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
