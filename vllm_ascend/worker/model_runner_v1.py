@@ -226,6 +226,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.max_num_reqs,
                 self.device,
                 self.vllm_config,
+                self.use_async_scheduling,
                 self.pin_memory,
             )
             # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
@@ -540,10 +541,18 @@ class NPUModelRunner(GPUModelRunner):
         # for pcp, prefill mtp should use origin scheduleroutput ,
         if self.speculative_config and self.pcp_size * self.dcp_size > 1:
             self.pcp_manager.generate_pcp_mtp_input(
-                num_reqs, total_num_scheduled_tokens,
-                scheduler_output.num_scheduled_tokens, with_prefill,
-                self.input_batch, self.arange_np, req_indices, positions_np,
-                cu_num_tokens)
+                num_reqs,
+                total_num_scheduled_tokens,
+                scheduler_output.num_scheduled_tokens,
+                with_prefill,
+                self.input_batch,
+                self.arange_np,
+                req_indices,
+                positions_np,
+                cu_num_tokens,
+                self._draft_token_ids,  # type: ignore[has-type]
+                scheduler_output,
+                self.num_spec_tokens)
 
         if self.pcp_size > 1:
             if not self.vllm_config.model_config.use_mla:
@@ -929,7 +938,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_size * self.dcp_size > 1:
                 self.long_seq_metadata = self.pcp_manager.generate_pcp_metadata(
                     total_num_scheduled_tokens, self.query_lens,
-                    self.input_batch)
+                    self.input_batch, num_scheduled_tokens)
                 blk_table.slot_mapping.gpu[maybe_pcp_full_tokens:].fill_(-1)
                 if self.pcp_size > 1:
                     slot_mapping_pcp = self.pcp_manager.get_padded_slot_mapping(
@@ -1946,7 +1955,8 @@ class NPUModelRunner(GPUModelRunner):
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
                 long_seq_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
-                    num_tokens, self.query_lens, self.input_batch)
+                    num_tokens, self.query_lens, self.input_batch,
+                    num_scheduled_tokens)
                 if long_seq_metadata is not None:
                     pcp_world_size = get_pcp_group().world_size
                     dcp_world_size = get_dcp_group().world_size
