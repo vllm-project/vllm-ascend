@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 import os
 import subprocess
 from collections import defaultdict
-from typing import Dict, List, Tuple
 
 import psutil
 from vllm.logger import logger
@@ -13,26 +11,22 @@ ALLOWED_CPUS_PATH = "/proc/self/status"
 ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 
 
-def execute_command(cmd: List[str]) -> Tuple[str, int]:
-    with subprocess.Popen(cmd,
-                          shell=False,
-                          stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE) as p:
+def execute_command(cmd: list[str]) -> tuple[str, int]:
+    with subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as p:
         out, _ = p.communicate(timeout=1000)
     return out.decode(), p.returncode
 
 
 class DeviceInfo:
-
     def __init__(self):
-        self.npu_map_info: Dict[str, Dict[str, str]] = self.get_npu_map_info()
-        self.allowed_cpus: List[int] = self.parse_allowed_cpus()
-        self.running_npu_list: List[int] = self.get_running_npus()
-        self.npu_affinity: Dict[int, List[int]] = self.parse_topo_affinity()
+        self.npu_map_info: dict[str, dict[str, str]] = self.get_npu_map_info()
+        self.allowed_cpus: list[int] = self.parse_allowed_cpus()
+        self.running_npu_list: list[int] = self.get_running_npus()
+        self.npu_affinity: dict[int, list[int]] = self.parse_topo_affinity()
 
     @staticmethod
-    def expand_cpu_list(allowed_list_str: str) -> List[int]:
-        allowed_cpus_list: List[int] = []
+    def expand_cpu_list(allowed_list_str: str) -> list[int]:
+        allowed_cpus_list: list[int] = []
         for per_range in allowed_list_str.split(","):
             if "-" in per_range:
                 start_cpu, end_cpu = map(int, per_range.split("-"))
@@ -42,8 +36,8 @@ class DeviceInfo:
         return allowed_cpus_list
 
     @staticmethod
-    def get_npu_map_info() -> Dict[str, Dict[str, str]]:
-        npu_map_info: Dict[str, Dict[str, str]] = {}
+    def get_npu_map_info() -> dict[str, dict[str, str]]:
+        npu_map_info: dict[str, dict[str, str]] = {}
         npu_info, _ = execute_command(["npu-smi", "info", "-m"])
         npu_map = npu_info.strip().split("\n")[1:]
         for line in npu_map:
@@ -55,7 +49,7 @@ class DeviceInfo:
             npu_map_info[npu_id][chip_id] = chip_logic_id
         return npu_map_info
 
-    def get_running_npus(self) -> List[int]:
+    def get_running_npus(self) -> list[int]:
         npu_message, _ = execute_command(["npu-smi", "info"])
         in_proc_section = False
         running_npu_set = set()
@@ -76,36 +70,29 @@ class DeviceInfo:
                     continue
                 chip_logic_id = self.npu_map_info.get(npu_id, {}).get(chip_id)
                 if not chip_logic_id or not chip_logic_id.isdigit():
-                    raise RuntimeError(
-                        "Failed to get correct chip_logic_id from command 'npu-smi info -m'."
-                    )
+                    raise RuntimeError("Failed to get correct chip_logic_id from command 'npu-smi info -m'.")
                 running_npu_set.add(int(chip_logic_id))
         if ASCEND_RT_VISIBLE_DEVICES:
             devices_str = ASCEND_RT_VISIBLE_DEVICES
             devices_list = [int(x) for x in devices_str.split(",")]
             running_npu_set = set(devices_list) & running_npu_set
         if not running_npu_set:
-            raise RuntimeError(
-                "Can not get running npu info, you can use BIND_CPU=0 to skip."
-            )
+            raise RuntimeError("Can not get running npu info, you can use BIND_CPU=0 to skip.")
         return sorted(running_npu_set)
 
-    def parse_allowed_cpus(self) -> List[int]:
+    def parse_allowed_cpus(self) -> list[int]:
         if not os.path.exists(ALLOWED_CPUS_PATH):
             return []
         with open(ALLOWED_CPUS_PATH) as f:
             for line in f:
                 if line.startswith("Cpus_allowed_list"):
                     return self.expand_cpu_list(line.split()[1])
-        raise RuntimeError(
-            "Can not found specific 'Cpus_allowed_list' in the '/proc/self/status' file."
-        )
+        raise RuntimeError("Can not found specific 'Cpus_allowed_list' in the '/proc/self/status' file.")
 
-    def parse_topo_affinity(self) -> Dict[int, List[int]]:
+    def parse_topo_affinity(self) -> dict[int, list[int]]:
         chip_logic_id = 0
-        affinity: Dict[int, List[int]] = {}
-        affinity_message, _ = execute_command(
-            ["npu-smi", "info", "-t", "topo"])
+        affinity: dict[int, list[int]] = {}
+        affinity_message, _ = execute_command(["npu-smi", "info", "-t", "topo"])
         for line in affinity_message.splitlines():
             if line.startswith("NPU"):
                 parts = line.split()
@@ -117,21 +104,19 @@ class DeviceInfo:
 
 
 class CpuAlloc:
-
     def __init__(self, rank_id: int):
         self.rank_id = rank_id
         self.device_info: DeviceInfo = DeviceInfo()
-        self.cpu_node: Dict[int, int] = {}
-        self.numa_to_cpu_map: Dict[int, List[int]] = defaultdict(list)
-        self.npu_cpu_pool: Dict[int, List[int]] = {}
-        self.assign_main: Dict[int, List[int]] = {}
-        self.assign_acl: Dict[int, List[int]] = {}
-        self.assign_rel: Dict[int, List[int]] = {}
+        self.cpu_node: dict[int, int] = {}
+        self.numa_to_cpu_map: dict[int, list[int]] = defaultdict(list)
+        self.npu_cpu_pool: dict[int, list[int]] = {}
+        self.assign_main: dict[int, list[int]] = {}
+        self.assign_acl: dict[int, list[int]] = {}
+        self.assign_rel: dict[int, list[int]] = {}
 
     @staticmethod
-    def get_threads_map(
-            thread_message: str) -> Dict[str, Dict[str, List[str]]]:
-        threads_map: Dict[str, Dict[str, List[str]]] = {}
+    def get_threads_map(thread_message: str) -> dict[str, dict[str, list[str]]]:
+        threads_map: dict[str, dict[str, list[str]]] = {}
         for line in thread_message.splitlines():
             parts = line.split()
             if len(parts) < 2:
@@ -144,40 +129,33 @@ class CpuAlloc:
             else:
                 continue
             if main_pid not in threads_map:
-                threads_map[main_pid] = {
-                    "acl_thread": [],
-                    "release_thread": []
-                }
+                threads_map[main_pid] = {"acl_thread": [], "release_thread": []}
             threads_map[main_pid][key].append(sub_pid)
         return threads_map
 
     @staticmethod
-    def bind(pid: str, cpus: List[int], bind_sub_thread: bool) -> None:
+    def bind(pid: str, cpus: list[int], bind_sub_thread: bool) -> None:
         if cpus:
             cpu_list = ",".join(map(str, cpus))
             if bind_sub_thread:
-                bind_result, return_code = execute_command(
-                    ["taskset", "-acp", cpu_list, pid])
+                bind_result, return_code = execute_command(["taskset", "-acp", cpu_list, pid])
             else:
-                bind_result, return_code = execute_command(
-                    ["taskset", "-cp", cpu_list, pid])
+                bind_result, return_code = execute_command(["taskset", "-cp", cpu_list, pid])
             if return_code != 0:
                 raise RuntimeError(f"Failed to bind {pid} to CPU {cpu_list}.")
 
-    def average_distribute(
-            self, groups: Dict[str, List[int]]) -> Dict[int, List[int]]:
-        result: Dict[int, List[int]] = {}
+    def average_distribute(self, groups: dict[str, list[int]]) -> dict[int, list[int]]:
+        result: dict[int, list[int]] = {}
         for key, npu_list in groups.items():
             cpu_list = sorted(self.npu_cpu_pool[npu_list[0]])
             cpu_num_per_npu = len(cpu_list) // len(npu_list)
             for i, npu in enumerate(npu_list):
                 start_index = i * cpu_num_per_npu
-                end_index = (i + 1) * cpu_num_per_npu if i < len(
-                    npu_list) - 1 else len(cpu_list)
+                end_index = (i + 1) * cpu_num_per_npu if i < len(npu_list) - 1 else len(cpu_list)
                 result[npu] = cpu_list[start_index:end_index]
         return result
 
-    def extend_numa(self, cpu_list: List[int]) -> List[int]:
+    def extend_numa(self, cpu_list: list[int]) -> list[int]:
         if not cpu_list:
             return []
         nodes = {self.cpu_node[c] for c in cpu_list}
@@ -203,9 +181,7 @@ class CpuAlloc:
             self.cpu_node[cpu] = node
             self.numa_to_cpu_map[node].append(cpu)
         if len(self.numa_to_cpu_map) == 0:
-            raise RuntimeError(
-                "lscpu command output error, no NUMA node available. Please check!"
-            )
+            raise RuntimeError("lscpu command output error, no NUMA node available. Please check!")
 
     def handle_no_affinity(self) -> None:
         num_running_npu = len(self.device_info.running_npu_list)
@@ -219,10 +195,7 @@ class CpuAlloc:
         index = 0
         for node in sorted(self.numa_to_cpu_map):
             # Available CPUs on this NUMA (constrained by allowed_cpus)
-            cpus = [
-                c for c in self.numa_to_cpu_map[node]
-                if c in self.device_info.allowed_cpus
-            ]
+            cpus = [c for c in self.numa_to_cpu_map[node] if c in self.device_info.allowed_cpus]
             if not cpus:
                 continue
             # The actual number of NPUs to be allocated on this NUMA.
@@ -251,19 +224,16 @@ class CpuAlloc:
             return
         for npu in self.device_info.running_npu_list:
             base_cpu_list = [
-                cpu for cpu in self.device_info.npu_affinity.get(npu, [])
-                if cpu in self.device_info.allowed_cpus
+                cpu for cpu in self.device_info.npu_affinity.get(npu, []) if cpu in self.device_info.allowed_cpus
             ]
             if not base_cpu_list:
-                raise RuntimeError(
-                    "CPUs available in 'Cpus_allowed_list' conflict with NUMA affinity."
-                )
+                raise RuntimeError("CPUs available in 'Cpus_allowed_list' conflict with NUMA affinity.")
             extra_cpu_list = self.extend_numa(base_cpu_list)
             self.npu_cpu_pool[npu] = extra_cpu_list
         groups = defaultdict(list)
         for npu, cpus in self.npu_cpu_pool.items():
             groups[str(cpus)].append(npu)
-        final: Dict[int, List[int]] = {}
+        final: dict[int, list[int]] = {}
         for key, npu_list in groups.items():
             if len(npu_list) == 1:
                 final[npu_list[0]] = self.npu_cpu_pool[npu_list[0]]
@@ -279,8 +249,8 @@ class CpuAlloc:
                 rel = [pool[-1]]
             else:
                 raise RuntimeError(
-                    "The number of CPUs is insufficient to bind to the NPUs. "
-                    "Each NPU requires at least 3 CPUs.")
+                    "The number of CPUs is insufficient to bind to the NPUs. Each NPU requires at least 3 CPUs."
+                )
             self.assign_main[npu] = main
             self.assign_acl[npu] = acl
             self.assign_rel[npu] = rel
@@ -290,10 +260,8 @@ class CpuAlloc:
         current_npu = self.device_info.running_npu_list[self.rank_id]
         main = " ".join(map(str, self.assign_main[current_npu]))
         acl = " ".join(map(str, self.assign_acl[current_npu]))
-        rel = str(self.assign_rel[current_npu]
-                  ) if self.assign_rel[current_npu] else ""
-        logger.info(
-            f"NPU{current_npu}: main=[{main}]  acl=[{acl}]  release=[{rel}]")
+        rel = str(self.assign_rel[current_npu]) if self.assign_rel[current_npu] else ""
+        logger.info(f"NPU{current_npu}: main=[{main}]  acl=[{acl}]  release=[{rel}]")
 
     def bind_threads(self) -> None:
         thread_message, _ = execute_command(["ps", "-Te"])
@@ -303,8 +271,7 @@ class CpuAlloc:
         self.bind(main_pid, self.assign_main[current_npu], True)
         for acl_thread in threads_map.get(main_pid, {}).get("acl_thread", []):
             self.bind(acl_thread, self.assign_acl[current_npu], False)
-        for release_thread in threads_map.get(main_pid,
-                                              {}).get("release_thread", []):
+        for release_thread in threads_map.get(main_pid, {}).get("release_thread", []):
             self.bind(release_thread, self.assign_rel[current_npu], False)
 
     def run_all(self) -> None:

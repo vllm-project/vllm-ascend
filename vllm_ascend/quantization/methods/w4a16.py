@@ -205,9 +205,6 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         enable_force_load_balance: bool = True,
         log2phy: Optional[torch.Tensor] = None,
         global_redundant_expert_num: int = 0,
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -243,9 +240,6 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
             use_int4_w4a16=True,
             expert_map=expert_map,
             log2phy=log2phy,
-            shared_experts=shared_experts,
-            quantized_x_for_share=quantized_x_for_share,
-            dynamic_scale_for_share=dynamic_scale_for_share,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
 
