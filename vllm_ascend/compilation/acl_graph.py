@@ -504,7 +504,7 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape
                 actual_seq_lengths,
                 actual_seq_lengths_kv,
                 attn_output,
-                softmax_lse
+                softmax_lse,
             ) = param
 
             decode_meta = forward_context.attn_metadata[key].decode
@@ -515,8 +515,7 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape
 
             pad_length = runtime_shape - len(actual_seq_lengths_kv)
             if pad_length > 0:
-                actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (
-                    runtime_shape - len(actual_seq_lengths_kv))
+                actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (runtime_shape - len(actual_seq_lengths_kv))
 
             torch.npu.graph_task_update_begin(update_stream, handle)
 
@@ -540,7 +539,8 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape
                 actual_seq_lengths_kv=actual_seq_lengths_kv,
                 actual_seq_lengths=actual_seq_lengths,
                 workspace=graph_params.workspaces.get(runtime_shape),
-                out=[attn_output, softmax_lse])
+                out=[attn_output, softmax_lse],
+            )
             torch.npu.graph_task_update_end(update_stream)
 
             event.record(update_stream)
