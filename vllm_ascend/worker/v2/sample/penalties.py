@@ -72,7 +72,8 @@ def _penalties_and_temperature_kernel(
             block,
             mask=mask,
         )
-        output_bin_mask = output_bin_counts > 0
+        # to use vector core, if use > 0 will use scalar to slow down performance
+        output_bin_mask = output_bin_counts != 0
 
         # Apply repetition penalties.
         if use_rep_penalty:
@@ -83,8 +84,15 @@ def _penalties_and_temperature_kernel(
                 packed_block,
                 mask=packed_block < tl.cdiv(vocab_size, 32),
             )
-            prompt_bin_mask = (packed_mask[:, None] >>
-                               (tl.arange(0, 32)[None, :])) & 1
+            # the compiler itself does not optimize right-shift operations, so we change the same func
+            bit_masks = 1 << tl.arange(0, 32)
+            bit_masks_expanded = bit_masks[None, :]
+
+            packed_expanded = packed_mask[:, None]
+            bits_matrix = (packed_expanded & bit_masks_expanded) != 0
+
+            prompt_bin_mask = bits_matrix.reshape(BLOCK_SIZE)
+
             prompt_bin_mask = prompt_bin_mask.to(tl.int1)
             prompt_bin_mask = prompt_bin_mask.reshape(BLOCK_SIZE)
 
