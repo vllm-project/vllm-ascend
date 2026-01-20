@@ -215,10 +215,10 @@ class KVPoolScheduler:
                 if not new_block_ids:
                     continue
                 if req_id in self._preempted_req_ids:
-                    if not isinstance(new_block_ids, list):
-                        new_block_ids = new_block_ids.copy()
-                    else:
+                    if isinstance(new_block_ids, tuple):
                         new_block_ids = new_block_ids[0].copy()
+                    else:
+                        new_block_ids = new_block_ids.copy()
                     self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
