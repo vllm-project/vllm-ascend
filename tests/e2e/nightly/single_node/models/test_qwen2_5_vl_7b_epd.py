@@ -18,7 +18,7 @@
 import pytest
 from vllm.utils import get_open_port
 
-from tests.e2e.conftest import RemoteEPDServer, DisaggEpdProxy
+from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
@@ -68,27 +68,29 @@ aisbench_cases = [{
 async def test_models(model: str, tp_size: int) -> None:
     encode_port = get_open_port()
     pd_port = get_open_port()
-    e_server_args = [
-        "--port",
-        str(encode_port), "--model", model, "--gpu-memory-utilization", "0.01",
-        "--tensor-parallel-size",
-        str(tp_size), "--enforce-eager", "--no-enable-prefix-caching",
-        "--max-model-len", "10000", "--max-num-batched-tokens", "10000",
-        "--max-num-seqs", "1", "--ec-transfer-config",
-        '{"ec_connector_extra_config":{"shared_storage_path":"' +
-        SHARED_STORAGE_PATH +
-        '"},"ec_connector":"ECSharedStorageConnector","ec_role": "ec_producer"}'
-    ]
-    pd_server_args = [
-        "--port",
-        str(pd_port), "--model", model, "--gpu-memory-utilization", "0.95",
-        "--tensor-parallel-size",
-        str(tp_size), "--enforce-eager", "--max-model-len", "10000",
-        "--max-num-batched-tokens", "10000", "--max-num-seqs", "128",
-        "--ec-transfer-config",
-        '{"ec_connector_extra_config":{"shared_storage_path":"' +
-        SHARED_STORAGE_PATH +
-        '"},"ec_connector":"ECSharedStorageConnector","ec_role": "ec_consumer"}'
+    vllm_server_args = [
+        [
+            "--port",
+            str(encode_port), "--model", model, "--gpu-memory-utilization",
+            "0.01", "--tensor-parallel-size",
+            str(tp_size), "--enforce-eager", "--no-enable-prefix-caching",
+            "--max-model-len", "10000", "--max-num-batched-tokens", "10000",
+            "--max-num-seqs", "1", "--ec-transfer-config",
+            '{"ec_connector_extra_config":{"shared_storage_path":"' +
+            SHARED_STORAGE_PATH +
+            '"},"ec_connector":"ECSharedStorageConnector","ec_role": "ec_producer"}'
+        ],
+        [
+            "--port",
+            str(pd_port), "--model", model, "--gpu-memory-utilization", "0.95",
+            "--tensor-parallel-size",
+            str(tp_size), "--enforce-eager", "--max-model-len", "10000",
+            "--max-num-batched-tokens", "10000", "--max-num-seqs", "128",
+            "--ec-transfer-config",
+            '{"ec_connector_extra_config":{"shared_storage_path":"' +
+            SHARED_STORAGE_PATH +
+            '"},"ec_connector":"ECSharedStorageConnector","ec_role": "ec_consumer"}'
+        ]
     ]
     proxy_port = get_open_port()
     proxy_args = [
@@ -98,9 +100,8 @@ async def test_models(model: str, tp_size: int) -> None:
         f"http://localhost:{pd_port}", "--prefill-servers-urls", "disable"
     ]
 
-    async with RemoteEPDServer(e_serve_args=e_server_args,
-                               pd_serve_args=pd_server_args) as server:
-        async with DisaggEpdProxy(proxy_args=proxy_args) as proxy:
+    with RemoteEPDServer(vllm_serve_args=vllm_server_args) as _:
+        with DisaggEpdProxy(proxy_args=proxy_args) as _:
             # warm up
             run_aisbench_cases(model=model,
                                port=proxy_port,
