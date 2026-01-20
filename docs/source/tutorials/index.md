@@ -13,7 +13,9 @@ Qwen3-VL-30B-A3B-Instruct.md
 Qwen3-VL-235B-A22B-Instruct.md
 Qwen3-Coder-30B-A3B.md
 Qwen3_embedding.md
+Qwen3-VL-Embedding.md
 Qwen3_reranker.md
+Qwen3-VL-Reranker.md
 Qwen3-8B-W4A8.md
 Qwen3-32B-W4A4.md
 Qwen3-Next.md
