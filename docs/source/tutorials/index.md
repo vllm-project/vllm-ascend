@@ -1,26 +1,44 @@
 # Tutorials
 
 :::{toctree}
-:caption: Deployment
+:caption: Models
 :maxdepth: 1
-single_npu
-single_npu_qwen2.5_vl
-single_npu_qwen2_audio
-single_npu_qwen3_embedding
-single_npu_qwen3_quantization
-single_npu_qwen3_w4a4
-single_node_pd_disaggregation_llmdatadist
-multi_npu_qwen3_next
-multi_npu
-multi_npu_moge
-multi_npu_qwen3_moe
-multi_npu_quantization
-single_node_300i
-DeepSeek-V3.2-Exp.md
-multi_node
-multi_node_kimi
-multi_node_qwen3vl
-multi_node_pd_disaggregation_mooncake
-multi_node_ray
 Qwen2.5-Omni.md
+Qwen2.5-7B.md
+Qwen3-Dense.md
+Qwen-VL-Dense.md
+Qwen3-30B-A3B.md
+Qwen3-235B-A22B.md
+Qwen3-VL-30B-A3B-Instruct.md
+Qwen3-VL-235B-A22B-Instruct.md
+Qwen3-Coder-30B-A3B.md
+Qwen3_embedding.md
+Qwen3_reranker.md
+Qwen3-8B-W4A8.md
+Qwen3-32B-W4A4.md
+Qwen3-Next.md
+Qwen3-Omni-30B-A3B-Thinking.md
+DeepSeek-V3.1.md
+DeepSeek-V3.2.md
+DeepSeek-R1.md
+GLM4.x.md
+Kimi-K2-Thinking.md
+PaddleOCR-VL.md
+:::
+
+:::{toctree}
+:caption: Features
+:maxdepth: 1
+pd_colocated_mooncake_multi_instance.md
+pd_disaggregation_mooncake_single_node.md
+pd_disaggregation_mooncake_multi_node.md
+long_sequence_context_parallel_single_node.md
+long_sequence_context_parallel_multi_node.md
+ray
+:::
+
+:::{toctree}
+:caption: Hardware
+:maxdepth: 1
+310p.md
 :::

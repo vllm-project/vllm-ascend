@@ -12,32 +12,32 @@ from vllm_ascend.distributed.parallel_state import (
 
 @pytest.fixture
 def parallel_config():
-    return ParallelConfig(data_parallel_size=2,
-                          tensor_parallel_size=2,
-                          pipeline_parallel_size=2)
+    return ParallelConfig(
+        data_parallel_size=2,
+        tensor_parallel_size=4,
+        pipeline_parallel_size=2,
+    )
 
 
 @pytest.fixture
 def mock_distributed():
     with patch('torch.distributed.is_initialized', return_value=True), \
-         patch('torch.distributed.get_world_size', return_value=8), \
+         patch('torch.distributed.get_world_size', return_value=16), \
          patch('torch.distributed.get_backend', return_value='nccl'), \
          patch('vllm_ascend.distributed.parallel_state.get_world_group') as mock_group, \
-         patch('vllm_ascend.distributed.parallel_state.get_tp_group') as mock_tp_group, \
-         patch('vllm_ascend.distributed.parallel_state.get_dp_group') as mock_dp_group, \
-         patch('vllm_ascend.distributed.parallel_state.get_pp_group') as mock_pp_group:
+         patch('vllm_ascend.distributed.parallel_state.get_tp_group') as mock_tp_group:
         mock_group.return_value.local_rank = 0
         mock_group.return_value.device_group = MagicMock()
         mock_tp_group.return_value.world_size = 4
-        mock_dp_group.return_value.world_size = 2
-        mock_pp_group.return_value.world_size = 2
         yield
 
 
 def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_ascend_config = MagicMock()
-    mock_ascend_config.lmhead_tensor_parallel_size = 2
-    mock_ascend_config.oproj_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
     mock_ascend_config.flashcomm2_oproj_tensor_parallel_size = 2
     mock_ascend_config.pd_tp_ratio = 2
     mock_ascend_config.num_head_replica = 0

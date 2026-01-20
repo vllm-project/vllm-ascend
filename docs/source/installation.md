@@ -12,11 +12,13 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | >= 8.3.RC1                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.7.1             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.7.1                         | Required for torch-npu and vllm           |
+    | CANN          | == 8.3.RC2                       | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.8.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.8.0                          | Required for torch-npu and vllm           |
+    | NNAL          | == 8.3.RC2                       | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
+
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
 - **Using docker**: use the `vllm-ascend` pre-built docker image directly.
 
@@ -45,6 +47,10 @@ Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/
 
 The easiest way to prepare your software environment is using CANN image directly:
 
+```{note}
+The CANN prebuilt image includes NNAL (Ascend Neural Network Acceleration Library) which provides libatb.so for advanced tensor operations. No additional installation is required when using the prebuilt image.
+```
+
 ```{code-block} bash
    :substitutions:
 # Update DEVICE according to your device (/dev/davinci[0-7])
@@ -70,6 +76,10 @@ docker run --rm \
 :::{dropdown} Click here to see "Install CANN manually"
 :animate: fade-in-slide-down
 You can also install CANN manually:
+
+```{warning}
+If you encounter "libatb.so not found" errors during runtime, please ensure NNAL is properly installed as shown in the manual installation steps below.
+```
 
 ```bash
 # Create a virtual environment.
@@ -157,15 +167,15 @@ cd ..
 # Install vLLM Ascend.
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
+git submodule update --init --recursive
 pip install -v -e .
 cd ..
 ```
 
-vllm-ascend will build custom operators by default. If you don't want to build it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it.
+If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has Internet access.
 :::
 
 ```{note}
-If you are building from v0.7.3-dev and intend to use sleep mode feature, you should set `COMPILE_CUSTOM_KERNELS=1` manually.
 To build custom operators, gcc/g++ higher than 8 and c++ 17 or higher is required. If you're using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
 If you encounter other problems during compiling, it is probably because unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in environment to specify your g++ and gcc locations before compiling.
 ```
@@ -175,6 +185,7 @@ If you encounter other problems during compiling, it is probably because unexpec
 `vllm-ascend` offers Docker images for deployment. You can just pull the **prebuilt image** from the image repository [ascend/vllm-ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and run it with bash.
 
 Supported images as following.
+
 | image name | Hardware | OS |
 |-|-|-|
 | image-tag | Atlas A2 | Ubuntu |
@@ -297,16 +308,17 @@ Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt
 ```
 
 ## Multi-node Deployment
+
 ### Verify Multi-Node Communication
 
 First, check physical layer connectivity, then verify each node, and finally verify the inter-node connectivity.
 
-#### Physical Layer Requirements:
+#### Physical Layer Requirements
 
 - The physical machines must be located on the same WLAN, with network connectivity.
 - All NPUs are connected with optical modules, and the connection status must be normal.
 
-#### Each Node Verification:
+#### Each Node Verification
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -353,8 +365,10 @@ Execute the following commands on each node in sequence. The results must all be
 ::::
 :::::
 
-#### Interconnect Verification:
+#### Interconnect Verification
+
 ##### 1. Get NPU IP Addresses
+
 :::::{tab-set}
 :sync-group: multi-node
 

@@ -357,7 +357,7 @@ private:
 
 // declare all dtype kernel
 SGMV_EXPAND_TYPE_DECLARE(half)
-#if (__CCE_AICORE__ >= 220)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
     SGMV_EXPAND_TYPE_DECLARE(bfloat16_t)
 #endif
 
@@ -375,8 +375,8 @@ extern void sgmv_expand_impl(AscendType type, void* stream, void* x, void* weigh
                                                         numTokensPerCore, maxLoRARank, outputHiddenDim, sliceOffset, 
                                                         outputFullDim);
     } else if (type == AscendType::BF16) {
-        #if (__CCE_AICORE__ >= 220)
-            sgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, 
+        #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        sgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, 
                                                                   seqLen, seqLenSize, yIn, yOut, batchSize,
                                                                   numTokensPerCore, maxLoRARank, outputHiddenDim,
                                                                   sliceOffset, outputFullDim);

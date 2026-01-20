@@ -2,22 +2,35 @@ from collections.abc import Iterator
 from typing import Optional
 
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.config import VllmConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandler
+from vllm_ascend.utils import vllm_version_is
+
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.abstract import AttentionBackend  # type: ignore
+else:
+    from vllm.v1.attention.backend import AttentionBackend  # type: ignore
+# isort: on
 
 
 class NPUOffloadingSpec(OffloadingSpec):
 
-    def __init__(self, vllm_config: VllmConfig):
-        super().__init__(vllm_config)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 kv_cache_config: Optional[KVCacheConfig] = None):
+        if vllm_version_is('0.13.0'):
+            super().__init__(vllm_config)
+        else:
+            super().__init__(vllm_config, kv_cache_config)
 
         num_cpu_blocks = self.extra_config.get("num_cpu_blocks")
         if not num_cpu_blocks:
@@ -45,19 +58,12 @@ class NPUOffloadingSpec(OffloadingSpec):
         return self._manager
 
     def get_handlers(
-        self, kv_caches: dict[str, torch.Tensor]
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        attn_backends: dict[str, type[AttentionBackend]],
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec],
                         OffloadingHandler]]:
         if not self._handler:
-            layer_names = list(kv_caches.keys())
-            layers = get_layers_from_vllm_config(self.vllm_config,
-                                                 AttentionLayerBase,
-                                                 layer_names)
-            attn_backends = {
-                layer_name: layers[layer_name].get_attn_backend()
-                for layer_name in layer_names
-            }
-
             self._handler = CpuNpuOffloadingHandler(
                 attn_backends=attn_backends,
                 gpu_block_size=self.gpu_block_size,

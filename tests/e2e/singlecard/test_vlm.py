@@ -20,6 +20,9 @@
 
 Run `pytest tests/test_offline_inference.py`.
 """
+import os
+from unittest.mock import patch
+
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -27,33 +30,38 @@ from vllm.assets.image import ImageAsset
 from tests.e2e.conftest import VllmRunner
 
 
-def test_multimodal_vl(prompt_template):
-    image = ImageAsset("cherry_blossom") \
-        .pil_image.convert("RGB")
+@patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
+def test_multimodal_vl(vl_config):
+    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+
     img_questions = [
         "What is the content of this image?",
         "Describe the content of this image in detail.",
         "What's in the image?",
         "Where is this image taken?",
     ]
+
     images = [image] * len(img_questions)
-    prompts = prompt_template(img_questions)
-    with VllmRunner("Qwen/Qwen2.5-VL-3B-Instruct",
-                    max_model_len=4096,
-                    mm_processor_kwargs={
-                        "min_pixels": 28 * 28,
-                        "max_pixels": 1280 * 28 * 28,
-                        "fps": 1,
-                    },
-                    enforce_eager=False) as vllm_model:
-        outputs = vllm_model.generate_greedy(prompts=prompts,
-                                             images=images,
-                                             max_tokens=64)
+    prompts = vl_config["prompt_fn"](img_questions)
+
+    with VllmRunner(vl_config["model"],
+                    mm_processor_kwargs=vl_config["mm_processor_kwargs"],
+                    max_model_len=8192,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
+                    limit_mm_per_prompt={"image": 1}) as vllm_model:
+        outputs = vllm_model.generate_greedy(
+            prompts=prompts,
+            images=images,
+            max_tokens=64,
+        )
+
         assert len(outputs) == len(prompts)
+
         for _, output_str in outputs:
             assert output_str, "Generated output should not be empty."
 
 
+@patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_multimodal_audio():
     audio_prompt = "".join([
         f"Audio {idx+1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n"
@@ -82,6 +90,7 @@ def test_multimodal_audio():
                     max_num_seqs=5,
                     dtype="bfloat16",
                     limit_mm_per_prompt={"audio": 2},
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
                     gpu_memory_utilization=0.9) as runner:
         outputs = runner.generate(inputs, sampling_params=sampling_params)
 

@@ -282,7 +282,7 @@ function(add_ops_src_copy)
         set(_BUILD_FLAG ${SRC_COPY_DST}/${SRC_COPY_TARGET_NAME}.done)
         add_custom_command(OUTPUT ${_BUILD_FLAG}
                 COMMAND mkdir -p ${SRC_COPY_DST}
-                COMMAND cp -rf ${SRC_COPY_SRC}/op_kernel/*.* ${SRC_COPY_DST}
+                COMMAND cp -rf ${SRC_COPY_SRC}/op_kernel/* ${SRC_COPY_DST}
                 COMMAND touch ${_BUILD_FLAG}
         )
 

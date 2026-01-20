@@ -71,6 +71,8 @@ class BudgetRefiner:
             valid = group[group['cost'] <= slo_limit]
             if not valid.empty:
                 max_row = valid.loc[valid['chunk_size'].idxmax()]
+                assert isinstance(ctx_len, int), "ctx_len must be an integer"
+                assert isinstance(d_num, int), "d_num must be an integer"
                 self.lookup[(ctx_len, d_num)] = int(max_row['chunk_size'])
                 self.context_keys.add(ctx_len)
                 self.dnum_keys.add(d_num)
@@ -404,7 +406,7 @@ class SchedulerDynamicBatch(Scheduler):
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
-                    if not self.scheduler_config.chunked_prefill_enabled and \
+                    if not self.scheduler_config.enable_chunked_prefill and \
                         num_new_tokens > token_budget:
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)

@@ -2,6 +2,8 @@
 
 The feature support principle of vLLM Ascend is: **aligned with the vLLM**. We are also actively collaborating with the community to accelerate support.
 
+Functional call: <https://docs.vllm.ai/en/latest/features/tool_calling/>
+
 You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is the feature support status of vLLM Ascend:
 
 | Feature                       |      Status    | Next Step                                                              |
@@ -26,6 +28,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Quantization                  | 🟢 Functional  | W8A8 available; working on more quantization method support (W4A8, etc) |
 | Graph Mode                    | 🔵 Experimental| Experimental, see detailed note: [vllm-ascend#767][graph_mode]           |
 | Sleep Mode                    | 🟢 Functional  |                                                                        |
+| Context Parallel              | 🔵 Experimental|                                                                        |
 
 - 🟢 Functional: Fully operational, with ongoing optimizations.
 - 🔵 Experimental: Experimental support, interfaces and functions may change.
@@ -34,7 +37,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 - 🔴 NO plan/Deprecated: No plan or deprecated by vLLM.
 
 [v1_user_guide]: https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html
-[multimodal]: https://vllm-ascend.readthedocs.io/en/latest/tutorials/single_npu_multimodal.html
+[multimodal]: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/single_npu_multimodal.html
 [guided_decoding]: https://github.com/vllm-project/vllm-ascend/issues/177
 [multilora]: https://github.com/vllm-project/vllm-ascend/issues/396
 [v1 multilora]: https://github.com/vllm-project/vllm-ascend/pull/893
