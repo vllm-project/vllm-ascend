@@ -18,17 +18,21 @@
 import math
 from typing import Optional, Tuple
 
-import einops
 import torch
 import torch_npu
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
-                               get_ascend_device_type, has_rope, is_vl_model)
+                               get_ascend_device_type, has_rope, is_vl_model,
+                               vllm_version_is)
 
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
 # However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
@@ -127,6 +131,18 @@ def _record_cos_and_sin_cache(cos_cache, sin_cache):
     global _sin_cache
     _cos_cache = cos_cache
     _sin_cache = sin_cache
+
+
+def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
+    global _cos_cache
+    global _sin_cache
+    if _cos_cache is not None or _sin_cache is not None:
+        return
+    hidden_dim = cos_sin_cache.shape[-1] // 2
+    cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(
+        1, 1, 2).chunk(2, dim=1)
+    _cos_cache = cos_cache.squeeze(1)
+    _sin_cache = sin_cache.squeeze(1)
 
 
 def update_cos_sin(positions):
@@ -252,6 +268,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
         _record_cos_sin_cache(self.cos_sin_cache)
+        _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
 
     def forward_oot(
         self,
@@ -514,12 +531,50 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
 
 class AscendMRotaryEmbedding(MRotaryEmbedding):
 
+    def forward_triton(self,
+                       positions: torch.Tensor,
+                       query: torch.Tensor,
+                       key: torch.Tensor | None = None,
+                       offsets: torch.Tensor | None = None):
+        assert positions.ndim == 2
+        assert key is not None
+
+        self._match_cos_sin_cache_dtype(query)
+        self.cos = None
+        self.sin = None
+        if self.cos is None and self.sin is None:
+            cos_sin = self.cos_sin_cache[positions]  # type: ignore
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            self.cos = cos.contiguous()
+            self.sin = sin.contiguous()
+        query_shape = query.shape
+        key_shape = key.shape
+
+        assert self.mrope_section
+
+        q, k = triton_mrope(
+            query,
+            key,
+            self.cos,
+            self.sin,
+            self.mrope_section,
+            self.head_size,
+            self.rotary_dim,
+            self.mrope_interleaved,
+        )
+
+        return q.reshape(query_shape), k.reshape(key_shape)
+
     def forward_oot(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
     ):
+        if HAS_TRITON and positions.ndim == 2:
+            # todo: need cann update in 8.5.0
+            return self.forward_triton(positions, query, key)
+
         if self.mrope_section != [16, 24, 24] or \
             get_ascend_device_type() == AscendDeviceType.A5:
             return super().forward_oot(positions, query, key)
@@ -567,14 +622,20 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        if vllm_version_is('0.13.0'):
+            origin_shape = x.shape
+            origin_dtype = x.dtype
+            if len(origin_shape) == 3:
+                x = x.unsqueeze(0)
+            if self.enable_fp32_compute:
+                x = x.float()
+                cos = cos.float()
+                sin = sin.float()
+        else:
+            x, cos, sin, origin_shape, origin_dtype = self._pre_process(
+                x, cos, sin)
+
         head_dim = x.shape[-1]
-
-        origin_dtype = x.dtype
-        if self.enable_fp32_compute:
-            x = x.float()
-            cos = cos.float()
-            sin = sin.float()
-
         # cos, sin: [seq_len, head_dim // 2]
         cos = torch.cat((cos, cos), dim=-1)
         sin = torch.cat((sin, sin), dim=-1)
@@ -582,22 +643,14 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         cos = cos.reshape(1, -1, 1, head_dim)
         sin = sin.reshape(1, -1, 1, head_dim)
 
-        if len(x.shape) == 3:
-            # x: [seq_len, num_heads, head_size]
-            x = x.unsqueeze(0)
-            # x: [1, seq_len, num_heads, head_size]
-            output = torch_npu.npu_rotary_mul(x, cos, sin).squeeze(0)
-        else:
-            assert len(x.shape) == 4
-            # x: [2 * b, s, head, head_dim]
-            qk = einops.rearrange(
-                x, "(two b) s head head_dim -> b s two head head_dim", two=2)
-            # q, k: [b, s, head, head_dim]
-            q, k = qk[:, :, 0], qk[:, :, 1]
-            q = torch_npu.npu_rotary_mul(q, cos, sin)
-            k = torch_npu.npu_rotary_mul(k, cos, sin)
-            output = torch.cat([q, k], dim=0)
+        output = torch_npu.npu_rotary_mul(x, cos, sin)
 
-        if self.enable_fp32_compute:
-            output = output.to(origin_dtype)
+        if vllm_version_is('0.13.0'):
+            if len(origin_shape) == 3:
+                output = output.squeeze(0)
+            if self.enable_fp32_compute:
+                output = output.to(origin_dtype)
+        else:
+            output = self._post_process(output, origin_shape, origin_dtype)
+
         return output

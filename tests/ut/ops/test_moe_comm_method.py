@@ -26,7 +26,7 @@ class TestMoECommMethod(TestBase):
         self.moe_config.tp_size = 1
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
-        self.moe_config.num_global_redundant_experts = 0
+        self.moe_config.global_redundant_expert_num = 0
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
@@ -163,6 +163,7 @@ class TestMoECommMethod(TestBase):
         "vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithAllGather"
     )
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.unified_apply_mlp")
+    @patch("torch.npu.current_stream", MagicMock())
     def test_fused_experts_method(self, mock_unified_apply_mlp,
                                   mock_token_dispatcher, mock_prepare_finalize,
                                   mock_get_forward_context):

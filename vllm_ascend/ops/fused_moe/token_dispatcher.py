@@ -22,7 +22,7 @@
 # limitations under the License.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 import torch_npu
@@ -80,11 +80,7 @@ class MoETokenDispatcher(ABC):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         expert_map: Optional[torch.Tensor] = None,
-        log2phy: Optional[torch.Tensor] = None,
         global_redundant_expert_num: int = 0,
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
         mc2_mask: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         with_quant: bool = False,
@@ -152,18 +148,14 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         mc2_mask: torch.Tensor,
         global_redundant_expert_num: int = 0,
     ):
-        if self.with_quant:
-            quant_mode = 2
-            moe_expert_num = len(expert_map)
-        else:
-            quant_mode = 0
-            moe_expert_num = len(expert_map)
+        quant_mode = 2 if self.with_quant else 0
+        self.moe_expert_num = len(expert_map) + global_redundant_expert_num
         kwargs_mc2 = {
             "x": hidden_states,
             "expert_ids": topk_ids,
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
-            "moe_expert_num": moe_expert_num,
+            "moe_expert_num": self.moe_expert_num,
             "global_bs": self.global_bs,
             "expert_token_nums_type": 0,
         }
@@ -195,21 +187,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
                        expert_map: Optional[torch.Tensor] = None,
-                       log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[Any] = None,
-                       quantized_x_for_share: Optional[Any] = None,
-                       dynamic_scale_for_share: Optional[Any] = None,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False,
                        dynamic_eplb: bool = False,
                        pertoken_scale: Optional[torch.Tensor] = None):
         self.with_quant = with_quant
-
-        # Apply log2phy if needed
-        if log2phy is not None:
-            topk_ids = log2phy[topk_ids]
 
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(hidden_states, topk_weights,
                                                   topk_ids, expert_map,
@@ -230,12 +214,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "ep_recv_counts": ep_recv_counts,
             "tp_recv_counts": tp_recv_counts,
             "assist_info_for_combine": assist_info_for_combine,
-            "shared_experts": shared_experts,
             "expand_scales": expand_scales
         }
 
         group_list_type = 0
-
         return TokenDispatchResult(hidden_states=expand_x,
                                    dynamic_scale=dynamic_scale,
                                    group_list=expert_token_nums,
@@ -253,7 +235,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         expand_scales = context_metadata["expand_scales"]
 
         assert expert_map is not None
-        moe_expert_num = len(expert_map)
 
         kwargs_mc2 = {
             "expand_x": hidden_states,
@@ -261,7 +242,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_scales": topk_weights.to(torch.float32),
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
-            "moe_expert_num": moe_expert_num,
+            "moe_expert_num": self.moe_expert_num,
             "global_bs": self.global_bs,
         }
 
@@ -302,7 +283,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         combined_output = torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2) \
             if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
-        return TokenCombineResult(routed_out=combined_output)
+        return TokenCombineResult(routed_out=combined_output, )
 
 
 class TokenDispatcherWithAllGather(MoETokenDispatcher):
@@ -322,11 +303,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
                        expert_map: Optional[torch.Tensor] = None,
-                       log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[Any] = None,
-                       quantized_x_for_share: Optional[Any] = None,
-                       dynamic_scale_for_share: Optional[Any] = None,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False,
@@ -347,7 +324,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             hidden_states = hidden_states * \
                 topk_weights.to(hidden_states.dtype)
         if expert_map is not None:
-            global_num_experts = len(expert_map)
+            global_num_experts = len(expert_map) + global_redundant_expert_num
             mask = (expert_map[topk_ids] != -1)
             topk_weights = topk_weights * mask
             first_expert_idx = get_ep_group(
@@ -359,7 +336,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             global_num_experts = self.num_experts_local
 
         sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = (
-            torch_npu.npu_moe_init_routing_v2(
+            torch.ops._C_ascend.npu_moe_init_routing_custom(
                 hidden_states,
                 topk_ids,
                 scale=pertoken_scale,
@@ -445,11 +422,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
                        expert_map: Optional[torch.Tensor] = None,
-                       log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[Any] = None,
-                       quantized_x_for_share: Optional[Any] = None,
-                       dynamic_scale_for_share: Optional[Any] = None,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False,
@@ -457,9 +430,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                        pertoken_scale: Optional[torch.Tensor] = None):
         self.with_quant = with_quant
         self.hidden_shape = hidden_states.shape
-
-        if log2phy is not None:
-            topk_ids = log2phy[topk_ids]
 
         (
             permutated_local_input_tokens,

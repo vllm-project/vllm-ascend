@@ -36,7 +36,7 @@ docker run --rm \
 
 :::{note}
 You can choose to convert the model yourself or use the quantized model we uploaded,
-see https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4
+see <https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4>
 :::
 
 ```bash
