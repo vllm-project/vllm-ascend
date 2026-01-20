@@ -8,8 +8,8 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size)
 from vllm.forward_context import (BatchDescriptor, get_forward_context,
-                                  set_forward_context)
-
+                                  set_forward_context,AFDMetadata)
+from vllm.v1.worker.ubatch_utils import UBatchSlices
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
@@ -36,9 +36,11 @@ def set_ascend_forward_context(
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
+        ubatch_slices: Optional[UBatchSlices] = None,
         model_instance: torch.nn.Module = None,
         is_draft_model=False,
-        is_multimodal_model=False):
+        is_multimodal_model=False,
+        afd_metadata: Optional[AFDMetadata] = None,):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -51,6 +53,8 @@ def set_ascend_forward_context(
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=aclgraph_runtime_mode,
             batch_descriptor=batch_descriptor,
+            afd_metadata=afd_metadata,
+            ubatch_slices=ubatch_slices
     ):
         forward_context = get_forward_context()
 

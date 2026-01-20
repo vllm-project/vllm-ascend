@@ -26,7 +26,8 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
-from vllm.distributed import divide
+from vllm.distributed import (divide, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear, LinearBase,
     MergedColumnParallelLinear, QKVParallelLinear, QuantizeMethodBase,
@@ -187,6 +188,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
     ):
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
             disable_tp, prefix, self, "column")
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         self.output_sizes = output_sizes
         assert all(output_size % self.tp_size == 0
@@ -249,6 +252,8 @@ class AscendRowParallelLinear(RowParallelLinear):
 
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
             disable_tp, prefix, self, "row")
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         # Divide the weight matrix along the first dimension.
         self.input_size_per_partition = divide(input_size, self.tp_size)
@@ -331,6 +336,8 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
     ):
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
             disable_tp, prefix, self, "column")
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)

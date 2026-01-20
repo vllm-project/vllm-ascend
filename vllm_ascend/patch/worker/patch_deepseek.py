@@ -5,6 +5,7 @@ from vllm.distributed import get_pp_group
 from vllm.model_executor.models.deepseek_v2 import (DeepseekV2Model,
                                                     _get_llama_4_scaling)
 from vllm.sequence import IntermediateTensors
+from vllm.forward_context import get_forward_context
 
 
 def forward(
@@ -43,9 +44,17 @@ def forward(
     else:
         llama_4_scaling = None
 
-    for layer in islice(self.layers, self.start_layer, self.end_layer):
-        hidden_states, residual = layer(positions, hidden_states, residual,
-                                        llama_4_scaling)
+    # support afd
+    forward_ctx = get_forward_context()
+    afd_metadata = forward_ctx.afd_metadata if forward_ctx is not None else None
+
+    if afd_metadata is not None:
+        hidden_states, residual = self.forward_m2n(hidden_states, residual, positions, afd_metadata,
+                                                   llama_4_scaling)
+    else:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            hidden_states, residual = layer(positions, hidden_states, residual,
+                                            llama_4_scaling)
 
     if not get_pp_group().is_last_rank:
         return IntermediateTensors({

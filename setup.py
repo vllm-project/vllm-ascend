@@ -528,5 +528,8 @@ setup(
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling"
         ],
+        "vllm.afd_connectors": [
+            "ascend_afd_connector = vllm_ascend:register_afd_connector"
+        ],
     },
 )

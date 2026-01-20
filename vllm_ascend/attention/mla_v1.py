@@ -404,6 +404,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        is_ubatch_mode: bool = False,
     ) -> AscendMLAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
@@ -1532,9 +1533,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                            max_size=MAX_O_PROJ_PREFETCH_SIZE,
                            enabled=self.enable_prefetch)
 
-        output[...] = self.o_proj(o_proj_input,
+        o_proj_output = self.o_proj(o_proj_input,
                                   is_prefill=prefill_preprocess_res
                                   is not None)[0]
+        output[:o_proj_output.shape[0]] = o_proj_output
 
         del o_proj_input
 

@@ -25,6 +25,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Union
+from typing_extensions import TypeAlias
 
 import numpy as np
 import torch
@@ -35,15 +36,16 @@ from vllm.attention.layer import Attention, MLAAttention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
+from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
-from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
+from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group, get_world_group,
                                              get_pcp_group, get_pp_group,
                                              get_tp_group)
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import AFDMetadata, get_forward_context, DPMetadata, set_forward_context, BatchDescriptor
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -53,7 +55,8 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata, AttentionCGSupport, PAD_SLOT_ID
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec, CrossAttentionSpec,
                                         EncoderOnlyAttentionSpec,
@@ -74,12 +77,13 @@ from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
                                              GPUModelRunner)
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_attn_metadata
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
@@ -113,6 +117,16 @@ from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType, get_mc2_tokens_capacity, select_moe_comm_method,
     set_ascend_forward_context, set_mc2_mask, set_mc2_tokens_capacity)
+
+from vllm_ascend.worker.npu_ubatch_wrapper import UBatchWrapper
+from vllm.v1.worker.ubatch_utils import maybe_create_ubatch_slices, UBatchSlice, UBatchSlices, check_ubatch_thresholds
+
+AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
+# list when ubatching is enabled
+PerLayerAttnMetadata: TypeAlias = Union[list[AttnMetadataDict],
+                                        AttnMetadataDict]
+
+
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -192,6 +206,7 @@ class NPUModelRunner(GPUModelRunner):
             super().__init__(vllm_config, device)
         vllm_config.scheduler_config.max_num_batched_tokens -= max_pcp_pad_tokens
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        self.afd_config = vllm_config.afd_config
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -337,6 +352,8 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs,
                                                   dtype=torch.int32)
+        self.attn_dummy_run_call_cnt = 0
+
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
@@ -367,7 +384,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
-            if get_pp_group().is_last_rank:
+            if get_pp_group().is_last_rank and (not self.afd_config or self.afd_config.afd_role == "attention"):
                 self.drafter = self._get_drafter()
                 if self.speculative_config.method == "eagle3":
                     assert isinstance(self.drafter, EagleProposer)
@@ -476,7 +493,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
-        if isinstance(self.model, ACLGraphWrapper):
+        if isinstance(self.model, (ACLGraphWrapper, UBatchWrapper)):
             return self.model.unwrap()
         return self.model
 
@@ -487,7 +504,7 @@ class NPUModelRunner(GPUModelRunner):
     ) -> tuple[dict[str, Any], torch.Tensor, np.ndarray, int, torch.Tensor,
                int, torch.Tensor, SpecDecodeMetadata, Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor], int, dict[str,
-                                                                         Any]]:
+               Any], Optional[AFDMetadata], UBatchSlices]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -688,6 +705,59 @@ class NPUModelRunner(GPUModelRunner):
         self.query_start_loc.np[num_reqs + 1:].fill(cu_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
 
+        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+        num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+        cascade_attn_prefix_lens = None
+
+        uniform_decode = (max_num_scheduled_tokens == self.uniform_decode_query_len
+                          ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
+
+        (
+            cudagraph_mode,
+            batch_desc,
+            should_ubatch,
+            num_tokens_across_dp,
+            cudagraph_stats,
+        ) = self._determine_batch_execution_and_padding(
+            num_tokens=num_tokens_unpadded,
+            num_reqs=num_reqs,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
+            use_cascade_attn=cascade_attn_prefix_lens is not None,
+            num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+        )
+
+        logger.info(
+            "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+            "should_ubatch: %s, num_tokens_across_dp: %s",
+            cudagraph_mode,
+            batch_desc,
+            should_ubatch,
+            num_tokens_across_dp,
+        )
+
+        num_tokens_padded = batch_desc.num_tokens
+        num_reqs_padded = (
+            batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+        )
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            should_ubatch,
+            num_scheduled_tokens_np,
+            num_tokens_padded,
+            num_reqs_padded,
+            self.parallel_config.num_ubatches,
+        )
+        use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+        pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+        ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+
+        # send is_ubatch to ffn side
+        logger.info(f"prepare_inpute: should_ubatch is {should_ubatch}, ubatch_slices: {ubatch_slices}")
+        # support inequal AF,[ffn_size,ffn_size + min_size) send
+        if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
+            self.afd_connector.send_is_ubatch(should_ubatch)
+            logger.info(f'afd_connector.rank in prepare input is {self.afd_connector.rank}, should_ubatch: {should_ubatch}')
+
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
@@ -700,7 +770,6 @@ class NPUModelRunner(GPUModelRunner):
                                 cu_num_tokens)
         self.positions.cpu[total_num_scheduled_tokens:num_input_tokens].zero_()
         self.positions.copy_to_gpu()
-        attn_metadata: dict[str, Any] = {}
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
@@ -881,6 +950,16 @@ class NPUModelRunner(GPUModelRunner):
         # save logits_indices for pcp spec decode usage
         self.logits_indices = logits_indices
 
+        attn_metadata: PerLayerAttnMetadata = {}
+        if ubatch_slices is not None:
+            print(f'ubatch_slices: {ubatch_slices}')
+            attn_metadata = [dict() for _ in range(len(ubatch_slices))]
+        else:
+            print(f"ubatch_slices is None")
+
+        # pad_attn = self.compilation_config.cudagraph_mode.value == CUDAGraphMode.FULL.value
+        # ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+
         # Used in the below loop.
         self.spec_decode_common_attn_metadata = None
         if use_spec_decode and self.need_accepted_tokens:
@@ -1034,8 +1113,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.long_seq_metadata.max_query_len_pcp_full = \
                     ori_query_lens_cpu.max().item()
 
-
-
             if self.speculative_config and \
                 self.spec_decode_common_attn_metadata is None:
                 self.spec_decode_common_attn_metadata = common_attn_metadata
@@ -1057,13 +1134,31 @@ class NPUModelRunner(GPUModelRunner):
                             num_decode_draft_tokens_cpu=self.
                             num_decode_draft_tokens.cpu[:num_reqs],
                         )
-                attn_metadata_i = builder.build(
-                    common_prefix_len=common_prefix_len,
-                    common_attn_metadata=common_attn_metadata,
-                    **extra_attn_metadata_args)
-
-                for layer_name in attn_group.layer_names:
-                    attn_metadata[layer_name] = attn_metadata_i
+                if ubatch_slices_attn is not None:
+                    common_attn_metadata_list = split_attn_metadata(
+                        ubatch_slices_attn, common_attn_metadata
+                    )
+                    for ubid, sub_common_attn_metadata in enumerate(
+                            common_attn_metadata_list
+                    ):
+                        attn_metadata_i = attn_group.get_metadata_builder(
+                            ubatch_id=ubid
+                        ).build(
+                            common_prefix_len=common_prefix_len,
+                            common_attn_metadata=sub_common_attn_metadata,
+                            **extra_attn_metadata_args,
+                        )
+                        for layer_name in attn_group.layer_names:
+                            assert type(attn_metadata) is list
+                            attn_metadata[ubid][layer_name] = attn_metadata_i
+                else:
+                    attn_metadata_i = builder.build(
+                        common_prefix_len=common_prefix_len,
+                        common_attn_metadata=common_attn_metadata,
+                        **extra_attn_metadata_args,
+                    )
+                    for layer_name in attn_group.layer_names:
+                        attn_metadata[layer_name] = attn_metadata_i
 
         # update global cos, sin
         update_cos_sin(positions)
@@ -1074,11 +1169,13 @@ class NPUModelRunner(GPUModelRunner):
                 logits_indices,
                 (0, max_num_reqs_across_dp - logits_indices.shape[0]))
 
+        afd_metadata = self._build_afd_metadata(ubatch_slices_padded, maybe_padded_num_tokens)
+
         return (attn_metadata, positions, num_scheduled_tokens,
                 num_input_tokens, num_tokens_across_dp,
                 maybe_padded_num_tokens, logits_indices, spec_decode_metadata,
                 input_ids, inputs_embeds, intermediate_tensors,
-                max_num_scheduled_tokens, model_kwargs)
+                max_num_scheduled_tokens, model_kwargs, afd_metadata, ubatch_slices_padded)
 
     # all-gather one hidden-states in sp scene
     @staticmethod
@@ -1476,11 +1573,20 @@ class NPUModelRunner(GPUModelRunner):
              num_input_tokens, num_tokens_across_dp, maybe_padded_num_tokens,
              logits_indices, spec_decode_metadata, input_ids, inputs_embeds,
              intermediate_tensors, max_query_len,
-             model_kwargs) = (self._prepare_inputs(scheduler_output,
+             model_kwargs, afd_metadata,
+             ubatch_slices) = (self._prepare_inputs(scheduler_output,
                                                    intermediate_tensors))
 
-            if self.dynamic_eplb:
-                self.eplb_updator.take_update_info_from_eplb_process()
+        dp_rank = self.parallel_config.data_parallel_rank
+        if ubatch_slices:
+            assert num_tokens_across_dp is not None
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+        elif num_tokens_across_dp is not None:
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+        logger.info(f"execute_model ubatch_slices is {ubatch_slices}")
+
+        if self.dynamic_eplb:
+            self.eplb_updator.take_update_info_from_eplb_process()
 
         # prevent debugger is None
         if self.debugger is not None:
@@ -1518,7 +1624,9 @@ class NPUModelRunner(GPUModelRunner):
                     num_actual_tokens=scheduler_output.
                     total_num_scheduled_tokens,
                     model_instance=self.model,
-                    is_multimodal_model=self.is_multimodal_model):
+                    is_multimodal_model=self.is_multimodal_model,
+                    afd_metadata=afd_metadata,
+                    ubatch_slices=ubatch_slices):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
@@ -1904,14 +2012,17 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: np.ndarray,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
-    ) -> Optional[dict[str, Any]]:
-        attn_metadata: Optional[dict[str, Any]] = None
+        ubatch_slices: list[UBatchSlice] = None,
+    ) -> Optional[Union[dict[str, Any], list[dict[str, Any]]]]:
+        attn_metadata: Optional[Union[dict[str, Any], list[dict[str, Any]]]] = None
 
         if force_attention or aclgraph_runtime_mode == CUDAGraphMode.FULL:
             assert with_prefill is False, \
                 "Full decode graph only supports uniform batch now."
-
-            attn_metadata = {}
+            if ubatch_slices is not None:
+                attn_metadata = [dict() for _ in range(len(ubatch_slices))]
+            else:
+                attn_metadata = dict()
 
             seq_lens = max_query_len
             self.seq_lens.np[:num_reqs] = seq_lens
@@ -1994,16 +2105,33 @@ class NPUModelRunner(GPUModelRunner):
                     if isinstance(builder, GDNAttentionMetadataBuilder):
                         attn_metadata_gdn_attention = builder.build_for_cudagraph_capture(
                             common_metadata)
+                        for layer_name in kv_cache_group_spec.layer_names:
+                            if "linear_attn" in layer_name:
+                                attn_metadata[
+                                    layer_name] = attn_metadata_gdn_attention
                     else:
-                        attn_metadata_full_attention = builder.build_for_graph_capture(
-                            common_attn_metadata, attn_state)
-                    for layer_name in kv_cache_group_spec.layer_names:
-                        if "linear_attn" in layer_name:
-                            attn_metadata[
-                                layer_name] = attn_metadata_gdn_attention
+                        if ubatch_slices is not None:
+                            common_attn_metadata_list = split_attn_metadata(
+                                ubatch_slices, common_attn_metadata
+                            )
+                            for ubid, common_attn_metadata in enumerate(
+                                    common_attn_metadata_list
+                            ):
+                                attn_metadata_full_attention = attn_group.get_metadata_builder(
+                                    ubatch_id=ubid
+                                ).build_for_graph_capture(
+                                    common_attn_metadata,
+                                    AscendAttentionState.DecodeOnly
+                                )
+                                for layer_name in kv_cache_group_spec.layer_names:
+                                    assert type(attn_metadata) is list
+                                    attn_metadata[ubid][layer_name] = attn_metadata_full_attention
                         else:
-                            attn_metadata[
-                                layer_name] = attn_metadata_full_attention
+                            attn_metadata_full_attention = builder.build_for_graph_capture(
+                                common_attn_metadata, attn_state)
+                            for layer_name in kv_cache_group_spec.layer_names:
+                                attn_metadata[
+                                    layer_name] = attn_metadata_full_attention
 
         return attn_metadata
 
@@ -2043,6 +2171,239 @@ class NPUModelRunner(GPUModelRunner):
         else:
             hidden_states = hidden_states
         return hidden_states
+
+    def _sync_batch_across_dp(
+            self,
+            num_tokens_padded: int,
+            cudagraph_mode: int = 0,
+    ) -> tuple[bool, torch.Tensor | None, int]:
+        """
+        Coordinates amongst all DP ranks to determine if and how the full batch
+        should be split into microbatches.
+
+        Args:
+            num_tokens_padded: Number of tokens including any non-DP padding (CUDA graphs,
+                TP, etc)
+            cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL)
+
+        Returns: tuple[
+            ubatch_slices: if this is set then all DP ranks have agreed to
+            microbatch
+            num_tokens_after_padding: A tensor containing the total number of
+            tokens per-microbatch for each DP rank including padding. Will be
+            padded up to the max value across all DP ranks when allow_dp_padding
+            is True.
+            synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
+        ]
+
+        """
+
+        # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
+        # our case, we still need to sync the other two flags as well. So we need to
+        # include them in the all_reduce operation, and more over, we CANNOT skip it
+        # even if we are running in eager mode, which harms performance.
+        # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
+        # immediately once the other two flags are no longer needed.
+
+        if self.dp_size == 1:
+            should_ubatch = check_enable_ubatch(
+                num_tokens_padded,
+                num_tokens_padded,
+                uniform_decode=False,
+                vllm_config=self.vllm_config,
+                moe_comm_type=select_moe_comm_method(num_tokens_padded,
+                                                     self.vllm_config),
+            )
+
+            return should_ubatch, None, cudagraph_mode
+
+        if self._skip_all_reduce_across_dp_group():
+            num_tokens_after_padding = torch.tensor([num_tokens_padded] *
+                                                    self.dp_size,
+                                                    device="cpu",
+                                                    dtype=torch.int32)
+            return False, num_tokens_after_padding, cudagraph_mode
+
+        tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
+        tensor[0][self.dp_rank] = num_tokens_padded
+        tensor[1][self.dp_rank] = cudagraph_mode
+        dist.all_reduce(tensor, group=get_dp_group().cpu_group)
+
+        num_tokens_across_dp = tensor[0, :]
+        max_num_tokens = int(num_tokens_across_dp.max().item())
+        min_num_tokens = int(num_tokens_across_dp.min().item())
+        num_tokens_after_padding = torch.tensor(
+            [max_num_tokens] * len(num_tokens_across_dp),
+            device="cpu",
+            dtype=torch.int32,
+        )
+        # Synchronize cudagraph_mode across ranks (take min)
+        synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
+
+        logger.info(f"ttg _sync_batch_across_dp num_tokens_after_padding: {num_tokens_after_padding}, "
+                    f"min_num_tokens: {min_num_tokens}, max_num_tokens: {max_num_tokens}")
+
+        should_ubatch = check_enable_ubatch(
+            min_num_tokens,
+            max_num_tokens,
+            uniform_decode=False,
+            vllm_config=self.vllm_config,
+            moe_comm_type=select_moe_comm_method(num_tokens_padded,
+                                                 self.vllm_config),
+        )
+        return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
+
+    def _determine_batch_execution_and_padding(
+            self,
+            num_tokens: int,
+            num_reqs: int,
+            num_scheduled_tokens_np: np.ndarray,
+            max_num_scheduled_tokens: int,
+            use_cascade_attn: bool,
+            allow_microbatching: bool = False,
+            force_eager: bool = False,
+            # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
+            # be improved in model runner v2)
+            force_uniform_decode: bool | None = None,
+            force_has_lora: bool | None = None,
+            num_encoder_reqs: int = 0,
+    ) -> tuple[CUDAGraphMode, BatchDescriptor, bool,
+               torch.Tensor | None, CUDAGraphStat | None]:
+
+        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        uniform_decode = (
+            ((max_num_scheduled_tokens == self.uniform_decode_query_len) and
+             (num_tokens == max_num_scheduled_tokens * num_reqs))
+            if force_uniform_decode is None else force_uniform_decode)
+        # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
+        # is present). Also, chunked-prefill is disabled, so batch are uniform.
+        has_encoder_output = (self.model_config.is_encoder_decoder
+                              and num_encoder_reqs > 0)
+        has_lora = (len(self.input_batch.lora_id_to_lora_request) > 0
+                    if force_has_lora is None else force_has_lora)
+
+        dispatch_cudagraph = (
+            lambda num_tokens, disable_full: self.cudagraph_dispatcher.
+                dispatch(
+                num_tokens=num_tokens,
+                has_lora=has_lora,
+                uniform_decode=uniform_decode,
+                disable_full=disable_full,
+            ) if not force_eager else
+            (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded)))
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+            num_tokens_padded, use_cascade_attn or has_encoder_output)
+        
+        # When VLLM_COMPILE is enabled, AscendCompiler uses PiecewiseBackend which
+        # bucketizes inputs to capture sizes. If Dispatcher returns NONE (Eager) 
+        # but inputs match a bucket, Backend might pad internally, causing mismatch 
+        # with ModelRunner's metadata. We force padding here to align them.
+        if cudagraph_mode == CUDAGraphMode.NONE and \
+           self.compilation_config.mode == CompilationMode.VLLM_COMPILE and \
+           self.compilation_config.cudagraph_capture_sizes:
+            for size in sorted(self.compilation_config.cudagraph_capture_sizes):
+                if size >= batch_descriptor.num_tokens:
+                    batch_descriptor = BatchDescriptor(
+                        num_tokens=size,
+                        num_reqs=batch_descriptor.num_reqs,
+                        uniform=batch_descriptor.uniform,
+                        has_lora=batch_descriptor.has_lora
+                    )
+                    break
+
+        num_tokens_padded = batch_descriptor.num_tokens
+        if enable_sp(self.vllm_config):
+            assert (batch_descriptor.num_tokens %
+                    self.vllm_config.parallel_config.tensor_parallel_size == 0
+                    ), ("Sequence parallelism requires num_tokens to be "
+                        "a multiple of tensor parallel size")
+        # Extra coordination when running data-parallel since we need to coordinate
+        # across ranks
+        should_ubatch, num_tokens_across_dp = False, None
+        if self.vllm_config.parallel_config.data_parallel_size > 1:
+            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = self._sync_batch_across_dp(
+                num_tokens_padded=num_tokens_padded,
+                cudagraph_mode=cudagraph_mode.value,
+            )
+            logger.info(f"ttg determine_batch_execution_and_padding num_tokens_padded: {num_tokens_padded}, "
+                        f"num_tokens_across_dp: {num_tokens_across_dp}")
+
+            # Extract DP padding if there is any
+            if num_tokens_across_dp is not None:
+                dp_rank = self.parallel_config.data_parallel_rank
+                num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
+                # Re-dispatch with DP padding
+                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                    num_tokens_padded,
+                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value, )
+                # Assert to make sure the agreed upon token count is correct otherwise
+                # num_tokens_across_dp will no-longer be valid
+                assert batch_descriptor.num_tokens == num_tokens_padded
+        else:
+            # dp == 1
+            should_ubatch = check_enable_ubatch(
+                num_tokens_padded,
+                num_tokens_padded,
+                uniform_decode=False,
+                vllm_config=self.vllm_config,
+                moe_comm_type=select_moe_comm_method(num_tokens_padded,
+                                                     self.vllm_config),
+            )
+        cudagraph_stats = None
+        if self.vllm_config.observability_config.cudagraph_metrics:
+            cudagraph_stats = CUDAGraphStat(
+                num_unpadded_tokens=num_tokens,
+                num_padded_tokens=batch_descriptor.num_tokens,
+                num_paddings=batch_descriptor.num_tokens - num_tokens,
+                runtime_mode=str(cudagraph_mode),
+            )
+
+        return (
+            cudagraph_mode,
+            batch_descriptor,
+            should_ubatch,
+            num_tokens_across_dp,
+            cudagraph_stats,
+        )
+
+    def _build_afd_metadata(
+        self, ubatch_slices: UBatchSlices | None, num_tokens_unpadded: int
+    ):
+        afd_metadata = None
+        if self.afd_config:
+            # For prefill, compute tokens per stage based on actual token
+            if ubatch_slices and len(ubatch_slices) > 1:
+                afd_tokens_start_loc = [ub.token_slice.start for ub in ubatch_slices]
+                afd_reqs_start_loc = [ub.request_slice.start for ub in ubatch_slices]
+                logger.info(
+                    f"afd_tokens_start_loc: {afd_tokens_start_loc} "
+                    f"afd_reqs_start_loc: {afd_reqs_start_loc} "
+                    f"ubatch_slices: {ubatch_slices}"
+                )
+                afd_tokens_lens = [ub.num_tokens for ub in ubatch_slices]
+            else:
+                afd_tokens_start_loc = [0]
+                afd_reqs_start_loc = [0]
+                afd_tokens_lens = [num_tokens_unpadded]
+            
+            # If ubatch_slices is None, we need to initialize lists in afd_metadata
+            # so they can be populated by UBatchWrapper if needed,
+            # BUT, jiusi-vllm's _build_afd_metadata in gpu_model_runner.py DOES NOT initialize lists.
+            # The lists are initialized in AFDMetadata constructor? No, AFDMetadata is a dataclass.
+            # In jiusi-vllm, gpu_ubatch_wrapper._make_afd_ubatch_metadata appends to these lists.
+            # So here we should probably pass empty lists if we expect UBatchWrapper to fill them?
+            # Wait, AFDMetadata in jiusi-vllm has fields like input_ids_list: list[torch.Tensor] = field(default_factory=list).
+            # If so, we don't need to do anything special here.
+            
+            afd_metadata = AFDMetadata(
+                afd_tokens_start_loc=afd_tokens_start_loc,
+                afd_reqs_start_loc=afd_reqs_start_loc,
+                afd_stage_idx=0,
+                afd_connector=self.afd_connector,
+                afd_tokens_lens=afd_tokens_lens,
+                num_of_stages=len(ubatch_slices) if ubatch_slices else 1,
+            )
+        return afd_metadata
 
     @torch.inference_mode()
     def _dummy_run(
@@ -2098,7 +2459,8 @@ class NPUModelRunner(GPUModelRunner):
         max_query_len = self.uniform_decode_query_len if uniform_decode else \
                                                                 num_tokens
 
-        # Set num_scheduled_tokens based on num_tokens and max_num_seqs
+        # Set num_scheduled_toke
+        # ns based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
@@ -2123,6 +2485,77 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
+        self.query_lens = torch.from_numpy(num_scheduled_tokens)
+        num_tokens_unpadded = int(num_scheduled_tokens.sum())
+
+        _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
+            self._determine_batch_execution_and_padding(
+                num_tokens=num_tokens_unpadded,
+                num_reqs=num_reqs,
+                num_scheduled_tokens_np=num_scheduled_tokens,
+                max_num_scheduled_tokens=max_query_len,
+                use_cascade_attn=False,
+                allow_microbatching=allow_microbatching,
+                force_eager=is_profile
+                or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
+                # `force_uniform_decode` is used for cudagraph capture; because for
+                # capturing mixed prefill-decode batches, we sometimes use
+                # num_tokens == num_reqs which looks like a uniform decode batch to the
+                # dispatcher; but we actually want to capture a piecewise cudagraph
+                force_uniform_decode=uniform_decode,
+                # `force_has_lora` is used for cudagraph capture; because LoRA is
+                # activated later in the context manager, but we need to know the
+                # LoRA state when determining the batch descriptor for capture
+                force_has_lora=activate_lora,
+            )
+        )
+
+        if cudagraph_runtime_mode is None:
+            cudagraph_runtime_mode = _cudagraph_mode
+        else:
+            assert cudagraph_runtime_mode == _cudagraph_mode, (
+                f"Cudagraph runtime mode mismatch in dummy_run. "
+                f"Expected {_cudagraph_mode}, but got {cudagraph_runtime_mode}."
+            )
+
+        num_tokens_padded = batch_desc.num_tokens
+        num_reqs_padded = (
+            batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+        )
+
+        if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
+            # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
+            num_tokens_across_dp[:] = num_tokens_padded
+            num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
+
+        # We currently only microbatch if the number of tokens is
+        # over a certain threshold.
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            should_ubatch,
+            num_scheduled_tokens,
+            num_tokens_padded,
+            num_reqs_padded,
+            self.parallel_config.num_ubatches,
+        )
+        logger.debug(
+            "ubatch_slices: %s, ubatch_slices_padded: %s",
+            ubatch_slices,
+            ubatch_slices_padded,
+        )
+
+        # send is_ubatch to ffn side
+        logger.info(f"dummy_run: should_ubatch is {should_ubatch}, ubatch_slices: {ubatch_slices}")
+        # support inequal AF,[ffn_size,ffn_size + min_size) send
+        if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
+            logger.info(f'afd_connector.rank in dummy_run is {self.afd_connector.rank}')
+            self.afd_connector.send_is_ubatch(should_ubatch)
+            logger.info(f'afd_connector.rank in dummy_run is {self.afd_connector.rank}, '
+                        f'should_ubatch in dummy_run  is {should_ubatch}')
+
+        # num_tokens_after_padding = num_tokens
+        # if num_tokens_across_dp is not None:
+        #     dp_rank = self.parallel_config.data_parallel_rank
+        #     num_tokens_after_padding = int(num_tokens_across_dp[dp_rank])
 
         if not is_profile and self.dynamic_eplb:
             self.eplb_updator.forward_before()
@@ -2162,6 +2595,8 @@ class NPUModelRunner(GPUModelRunner):
             aclgraph_runtime_mode=cudagraph_runtime_mode,
             force_attention=force_attention,
             num_scheduled_tokens=num_scheduled_tokens,
+            ubatch_slices=ubatch_slices_padded
+            if self.compilation_config.cudagraph_mode.value == CUDAGraphMode.FULL.value else ubatch_slices,
         )
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
@@ -2210,6 +2645,14 @@ class NPUModelRunner(GPUModelRunner):
                     for k, v in self.intermediate_tensors.items()
                 })
 
+            # if ubatch_slices is not None:
+            #     # Adjust values to reflect a single ubatch.
+            #     # TODO(sage,lucas): this is cruft that should be addressed in
+            #     #  the padding refactor.
+            #     num_tokens_after_padding = ubatch_slices[0].num_tokens
+            #     if num_tokens_across_dp is not None:
+            #         num_tokens_across_dp[:] = num_tokens_after_padding
+
             need_dummy_logits = (not is_profile and lmhead_tp_enable())
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
             dummy_indices = torch.zeros(max_num_reqs_across_dp,
@@ -2227,7 +2670,8 @@ class NPUModelRunner(GPUModelRunner):
                         self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(
                         hidden_states[dummy_indices])
-
+            logger.info(f'num_tokens is {num_tokens_padded},num_tokens_across_dp is {num_tokens_across_dp}')
+            afd_metadata = self._build_afd_metadata(ubatch_slices, num_tokens_padded)
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -2238,7 +2682,9 @@ class NPUModelRunner(GPUModelRunner):
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     model_instance=self.model,
-                    is_multimodal_model=self.is_multimodal_model):
+                    is_multimodal_model=self.is_multimodal_model,
+                    afd_metadata=afd_metadata,
+                    ubatch_slices=ubatch_slices):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     input_ids, positions, num_tokens_padded,
                     intermediate_tensors, inputs_embeds)
@@ -2260,6 +2706,8 @@ class NPUModelRunner(GPUModelRunner):
             if not is_profile and self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
                 self.eplb_updator.forward_end()
+            print(f'attn_dummy_run_call_cnt is {self.attn_dummy_run_call_cnt}')
+            self.attn_dummy_run_call_cnt += 1
             return hidden_states, hidden_states
 
     @torch.inference_mode()
@@ -2278,6 +2726,8 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        logger.info(f'hidden_states before synchronize shape is {hidden_states.shape}')
+        torch.npu.synchronize()
         # TODO: need to rum a dummy sampler for generate task
         # Sometimes, after the model is compiled through the AOT backend,
         # the model output may become a list containing only one Tensor object.
@@ -2296,6 +2746,7 @@ class NPUModelRunner(GPUModelRunner):
             self._dummy_run(mc2_tokens_capacity,
                             with_prefill=True,
                             is_profile=True)
+            logger.info(f"profile_run finish dummy run")
         origin_max_num_tokens = self.max_num_tokens
         # in the pcp scenario, the split sequence needs to be used for profile run
         # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
@@ -2334,11 +2785,20 @@ class NPUModelRunner(GPUModelRunner):
                     m.consumed_memory / float(2**30))
 
         # wrap the model with full graph wrapper if needed.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs()\
+            and not self.parallel_config.use_ubatching:
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
+        elif self.parallel_config.use_ubatching:
+            self.update_stream: torch.npu.Stream = torch.npu.Stream()
+            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                self.model = UBatchWrapper(self.model, self.vllm_config,
+                                           CUDAGraphMode.FULL, self.device)
+            else:
+                self.model = UBatchWrapper(self.model, self.vllm_config,
+                                           CUDAGraphMode.NONE, self.device)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -2353,14 +2813,22 @@ class NPUModelRunner(GPUModelRunner):
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
+
         self.use_hybrid_blocks = (len(self.attn_groups) > 1)
+
+        # The kernel block size for all KV cache groups.
+        kernel_block_sizes = self._prepare_kernel_block_sizes(kv_cache_config)
+
+        # create metadata builders
+        self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
+
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any([
             isinstance(attn_group[0].kv_cache_spec, MambaSpec)
             for attn_group in self.attn_groups
         ])
 
-        self.may_reinitialize_input_batch(kv_cache_config)
+        self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if has_kv_transfer_group():
@@ -2674,23 +3142,7 @@ class NPUModelRunner(GPUModelRunner):
 
         return kv_caches
 
-    def may_reinitialize_input_batch(self,
-                                     kv_cache_config: KVCacheConfig) -> None:
-        """
-        Re-initialize the input batch if the block sizes are different from
-        `[self.cache_config.block_size]`. This usually happens when there
-        are multiple KV cache groups.
-
-        Args:
-            kv_cache_config: The KV cache configuration.
-        """
-        block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-            if not isinstance(kv_cache_group.kv_cache_spec,
-                              EncoderOnlyAttentionSpec)
-        ]
-
+    def _prepare_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> list[list[int]]:
         # Generate kernel_block_sizes that matches each block_size
         # For attention backends that support virtual block splitting,
         # use the supported block sizes from the backend
@@ -2730,6 +3182,30 @@ class NPUModelRunner(GPUModelRunner):
                 # of mamba block. In this case, BlockTable.block_size will never equal
                 # to kernel_block_sizes[0]
                 kernel_block_sizes.append([0])
+        return kernel_block_sizes
+
+    def may_reinitialize_input_batch(self,
+                                     kv_cache_config: KVCacheConfig,
+                                     kernel_block_sizes: Optional[list[list[int]]] = None) -> None:
+        """
+        Re-initialize the input batch if the block sizes are different from
+        `[self.cache_config.block_size]`. This usually happens when there
+        are multiple KV cache groups.
+
+        Args:
+            kv_cache_config: The KV cache configuration.
+            kernel_block_sizes: The kernel block sizes for each KV cache group.
+        """
+        block_sizes = [
+            kv_cache_group.kv_cache_spec.block_size
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+            if not isinstance(kv_cache_group.kv_cache_spec,
+                              EncoderOnlyAttentionSpec)
+        ]
+
+        if kernel_block_sizes is None:
+            kernel_block_sizes = self._prepare_kernel_block_sizes(kv_cache_config)
+
         if block_sizes != [
                 self.cache_config.block_size
         ] or kernel_block_sizes != [[self.cache_config.block_size]]:
@@ -2806,16 +3282,8 @@ class NPUModelRunner(GPUModelRunner):
             attn_groups: list[AttentionGroup] = []
             for (attn_backend,
                  kv_cache_spec), layer_names in attn_backends_map.items():
-                attn_metadata_builders = []
-                attn_metadata_builders.append(attn_backend.get_builder_cls()(
-                    kv_cache_spec,
-                    layer_names,
-                    self.vllm_config,
-                    self.device,
-                ))
                 attn_group = AttentionGroup(attn_backend, layer_names,
-                                            kv_cache_spec, kv_cache_group_id,
-                                            attn_metadata_builders)
+                                            kv_cache_spec, kv_cache_group_id)
                 attn_groups.append(attn_group)
             return attn_groups
 
@@ -2835,7 +3303,27 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_group_spec)
             self.attn_groups.append(create_attn_groups(attn_backends[0], i))
 
+    def initialize_metadata_builders(
+        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: Optional[list[list[int]]] = None
+    ) -> None:
+        """
+        Create the metadata builders for all KV cache groups and attn groups.
+        """
+        for kv_cache_group_id in range(len(kv_cache_config.kv_cache_groups)):
+            for attn_group in self.attn_groups[kv_cache_group_id]:
+                attn_group.create_metadata_builders(
+                    self.vllm_config,
+                    self.device,
+                    min(kernel_block_sizes[kv_cache_group_id])
+                    if kernel_block_sizes and kv_cache_group_id < len(kernel_block_sizes)
+                    else None,
+                    num_metadata_builders=1
+                    if not self.parallel_config.use_ubatching
+                    else self.parallel_config.num_ubatches,
+                )
         # Calculate reorder batch threshold (if needed)
+        # Note (tdoublep): do this *after* constructing builders,
+        # because some of them change the threshold at init time.
         self.calculate_reorder_batch_threshold()
 
     def calculate_reorder_batch_threshold(self) -> None:
@@ -2989,7 +3477,7 @@ class NPUModelRunner(GPUModelRunner):
     def _prepare_multimodal_fields(self):
         """
         Ensures specific multimodal tensors are on CPU.
-        This is necessary for fields like 'grid_thw' which are converted to numpy 
+        This is necessary for fields like 'grid_thw' which are converted to numpy
         inside the model's forward pass.
         """
         if not self.multimodal_cpu_fields:
@@ -3012,6 +3500,57 @@ class NPUModelRunner(GPUModelRunner):
                             tensor,
                             torch.Tensor) and tensor.device.type != 'cpu':
                         mm_data[field] = tensor.cpu()
+
+
+def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
+    """
+    Synchronize cudagraph_mode across DP ranks by taking the minimum.
+    If any rank has NONE (0), all ranks use NONE.
+    This ensures all ranks send consistent values (all padded or all unpadded).
+    """
+    return int(tensor[1, :].min().item())
+
+
+def check_enable_ubatch(
+    num_tokens_unpadded: int,
+    num_tokens_padded: int,
+    uniform_decode: bool,
+    vllm_config: VllmConfig,
+    moe_comm_type: MoECommType | None,
+    request_level_split: bool = False,
+) -> bool:
+    parallel_config = vllm_config.parallel_config
+    # Check preconditions for microbatching
+    should_attempt_ubatching = check_ubatch_thresholds(
+        parallel_config,
+        num_tokens_unpadded,
+        uniform_decode=uniform_decode,
+    )
+    logger.info(f"ttg check_enable_ubatch should_attempt_ubatching: {should_attempt_ubatching}, "
+                f"moe_comm_type: {moe_comm_type}")
+
+    # if not parallel_config.enable_dbo or not should_attempt_ubatching or moe_comm_type == MoECommType.MC2:
+    #     return False
+    if not parallel_config.enable_dbo or not should_attempt_ubatching:
+        return False
+
+    if hasattr(vllm_config.parallel_config, "num_ubatches"):
+        num_ubatches = vllm_config.parallel_config.num_ubatches
+    else:
+        num_ubatches = 2
+    # Sanity Check that the existing padding isn't giving us an empty second
+    # ubatch. Abort if so
+    if is_last_ubatch_empty(num_tokens_unpadded, num_tokens_padded, num_ubatches):
+        logger.debug(
+            "Empty last µbatch detected: unpadded tokens: %s, padded tokens: %s", num_tokens_unpadded, num_tokens_padded
+        )
+        return False
+
+    return True
+
+
+def is_last_ubatch_empty(orig_num_tokens: int, padded_num_tokens: int, num_ubatches: int = 2) -> bool:
+    return (padded_num_tokens // num_ubatches) * (num_ubatches - 1) >= orig_num_tokens
 
 
 @contextmanager

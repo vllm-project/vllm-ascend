@@ -17,9 +17,12 @@
 from typing import Any, Callable, Optional
 
 import torch
+import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
-                              tensor_model_parallel_all_reduce)
+                              tensor_model_parallel_all_reduce,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
@@ -380,6 +383,52 @@ class AscendFusedMoE(FusedMoE):
 
         return routed_out
 
+    def afd_ffn_compute(
+            self,
+            layer: torch.nn.Module,
+            hidden_states: torch.Tensor,
+            router_logits:  Optional[torch.Tensor] = None,
+            group_list:  Optional[torch.Tensor] = None,
+            topk_weights: Optional[torch.Tensor] = None,
+            topk_ids: Optional[torch.Tensor] = None,
+            row_idx: Optional[torch.Tensor] = None,
+        ):
+        forward_context = get_forward_context()
+        moe_comm_method = forward_context.moe_comm_method
+        # 自动检测量化类型并获取所有相关参数
+        use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias = \
+            self._detect_quantization_and_get_params(layer)
+
+        final_hidden_states = moe_comm_method.fused_experts(
+            hidden_states=hidden_states,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=self.global_num_experts,
+            expert_map=self._expert_map,
+            shared_experts=None,
+            apply_router_weight_on_input=self.apply_router_weight_on_input,
+            dynamic_eplb=self.dynamic_eplb,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int4_w4a8=use_int4_w4a8,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_scale_bias=w1_scale_bias,
+            w2_scale_bias=w2_scale_bias)
+        if isinstance(final_hidden_states, tuple):
+            final_hidden_states, group_list_type, expert_tokens = final_hidden_states
+
+        if self.dynamic_eplb:
+            self.moe_load += expert_tokens if group_list_type else \
+                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+
+        final_hidden_states = forward_context.moe_comm_method.finalize(
+            hidden_states=final_hidden_states,
+            reduce_results=self.reduce_results)
+
+        return final_hidden_states
+
 
 class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
@@ -473,3 +522,193 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             shared_out = fc3_context.shared_out
 
         return shared_out, routed_out
+
+    # TODO 这里的weight的传入有问题，目测是没加载对?
+    def afd_ffn_compute(
+            self,
+            layer: torch.nn.Module,
+            hidden_states: torch.Tensor,
+            router_logits: Optional[torch.Tensor] = None,
+            group_list: Optional[torch.Tensor] = None,
+            topk_weights: Optional[torch.Tensor] = None,
+            topk_ids: Optional[torch.Tensor] = None,
+            row_idx: Optional[torch.Tensor] = None,
+    ):
+        import torch.nn as nn
+        forward_context = get_forward_context()
+        moe_comm_method = forward_context.moe_comm_method
+
+        # Load balancing for token distribution among experts in dummy_run
+        # TODO: The community only considers load balancing when DP > 1.
+        # This approach may overlook some extreme scenarios.
+        enable_force_load_balance = forward_context.in_profile_run
+
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
+        shared_out = self._shared_experts(hidden_states)
+
+        # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
+        if tp_size > 1:
+            moe_comm_type = forward_context.moe_comm_type
+            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
+                shared_out = tensor_model_parallel_all_reduce(shared_out)
+
+        num_tokens, _ = hidden_states.shape
+        target_pad_length = forward_context.padded_num_tokens
+        pad_size = target_pad_length - num_tokens
+        # Pad if necessary (unless shared expert DP is enabled)
+        if pad_size > 0 and not self.enable_shared_expert_dp:
+            topk_weights = nn.functional.pad(topk_weights, (0, 0, 0, pad_size))
+            topk_ids = nn.functional.pad(topk_ids, (0, 0, 0, pad_size))
+            if row_idx is not None:
+                row_idx = nn.functional.pad(row_idx, (0, 0, 0, pad_size))
+
+        # if tp_size > 1 and not self.enable_shared_expert_dp:
+        #     split_topk_weights = torch.tensor_split(topk_weights, tp_size, dim=0)
+        #     split_topk_ids = torch.tensor_split(topk_ids, tp_size, dim=0)
+        #     if row_idx is not None:
+        #         split_row_idx = torch.tensor_split(row_idx, tp_size, dim=0)
+        #         row_idx = split_row_idx[tp_rank]
+        #     topk_weights = split_topk_weights[tp_rank]
+        #     topk_ids = split_topk_ids[tp_rank]
+
+
+        # print(f'topk_ids shape after split is {topk_ids.shape}')
+        hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            replace_allreduce=forward_context.sp_enabled,
+            enable_shared_expert_dp=self.enable_shared_expert_dp,
+            quant_type=self.quant_type)
+
+        use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias = \
+            _detect_quantization_and_get_params(layer)
+
+        final_hidden_states = moe_comm_method.fused_experts(
+            hidden_states=hidden_states,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=self.global_num_experts,
+            expert_map=self._expert_map,
+            shared_experts=None,
+            apply_router_weight_on_input=self.apply_router_weight_on_input,
+            dynamic_eplb=self.dynamic_eplb,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int4_w4a8=use_int4_w4a8,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_scale_bias=w1_scale_bias,
+            w2_scale_bias=w2_scale_bias,
+            mc2_mask=mc2_mask)
+
+        if isinstance(final_hidden_states, tuple):
+            final_hidden_states, group_list_type, expert_tokens = final_hidden_states
+
+        if self.dynamic_eplb:
+            self.moe_load += expert_tokens if group_list_type else \
+                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+
+        final_hidden_states = forward_context.moe_comm_method.finalize(
+            hidden_states=final_hidden_states.routed_out,
+            reduce_results=self.reduce_results,
+            context_metadata=context_metadata)
+
+        return shared_out, final_hidden_states
+
+    def afd_m2n_ffn_compute(
+            self,
+            layer: torch.nn.Module,
+            hidden_states: torch.Tensor,
+            router_logits: Optional[torch.Tensor] = None,
+            group_list: Optional[torch.Tensor] = None,
+            dynamic_scale: Optional[torch.Tensor] = None,
+            topk_weights: Optional[torch.Tensor] = None,
+            topk_ids: Optional[torch.Tensor] = None,
+            row_idx: Optional[torch.Tensor] = None,
+            x_active_mask: Optional[torch.Tensor] = None,
+            group_list_type: Optional[int] = 1,
+            connector_name: Optional[str] = "",
+            cam_p2p_ep_name: Optional[str] = "",
+    ):
+        use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias = \
+            _detect_quantization_and_get_params(layer)
+        # TODO(yxj):move to p2p
+        # hidden_states是dispatch之后的，shape第一维是group_list[-1],self.max_num_token*8*2
+        shared_out = self._shared_experts(hidden_states)
+
+        if connector_name == "camp2pconnector":
+            w1 = layer.w13_weight.to(torch.int8)
+            w2 = layer.w2_weight.to(torch.int8)
+            gmm1_weight = torch_npu.npu_format_cast(w1, torch_npu.Format.FRACTAL_NZ)
+            gmm2_weight = torch_npu.npu_format_cast(w2, torch_npu.Format.FRACTAL_NZ)
+            w1_scale = w1_scale.float()
+            w2_scale = w2_scale.float()
+            from vllm_ascend.ops.moe.moe_mlp import fused_experts
+            mlp_output = fused_experts(
+                hidden_states=hidden_states,
+                w1=gmm1_weight,
+                w1_scale=w1_scale,
+                w2=gmm2_weight,
+                w2_scale=w2_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                x_active_mask=x_active_mask,
+                group_ep=cam_p2p_ep_name,
+                ep_rank_size=self.ep_size,
+                ep_rank_id=self.ep_rank,
+                moe_expert_num=self.global_num_experts
+            )
+            return shared_out, mlp_output
+        from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
+
+        permuted_hidden_states, expert_tokens = hidden_states, group_list
+
+        mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
+                                       w1=layer.w13_weight,
+                                       w1_scale=w1_scale,
+                                       w2=layer.w2_weight,
+                                       w2_scale=w2_scale,
+                                       group_list=expert_tokens,
+                                       dynamic_scale=dynamic_scale,
+                                       group_list_type=group_list_type,
+                                       w1_scale_bias=w1_scale_bias,
+                                       w2_scale_bias=w2_scale_bias,
+                                       with_quant=use_int4_w4a8 or use_int8_w8a8,
+                                       fusion=False,
+                                       need_trans=False)
+
+        return shared_out, mlp_output
+
+
+def _detect_quantization_and_get_params(layer: torch.nn.Module):
+    # detect weight dtype（INT8）
+    is_w1_int8 = layer.w13_weight.dtype in [torch.int8, torch.uint8]
+    is_w2_int8 = layer.w2_weight.dtype in [torch.int8, torch.uint8]
+
+    # Detect the existence of scale parameter（INT8 W8A8）
+    has_w1_scale = hasattr(layer, 'w13_weight_scale') and layer.w13_weight_scale is not None
+    has_w2_scale = hasattr(layer, 'w2_weight_scale') and layer.w2_weight_scale is not None
+
+    # Detect the existence of scale_second parameter（INT4 W4A8）
+    has_w1_scale_second = hasattr(layer, 'w13_weight_scale_second') and \
+                          getattr(layer, 'w13_weight_scale_second', None) is not None
+    has_w2_scale_second = hasattr(layer, 'w2_weight_scale_second') and \
+                          getattr(layer, 'w2_weight_scale_second', None) is not None
+
+    # Determine quantization type
+    use_int8_w8a8 = (is_w1_int8 or is_w2_int8) or (has_w1_scale or has_w2_scale)
+    use_int4_w4a8 = has_w1_scale_second or has_w2_scale_second
+
+    # get scale param（INT8）
+    w1_scale = getattr(layer, 'w13_weight_scale', None) if has_w1_scale else None
+    w2_scale = getattr(layer, 'w2_weight_scale', None) if has_w2_scale else None
+
+    # get scale_bias param（INT4)
+    w1_scale_bias = getattr(layer, 'w13_weight_offset', None) if \
+        hasattr(layer, 'w13_weight_offset') else None
+    w2_scale_bias = getattr(layer, 'w2_weight_offset', None) if \
+        hasattr(layer, 'w2_weight_offset') else None
+    return use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias
