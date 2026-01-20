@@ -69,8 +69,10 @@ def test_split_qkv_rmsnorm(num_tokens, num_q_heads, num_kv_heads,
     _q, _k, v_gold = qkv.cpu().split(
         [q_hidden_size, kv_hidden_size, kv_hidden_size], dim=-1)
     # norm
-    q_gold = rms_norm(_q.reshape(-1, q_hidden_size), q_weight.cpu(), eps)
-    k_gold = rms_norm(_k.reshape(-1, kv_hidden_size), k_weight.cpu(), eps)
+    q_gold = rms_norm(_q.reshape(-1, head_size), q_weight.cpu(), eps)
+    k_gold = rms_norm(_k.reshape(-1, head_size), k_weight.cpu(), eps)
+    q_gold = q_gold.reshape(num_tokens, -1)
+    k_gold = k_gold.reshape(num_tokens, -1)
 
     # Compare the results.
     torch.testing.assert_close(q.to(torch.float32).cpu(),
@@ -134,14 +136,17 @@ def test_split_qkv_rmsnorm_with_bias(num_tokens, num_q_heads,
     _q, _k, v_gold = qkv.cpu().split(
         [q_hidden_size, kv_hidden_size, kv_hidden_size], dim=-1)
     # norm
-    q_gold = rms_norm(_q.reshape(-1, q_hidden_size),
+    q_gold = rms_norm(_q.reshape(-1, head_size),
                   q_weight.cpu(),
                   eps,
                   norm_bias=q_bias.cpu())
-    k_gold = rms_norm(_k.reshape(-1, kv_hidden_size),
+    k_gold = rms_norm(_k.reshape(-1, head_size),
                   k_weight.cpu(),
                   eps,
                   norm_bias=k_bias.cpu())
+
+    q_gold = q_gold.reshape(num_tokens, -1)
+    k_gold = k_gold.reshape(num_tokens, -1)
 
     # Compare the results.
     torch.testing.assert_close(q.to(torch.float32).cpu(),
