@@ -162,7 +162,7 @@ class KVPoolScheduler:
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
 
-        meta = AscendConnectorMetadata(self._unfinished_request_ids)
+        meta = AscendConnectorMetadata(self._unfinished_request_ids, scheduler_output.preempted_req_ids)
 
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
