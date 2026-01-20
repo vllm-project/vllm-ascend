@@ -564,7 +564,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
                                                   torch.randn(8 * 128, 1))
 
         # Call the method under test
-        output, _ = self.impl._npu_attn_out_lse_update(attn_lse_mask,
+        output = self.impl._npu_attn_out_lse_update(attn_lse_mask,
                                                        attn_lse_nomask,
                                                        attn_out_mask,
                                                        attn_out_nomask)
