@@ -130,6 +130,7 @@ class M2NAFDConnector(AFDConnectorBase):
         config = kwargs.get('config')
         if config:
             metadata.connector_data.moe_expert_num = config.n_routed_experts
+            # TODO: quant_mode and aiv_num read from config
             metadata.connector_data.quant_mode = 0
             metadata.connector_data.aiv_num = 48
             metadata.connector_data.scale = None

@@ -2,8 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from vllm.distributed.afd_transfer.afd_connector import (AFDConnectorBase, AFDConnectorFactory,
-                            AFDConnectorMetadata)
-
+                                                         AFDConnectorMetadata)
 
 __all__ = ["AFDConnectorBase", "AFDConnectorMetadata", "AFDConnectorFactory"]
 
@@ -14,22 +13,24 @@ from torch.distributed.distributed_c10d import _get_default_group
 import re
 
 import torch
-from torch.distributed.distributed_c10d import  _update_default_pg, _get_default_group
+from torch.distributed.distributed_c10d import _update_default_pg, _get_default_group
 
 from vllm.distributed.parallel_state import init_afd_process_group, init_model_parallel_group
 from vllm.logger import init_logger
 from vllm.config import VllmConfig
 from vllm_ascend.distributed.metadata import (CAMP2PAFDConnectorMetadata)
-from vllm.config import VllmConfig,CUDAGraphMode,CompilationLevel
+from vllm.config import VllmConfig, CUDAGraphMode, CompilationLevel
 from vllm.distributed.afd_transfer.afd_connector.p2p_connector import DefaultProcessGroupSwitcher
+
 logger = init_logger(__name__)
+
 
 class CAMP2PAFDConnector(AFDConnectorBase):
     def __init__(self,
-        rank: int,
-        local_rank: int,
-        config: "VllmConfig"
-    )-> None:
+                 rank: int,
+                 local_rank: int,
+                 config: "VllmConfig"
+                 ) -> None:
         self.rank = rank
         self.local_rank = local_rank
         self._initialized = False
@@ -55,8 +56,8 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         self.attn_size, self.ffn_size = map(
             int,
             re.match(r"(\d+)\D+(\d+)", afd_size).groups())
-        #ffn_ranks = [i for i in range(ffn_size, ffn_size + attn_size)]
-        #attn_ranks = [i for i in range(attn_size)]
+        # ffn_ranks = [i for i in range(ffn_size, ffn_size + attn_size)]
+        # attn_ranks = [i for i in range(attn_size)]
         # self rank atten:0 ffn:0
         self.rank = self.rank + self.ffn_size if role == "attention" else self.rank
 
@@ -94,9 +95,9 @@ class CAMP2PAFDConnector(AFDConnectorBase):
                 ranks = list([attn_ranks[i], ffn_ranks[i]])
                 sub_group_ranks.append(ranks)
             self.process_group = init_model_parallel_group(sub_group_ranks,
-                                                 self.rank,
-                                                 backend="hccl",
-                                                 group_name="ae")
+                                                           self.rank,
+                                                           backend="hccl",
+                                                           group_name="ae")
 
         logger.info("m2n connector initialized")
 
@@ -118,6 +119,7 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         batch_size = kwargs.get('batch_size')
         if config:
             metadata.connector_data.moe_expert_num = config.n_routed_experts
+            # TODO: quant_mode and aiv_num read from config
             metadata.connector_data.quant_mode = 0
             metadata.connector_data.aiv_num = 48
             metadata.connector_data.scale = None
@@ -132,27 +134,27 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         cam_p2p_ep_name = kwargs.get('cam_p2p_ep_name')
 
         return experts.afd_m2n_ffn_compute(
-                layer=experts,
-                hidden_states=hidden_states,
-                topk_ids=topk_ids,
-                topk_weights=topk_weights,
-                connector_name="camp2pconnector",
-                x_active_mask=x_active_mask,
-                cam_p2p_ep_name=cam_p2p_ep_name
-                )
+            layer=experts,
+            hidden_states=hidden_states,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            connector_name="camp2pconnector",
+            x_active_mask=x_active_mask,
+            cam_p2p_ep_name=cam_p2p_ep_name
+        )
 
     def select_experts(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        use_grouped_topk: bool,
-        renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Any] = None,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        **kwargs
+            self,
+            hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+            top_k: int,
+            use_grouped_topk: bool,
+            renormalize: bool,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            custom_routing_function: Optional[Any] = None,
+            e_score_correction_bias: Optional[torch.Tensor] = None,
+            **kwargs
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         from vllm_ascend.ops.moe.experts_selector import select_experts
         return select_experts(
@@ -181,7 +183,7 @@ class CAMP2PAFDConnector(AFDConnectorBase):
             print(f'send_attn_output start rank:{self.rank}')
             dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
             print(f'send_attn_output dst is {dst}')
-            self.process_group.send_object(metadata,dst)
+            self.process_group.send_object(metadata, dst)
 
         # Access p2p data
         batch_size = metadata.connector_data.batch_size
@@ -190,11 +192,11 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         aiv_num = metadata.connector_data.aiv_num
 
         output_list = torch_npu.cam_a2e(expandX=hidden_states, expertIds=topk_idx,
-                                       scales=topk_weights,
-                                       batchSize=batch_size, hiddenSize=h, topk=k,
-                                       expertRankSize=self.ffn_size, attentionRankSize=self.attn_size,
-                                       ank=self.rank, groupEp=self.hccl_comm_name,
-                                       aivNum=aiv_num)
+                                        scales=topk_weights,
+                                        batchSize=batch_size, hiddenSize=h, topk=k,
+                                        expertRankSize=self.ffn_size, attentionRankSize=self.attn_size,
+                                        ank=self.rank, groupEp=self.hccl_comm_name,
+                                        aivNum=aiv_num)
 
         hidden_states1, simulateExpertIds, simulateExpertScales, attenBatchSize, xActiveMaskOut = output_list[0:5]
         handle_out = [hidden_states1, simulateExpertIds, simulateExpertScales, attenBatchSize]
@@ -229,11 +231,11 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         aiv_num = metadata.connector_data.aiv_num
         handle = metadata.connector_data.handle
 
-        torch_npu.cam_e2a(expandXOut = ffn_output, attenBatchSize = handle[0],
-                            batchSize = batch_size, hiddenSize = h, topk = k,
-                            expertRankSize = self.ffn_size, attentionRankSize = self.attn_size,
-                            rank = self.rank, groupEp = self.hccl_comm_name,
-                            aivNum = aiv_num)
+        torch_npu.cam_e2a(expandXOut=ffn_output, attenBatchSize=handle[0],
+                          batchSize=batch_size, hiddenSize=h, topk=k,
+                          expertRankSize=self.ffn_size, attentionRankSize=self.attn_size,
+                          rank=self.rank, groupEp=self.hccl_comm_name,
+                          aivNum=aiv_num)
 
         return
 
@@ -263,8 +265,8 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         return AFDRecvOutput(
             hidden_states=outputs[0],
             metadata=afdmetadata,
-            topk_ids=outputs[1], # simulateExpertIds
-            topk_weights=outputs[2], # simulateExpertScales
+            topk_ids=outputs[1],  # simulateExpertIds
+            topk_weights=outputs[2],  # simulateExpertScales
             atten_batch_size=outputs[3],
             x_active_mask=outputs[4],
             cam_p2p_ep_name=self.hccl_comm_name1
@@ -273,18 +275,18 @@ class CAMP2PAFDConnector(AFDConnectorBase):
     def create_recv_metadata(self, **kwargs):
         max_num_tokens = kwargs.get('max_num_tokens', 0)
         hf_config = self.config.model_config.hf_config
-        
+
         return CAMP2PAFDConnectorMetadata(
-            moe_expert_num = hf_config.n_routed_experts,
-            shared_expert_num = 0,
-            scale = None,
-            handle = None,
-            quant_mode = 0,
-            aiv_num = 48,
-            batch_size = max_num_tokens,
-            h = hf_config.hidden_size,
-            k = hf_config.num_experts_per_tok
+            moe_expert_num=hf_config.n_routed_experts,
+            shared_expert_num=0,
+            scale=None,
+            handle=None,
+            quant_mode=0,
+            aiv_num=48,
+            batch_size=max_num_tokens,
+            h=hf_config.hidden_size,
+            k=hf_config.num_experts_per_tok
         )
-        
+
     def update_metadata(self, metadata, recv_output):
         metadata.handle = [recv_output.atten_batch_size]
