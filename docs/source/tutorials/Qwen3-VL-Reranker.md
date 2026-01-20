@@ -25,16 +25,50 @@ if you don't want to use the docker image as above, you can also build all from 
 
 ## Deployment
 
-Using the Qwen3-VL-Reranker-8B model as an example, first run the docker container with the following command:
+Using the Qwen3-VL-Reranker-8B model as an example:
+
+### Chat Template
+
+The Qwen3-VL-Reranker model requires a specific chat template for proper formatting. Create a file named `qwen3_vl_reranker.jinja` with the following content:
+
+```jinja
+<|im_start|>system
+Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
+<|im_start|>user
+<Instruct>: {{
+    messages
+    | selectattr("role", "eq", "system")
+    | map(attribute="content")
+    | first
+    | default("Given a search query, retrieve relevant candidates that answer the query.")
+}}<Query>:{{
+    messages
+    | selectattr("role", "eq", "query")
+    | map(attribute="content")
+    | first
+}}
+<Document>:{{
+    messages
+    | selectattr("role", "eq", "document")
+    | map(attribute="content")
+    | first
+}}<|im_end|>
+<|im_start|>assistant
+
+```
+
+Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
 ### Online Inference
+
+Start the server with the following command:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-Reranker-8B \
     --runner pooling \
     --max-model-len 4096 \
     --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
-    --chat-template /path/to/vllm/examples/pooling/score/template/qwen3_vl_reranker.jinja
+    --chat-template ./qwen3_vl_reranker.jinja
 ```
 
 Once your server is started, you can send request with follow examples.
