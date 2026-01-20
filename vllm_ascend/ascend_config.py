@@ -139,7 +139,7 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-    def update_compile_ranges_split_points(self):
+    def update_compilation_config(self):
         vllm_config = self.vllm_config
         new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
         if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):

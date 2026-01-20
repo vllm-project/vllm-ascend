@@ -20,7 +20,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
-from vllm.distributed import divide
+from vllm.distributed import divide, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -32,7 +32,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import (get_embed_tp_group,
                                                     get_lmhead_tp_group)
-from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable
+from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, enable_flash_comm_v1
 
 
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
@@ -189,7 +189,10 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
         # Reduce across all the model parallel GPUs.
-        output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+        if enable_flash_comm_v1():
+            output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+        else:
+            output = tensor_model_parallel_all_reduce(output_parallel)
         return output
 
 

@@ -44,7 +44,7 @@ FC1 is a unique optimization in vllm-ascend, currently implemented based on Cust
 
 |                      | VL + Dense | VL + MoE | non-VL + Dense | non-VL + MoE |
 | -------------------- | ---------- | -------- | -------------- | ------------ |
-| Sequence Parallelism | graph      | x        | x              | x            |
+| Sequence Parallelism | graph      | x        | graph          | x            |
 | Flash Comm V1        | x          | x        | eager/graph    | eager/graph  |
 
 ### With Quantization
