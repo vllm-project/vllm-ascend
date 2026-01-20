@@ -669,7 +669,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
+    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
         AscendMergedColumnParallelLinear,
@@ -715,6 +715,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
+        "RMSNormGated": AscendRMSNormGated,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
