@@ -170,6 +170,7 @@ class NPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # initialize ascend config from vllm additional_config
+        cls._fix_incompatible_config(vllm_config)
         ascend_config = init_ascend_config(vllm_config)
 
         if vllm_config.kv_transfer_config is not None:
@@ -619,3 +620,145 @@ class NPUPlatform(Platform):
             "max_tokens_across_dp": max_tokens_across_dp,
             "mc2_mask": mc2_mask,
         }
+
+    @staticmethod
+    def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
+        """
+        Check and correct parameters in VllmConfig that are incompatible with Ascend NPU.
+        If GPU-specific or currently unsupported parameters are set by the user,
+        log a warning and reset them to safe values.
+        """
+        # ==================== 1. Model Config ====================
+        if vllm_config.model_config:
+            # Disable Cascade Attention (GPU feature)
+            if getattr(vllm_config.model_config, "disable_cascade_attn", False):
+                logger.warning(
+                    "Parameter '--disable-cascade-attn' is a GPU-specific feature. Resetting to False for Ascend."
+                )
+                vllm_config.model_config.disable_cascade_attn = False
+
+        # ==================== 2. Parallel Config ====================
+        if vllm_config.parallel_config:
+            # Only allow the default all2all backend; others like deepep are not supported
+            default_backend = "allgather_reducescatter"
+            current_backend = getattr(vllm_config.parallel_config, "all2all_backend", default_backend)
+            if current_backend != default_backend:
+                logger.warning(
+                    "Parameter '--all2all-backend' is set to '%s', which may be "
+                    "incompatible with Ascend. Using internal plugin mechanisms.",
+                    current_backend,
+                )
+                vllm_config.parallel_config.all2all_backend = default_backend
+
+            # ==================== 3. Cache Config ====================
+            # Check and reset cpu_kvcache_space_bytes
+            if getattr(vllm_config.cache_config, "cpu_kvcache_space_bytes", False):
+                logger.warning(
+                    "Parameter 'cpu_kvcache_space_bytes' is tied to cpu backend. Resetting to None for Ascend."
+                )
+                vllm_config.cache_config.cpu_kvcache_space_bytes = None
+
+        # ==================== 4. MultiModal Config ====================
+        if vllm_config.model_config.multimodal_config:
+            # Ascend uses a different mechanism for Multi-Modal attention
+            if getattr(vllm_config.model_config.multimodal_config, "mm_encoder_attn_backend", None) is not None:
+                logger.warning(
+                    "Parameter '--mm-encoder-attn-backend' is set but Ascend uses "
+                    "a plugin mechanism for multi-modal attention. Resetting to None."
+                )
+                vllm_config.model_config.multimodal_config.mm_encoder_attn_backend = None
+
+        # ==================== 5. Observability Config ====================
+        if vllm_config.observability_config:
+            # NVTX tracing is NVIDIA specific
+            if getattr(vllm_config.observability_config, "enable_layerwise_nvtx_tracing", False):
+                logger.warning(
+                    "Parameter '--enable-layerwise-nvtx-tracing' relies on NVTX "
+                    "(NVIDIA Tools) and is not supported on Ascend. Resetting to False."
+                )
+                vllm_config.observability_config.enable_layerwise_nvtx_tracing = False
+
+        # ==================== 6. Scheduler Config ====================
+        if vllm_config.scheduler_config:
+            # Partial prefills are specific to ROCm optimization
+            if getattr(vllm_config.scheduler_config, "max_num_partial_prefills", 1) != 1:
+                logger.warning(
+                    "Parameter '--max-num-partial-prefills' is optimized for ROCm. Resetting to default (1) for Ascend."
+                )
+                vllm_config.scheduler_config.max_num_partial_prefills = 1
+
+        # ==================== 7. Speculative Config ====================
+        if vllm_config.speculative_config:
+            # Ascend automatically inherits main model quantization
+            if getattr(vllm_config.speculative_config, "quantization", None) is not None:
+                logger.warning(
+                    "Speculative quantization is set but Ascend automatically uses "
+                    "the main model's quantization method. Resetting to None."
+                )
+                vllm_config.speculative_config.quantization = None
+
+        # ==================== 8. KV Transfer Config ====================
+        if vllm_config.kv_transfer_config:
+            # Buffer size is primarily tied to NCCL (GPU) backends
+            current_buffer_size = getattr(vllm_config.kv_transfer_config, "kv_buffer_size", 1e9)
+            if current_buffer_size != 1e9:
+                logger.warning(
+                    "Parameter 'kv_buffer_size' is optimized for NCCL and may be "
+                    "incompatible with current Ascend KV transfer status. Resetting to default (1e9)."
+                )
+                # Use setattr to safely assign the value
+                vllm_config.kv_transfer_config.kv_buffer_size = 1e9
+
+            # Check and reset enable_permute_local_kv
+            if getattr(vllm_config.kv_transfer_config, "enable_permute_local_kv", False):
+                logger.warning(
+                    "Parameter 'enable_permute_local_kv' is tied to NIXL backend. "
+                    "Resetting to False for Ascend stability."
+                )
+                vllm_config.kv_transfer_config.enable_permute_local_kv = False
+
+        # ==================== 9. Attention Config ====================
+        if vllm_config.attention_config:
+            att_config = vllm_config.attention_config
+
+            # Boolean flags that must be False on Ascend (typically NVIDIA-specific)
+            force_false_flags = [
+                "use_prefill_decode_attention",
+                "use_cudnn_prefill",
+                "use_trtllm_ragged_deepseek_prefill",
+                "use_trtllm_attention",
+                "disable_flashinfer_prefill",
+                "disable_flashinfer_q_quantization",
+            ]
+            for flag in force_false_flags:
+                if getattr(att_config, flag, False):
+                    logger.warning(
+                        "Ignored parameter '%s'. This is a GPU-specific feature "
+                        "not supported on Ascend. Resetting to False.",
+                        flag,
+                    )
+                    setattr(att_config, flag, False)
+
+            # Reset specific values to None as Ascend uses its own internal logic
+            if getattr(att_config, "flash_attn_version", None) is not None:
+                logger.warning(
+                    "Ignored parameter 'flash_attn_version'. Ascend uses its own attention backend. Resetting to None."
+                )
+                att_config.flash_attn_version = None
+
+            # Notify user that the backend will be managed by Ascend plugins
+            if getattr(att_config, "backend", None) is not None:
+                logger.info(
+                    "User specified attention backend '%s'. Note that Ascend NPU "
+                    "will use its registered plugin backend instead. Resetting to None.",
+                    att_config.backend,
+                )
+                att_config.backend = None
+
+            # CUDA Graph specific split points are not applicable
+            if getattr(att_config, "flash_attn_max_num_splits_for_cuda_graph", 32) != 32:
+                logger.warning(
+                    "Parameter 'flash_attn_max_num_splits_for_cuda_graph' is "
+                    "ignored on Ascend. Resetting to default (32)."
+                )
+                att_config.flash_attn_max_num_splits_for_cuda_graph = 32
