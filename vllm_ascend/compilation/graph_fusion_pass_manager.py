@@ -56,7 +56,7 @@ class GraphFusionPassManager:
 
         if self.ascend_compilation_config.get("fuse_qknorm", False):
             from .passes.qknorm_fusion_pass import QKNormFusionPass
-            
+
             self.passes.append(QKNormFusionPass(config))
 
         if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
