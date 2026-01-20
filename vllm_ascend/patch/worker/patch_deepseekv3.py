@@ -174,7 +174,6 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         mix_placement = getattr(ascend_config, "mix_placement", False)
 
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
-            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -318,7 +317,6 @@ class CustomDeepSeekMTP(DeepSeekMTP):
         ]
 
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
-            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
