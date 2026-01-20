@@ -2277,7 +2277,7 @@ class NPUModelRunner(GPUModelRunner):
                     is_profile=is_profile)
             if is_profile and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
-            if not is_profile and self.dynamic_eplb:
+            if self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
                 self.eplb_updator.forward_end()
             return hidden_states, hidden_states
@@ -2310,6 +2310,7 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def profile_run(self) -> None:
+        self.eplb_warmup()
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         if self.max_num_tokens > mc2_tokens_capacity and \
             select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
