@@ -192,8 +192,27 @@ class NPUPlatform(Platform):
                 else ascend_compilation_config
             )
 
+            if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THREHOLD
+
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THREHOLD)
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                logger.debug(
+                    "set compile_ranges_split_points to "
+                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                )
+
         elif model_config and hasattr(model_config.hf_text_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
+
+        ascend_fusion_config = ascend_config.ascend_fusion_config
+        if ascend_fusion_config:
+            vllm_config.additional_config.setdefault("ascend_fusion_config", {}).update(
+                vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict) else ascend_fusion_config
+            )
+
         if model_config is None:
             logger.warning("Model config is missing. This may indicate that we are running a test case")
             enforce_eager = False
@@ -383,13 +402,14 @@ class NPUPlatform(Platform):
             # For example: "page_size:1g" + ",expandable_segments:True".
             # NOTE: `max_split_size_mb` or `garbage_collection_threshold` cannot
             # be enabled together with `expandable_segments=True`.
-            if "expandable_segments" not in npu_alloc_configs and \
-                "max_split_size_mb" not in npu_alloc_configs and \
-                "garbage_collection_threshold" not in npu_alloc_configs:
+            if (
+                "expandable_segments" not in npu_alloc_configs
+                and "max_split_size_mb" not in npu_alloc_configs
+                and "garbage_collection_threshold" not in npu_alloc_configs
+            ):
                 npu_alloc_configs += ",expandable_segments:True"
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
-
 
     @classmethod
     def import_kernels(cls) -> None:
