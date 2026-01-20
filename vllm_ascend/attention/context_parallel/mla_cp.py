@@ -588,19 +588,21 @@ class AscendMlaCPImpl(AscendMLAImpl):
         q_nope = q_nope.view(num_tokens, num_heads, -1)
         q_pe = q_pe.view(num_tokens, num_heads, -1)
         # use pcp & dcp split computed token nums from scheduler to compute actual seq_len and seq_mask
-        k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
-                             self.kv_lora_rank)
-        k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
-                         self.qk_rope_head_dim)
+        k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
+        k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
         actual_seq_lengths = None
         input_layout = "BNSD"
 
-        if attn_metadata.attn_state in [
+        if (
+            attn_metadata.attn_state
+            in [
                 AscendAttentionState.SpecDecoding,
                 AscendAttentionState.ChunkedPrefill,
                 AscendAttentionState.DecodeOnly,
-        ] and self.speculative_config is not None:
+            ]
+            and self.speculative_config is not None
+        ):
             input_layout = "TND"
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
             q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
@@ -615,21 +617,21 @@ class AscendMlaCPImpl(AscendMLAImpl):
             spec_attn_mask = None
 
         common_kwargs = {
-            'query_rope': q_pe,
-            'key_rope': k_pe,
-            'num_heads': num_heads,
-            'num_key_value_heads': self.num_kv_heads,
-            'input_layout': input_layout,
-            'atten_mask': spec_attn_mask,
-            'sparse_mode': sparse_mode,
-            'scale': self.scale,
-            'antiquant_mode': 0,
-            'antiquant_scale': None,
-            'block_table': decode_meta.block_table,
-            'block_size': block_size,
-            'actual_seq_lengths': actual_seq_lengths,
-            'actual_seq_lengths_kv': decode_meta.cp_seq_len,
-            'softmax_lse_flag': True,
+            "query_rope": q_pe,
+            "key_rope": k_pe,
+            "num_heads": num_heads,
+            "num_key_value_heads": self.num_kv_heads,
+            "input_layout": input_layout,
+            "atten_mask": spec_attn_mask,
+            "sparse_mode": sparse_mode,
+            "scale": self.scale,
+            "antiquant_mode": 0,
+            "antiquant_scale": None,
+            "block_table": decode_meta.block_table,
+            "block_size": block_size,
+            "actual_seq_lengths": actual_seq_lengths,
+            "actual_seq_lengths_kv": decode_meta.cp_seq_len,
+            "softmax_lse_flag": True,
         }
 
         forward_context: ForwardContext = get_forward_context()
@@ -650,13 +652,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 update_graph_params_workspaces(num_tokens, workspace)
             attn_output = torch.empty_like(q_nope)
             if input_layout == "BNSD":
-                softmax_lse = torch.empty((num_tokens, num_heads, 1, 1),
-                                          dtype=torch.float,
-                                          device=q_nope.device)
+                softmax_lse = torch.empty((num_tokens, num_heads, 1, 1), dtype=torch.float, device=q_nope.device)
             else:
-                softmax_lse = torch.empty((num_tokens, num_heads, 1),
-                                          dtype=torch.float,
-                                          device=q_nope.device)
+                softmax_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=q_nope.device)
 
             graph_params.attn_params[num_tokens].append(
                 (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
@@ -669,12 +667,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
                  weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score.out(
-                q_nope,
-                k_nope,
-                k_nope,
-                **common_kwargs,
-                workspace=workspace,
-                out=[attn_output, softmax_lse])
+                q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]
+            )
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
@@ -689,10 +683,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
             B_attn, N_attn, S, D = attn_output.shape
             B_lse, N_lse, Q_S, _ = softmax_lse.shape
 
-            attn_output = attn_output.permute(0, 2, 1, 3).reshape(
-                B_attn * S, N_attn, D)
-            softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(
-                B_lse * Q_S, N_lse, 1)
+            attn_output = attn_output.permute(0, 2, 1, 3).reshape(B_attn * S, N_attn, D)
+            softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
         attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse,
