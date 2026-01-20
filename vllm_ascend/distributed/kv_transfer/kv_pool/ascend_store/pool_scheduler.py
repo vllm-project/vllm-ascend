@@ -43,6 +43,7 @@ class KVPoolScheduler:
             self._block_size *= self.dcp_size
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
+        self._preempted_req_ids: set[str] = set()
         # Whether to discard partial chunks
         self._discard_partial_chunks = (
             vllm_config.kv_transfer_config.get_from_extra_config(
