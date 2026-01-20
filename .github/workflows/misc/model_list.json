@@ -142,6 +142,8 @@
       "mistralai/Ministral-3-3B-Instruct-2512-BF16",
       "mistralai/Ministral-3-8B-Instruct-2512-BF16",
       "mistralai/Mistral-7B-Instruct-v0.1",
+      "mistralai/Mistral-7B-Instruct-v0.3",
+      "mistralai/Ministral-8B-Instruct-2410",
       "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
       "mlx-community/DeepSeek-V3-3bit-bf16",
       "moonshotai/..__temp",
