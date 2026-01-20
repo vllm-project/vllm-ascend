@@ -95,7 +95,7 @@ def _process_attn_out_lse(
     dcp_size = get_decode_context_model_parallel_world_size()
     dcp_group = get_dcp_group().device_group if dcp_size > 1 else None
     out_mask = batch_seq_mask[:, None, None].expand_as(attn_output)
-    attn_output = torch.where(out_mask, 0 , attn_output)
+    attn_output = torch.where(out_mask, 0, attn_output)
     lse_mask = batch_seq_mask[:, None, None].expand_as(softmax_lse)
     softmax_lse = torch.where(lse_mask, -torch.inf, softmax_lse)
     softmax_lse = softmax_lse.to(torch.float32)
