@@ -177,7 +177,6 @@ class KVPoolScheduler:
                 request.num_computed_tokens +
                 scheduler_output.num_scheduled_tokens[request.req_id])
             request_tuple = self._unfinished_requests.get(request.req_id)
-            # logger.info(f"request_tuple:{request_tuple}")
             request_real = request_tuple[0]  # type: ignore[index]
             if not isinstance(request.block_ids[0], list):
                 unfolded_block_ids = request.block_ids.copy()
