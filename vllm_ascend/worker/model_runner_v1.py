@@ -1046,10 +1046,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # _prepare_inputs may reorder the batch, so we must gather
         # multi-modal outputs after that to ensure the correct order
-        if vllm_version_is('0.13.0'):
-            model_kwargs = self._init_model_kwargs(num_input_tokens)
-        else:
-            model_kwargs = self._init_model_kwargs()
+
         if self.is_multimodal_model and not self.model_config.is_encoder_decoder:
             self.multimodal_cpu_fields = ["grid_thw"]
             self._prepare_multimodal_fields()
@@ -1075,8 +1072,19 @@ class NPUModelRunner(GPUModelRunner):
 
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds)
-            inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
-            input_ids = None
+
+            input_ids, inputs_embeds = self._prepare_mm_inputs(num_input_tokens)
+            if vllm_version_is('0.13.0'):
+                model_kwargs = {
+                    **self._init_model_kwargs(num_input_tokens),
+                    **self._extract_mm_kwargs(scheduler_output),
+                }
+            else:
+                model_kwargs = {
+                    **self._init_model_kwargs(),
+                    **self._extract_mm_kwargs(scheduler_output),
+                }
+
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
@@ -1101,6 +1109,10 @@ class NPUModelRunner(GPUModelRunner):
                 self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
 
             inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
+            if vllm_version_is('0.13.0'):
+                model_kwargs = self._init_model_kwargs(num_input_tokens)
+            else:
+                model_kwargs = self._init_model_kwargs()
             input_ids = None
         else:
             # For text-only models, we use token ids as input.
@@ -1109,6 +1121,11 @@ class NPUModelRunner(GPUModelRunner):
             # then the embedding layer is not included in the ACL graph.
             input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = None
+            if vllm_version_is('0.13.0'):
+                model_kwargs = self._init_model_kwargs(num_input_tokens)
+            else:
+                model_kwargs = self._init_model_kwargs()
+
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
         elif self.uses_xdrope_dim > 0:
