@@ -37,7 +37,7 @@ jobs:
     steps:
       - name: Get vLLM version
         run: |
-          VLLM_COMMIT=2c24bc6996cb165fce92f780b388a5e39b3f4060
+          VLLM_COMMIT=d68209402ddab3f54a09bc1f4de9a9495a283b60
           echo "VLLM_COMMIT=https://github.com/vllm-project/vllm/commit/$VLLM_COMMIT" >> $GITHUB_ENV
 
       - name: Checkout repository
