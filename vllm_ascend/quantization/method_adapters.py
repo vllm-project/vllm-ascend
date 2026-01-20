@@ -15,18 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Wrapper classes that delegate to actual quantization scheme implementations.
-
-These wrapper classes (AscendLinearMethod, AscendFusedMoEMethod, etc.) implement
-the vLLM QuantizeMethodBase interface and delegate the actual quantization
-operations to scheme implementations (AscendLinearScheme, AscendMoEScheme).
-
-The wrapper classes handle:
-- Weight creation and registration
-- Parameter attribute setting
-- Tensor parallel rank handling
-- Delegation to the underlying scheme's apply() method
-"""
 
 from typing import Callable, List, Optional
 
