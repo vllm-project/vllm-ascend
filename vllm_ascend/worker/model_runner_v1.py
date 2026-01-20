@@ -1946,7 +1946,7 @@ class NPUModelRunner(GPUModelRunner):
         def _get_pcp_metadata(num_tokens):
             if not self.use_cp:
                 return None
-            return self.pcp_manager.generate_pcp_metadata(num_tokens, self.query_lens, self.input_batch)
+            return self.pcp_manager.generate_pcp_metadata(num_tokens, self.query_lens, self.input_batch, num_scheduled_tokens)
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
