@@ -2328,6 +2328,7 @@ class NPUModelRunner(GPUModelRunner):
             self.max_num_tokens = math.ceil(self.max_num_tokens /
                                             (self.pcp_size * 2)) * 2
         super().profile_run()
+        self.eplb_warmup()
         self.max_num_tokens = origin_max_num_tokens
 
     def eplb_warmup(self):

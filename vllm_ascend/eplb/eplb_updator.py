@@ -35,6 +35,7 @@ class EplbUpdator:
         self.eplb_process = eplb_process
         self.shared_dict = self.eplb_process.shared_dict
         self.moe_imbalance_dict: dict[int, float] = {}
+        self._gather_buffer = None
 
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
@@ -139,7 +140,7 @@ class EplbUpdator:
 
     def forward_end(self):
         if self.wakeup_eplb_worker_flag():
-            self.compute_and_set_moe_load(is_clear=True)
+            self.compute_and_set_moe_load()
             self.wakeup_eplb_worker()
 
         if self.update_expert_weight_flag(
@@ -148,34 +149,28 @@ class EplbUpdator:
 
         self.update_iteration()
 
-    def compute_and_set_moe_load(self, is_clear=False):
+    def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload()
 
-        self._gather_buffer = None
-        if dist.is_initialized():
-            self.world_size = dist.get_world_size()
-            self.device = local_load.device
-            if self._gather_buffer is None:
-                shape = (self.world_size, *local_load.shape)
-                self._gather_buffer = torch.empty(shape,
-                                                  dtype=local_load.dtype,
-                                                  device=self.device)
-
-            dist.all_gather_into_tensor(self._gather_buffer, local_load)
-
-            moe_load = self._gather_buffer.permute(1, 0, 2)
-            self.shared_dict["moe_load"] = moe_load.cpu()
-            logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-            )
+        self.world_size = dist.get_world_size()
+        self.device = local_load.device
+        if self._gather_buffer is None:
+            shape = (self.world_size, *local_load.shape)
+            self._gather_buffer = torch.empty(shape,
+                                              dtype=local_load.dtype,
+                                              device=self.device)
         else:
-            moe_load = local_load.unsqueeze(1)
-            self.shared_dict["moe_load"] = moe_load.cpu()
-            logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-            )
+            self._gather_buffer.zero_()
 
-        if dist.is_initialized() and dist.get_rank() == 0:
+        dist.all_gather_into_tensor(self._gather_buffer, local_load)
+
+        moe_load = self._gather_buffer.permute(1, 0, 2)
+        self.shared_dict["moe_load"] = moe_load.cpu()
+        logger.debug(
+            f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
+        )
+
+        if dist.get_rank() == 0:
             self.compute_moe_imbalance(moe_load)
             self.summarize_moe_imbalance()
 
