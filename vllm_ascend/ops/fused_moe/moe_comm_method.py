@@ -105,7 +105,6 @@ class MoECommMethod(ABC):
             use_int8_w8a8: bool = False,
             use_int4_w4a8: bool = False,
             use_int4_w4a16: bool = False,
-            global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
             w1_scale: Optional[list[torch.Tensor]] = None,
             w2_scale: Optional[list[torch.Tensor]] = None,
@@ -127,13 +126,16 @@ class MoECommMethod(ABC):
         moe_comm_method = get_forward_context().moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
+        # Apply log2phy if needed
+        if log2phy is not None:
+            topk_ids = log2phy[topk_ids]
+
         before_dispatch_evt = torch.npu.current_stream().record_event()
         dispatch_results = self.token_dispatcher.token_dispatch(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            log2phy=log2phy,
             global_redundant_expert_num=self.moe_config.
             global_redundant_expert_num,
             mc2_mask=mc2_mask,
@@ -278,7 +280,6 @@ class FusedMC2CommImpl(MoECommMethod):
             use_int8_w8a8: bool = False,
             use_int4_w4a8: bool = False,
             use_int4_w4a16: bool = False,
-            global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
             w1_scale: Optional[list[torch.Tensor]] = None,
             w2_scale: Optional[list[torch.Tensor]] = None,
