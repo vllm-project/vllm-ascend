@@ -116,10 +116,53 @@ def npugraph_ex_compile(
         ]
         config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
 
+        have_uninstall = False
+        def signal_handler(signum, frame):
+            nonlocal have_uninstall
+            if not have_uninstall:
+                have_uninstall = True
+                uninstall_static_kernel()
+                raise SystemExit()
+
+        import signal
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
 
     compile_graph = npugraph_ex(graph, example_inputs)
     return compile_graph, None
+
+
+def uninstall_static_kernel():
+    import os
+    import fcntl
+    import subprocess
+
+    ascend_home_path = os.environ["ASCEND_HOME_PATH"]
+    static_kernel_dir_path = os.path.join(ascend_home_path, 'opp/static_kernel')
+    uninstall_script_path = os.path.join(static_kernel_dir_path, 'ai_core/uninstall.sh')
+    lock_file_path = os.path.join(static_kernel_dir_path, 'uninstall.lock')
+
+    if not os.path.exists(uninstall_script_path):
+        return
+    lock_fd = open(lock_file_path, 'w')
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        process = subprocess.Popen(
+            ['bash', uninstall_script_path],
+            stdin=subprocess.DEVNULL,
+            start_new_session=True
+        )
+    except (BlockingIOError, OSError) as e:
+        return
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            if os.path.exists(lock_file_path):
+                os.remove(lock_file_path)
+        except Exception:
+            return
 
 
 class AscendCompiler(CompilerInterface):
