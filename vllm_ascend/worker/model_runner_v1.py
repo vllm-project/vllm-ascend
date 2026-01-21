@@ -30,7 +30,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
@@ -61,8 +60,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         MambaSpec, UniformTypeKVCacheSpecs)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
-                             LogprobsLists, LogprobsTensors, ModelRunnerOutput,
-                             SamplerOutput,
+                             ECConnectorOutput, LogprobsLists, LogprobsTensors,
+                             ModelRunnerOutput, SamplerOutput,
                              make_empty_encoder_model_runner_output)
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -127,6 +126,7 @@ if vllm_version_is('0.13.0'):
     from vllm.attention.backends.abstract import (  # type: ignore
         AttentionBackend, AttentionType)
     from vllm.attention.selector import get_attn_backend  # type: ignore
+    from vllm.attention.backends.abstract import AttentionMetadata # type: ignore
 else:
     from vllm.v1.attention.selector import get_attn_backend  # type: ignore
     from vllm.v1.attention.backend import AttentionBackend, AttentionType  # type: ignore
@@ -192,8 +192,9 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
-    attn_metadata: dict[str, Any]
+    attn_metadata: "PerLayerAttnMetadata"
     positions: torch.Tensor
+    ec_connector_output: "ECConnectorOutput | None"
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -247,7 +248,7 @@ class NPUModelRunner(GPUModelRunner):
             self.positions = self._make_buffer(max_buffer_num_tokens,
                                                dtype=torch.int64)
         self.sampler = AscendSampler()
-        self.attn_state = None
+        self.attn_state: AscendAttentionState | None = None
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -1093,7 +1094,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self.use_async_scheduling
             and self.num_spec_tokens
-            and self._draft_token_ids is None
+            and self._draft_token_ids is None  # type: ignore[has-type]
         ):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1231,10 +1232,10 @@ class NPUModelRunner(GPUModelRunner):
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
-        if self.calculate_kv_scales:
+        if self.calculate_kv_scales:  # type: ignore[has-type]
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
-            self.calculate_kv_scales = False
+            self.calculate_kv_scales = False  # type: ignore[has-type]
         # prevent debugger is None
         if self.debugger is not None:
             dbg_cfg = getattr(self.debugger, "config", None)
@@ -1353,6 +1354,7 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states,
                 attn_metadata,
                 positions,
+                ec_connector_output,
             )
             self.kv_connector_output = kv_connector_output
         return None
@@ -1388,6 +1390,7 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states,
             attn_metadata,
             positions,
+            ec_connector_output,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -1464,6 +1467,9 @@ class NPUModelRunner(GPUModelRunner):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
+            ec_connector_output=ec_connector_output
+            if self.supports_mm_inputs
+            else None,
             **extra_args,
         )
 
@@ -1675,6 +1681,7 @@ class NPUModelRunner(GPUModelRunner):
                 # FIXME: Try using `auto_dispatch_capture=True`
                 if self.pcp_size * self.dcp_size > 1:
                     # FIXME: Try using `auto_dispatch_capture=True`
+                    assert positions is not None
                     update_mla_attn_dcp_pcp_params(self.update_stream,
                                                    forward_context,
                                                    positions.shape[0])
@@ -1684,6 +1691,7 @@ class NPUModelRunner(GPUModelRunner):
                                            maybe_padded_num_tokens, self.speculative_config)
             else:
                 if self.pcp_size * self.dcp_size > 1:
+                    assert positions is not None
                     update_attn_dcp_pcp_params(self.update_stream,
                                                forward_context,
                                                positions.shape[0])
