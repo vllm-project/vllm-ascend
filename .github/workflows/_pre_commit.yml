@@ -63,4 +63,11 @@ jobs:
         PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         export PYTHONPATH
-        bash format.sh ci
+        pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+    - name: Run mypy
+      run: |
+        for python_version in "3.10" "3.11" "3.12"; do
+          echo "============================"
+          tools/mypy.sh 1 "$python_version"
+          echo "============================"
+        done

@@ -40,17 +40,5 @@ export SHELLCHECK_OPTS="--exclude=SC2046,SC2006,SC2086"
 if [[ "$1" != 'ci' ]]; then
     pre-commit run --all-files
 else
-    pre-commit run --all-files --hook-stage manual --show-diff-on-failure
-    echo "Running mypy for Python 3.10"
-    echo "============================"
-    tools/mypy.sh 1 "3.10"
-    echo "============================"
-    echo "Running mypy for Python 3.11"
-    echo "============================"
-    tools/mypy.sh 1 "3.11"
-    echo "============================"
-    echo "Running mypy for Python 3.12"
-    echo "============================"
-    tools/mypy.sh 1 "3.12"
-    echo "============================"
+    pre-commit run --all-files --hook-stage manual
 fi
