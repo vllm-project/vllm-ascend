@@ -139,7 +139,6 @@ def matmul_persistent(x, y, bias=None):
     output = torch.empty((M, N), dtype=x.dtype, device=x.device)
 
     # Define block sizes (can be adjusted based on hardware)
-    # for Qwen-0.6B
     BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 64
 
     # Calculate grid size (one thread per block)
