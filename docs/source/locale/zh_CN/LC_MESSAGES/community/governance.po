@@ -26,7 +26,7 @@ msgstr "管理"
 
 #: ../../source/community/governance.md:3
 msgid "Mission"
-msgstr "使命"
+msgstr "目标"
 
 #: ../../source/community/governance.md:4
 msgid ""
@@ -51,7 +51,7 @@ msgstr ""
 
 #: ../../source/community/governance.md:9
 msgid "Governance - Mechanics"
-msgstr "治理机制"
+msgstr "管理机制"
 
 #: ../../source/community/governance.md:10
 msgid ""

@@ -25,9 +25,8 @@ msgid "LLaMA-Factory"
 msgstr "LLaMA-Factory"
 
 #: ../../source/community/user_stories/llamafactory.md:3
-#, fuzzy
 msgid "**Introduction**"
-msgstr "**关于 / 介绍**"
+msgstr "**简介**"
 
 #: ../../source/community/user_stories/llamafactory.md:5
 msgid ""
@@ -36,33 +35,27 @@ msgid ""
 "models. With LLaMA-Factory, you can fine-tune hundreds of pre-trained "
 "models locally without writing any code."
 msgstr ""
-"[LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) "
-"是一个易于使用且高效的平台，用于训练和微调大型语言模型。有了 LLaMA-"
-"Factory，你可以在本地对数百个预训练模型进行微调，无需编写任何代码。"
+"[LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) 是一个易于使用且高效的大语言模型训练与微调平台。通过 LLaMA-Factory，您可以在本地对数百个预训练模型进行微调，无需编写任何代码。"
 
 #: ../../source/community/user_stories/llamafactory.md:7
-#, fuzzy
 msgid ""
 "LLaMA-Facotory users need to evaluate and inference the model after fine-"
 "tuning."
-msgstr "LLaMA-Facotory 用户需要在对模型进行微调后对模型进行评估和推理。"
+msgstr "LLaMA-Factory 用户在模型微调后，需要对其进行评估和推理。"
 
 #: ../../source/community/user_stories/llamafactory.md:9
-#, fuzzy
 msgid "**Business challenge**"
-msgstr "**业务挑战**"
+msgstr "**面临的问题**"
 
 #: ../../source/community/user_stories/llamafactory.md:11
-#, fuzzy
 msgid ""
 "LLaMA-Factory uses Transformers to perform inference on Ascend NPUs, but "
 "the speed is slow."
-msgstr "LLaMA-Factory 使用 transformers 在 Ascend NPU 上进行推理，但速度较慢。"
+msgstr "LLaMA-Factory 最初使用 Transformers 在昇腾 NPU 上进行推理，但推理速度较慢。"
 
 #: ../../source/community/user_stories/llamafactory.md:13
-#, fuzzy
 msgid "**Benefits with vLLM Ascend**"
-msgstr "**通过 vLLM Ascend 解决挑战与收益**"
+msgstr "**使用 vLLM Ascend 的优势**"
 
 #: ../../source/community/user_stories/llamafactory.md:15
 msgid ""
@@ -71,22 +64,18 @@ msgid ""
 "LLaMA-Factory has achieved significant performance gains during model "
 "inference. Benchmark results show that its inference speed is now up to "
 "2× faster compared to the Transformers implementation."
-msgstr ""
+msgstr "通过 LLaMA-Factory 与 vLLM Ascend 的共同努力（[LLaMA-Factory#7739](https://github.com/hiyouga/LLaMA-Factory/pull/7739)），LLaMA-Factory 在模型推理阶段取得了显著的性能提升。基准测试结果表明，其推理速度相比原有的 Transformers 实现提升高达 2 倍。
 
 #: ../../source/community/user_stories/llamafactory.md:17
 msgid "**Learn more**"
 msgstr "**了解更多**"
 
 #: ../../source/community/user_stories/llamafactory.md:19
-#, fuzzy
 msgid ""
 "See more details about LLaMA-Factory and how it uses vLLM Ascend for "
 "inference on Ascend NPUs in [LLaMA-Factory Ascend NPU "
 "Inference](https://llamafactory.readthedocs.io/en/latest/advanced/npu_inference.html)."
-msgstr ""
-"在以下文档中查看更多关于 LLaMA-Factory 以及其如何在 Ascend NPU 上使用 vLLM Ascend 进行推理的信息"
-"：[LLaMA-Factory Ascend NPU "
-"推理](https://llamafactory.readthedocs.io/en/latest/advanced/npu_inference.html)。"
+msgstr "关于 LLaMA-Factory 的更多详细信息，以及它如何在昇腾 NPU 上使用 vLLM Ascend 进行推理，请参阅 [LLaMA-Factory 昇腾 NPU 推理](https://llamafactory.readthedocs.io/en/latest/advanced/npu_inference.html) 文档。"
 
 #~ msgid ""
 #~ "With the joint efforts of LLaMA-"
