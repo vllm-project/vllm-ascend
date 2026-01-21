@@ -48,15 +48,11 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import vllm_version_is, weak_ref_tensors, prefill_context_parallel_enable
 
 # isort: off
 if prefill_context_parallel_enable():
-    from vllm.distributed import (get_pcp_group,
-                                  get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-from vllm.distributed import get_tp_group
+    from vllm.distributed import get_pcp_group
 
 if vllm_version_is("0.13.0"):
     from vllm.v1.attention.backends.utils import AttentionCGSupport, AttentionMetadataBuilder
@@ -738,13 +734,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return output
 
     def _attention_with_nomask_and_mask(self, q: torch.Tensor,
-                                        q_seqlens: List[int],
+                                        q_seqlens: list[int],
                                         k_nomask: torch.Tensor,
                                         v_nomask: torch.Tensor,
-                                        kv_seqlens_nomask: List[int],
+                                        kv_seqlens_nomask: list[int],
                                         k_mask: torch.Tensor,
                                         v_mask: torch.Tensor,
-                                        kv_seqlens_mask: List[int],
+                                        kv_seqlens_mask: list[int],
                                         mask: torch.Tensor,
                                         attn_metadata) -> torch.Tensor:
         # nomask Attention
@@ -1061,7 +1057,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return out_final, lse_final
 
     def _forward_pcp_dcp(self, query: torch.Tensor, key: torch.Tensor,
-                         value: torch.Tensor, kv_cache: Tuple[torch.Tensor],
+                         value: torch.Tensor, kv_cache: tuple[torch.Tensor],
                          attn_metadata: AscendMetadata,
                          output: torch.Tensor, layer_idx: int) -> torch.Tensor:
         assert attn_metadata is not None

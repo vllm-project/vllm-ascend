@@ -32,7 +32,6 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm  # type: ignore
-from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
@@ -120,13 +119,9 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 # isort: off
-if vllm_version_is('0.13.0'):
-    from vllm.attention.backends.abstract import (  # type: ignore
-        AttentionBackend, AttentionType)
-    from vllm.attention.selector import get_attn_backend  # type: ignore
-else:
-    from vllm.v1.attention.selector import get_attn_backend  # type: ignore
-    from vllm.v1.attention.backend import AttentionBackend, AttentionType  # type: ignore
+from vllm.attention.backends.abstract import (  # type: ignore
+    AttentionBackend, AttentionType)
+from vllm.attention.selector import get_attn_backend  # type: ignore
 # isort: on
 import torch_npu
 
@@ -281,8 +276,6 @@ class NPUModelRunner(GPUModelRunner):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-        self._may_pad_kv_consumer_num_seq()
-
         # Persistent batch.
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
@@ -297,26 +290,8 @@ class NPUModelRunner(GPUModelRunner):
                                     dtype=torch.int32,
                                     device=self.device)
 
-        if self.vllm_config.model_config.use_mla and \
-            self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-            rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-            self.cos = torch.ones(self.max_num_reqs *
-                                  self.decode_token_per_req,
-                                  1,
-                                  1,
-                                  rope_dim,
-                                  dtype=self.dtype,
-                                  device=self.device)
-            self.sin = torch.zeros(self.max_num_reqs *
-                                   self.decode_token_per_req,
-                                   1,
-                                   1,
-                                   rope_dim,
-                                   dtype=self.dtype,
-                                   device=self.device)
-        else:
-            self.cos = None
-            self.sin = None
+        set_cos_and_sin(vllm_config, self.max_num_reqs,
+                        self.uniform_decode_query_len, self.dtype, self.device)
 
         self.uses_mrope = self.model_config.uses_mrope
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -382,7 +357,7 @@ class NPUModelRunner(GPUModelRunner):
             dtype=torch.int32,
             device=self.device)
         self.pcp_use_hybrid_attn = self.model_config.hf_config.model_type == "qwen3_next"
-        self.cp_kv_recover_idx_for_chunk: List[List[int]] = [
+        self.cp_kv_recover_idx_for_chunk: list[list[int]] = [
             [] for _ in range(self.pcp_size)
         ]
 

@@ -53,10 +53,6 @@ from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                shared_experts_calculation_stream)
 from vllm_ascend.utils import prefill_context_parallel_enable
 
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import (get_pcp_group, get_tp_group,
-                               shared_experts_calculation_stream, vllm_version_is)
 
 @dataclass
 class FusedMoEResult:

@@ -1,7 +1,7 @@
 import math
 from contextlib import contextmanager
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -43,9 +43,7 @@ def set_ascend_forward_context(
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
-        prefetch_stream: torch.npu.Stream = None,
         model_instance: torch.nn.Module = None,
-        weight_prefetch_method: Optional[WeightPrefetchMethod] = None,
         max_tokens_across_pcp: int = 0,
         is_draft_model=False):
     """A context manager that stores the current forward context,
