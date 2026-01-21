@@ -194,7 +194,7 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
     return;
 }
 
-at::Tensor& dispatch_ffn_combine_meta(
+std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& x,
     const at::TensorList& weight1,
     const at::TensorList& weight2,
