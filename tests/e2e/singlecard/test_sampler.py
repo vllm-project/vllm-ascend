@@ -63,8 +63,5 @@ def test_qwen3_exponential_overlap() -> None:
     with VllmRunner("Qwen/Qwen3-0.6B",
                     max_model_len=8192,
                     cudagraph_capture_sizes=[1, 2, 4, 8],
-                    gpu_memory_utilization=0.7,
-                    additional_config={
-                        "enable_async_exponential": True,
-                    }) as runner:
+                    gpu_memory_utilization=0.7) as runner:
         runner.generate(example_prompts, sampling_params)
