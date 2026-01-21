@@ -21,8 +21,9 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata, CPChunkedContextMetadata)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata, ascend_chunked_prefill_workspace_size,
-    enable_cp, enabling_malpo, maybe_save_kv_layer_to_connector, split_decodes_and_prefills,
-    trans_rope_weight, transdata, wait_for_kv_layer_from_connector)
+    enable_cp, maybe_save_kv_layer_to_connector, split_decodes_and_prefills,
+    trans_rope_weight, transdata, wait_for_kv_layer_from_connector,
+    enabling_malpo)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
     update_draft_graph_params_workspaces, update_graph_params_workspaces)
