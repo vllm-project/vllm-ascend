@@ -2,36 +2,9 @@ import torch
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import global_stream, npu_stream_switch
+from vllm_ascend.utils import global_stream
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
-
-
-def random_sample(
-    probs: torch.Tensor,
-    generators: dict[int, torch.Generator],
-) -> torch.Tensor:
-    """Randomly sample from the probabilities.
-
-    We use this function instead of torch.multinomial because torch.multinomial
-    causes CPU-NPU synchronization.
-    """
-    # NOTE(woosuk): To batch-process the requests without their own seeds,
-    # which is the common case, we first assume that every request does
-    # not have its own seed. Then, we overwrite the values for the requests
-    # that have their own seeds.
-    with npu_stream_switch(global_stream()):
-        q = torch.empty_like(probs)
-        if len(generators) != probs.shape[0]:
-            q.exponential_()
-        if generators:
-            # TODO(woosuk): This can be slow because we handle each request
-            # one by one. Optimize this.
-            for i, generator in generators.items():
-                q[i].exponential_(generator=generator)
-    torch.npu.current_stream().wait_stream(global_stream())
-    return probs.div_(q).argmax(dim=-1).view(-1)
 
 
 class AscendSampler(Sampler):
@@ -83,11 +56,10 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        if get_ascend_config().enable_async_exponential:
-            # Add synchronize to prevent synchronize error.
-            self.async_event.synchronize()
-            return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
-        return random_sample(probs, generators), logits_to_return
+
+        # Add synchronize to prevent synchronize error.
+        self.async_event.synchronize()
+        return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
 
 
 def apply_top_k_top_p(
