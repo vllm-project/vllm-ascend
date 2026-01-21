@@ -63,7 +63,7 @@ from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_otp_group)
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import (enable_dsa_cp, enable_dsa_cp_with_layer_shard,
-                               enable_flash_comm_v1, enable_sp, flashcomm2_enable,
+                               enable_flash_comm_v1, flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
                                oproj_tp_enable, shared_expert_dp_enabled)
@@ -391,7 +391,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         else:
             output = output_parallel
 
-        if not forward_context.sp_enabled:
+        if not forward_context.flash_comm_v1_enabled:
             # flashcomm1 not enabled
             output = get_tp_group().all_gather(output, 0)
             if num_padding_tokens > 0:
@@ -503,7 +503,7 @@ class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
-        if enable_sp():
+        if enable_flash_comm_v1():
             input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 input_, True)
 
@@ -562,15 +562,15 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         assert self.quant_method is not None
         try:
             forward_context = get_forward_context()
-            sp_enabled = forward_context.sp_enabled
+            flash_comm_v1_enabled = forward_context.flash_comm_v1_enabled
             mmrs_fusion = forward_context.mmrs_fusion
         except AssertionError:
-            sp_enabled = False
+            flash_comm_v1_enabled = False
             mmrs_fusion = False
 
         x = input_parallel
 
-        if not sp_enabled:
+        if not flash_comm_v1_enabled:
             output_parallel = self.layer.quant_method.apply(self.layer,
                                                             x,
                                                             bias=bias_)

@@ -57,7 +57,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
-                               enable_sp, get_ascend_device_type,
+                               enable_flash_comm_v1, get_ascend_device_type,
                                register_ascend_customop)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -305,7 +305,7 @@ class NPUWorker(WorkerBase):
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise it will conflict with the all-gather operation in flashcomm1.
-            if enable_sp():
+            if enable_flash_comm_v1():
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
@@ -324,7 +324,7 @@ class NPUWorker(WorkerBase):
         assert parallel_config.distributed_executor_backend != (
             "external_launcher") and not get_pp_group().is_last_rank
         # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise it will conflict with the all-gather operation in flashcomm1.
-        if enable_sp():
+        if enable_flash_comm_v1():
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()

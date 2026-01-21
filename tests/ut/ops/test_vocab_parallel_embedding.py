@@ -130,7 +130,8 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         input_ = torch.tensor([1, 2, 3])
 
         with patch("torch.ops.vllm.maybe_pad_and_reduce",
-                   side_effect=lambda x: x) as mock_reduce_tp1:
+                   side_effect=lambda x: x), \
+            patch("vllm_ascend.ops.vocab_parallel_embedding.tensor_model_parallel_all_reduce", side_effect=lambda x: x) as mock_reduce_tp1:
             output = layer.forward(input_)
 
         # Should just pass through without masking
@@ -148,7 +149,8 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         input_ = torch.tensor([15, 35])  # one org vocab, one added vocab
 
         with patch("torch.ops.vllm.maybe_pad_and_reduce",
-                   side_effect=lambda x: x) as mock_reduce_tp:
+                   side_effect=lambda x: x), \
+            patch("vllm_ascend.ops.vocab_parallel_embedding.tensor_model_parallel_all_reduce", side_effect=lambda x: x) as mock_reduce_tp:
             # Call the forward method
             output = layer.forward(input_)
 
@@ -174,7 +176,8 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
 
         # Patch tensor_model_parallel_all_reduce to mock its behavior
         with patch("torch.ops.vllm.maybe_pad_and_reduce",
-                   side_effect=lambda x: x):
+                   side_effect=lambda x: x), \
+            patch("vllm_ascend.ops.vocab_parallel_embedding.tensor_model_parallel_all_reduce", side_effect=lambda x: x):
             # Call the forward method
             output = layer.forward(input_)
         # Check that invalid positions (0, 2, 4) were zeroed out
@@ -199,7 +202,8 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         for input_, expected_shape in test_cases:
             with self.subTest(input=input_):
                 with patch("torch.ops.vllm.maybe_pad_and_reduce",
-                           side_effect=lambda x: x):
+                        side_effect=lambda x: x), \
+                    patch("vllm_ascend.ops.vocab_parallel_embedding.tensor_model_parallel_all_reduce", side_effect=lambda x: x):
                     # Call the forward method
                     output = layer.forward(input_)
                 self.assertEqual(output.shape, expected_shape)
