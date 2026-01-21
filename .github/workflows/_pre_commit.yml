@@ -38,14 +38,21 @@ jobs:
         repository: vllm-project/vllm
         path: ./vllm-empty
         ref: ${{ inputs.vllm }}
-    - name: Install vllm
-      working-directory: vllm-empty
-      run: |
-        sleep 10000
-    - name: Install vllm-ascend dev
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          lint_tracker:
+            - 'requirements.txt'
+            - 'requirements-dev.txt'
+            - 'requirements-lint.txt'
+
+    - name: Install vllm-ascend dev (conditional)
+      if: steps.filter.outputs.lint_tracker == 'true'
       run: |
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
     - name: Run pre-commit
       env:
         PRE_COMMIT_COLOR: always
@@ -53,4 +60,6 @@ jobs:
         TERM: xterm-256color
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       run: |
-        pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+        PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+        export PYTHONPATH
+        bash format.sh ci
