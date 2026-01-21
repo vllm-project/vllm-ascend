@@ -493,7 +493,8 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
 
             pad_length = runtime_shape - len(actual_seq_lengths_kv)
             if pad_length > 0:
-                actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (runtime_shape - len(actual_seq_lengths_kv))
+                actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (
+                    runtime_shape - len(actual_seq_lengths_kv))
 
             torch.npu.graph_task_update_begin(update_stream, handle)
 
