@@ -738,7 +738,9 @@ at::Tensor& dispatch_ffn_combine(
     at::Tensor& out
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
-    EXEC_NPU_CMD(aclnnDispatchFFNCombine,
+    bool is_int8 = weight1[0].dtype() == at::kChar;
+    if (is_int8) {
+        EXEC_NPU_CMD(aclnnDispatchFFNCombine,
                  x,
                  weight1,
                  weight2,
@@ -749,6 +751,19 @@ at::Tensor& dispatch_ffn_combine(
                  group_ep_ptr,
                  max_output_size,
                  out);
+    } else {
+        EXEC_NPU_CMD(aclnnDispatchFFNCombineBF16,
+                 x,
+                 weight1,
+                 weight2,
+                 expert_idx,
+                 scale1,
+                 scale2,
+                 probs,
+                 group_ep_ptr,
+                 max_output_size,
+                 out);
+    }    
     return out;
 }
 
