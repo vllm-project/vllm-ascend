@@ -79,6 +79,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "notify_dispatch"
         "moe_init_routing_custom"
         "moe_gating_top_k"
+        "apply_top_k_top_p"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
