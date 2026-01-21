@@ -124,12 +124,11 @@ else:
 # isort: off
 if vllm_version_is('0.13.0'):
     from vllm.attention.backends.abstract import (  # type: ignore
-        AttentionBackend, AttentionType)
+        AttentionBackend, AttentionMetadata, AttentionType)
     from vllm.attention.selector import get_attn_backend  # type: ignore
-    from vllm.attention.backends.abstract import AttentionMetadata # type: ignore
 else:
     from vllm.v1.attention.selector import get_attn_backend  # type: ignore
-    from vllm.v1.attention.backend import AttentionBackend, AttentionType  # type: ignore
+    from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata, AttentionType  # type: ignore
 # isort: on
 import torch_npu
 
@@ -1190,11 +1189,11 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded = (
                     batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 )
+                ubatch_args = (should_ubatch, num_scheduled_tokens_np, num_tokens_padded, num_reqs_padded)
+                if not vllm_version_is('0.13.0'):
+                    ubatch_args = ubatch_args + (self.parallel_config.num_ubatches,)
                 ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
-                    should_ubatch,
-                    num_scheduled_tokens_np,
-                    num_tokens_padded,
-                    num_reqs_padded,
+                    *ubatch_args
                 )
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
