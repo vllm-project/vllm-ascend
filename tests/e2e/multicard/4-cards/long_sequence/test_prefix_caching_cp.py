@@ -28,7 +28,7 @@ import pytest
 from tests.e2e.conftest import _LONG_PROMPTS, VllmRunner
 
 MODELS = [
-    "vllm-ascend/Qwen3-30B-A3B-W8A8", "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    "vllm-ascend/Qwen3-30B-A3B-W8A8", "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 ]
 
 SETTINGS: Dict[str, Dict[str, Any]] = {
@@ -38,11 +38,11 @@ SETTINGS: Dict[str, Dict[str, Any]] = {
         "DCP": 1,
         "quantization": "ascend",
     },
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": {
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8": {
         "TP": 2,
         "PCP": 2,
         "DCP": 2,
-        "quantization": None,
+        "quantization": "ascend",
     }
 }
 

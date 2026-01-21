@@ -39,11 +39,11 @@ SETTINGS: Dict[str, Dict[str, Any]] = {
         "DCP": 1,
         "quantization": "ascend",
     },
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": {
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8": {
         "TP": 2,
         "PCP": 2,
         "DCP": 2,
-        "quantization": None,
+        "quantization": "ascend",
     }
 }
 
