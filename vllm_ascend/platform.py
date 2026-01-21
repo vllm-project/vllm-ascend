@@ -121,8 +121,8 @@ class NPUPlatform(Platform):
         Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
         """
-        ascend_config = get_ascend_config()
-        if ascend_config.enable_npugraph_ex:
+        npugraph_ex_config = get_ascend_config().npugraph_ex_config
+        if npugraph_ex_config.enable:
             return "vllm_ascend.compilation.npu_graph_ex_pass_manager.NpuGraphEXPassManager"
         else:
             return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
