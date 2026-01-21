@@ -278,9 +278,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
@@ -302,6 +299,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -312,6 +313,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -351,9 +353,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
@@ -376,6 +375,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -386,6 +389,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -426,8 +430,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
 
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
@@ -452,6 +454,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -504,9 +510,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
@@ -530,6 +533,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
