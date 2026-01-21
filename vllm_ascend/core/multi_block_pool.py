@@ -1,10 +1,9 @@
-from collections import defaultdict
 from functools import partial
 from typing import Iterable, Optional
 
 from vllm.distributed.kv_events import AllBlocksCleared, KVCacheEvent
 from vllm.logger import init_logger
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.request import Request
@@ -146,7 +145,8 @@ class MultiBlockPool(BlockPool):
 
         # Remove all hashes so that no new blocks will hit.
         # Process global cached_block_hash_to_block only.
-        self.cached_block_hash_to_block = defaultdict(dict)
+        self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap(
+        )
 
         # Remove all hashes from all blocks.
         for local_pool in self.block_pools:
