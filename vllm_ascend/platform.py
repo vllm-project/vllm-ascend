@@ -222,6 +222,12 @@ class NPUPlatform(Platform):
 
         from vllm.config.compilation import CUDAGraphMode
 
+        if ascend_config.xlite_graph_config.enabled and ascend_config.xlite_graph_config.full_mode:
+            logger.info("ACLGraph is disabled under xlite full mode")
+            enforce_eager = True
+            model_config.enforce_eager = True
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.mode = CompilationMode.NONE
@@ -275,7 +281,7 @@ class NPUPlatform(Platform):
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
-            ascend_config.enable_npugraph_ex = False
+            ascend_config.npugraph_ex_config.enable = False
         elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             logger.info("PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode")
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (
@@ -295,7 +301,7 @@ class NPUPlatform(Platform):
             # not be detected in advance assert.
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
-            ascend_config.enable_npugraph_ex = False
+            ascend_config.npugraph_ex_config.enable = False
         elif (
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
@@ -324,7 +330,7 @@ class NPUPlatform(Platform):
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.mode = CompilationMode.NONE
-            ascend_config.enable_npugraph_ex = False
+            ascend_config.npugraph_ex_config.enable = False
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience
@@ -411,6 +417,21 @@ class NPUPlatform(Platform):
                 npu_alloc_configs += ",expandable_segments:True"
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
+
+        # NOTE: vllm sets `speculative_config.enforce_eager` as True if using
+        # deepseek_v32 with mtp. Since we support graph mode, we simply ignore
+        # it here. However, this fix will also implicitly ignore user setting of
+        # `speculative_config.enforce_eager`, we need to take care and remove it
+        # once vllm supports this feature.
+        speculative_config = vllm_config.speculative_config
+        if (
+            model_config
+            and speculative_config
+            and hasattr(model_config.hf_text_config, "model_type")
+            and model_config.hf_text_config.model_type == "deepseek_v32"
+            and speculative_config.enforce_eager
+        ):
+            speculative_config.enforce_eager = False
 
     @classmethod
     def import_kernels(cls) -> None:
