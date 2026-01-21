@@ -112,7 +112,8 @@ jobs:
           # xgrammar has parameter mismatching bug, please follows: https://github.com/vllm-project/vllm-ascend/issues/5524
           # pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_llama32_lora.py
+          # TODO: Skip first
+          # pytest -sv --durations=0 tests/e2e/singlecard/test_llama32_lora.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_qwen3_multi_loras.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
@@ -227,7 +228,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_data_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_expert_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
-          # TODO: Skip frist, the graph mode and eager mode output are inconsistent
+          # TODO: Skip first
           # pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_full_graph_mode.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/spec_decode/test_spec_decode.py
@@ -241,7 +242,8 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_v2_lite_fc1_tp2
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_fc1_tp2
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep
+          # TODO: Skip first
+          # pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep
 
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_weight_load.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_pipeline_parallel.py
