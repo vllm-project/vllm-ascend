@@ -226,7 +226,9 @@ class TestAscendMLAMetadataBuilder(TestBase):
             )
 
         self.parent_init_patcher = patch(
-            "vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__",
+            ("vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__"
+ if vllm_version_is("0.13.0") else
+ "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__"),
             mock_parent_init)
         self.parent_init_patcher.start()
 
@@ -452,7 +454,9 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             )
 
         self.parent_init_patcher = patch(
-            "vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__",
+            ("vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__"
+ if vllm_version_is("0.13.0") else
+ "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__"),
             mock_parent_init)
         self.parent_init_patcher.start()
 
