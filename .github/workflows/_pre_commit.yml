@@ -61,5 +61,6 @@ jobs:
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       run: |
         PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+        git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         export PYTHONPATH
         bash format.sh ci
