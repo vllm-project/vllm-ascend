@@ -322,14 +322,13 @@ In this section, we provide simple scripts to re-produce our latest performance.
 - CANN 8.3.RC2
 - torch_npu 2.8.0
 - HDK/driver 25.3.RC1
-- triton_ascend 3.2.0.dev2025110717
+- triton_ascend 3.2.0
 
 **Notice:**
 triton_ascend is required for reproducing best performance of Qwen3-235B in vLLM-Ascend. If it is not installed in your environment, please follow the instructions below:
 
 ```bash
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
-pip install triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
+python3 -m pip install triton-ascend==3.2.0
 ```
 
 ### Single Node A3 （64G*16）
