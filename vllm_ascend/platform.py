@@ -221,6 +221,12 @@ class NPUPlatform(Platform):
 
         from vllm.config.compilation import CUDAGraphMode
 
+        if ascend_config.xlite_graph_config.enabled and ascend_config.xlite_graph_config.full_mode:
+            logger.info("ACLGraph is disabled under xlite full mode")
+            enforce_eager = True
+            model_config.enforce_eager = True
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.mode = CompilationMode.NONE
@@ -410,6 +416,21 @@ class NPUPlatform(Platform):
                 npu_alloc_configs += ",expandable_segments:True"
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
+
+        # NOTE: vllm sets `speculative_config.enforce_eager` as True if using
+        # deepseek_v32 with mtp. Since we support graph mode, we simply ignore
+        # it here. However, this fix will also implicitly ignore user setting of
+        # `speculative_config.enforce_eager`, we need to take care and remove it
+        # once vllm supports this feature.
+        speculative_config = vllm_config.speculative_config
+        if (
+            model_config
+            and speculative_config
+            and hasattr(model_config.hf_text_config, "model_type")
+            and model_config.hf_text_config.model_type == "deepseek_v32"
+            and speculative_config.enforce_eager
+        ):
+            speculative_config.enforce_eager = False
 
     @classmethod
     def import_kernels(cls) -> None:
