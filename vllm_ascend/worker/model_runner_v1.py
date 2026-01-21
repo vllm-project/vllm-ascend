@@ -24,7 +24,7 @@ from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Union, TypeAlias
+from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Union, TypeAlias, Tuple
 
 import numpy as np
 import torch
@@ -1189,7 +1189,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded = (
                     batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 )
-                ubatch_args = (should_ubatch, num_scheduled_tokens_np, num_tokens_padded, num_reqs_padded)
+                ubatch_args: Tuple[Any, ...] = (should_ubatch, num_scheduled_tokens_np, num_tokens_padded, num_reqs_padded)
                 if not vllm_version_is('0.13.0'):
                     ubatch_args = ubatch_args + (self.parallel_config.num_ubatches,)
                 ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
@@ -1212,6 +1212,7 @@ class NPUModelRunner(GPUModelRunner):
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
                         num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                        num_scheduled_tokens_np=num_scheduled_tokens_np,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     )
                 )
@@ -1278,15 +1279,15 @@ class NPUModelRunner(GPUModelRunner):
         finished_sending = None
         finished_recving = None
         with (ProfileExecuteDuration().capture_async("post process")):
-            aux_hidden_states = None
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, aux_hidden_states = hidden_states
             if self.pcp_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
                 hidden_states = self.pcp_manager.get_restore_hidden_states(
                     hidden_states
                 )
+            aux_hidden_states = None
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, aux_hidden_states = hidden_states
 
             if not self.broadcast_pp_output:
                 # Common case.
@@ -1657,9 +1658,36 @@ class NPUModelRunner(GPUModelRunner):
             invalid_req_indices,
         )
 
+    # all-gather one hidden-states in sp scene
+    @staticmethod
+    def _all_gather_hidden_states(hidden_states):
+        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        pad_size = get_forward_context().pad_size
+        if pad_size > 0:
+            hidden_states = hidden_states[:-pad_size, :]
+
+        return hidden_states
+
+    # all-gather a list of hidden-states in sp scene
+    @staticmethod
+    def _all_gather_hidden_states_list(hidden_states_list):
+        return [
+            NPUModelRunner._all_gather_hidden_states(hidden_states)
+            for hidden_states in hidden_states_list
+        ]
+
+    # all-gather hidden-states in last layer with aux-hidden-states in sp scene
+    @staticmethod
+    def _all_gather_hidden_states_and_aux(hidden_states):
+        if isinstance(hidden_states, tuple):
+            return (NPUModelRunner._all_gather_hidden_states(hidden_states[0]),
+                    NPUModelRunner._all_gather_hidden_states_list(
+                        hidden_states[1]))
+        return NPUModelRunner._all_gather_hidden_states(hidden_states)
+
     def _model_forward(
         self,
-        maybe_padded_num_tokens: int,
+        num_tokens_padded: int,
         input_ids: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
@@ -1687,7 +1715,7 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     # FIXME: Try using `auto_dispatch_capture=True`
                     update_mla_attn_params(self.update_stream, forward_context,
-                                           maybe_padded_num_tokens, self.speculative_config)
+                                           num_tokens_padded, self.speculative_config)
             else:
                 if self.pcp_size * self.dcp_size > 1:
                     assert positions is not None
@@ -1696,14 +1724,11 @@ class NPUModelRunner(GPUModelRunner):
                                                positions.shape[0])
                 else:
                     update_attn_params(self.update_stream, forward_context,
-                                       maybe_padded_num_tokens, self.vllm_config)
-        # TODO here is not consistent with eagle,
+                                       num_tokens_padded, self.vllm_config)
         if get_forward_context().sp_enabled and not isinstance(
                 hidden_states, IntermediateTensors):
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            pad_size = get_forward_context().pad_size
-            if pad_size > 0:
-                hidden_states = hidden_states[:-pad_size, :]
+            hidden_states = self._all_gather_hidden_states_and_aux(
+                hidden_states)
         return hidden_states
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
@@ -1868,6 +1893,7 @@ class NPUModelRunner(GPUModelRunner):
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
+        num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
@@ -1899,7 +1925,7 @@ class NPUModelRunner(GPUModelRunner):
         def _get_pcp_metadata(num_tokens):
             if not self.use_cp:
                 return None
-            return self.pcp_manager.generate_pcp_metadata(num_tokens, self.query_lens, self.input_batch, num_scheduled_tokens)
+            return self.pcp_manager.generate_pcp_metadata(num_tokens, self.query_lens, self.input_batch, num_scheduled_tokens_np)
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
@@ -2201,6 +2227,7 @@ class NPUModelRunner(GPUModelRunner):
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
+                num_scheduled_tokens_np=num_scheduled_tokens,
             )
 
         with self.maybe_dummy_run_with_lora(
