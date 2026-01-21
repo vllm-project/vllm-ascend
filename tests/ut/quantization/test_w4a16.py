@@ -101,8 +101,8 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
     @patch("vllm_ascend.quantization.w4a16.get_current_vllm_config")
     def setUp(self, mock_get_current_vllm_config, mock_get_ascend_config):
         mock_ascend_config = Mock()
-        mock_ascend_config.dynamic_eplb = False
-        mock_ascend_config.expert_map_record_path = None
+        mock_ascend_config.eplb_config.dynamic_eplb = False
+        mock_ascend_config.eplb_config.expert_map_record_path = None
         mock_get_ascend_config.return_value = mock_ascend_config
 
         mock_vllm_config = Mock()

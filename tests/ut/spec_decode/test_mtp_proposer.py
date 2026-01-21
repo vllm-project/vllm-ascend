@@ -30,7 +30,7 @@ class TestMtpProposer:
         config.additional_config = None
         config.speculative_config = MagicMock(spec=SpeculativeConfig)
         config.speculative_config.num_speculative_tokens = 2
-        config.speculative_config.method = "deepseek_mtp"
+        config.speculative_config.method = "mtp"
         config.speculative_config.draft_model_config = MagicMock()
         config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
         config.speculative_config.speculative_token_tree = str([
@@ -98,9 +98,11 @@ class TestMtpProposer:
         mock_buffer_instance = MagicMock()
         mock_cpu_gpu_buffer.return_value = mock_buffer_instance
         runner._use_aclgraph.return_value = True
+        vllm_config.scheduler_config.async_scheduling = False
+        vllm_config.speculative_config.enforce_eager = False
         proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
 
-        assert proposer.use_aclgraph is True
+        assert proposer.use_cuda_graph is True
 
     @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")

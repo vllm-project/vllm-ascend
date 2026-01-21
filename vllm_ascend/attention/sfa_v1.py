@@ -5,7 +5,6 @@ import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from torch import nn
-from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
@@ -13,15 +12,16 @@ from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
+from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         ascend_chunked_prefill_workspace_size,
+                                         maybe_save_kv_layer_to_connector,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.distributed.utils import all_gather_async
@@ -34,11 +34,23 @@ from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
-                               enable_dsa_cp, maybe_trans_nz)
+                               enable_dsa_cp, maybe_trans_nz, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
+# isort: off
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+if vllm_version_is('0.13.0'):
+    from vllm.v1.attention.backends.utils import AttentionCGSupport
+    from vllm.attention.backends.abstract import (  # type: ignore
+        AttentionBackend, MLAAttentionImpl)
+else:
+    from vllm.v1.attention.backend import (  # type: ignore
+        AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
+# isort: on
+
+# token count limits within bmm_transpose operator
+BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
 
 class AscendSFABackend(AttentionBackend):
@@ -92,7 +104,6 @@ class AscendSFAMetadata:
     # |---------- context_len ----------|
     # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
-    has_prefill: bool
     num_actual_tokens: int  # Number of tokens excluding padding.
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
@@ -121,7 +132,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     understand this class
     """
 
-    # _attn_mask_builder = None
     def __init__(
         self,
         kv_cache_spec,
@@ -131,11 +141,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        self.metadata_cls = (metadata_cls if metadata_cls is not None else
-                             AscendSFAMetadata)
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.device = device
+        super().__init__(
+            kv_cache_spec, layer_names, vllm_config, device,
+            metadata_cls if metadata_cls is not None else AscendSFAMetadata,
+            supports_dcp_with_varlen)
+
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len +
                            self.block_size - 1) // self.block_size
@@ -158,6 +168,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             == CUDAGraphMode.FULL_DECODE_ONLY
         ), "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+
+    @staticmethod
+    def determine_chunked_prefill_workspace_size(
+            vllm_config: VllmConfig) -> int:
+        return ascend_chunked_prefill_workspace_size(vllm_config)
 
     @classmethod
     def get_cudagraph_support(
@@ -189,16 +204,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         input_positions = common_attn_metadata.positions[:
                                                          num_input_tokens].long(
                                                          )
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        has_prefill = any(query_lens_cpu > self.decode_threshold)
 
         cum_query_lens = common_attn_metadata.query_start_loc[1:num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        if has_prefill:
-            cos, sin = get_cos_and_sin_mla(input_positions)
-        else:
-            cos, sin = get_cos_and_sin_mla(input_positions, True)
+
+        cos, sin = get_cos_and_sin_mla(input_positions, True)
 
         sfa_cp_context = None
         if self.enable_sfa_cp:
@@ -278,7 +288,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             )
 
         return self.metadata_cls(  # type: ignore
-            has_prefill=has_prefill,
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             cum_query_lens=cum_query_lens,
@@ -361,7 +370,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
-        self.num_heads_per_rank = self.num_heads // self.tp_size
         self.q_b_proj = kwargs['q_b_proj']
 
         ascend_config = get_ascend_config()
@@ -462,21 +470,17 @@ class AscendSFAImpl(MLAAttentionImpl):
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
-    def _v_up_proj(self, x, has_prefill: bool):
-        # TODO(zzzzwwjj): We should not judge by whether `has_prefill` or not.
-        # The true criteria for judgment is tensorA's shape[0] <= 1024 (num_tokens <= 1024).
-        # This is a bug in the previous code.
+    def _v_up_proj(self, x):
+        num_input_tokens, _, _ = x.shape
         if x.dtype in [torch.float16, torch.bfloat16] \
                 and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
-                and not self.enable_sfa_cp \
-                and not has_prefill:
-            x = x.view(-1, self.num_heads, self.kv_lora_rank)
-            b, _, _ = x.shape
-            res = torch.empty((b, self.num_heads, self.v_head_dim),
+                and num_input_tokens <= BMM_TRANS_MAX_SUPPORTED_TOKENS:
+            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
+            res = torch.empty((num_input_tokens, self.local_num_heads, self.v_head_dim),
                               dtype=x.dtype,
                               device=x.device)
             torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
-            x = res.reshape(-1, self.num_heads * self.v_head_dim)
+            x = res.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:
             # Convert from (B, N, L) to (N, B, L)
             x = x.view(-1, self.local_num_heads,
@@ -647,10 +651,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
         # referenced, so drop them to save memory.
-        ascend_config = get_ascend_config()
         if self.vllm_config.kv_transfer_config is not None and \
                 self.vllm_config.kv_transfer_config.is_kv_consumer and \
-                ascend_config.recompute_scheduler_enable:
+                self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             self.fused_qkv_a_proj.weight = None
             self.fused_qkv_a_proj.deq_scale = None
             self.fused_qkv_a_proj.quant_bias = None
@@ -738,7 +741,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                         reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
-        has_prefill = attn_metadata.has_prefill
         cos = attn_metadata.cos
         sin = attn_metadata.sin
         actual_seq_lengths_query = attn_metadata.cum_query_lens
@@ -746,17 +748,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.enable_sfa_cp:
             need_gather_q_kv = False
         # Inputs and outputs may be padded for CUDA graphs
+        num_input_tokens = attn_metadata.num_input_tokens
         output_padded = output
 
-        # TODO(zzzzwwjj): In sfa, prefill and decode have the same calculation formula,
-        # so `has_prefill` here is not necessary.
-        if self.enable_mlapo and not has_prefill:
+        if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
                 need_gather_q_kv=need_gather_q_kv,
-                num_input_tokens=attn_metadata.num_input_tokens,
+                num_input_tokens=num_input_tokens,
             )
             q, k = self.indexer_select_pre_process(
                 x=hidden_states,
@@ -789,8 +790,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 sin=sin,
                 need_gather_q_kv=need_gather_q_kv)
 
-            if has_prefill:
-                wait_for_kv_layer_from_connector(layer_name)
+            wait_for_kv_layer_from_connector(layer_name)
 
             slot_mapping = attn_metadata.slot_mapping
             if self.enable_sfa_cp:
@@ -868,12 +868,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             sparse_mode=3,
         )
 
-        attn_output = self._v_up_proj(attn_output, has_prefill)
+        attn_output = self._v_up_proj(attn_output)
         maybe_npu_prefetch(inputs=self.o_proj.weight,
                            dependency=attn_output,
                            max_size=MAX_O_PROJ_PREFETCH_SIZE,
                            enabled=self.enable_prefetch)
         output[...] = self.o_proj(attn_output)[0]
+
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+
         return output_padded
 
     def indexer_select_pre_process(

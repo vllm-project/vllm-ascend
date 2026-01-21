@@ -29,8 +29,8 @@ def clean_up():
     import gc
 
     import torch
-    from vllm.distributed.parallel_state import (
-        destroy_distributed_environment, destroy_model_parallel)
+    from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+
     destroy_model_parallel()
     destroy_distributed_environment()
     gc.collect()
@@ -44,8 +44,10 @@ def run_prefill(prefill_done, process_close):
     from vllm.config import KVTransferConfig
 
     prompts = [
-        "Hello, how are you today?", "Hi, what is your name?",
-        "Tell me a very long story.", "what is your favourite book?"
+        "Hello, how are you today?",
+        "Hi, what is your name?",
+        "Tell me a very long story.",
+        "what is your favourite book?",
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
@@ -54,23 +56,16 @@ def run_prefill(prefill_done, process_close):
         kv_role="kv_producer",
         kv_port="30000",
         engine_id="0",
-        kv_connector_module_path="vllm_ascend.distributed.mooncake_connector",
-        kv_connector_extra_config={
-            "prefill": {
-                "dp_size": 1,
-                "tp_size": 1
-            },
-            "decode": {
-                "dp_size": 1,
-                "tp_size": 1
-            }
-        })
+        kv_connector_extra_config={"prefill": {"dp_size": 1, "tp_size": 1}, "decode": {"dp_size": 1, "tp_size": 1}},
+    )
     # Set NPU memory utilization to 0.8
-    llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-              kv_transfer_config=ktc,
-              max_model_len=2000,
-              gpu_memory_utilization=0.8,
-              tensor_parallel_size=1)
+    llm = LLM(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        kv_transfer_config=ktc,
+        max_model_len=2000,
+        gpu_memory_utilization=0.8,
+        tensor_parallel_size=1,
+    )
 
     llm.generate(prompts, sampling_params)
     print("Prefill node is finished.")
@@ -96,8 +91,10 @@ def run_decode(prefill_done):
     from vllm.config import KVTransferConfig
 
     prompts = [
-        "Hello, how are you today?", "Hi, what is your name?",
-        "Tell me a very long story.", "what is your favourite book?"
+        "Hello, how are you today?",
+        "Hi, what is your name?",
+        "Tell me a very long story.",
+        "what is your favourite book?",
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
@@ -106,23 +103,16 @@ def run_decode(prefill_done):
         kv_role="kv_consumer",
         kv_port="30100",
         engine_id="1",
-        kv_connector_module_path="vllm_ascend.distributed.mooncake_connector",
-        kv_connector_extra_config={
-            "prefill": {
-                "dp_size": 1,
-                "tp_size": 1
-            },
-            "decode": {
-                "dp_size": 1,
-                "tp_size": 1
-            }
-        })
+        kv_connector_extra_config={"prefill": {"dp_size": 1, "tp_size": 1}, "decode": {"dp_size": 1, "tp_size": 1}},
+    )
 
-    llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-              kv_transfer_config=ktc,
-              max_model_len=2000,
-              gpu_memory_utilization=0.8,
-              tensor_parallel_size=1)
+    llm = LLM(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        kv_transfer_config=ktc,
+        max_model_len=2000,
+        gpu_memory_utilization=0.8,
+        tensor_parallel_size=1,
+    )
 
     # Wait for the producer to start the consumer
     print("Waiting for prefill node to finish...")
@@ -141,16 +131,18 @@ def run_decode(prefill_done):
 
 
 if __name__ == "__main__":
-    mp.get_context('spawn')
+    mp.get_context("spawn")
 
     prefill_done = Event()
     process_close = Event()
-    prefill_process = Process(target=run_prefill,
-                              args=(
-                                  prefill_done,
-                                  process_close,
-                              ))
-    decode_process = Process(target=run_decode, args=(prefill_done, ))
+    prefill_process = Process(
+        target=run_prefill,
+        args=(
+            prefill_done,
+            process_close,
+        ),
+    )
+    decode_process = Process(target=run_decode, args=(prefill_done,))
 
     # Start prefill node
     prefill_process.start()

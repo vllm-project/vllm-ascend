@@ -1,7 +1,8 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 from vllm_ascend.utils import AscendDeviceType
@@ -21,6 +22,15 @@ def mock_add_rmsnorm_bias(input, residual, norm_weight, norm_bias, eps):
     return 2 * input, output_residual
 
 
+@pytest.fixture(autouse=True)
+def default_vllm_config():
+    mock_config = MagicMock()
+    mock_config.compilation_config.custom_ops = ["all"]
+
+    with set_current_vllm_config(mock_config):
+        yield mock_config
+
+
 @pytest.mark.parametrize("is_310p", [True, False])
 @pytest.mark.parametrize(
     "residual",
@@ -28,7 +38,7 @@ def mock_add_rmsnorm_bias(input, residual, norm_weight, norm_bias, eps):
 @patch("torch_npu.npu_rms_norm", side_effect=mock_npu_rms_norm)
 @patch("torch.ops.vllm.add_rmsnorm_bias", side_effect=mock_add_rmsnorm_bias)
 def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
-                         dummy_tensor):
+                         dummy_tensor, default_vllm_config):
 
     with patch("vllm_ascend.utils.get_ascend_device_type",
                return_value=AscendDeviceType._310P

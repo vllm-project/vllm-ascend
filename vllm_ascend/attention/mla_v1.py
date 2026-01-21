@@ -5,15 +5,12 @@ import numpy as np
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend import envs
@@ -22,12 +19,10 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata, CPChunkedContextMetadata)
-from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         enable_cp,
-                                         maybe_save_kv_layer_to_connector,
-                                         split_decodes_and_prefills,
-                                         trans_rope_weight, transdata,
-                                         wait_for_kv_layer_from_connector)
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata, ascend_chunked_prefill_workspace_size,
+    enable_cp, maybe_save_kv_layer_to_connector, split_decodes_and_prefills,
+    trans_rope_weight, transdata, wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
     update_draft_graph_params_workspaces, update_graph_params_workspaces)
@@ -39,15 +34,29 @@ from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, maybe_trans_nz,
-                               weak_ref_tensors)
+                               vllm_version_is, weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.v1.attention.backends.utils import AttentionCGSupport
+    from vllm.attention.backends.abstract import (  # type: ignore
+        AttentionBackend, MLAAttentionImpl)
+    from vllm.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+else:
+    from vllm.v1.attention.backend import (  # type: ignore
+        AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+# isort: on
+
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+# token count limits within the mlapo operator
+MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
 
 class AscendMLABackend(AttentionBackend):
@@ -84,8 +93,11 @@ class AscendMLABackend(AttentionBackend):
 
 @dataclass
 class ChunkedContextMetadata:
-    # New for MLA (compared to FlashAttention)
-    # For handling chunked prefill
+    """
+    Metadata for chunked context handling in MLA attention.
+
+    Manages sequence boundaries and workspace for chunked prefill processing.
+    """
     cu_seq_lens: torch.Tensor
     starts: torch.Tensor
     seq_tot: list[int]
@@ -116,7 +128,8 @@ class AscendMLAPrefillMetadata:
 
 @dataclass
 class AscendMLADecodeMetadata:
-    # Input positions for rotrary embeddings since for MLA the rotary
+    """ Decode-specific metadata for Ascend MLA attention."""
+    # Input positions for rotary embeddings since for MLA the rotary
     # position embeddings are applied inside the attention backend
     input_positions: torch.Tensor
     block_table: torch.Tensor
@@ -200,11 +213,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         metadata_cls: type[AscendMLAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        self.metadata_cls = (metadata_cls if metadata_cls is not None else
-                             AscendMLAMetadata)
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.device = device
+        super().__init__(
+            kv_cache_spec, layer_names, vllm_config, device,
+            metadata_cls if metadata_cls is not None else AscendMLAMetadata,
+            supports_dcp_with_varlen)
+
         scheduler_config = vllm_config.scheduler_config
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len +
@@ -221,29 +234,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 got {self.decode_threshold}"
 
         self.reorder_batch_threshold = self.decode_threshold
-        if self.chunked_prefill_enabled:
-            self.chunked_prefill_workspace_size = min(
-                # Max sure there is enough for 8 full length request or at least
-                # 4 pages of cache per request
-                max(8 * self.model_config.max_model_len,
-                    4 * scheduler_config.max_num_seqs * self.block_size),
-                # For long-context models try not to over-allocate limiting
-                # kv-cache space, limiting it to 64k tokens,
-                # which would result in the workspace being:
-                #   2*(576)*(64*1024) = 144mb
-                # (assuming 576 MLA head dim, and fp16)
-                # which would result in up-projected context being
-                #   2*(192*128)*(64*1024) = 3gb
-                # (assuming 192 QK head dim, 128 heads, and fp16)
-                128 * 1024)
-            assert self.chunked_prefill_workspace_size >= \
-                   scheduler_config.max_num_seqs * self.block_size
-            self.chunked_prefill_workspace = torch.empty(
-                (self.chunked_prefill_workspace_size,
-                 self.model_config.get_head_size()),
-                dtype=self.model_config.dtype,
-                device=device,
-            )
+
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
@@ -264,6 +255,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.query_lens: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+
+    @staticmethod
+    def determine_chunked_prefill_workspace_size(
+            vllm_config: VllmConfig) -> int:
+        return ascend_chunked_prefill_workspace_size(vllm_config)
 
     @classmethod
     def get_cudagraph_support(
@@ -914,10 +910,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
         # referenced, so drop them to save memory.
-        ascend_config = get_ascend_config()
         if self.vllm_config.kv_transfer_config is not None and \
                 self.vllm_config.kv_transfer_config.is_kv_consumer and \
-                ascend_config.recompute_scheduler_enable:
+                self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             self.fused_qkv_a_proj.weight = None
             self.fused_qkv_a_proj.deq_scale = None
             self.fused_qkv_a_proj.quant_bias = None
@@ -1495,7 +1490,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                                    device=hidden_states.device)
 
         # MLA Preprocess
-        if self.enable_mlapo and not has_prefill:
+        if self.enable_mlapo and \
+            not has_prefill and \
+            attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv)
             decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess_only_decode(

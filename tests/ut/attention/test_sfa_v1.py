@@ -12,6 +12,7 @@ if 'torch_npu._inductor' not in sys.modules:
 from vllm_ascend.attention.sfa_v1 import (AscendSFABackend, AscendSFAImpl,
                                           AscendSFAMetadata,
                                           AscendSFAMetadataBuilder)
+from vllm_ascend.utils import enable_dsa_cp
 
 
 class TestAscendSFABackend(TestBase):
@@ -35,7 +36,6 @@ class TestAscendSFABackend(TestBase):
 class TestAscendSFAMetadata(TestBase):
 
     def test_ascend_sfa_metadata_default(self):
-        has_prefill = True
         num_actual_tokens = 100
         slot_mapping = torch.randn(100, 4, 1024)
         seq_lens = torch.tensor([30, 50])
@@ -53,7 +53,6 @@ class TestAscendSFAMetadata(TestBase):
         attn_state = AscendAttentionState.ChunkedPrefill
 
         metadata = AscendSFAMetadata(
-            has_prefill=has_prefill,
             num_actual_tokens=num_actual_tokens,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
@@ -67,7 +66,6 @@ class TestAscendSFAMetadata(TestBase):
             attn_state=attn_state,
         )
 
-        self.assertEqual(metadata.has_prefill, has_prefill)
         self.assertEqual(metadata.num_actual_tokens, num_actual_tokens)
         self.assertIs(metadata.slot_mapping, slot_mapping)
         self.assertTrue(torch.equal(metadata.seq_lens, seq_lens))
@@ -83,10 +81,62 @@ class TestAscendSFAMetadata(TestBase):
 
 class TestAscendSFAMetadataBuilder(TestBase):
 
+    def setUp(self):
+        self.mock_cfg = MagicMock()
+
+        self.mock_cfg.parallel_config = MagicMock()
+        self.mock_cfg.parallel_config.tensor_parallel_size = 1
+        self.mock_cfg.parallel_config.prefill_context_parallel_size = 1
+        self.mock_cfg.parallel_config.decode_context_parallel_size = 1
+
+        self.mock_cfg.compilation_config = MagicMock()
+        self.mock_cfg.compilation_config.pass_config = MagicMock()
+        self.mock_cfg.compilation_config.pass_config.enable_sp = False
+
+        self.mock_cfg.speculative_config.num_speculative_tokens = 0
+
+        self.patcher = patch("vllm.config.get_current_vllm_config",
+                             return_value=self.mock_cfg)
+        self.patcher.start()
+
+        # Mock parent class __init__ to avoid complex initialization,
+        # but still set the essential attributes that child class needs
+        def mock_parent_init(self, kv_cache_spec, layer_names, vllm_config,
+                             device, metadata_cls, supports_dcp_with_varlen):
+            self.metadata_cls = metadata_cls
+            self.kv_cache_spec = kv_cache_spec
+            self.model_config = vllm_config.model_config
+            self.vllm_config = vllm_config
+            self.device = device
+            self.chunked_prefill_workspace_size = 128 * 1024
+            self.chunked_prefill_workspace = torch.empty(
+                (self.chunked_prefill_workspace_size,
+                 vllm_config.model_config.get_head_size()),
+                dtype=vllm_config.model_config.dtype,
+                device=device,
+            )
+
+        self.parent_init_patcher = patch(
+            "vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__",
+            mock_parent_init)
+        self.parent_init_patcher.start()
+
+        if hasattr(enable_dsa_cp, "cache_clear"):
+            enable_dsa_cp.cache_clear()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.parent_init_patcher.stop()
+
     def test_ascend_sfa_metadata_builder_default(self):
         kv_cache_spec = MagicMock()
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
+        vllm_config.cache_config.block_size = 16
+        vllm_config.model_config.max_model_len = 1024
+        vllm_config.model_config.get_head_size.return_value = 64
+        vllm_config.model_config.dtype = torch.float16
+        vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
@@ -119,6 +169,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
         kv_cache_spec = MagicMock()
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
+        vllm_config.cache_config.block_size = 16
+        vllm_config.model_config.max_model_len = 1024
+        vllm_config.model_config.get_head_size.return_value = 64
+        vllm_config.model_config.dtype = torch.float16
+        vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
@@ -171,6 +226,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
         kv_cache_spec = MagicMock()
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
+        vllm_config.cache_config.block_size = 16
+        vllm_config.model_config.max_model_len = 1024
+        vllm_config.model_config.get_head_size.return_value = 64
+        vllm_config.model_config.dtype = torch.float16
+        vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config

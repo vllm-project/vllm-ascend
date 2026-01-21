@@ -18,8 +18,10 @@
 #
 
 import os
+import pytest
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "512"
 
@@ -44,10 +46,15 @@ def test_pcp_dcp_mtp1_eager():
                 "method": "deepseek_mtp",
             },
             enforce_eager=True,
+            async_scheduling=False,
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
 
+@pytest.mark.skipif(
+    not vllm_version_is('0.13.0'),
+    reason="vLLM PR-32118 break this",
+)
 def test_pcp_dcp_mtp3_eager():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -63,6 +70,7 @@ def test_pcp_dcp_mtp3_eager():
             max_num_batched_tokens=1024,
             enable_expert_parallel=True,
             block_size=128,
+            async_scheduling=True,
             speculative_config={
                 "num_speculative_tokens": 3,
                 "method": "deepseek_mtp",
@@ -72,6 +80,10 @@ def test_pcp_dcp_mtp3_eager():
         runner.generate_greedy(prompts, 32)
 
 
+@pytest.mark.skipif(
+    not vllm_version_is('0.13.0'),
+    reason="vLLM PR-32118 break this",
+)
 def test_pcp_dcp_mtp3_piecewise_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -95,10 +107,15 @@ def test_pcp_dcp_mtp3_piecewise_graph():
                 "cudagraph_mode": "PIECEWISE",
                 "cudagraph_capture_sizes": [4, 8, 16],
             },
+            async_scheduling=False,
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
 
+@pytest.mark.skipif(
+    not vllm_version_is('0.13.0'),
+    reason="vLLM PR-32118 break this",
+)
 def test_pcp_dcp_mtp3_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -122,6 +139,7 @@ def test_pcp_dcp_mtp3_full_graph():
                 "cudagraph_mode": "FULL_DECODE_ONLY",
                 "cudagraph_capture_sizes": [4, 8, 16],
             },
+            async_scheduling=False,
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
@@ -148,5 +166,6 @@ def test_dcp_mtp3_full_graph():
                 "cudagraph_mode": "FULL_DECODE_ONLY",
                 "cudagraph_capture_sizes": [4, 8, 16],
             },
+            async_scheduling=False,
     ) as runner:
         runner.generate_greedy(prompts, 32)

@@ -208,6 +208,15 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
 class TestAscendLogitsProcessor(unittest.TestCase):
 
     def setUp(self):
+        self.mock_vllm_config = MagicMock()
+        self.mock_vllm_config.compilation_config.custom_ops = ["all"]
+
+        from vllm.config.vllm import set_current_vllm_config
+        set_current_vllm_config(self.mock_vllm_config)
+
+        self.config_patch = patch("vllm.config.vllm.get_current_vllm_config",
+                                  return_value=self.mock_vllm_config)
+        self.config_patch.start()
         self.vocab_size = 50
         self.num_embeddings = 50
         self.embedding_dim = 10

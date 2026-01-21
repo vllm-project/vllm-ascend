@@ -21,16 +21,15 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
 
-from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 
 
 class EplbUpdator:
 
-    def __init__(self, ascend_config, loader, eplb_process: EplbProcess,
+    def __init__(self, eplb_config, loader, eplb_process: EplbProcess,
                  process):
-        self.ascend_config = ascend_config
-        self.init_eplb(self.ascend_config.expert_map_path, process)
+        self.eplb_config = eplb_config
+        self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
         self.eplb_process = eplb_process
         self.shared_dict = self.eplb_process.shared_dict
@@ -39,35 +38,29 @@ class EplbUpdator:
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
-        self.global_expert_num = self.adaptor.global_expert_num
 
     def init_eplb(self, expert_map_path, process):
         self.rank_id = dist.get_rank()
         self.num_expert_load_gather = 10
         self.periodic_load_gather = True
-        self.num_iterations_eplb_update: torch.int64 = self.ascend_config.num_iterations_eplb_update
-        EPLBParamUtils.check_iterations(self.num_iterations_eplb_update)
+        self.expert_heat_collection_interval: torch.int64 = self.eplb_config.expert_heat_collection_interval
         self.expert_map_path = expert_map_path
-        self.expert_map_record_path = self.ascend_config.expert_map_record_path
+        self.expert_map_record_path = self.eplb_config.expert_map_record_path
 
         try:
             if not envs.VLLM_ALLOW_EXPERT_LOAD_COLLECTING:
-                self.num_expert_load_gather = self.num_iterations_eplb_update
+                self.num_expert_load_gather = self.expert_heat_collection_interval
                 self.periodic_load_gather = False
         except Exception:
-            self.num_expert_load_gather = self.num_iterations_eplb_update
+            self.num_expert_load_gather = self.expert_heat_collection_interval
             self.periodic_load_gather = False
-
-        self.expert_map_initialized = False
-        self.gate_eplb = self.ascend_config.gate_eplb
 
         self.reqs = []
         self.update_info_all = []
 
         self.cur_iterations: torch.int64 = 0
 
-        self.num_wait_worker_iterations: torch.int64 = self.ascend_config.num_wait_worker_iterations
-        EPLBParamUtils.check_iterations(self.num_wait_worker_iterations)
+        self.algorithm_execution_interval: torch.int64 = self.eplb_config.algorithm_execution_interval
 
         self.process = process
 
@@ -76,8 +69,8 @@ class EplbUpdator:
 
     def update_iteration(self):
         self.cur_iterations += 1
-        if self.cur_iterations == (self.num_iterations_eplb_update + \
-                                   self.num_wait_worker_iterations + self.num_moe_layers):
+        if self.cur_iterations == (self.expert_heat_collection_interval + \
+                                   self.algorithm_execution_interval + self.num_moe_layers):
             logger.info("Finish expert parallel load balancing.")
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(
@@ -85,32 +78,22 @@ class EplbUpdator:
                     self.expert_map_record_path)
 
             self.adaptor.model.clear_all_moe_loads()
-            if not self.gate_eplb:
-                self.cur_iterations = 0
+            self.cur_iterations = 0
 
     def get_update_info_flag(self):
-        return self.cur_iterations == (self.num_iterations_eplb_update +
-                                       self.num_wait_worker_iterations - 1)
+        return self.cur_iterations == (self.expert_heat_collection_interval +
+                                       self.algorithm_execution_interval - 1)
 
     def wakeup_eplb_worker_flag(self):
-        return self.cur_iterations == (self.num_iterations_eplb_update - 1)
+        return self.cur_iterations == (self.expert_heat_collection_interval -
+                                       1)
 
     def update_expert_weight_flag(self):
         weight_update_counter = self.cur_iterations - (
-            self.num_iterations_eplb_update + self.num_wait_worker_iterations)
+            self.expert_heat_collection_interval +
+            self.algorithm_execution_interval)
         return (weight_update_counter >= 0
                 and weight_update_counter < self.num_moe_layers)
-
-    def get_init_expert_map(self):
-        try:
-            if not self.expert_map_initialized:
-                self.shared_dict[
-                    "expert_maps"] = self.adaptor.get_init_expert_map_from_file(
-                        self.num_moe_layers, self.expert_map_path)
-                self.expert_map_initialized = True
-        except Exception as e:
-            logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}",
-                           exc_info=True)
 
     def wakeup_eplb_worker(self):
         self.eplb_process.planner_q.put(1)
@@ -218,7 +201,7 @@ class EplbUpdator:
 
     def warm_up_eplb(self):
 
-        self.get_init_expert_map()
+        self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1, ), device=self.device)
