@@ -222,12 +222,6 @@ class NPUPlatform(Platform):
 
         from vllm.config.compilation import CUDAGraphMode
 
-        if ascend_config.xlite_graph_config.enabled and ascend_config.xlite_graph_config.full_mode:
-            logger.info("ACLGraph is disabled under xlite full mode")
-            enforce_eager = True
-            model_config.enforce_eager = True
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.mode = CompilationMode.NONE
