@@ -617,7 +617,7 @@ def causal_conv1d_update_npu(
     else:
         assert conv_state_indices is not None
         batch = conv_state_indices.size(0)
-        dim = x.size(2)
+        dim = x.size(1)
         seqlen = max_query_len
 
     width, _ = weight.shape
