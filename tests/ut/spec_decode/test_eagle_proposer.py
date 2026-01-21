@@ -65,10 +65,11 @@ class TestEagleProposerInitialization(TestBase):
         self.assertEqual(proposer.hidden_size, 4096)
         self.assertTrue(proposer.use_cuda_graph)
 
-        self.assertEqual(proposer.input_ids.shape, (1024, ))
-        self.assertEqual(proposer.positions.shape, (1024, ))
-        self.assertEqual(proposer.hidden_states.shape, (1024, 4096))
-        self.assertEqual(proposer.arange.shape, (1024, ))
+        expected_max_num_tokens = proposer.max_num_tokens
+        self.assertEqual(proposer.input_ids.shape, (expected_max_num_tokens, ))
+        self.assertEqual(proposer.positions.shape, (expected_max_num_tokens, ))
+        self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 4096))
+        self.assertEqual(proposer.arange.shape, (expected_max_num_tokens, ))
 
     def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
@@ -83,7 +84,8 @@ class TestEagleProposerInitialization(TestBase):
 
         self.assertEqual(proposer.hidden_size, 2048)
         self.assertFalse(proposer.use_cuda_graph)
-        self.assertEqual(proposer.hidden_states.shape, (1024, 2048))
+        expected_max_num_tokens = proposer.max_num_tokens
+        self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 2048))
 
     def test_initialization_eagle3_full_graph_async(self):
         self.vllm_config.speculative_config.method = "eagle3"
@@ -117,7 +119,8 @@ class TestEagleProposerInitialization(TestBase):
 
         self.assertEqual(proposer.hidden_size, 2048)
         self.assertFalse(proposer.use_cuda_graph)
-        self.assertEqual(proposer.hidden_states.shape, (1024, 2048))
+        expected_max_num_tokens = proposer.max_num_tokens
+        self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 2048))
 
 
 class TestEagleProposerLoadModel(TestBase):
