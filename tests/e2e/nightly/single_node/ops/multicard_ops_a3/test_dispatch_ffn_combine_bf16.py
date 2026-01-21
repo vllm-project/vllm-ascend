@@ -139,7 +139,7 @@ class TestDisptachFFNCombine:
             group=self.hcomm_info,
             max_output_size=512,
             out=out,
-            expert_token_nums,
+            expert_token_nums=expert_token_nums,
         )
         return True
 
@@ -192,7 +192,7 @@ class TestDisptachFFNCombine:
             group=self.hcomm_info,
             max_output_size=512,
             out=out,
-            expert_token_nums,
+            expert_token_nums=expert_token_nums,
         )
         return True
 
