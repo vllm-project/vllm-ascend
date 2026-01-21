@@ -117,11 +117,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
 
-    def dec_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
-
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
             if req_id in self.stored_requests:
@@ -135,10 +130,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         starts = []
         ends = []
         keys = []
-        if req_id not in self.stored_requests:
-            self.request_queue.task_done()
-            return
-
         for start, end, key in self.token_database.process_tokens(
                 token_len, req_meta.block_hashes):
             starts.append(start)
@@ -151,13 +142,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
             keys = keys[self.tp_rank % self.put_step::self.put_step]
 
         if not keys:
-            self.dec_stored_request(req_id)
+            with self.done_task_lock:
+                self.stored_requests[req_id] -= 1
             return
 
         skip_block_num = self.lookup(keys)
 
         if skip_block_num == len(keys):
-            self.dec_stored_request(req_id)
+            with self.done_task_lock:
+                self.stored_requests[req_id] -= 1
             return
 
         starts = starts[skip_block_num:]
@@ -196,7 +189,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 current_event.synchronize()
             self.m_store.put(keys, addrs, sizes)
 
-        self.dec_stored_request(req_id)
+        with self.done_task_lock:
+            self.stored_requests[req_id] -= 1
         self.request_queue.task_done()
 
 
