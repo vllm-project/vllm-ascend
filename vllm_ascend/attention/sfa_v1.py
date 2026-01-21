@@ -309,7 +309,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     ):
         if attn_state in {
                 AscendAttentionState.DecodeOnly,
-                AscendAttentionState.SpecDecoding
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.ChunkedPrefill,
         }:
             attn_metadata = self.build(
                 common_prefix_len=0,

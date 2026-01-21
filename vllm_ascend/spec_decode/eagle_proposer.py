@@ -286,12 +286,19 @@ class EagleProposer(VllmEagleProposer):
         model_positions = self._get_positions(num_tokens)
         model_previous_hidden_states = self.hidden_states[:num_tokens]
         for i in range(self.num_speculative_tokens):
+            if i <= 1:
+                (
+                    num_tokens,
+                    num_tokens_across_dp,
+                    _,
+                ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
             if i > 0 and in_graph_capturing and aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 aclgraph_runtime_mode = CUDAGraphMode.NONE
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp,
                     num_actual_tokens=0,
                     in_profile_run=is_profile,
                     batch_descriptor=batch_descriptor,
@@ -364,10 +371,26 @@ class EagleProposer(VllmEagleProposer):
         else:
             num_input_tokens = num_tokens
 
+        (
+            num_input_tokens,
+            num_tokens_across_dp,
+            _,
+        ) = self.runner._sync_metadata_across_dp(num_input_tokens, self.runner.with_prefill)
+
+        if self.method == "mtp" and self.enable_shared_expert_dp:
+            uniform_decode = False
+        else:
+            max_query_len = common_attn_metadata.max_query_len
+            uniform_decode_query_len = 1 + self.num_speculative_tokens
+            uniform_decode = (
+                max_query_len in list(range(1, uniform_decode_query_len + 1))
+                and scheduler_output.total_num_scheduled_tokens == self.runner.input_batch.num_reqs * uniform_decode_query_len
+            )
+
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = \
-                self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=True, has_lora=has_lora)
+                self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
@@ -389,6 +412,16 @@ class EagleProposer(VllmEagleProposer):
             inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
 
+        if (
+            self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and aclgraph_runtime_mode == CUDAGraphMode.FULL
+        ):
+            graph_pad_size = num_input_tokens
+        else:
+            graph_pad_size = -1
+        common_attn_metadata.graph_pad_size = graph_pad_size
+        common_attn_metadata.num_input_tokens = num_input_tokens
+
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata,
@@ -402,6 +435,7 @@ class EagleProposer(VllmEagleProposer):
                 per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
                 num_actual_tokens=num_tokens,
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=aclgraph_runtime_mode,
@@ -463,6 +497,12 @@ class EagleProposer(VllmEagleProposer):
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
         else:
             input_batch_size = batch_size
+
+        (
+            input_batch_size,
+            batch_size_across_dp,
+            _,
+        ) = self.runner._sync_metadata_across_dp(input_batch_size, False)
 
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = \
@@ -558,7 +598,7 @@ class EagleProposer(VllmEagleProposer):
                 block_numbers = clamped_positions[0] // block_size
             else:
                 block_numbers = (clamped_positions // block_size)
-            block_ids = attn_metadata.block_tables.gather(
+            block_ids = common_attn_metadata.block_table_tensor.gather(
                 dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             if self.uses_mrope:
@@ -609,6 +649,7 @@ class EagleProposer(VllmEagleProposer):
                     per_layer_attn_metadata,
                     self.vllm_config,
                     num_tokens=input_batch_size,
+                    num_tokens_across_dp=batch_size_across_dp,
                     num_actual_tokens=batch_size,
                     batch_descriptor=batch_descriptor,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,

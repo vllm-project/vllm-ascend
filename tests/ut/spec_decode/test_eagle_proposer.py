@@ -248,6 +248,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.runner = MagicMock()
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner._sync_metadata_across_dp.return_value = (8, 8, False)
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
