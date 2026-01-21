@@ -15,7 +15,7 @@ jobs:
     runs-on: linux-amd64-cpu-8-hk
     container:
       # Build it from https://github.com/nv-action/vllm-benchmarks/blob/main/Dockerfile
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+      image: quay.io/wangli12345/hello-world:lint
     steps:
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v6
@@ -42,7 +42,6 @@ jobs:
       working-directory: vllm-empty
       run: |
         sleep 10000
-        VLLM_TARGET_DEVICE=empty python3 -m pip install . --extra-index https://download.pytorch.org/whl/cpu/
     - name: Install vllm-ascend dev
       run: |
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
