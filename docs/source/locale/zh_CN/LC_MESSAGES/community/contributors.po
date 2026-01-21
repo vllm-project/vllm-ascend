@@ -21,7 +21,6 @@ msgstr ""
 "Generated-By: Babel 2.17.0\n"
 
 #: ../../source/community/contributors.md:1
-#, fuzzy
 msgid "Maintainers and Contributors"
 msgstr "维护者和贡献者"
 
@@ -87,20 +86,19 @@ msgstr "2025/06"
 
 #: ../../source/community/contributors.md
 msgid "Wengang Chen"
-msgstr ""
+msgstr "Wengang Chen"
 
 #: ../../source/community/contributors.md
 msgid "[@ApsarasX](https://github.com/ApsarasX)"
 msgstr "[@ApsarasX](https://github.com/ApsarasX)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "2025/08"
-msgstr "2025/06"
+msgstr "2025/08"
 
 #: ../../source/community/contributors.md
 msgid "Mengqing Cao"
-msgstr ""
+msgstr "Mengqing Cao"
 
 #: ../../source/community/contributors.md
 msgid "[@MengqingCao](https://github.com/MengqingCao)"
@@ -108,20 +106,19 @@ msgstr "[@MengqingCao](https://github.com/MengqingCao)"
 
 #: ../../source/community/contributors.md
 msgid "Peng Yu"
-msgstr ""
+msgstr "Peng Yu"
 
 #: ../../source/community/contributors.md
 msgid "[@paulyu12](https://github.com/paulyu12)"
 msgstr "[@paulyu12](https://github.com/paulyu12)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "2025/10"
-msgstr "2025/4/10"
+msgstr "2025/10"
 
 #: ../../source/community/contributors.md
 msgid "Yizhou Liu"
-msgstr ""
+msgstr "Yizhou Liu"
 
 #: ../../source/community/contributors.md
 msgid "[@yiz-liu](https://github.com/yiz-liu)"
@@ -129,7 +126,7 @@ msgstr "[@yiz-liu](https://github.com/yiz-liu)"
 
 #: ../../source/community/contributors.md
 msgid "Jinqian Wei"
-msgstr ""
+msgstr "Jinqian Wei"
 
 #: ../../source/community/contributors.md
 msgid "[@weijinqian0](https://github.com/weijinqian0)"
@@ -137,63 +134,57 @@ msgstr "[@weijinqian0](https://github.com/weijinqian0)"
 
 #: ../../source/community/contributors.md
 msgid "Chuanyu Qin"
-msgstr ""
+msgstr "Chuanyu Qin"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@nalinaly](https://github.com/nalinaly)"
-msgstr "[@SidaoY](https://github.com/SidaoY)"
+msgstr "[@nalinaly](https://github.com/nalinaly)"
 
 #: ../../source/community/contributors.md
 msgid "Jie Wen"
-msgstr ""
+msgstr "Jie Wen"
 
 #: ../../source/community/contributors.md
 msgid "[@zzzzwwjj](https://github.com/zzzzwwjj)"
 msgstr "[@zzzzwwjj](https://github.com/zzzzwwjj)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "2025/12"
-msgstr "2025/6/12"
+msgstr "2025/12"
 
 #: ../../source/community/contributors.md
 msgid "Chao Lei"
-msgstr ""
+msgstr "Chao Lei"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@LCAIZJ](https://github.com/LCAIZJ)"
-msgstr "[@yzim](https://github.com/yzim)"
+msgstr "[@LCAIZJ](https://github.com/LCAIZJ)"
 
 #: ../../source/community/contributors.md
 msgid "JiaXu Liu"
-msgstr ""
+msgstr "JiaXu Liu"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@realliujiaxu](https://github.com/realliujiaxu)"
-msgstr "[@Yuxiao-Xu](https://github.com/Yuxiao-Xu)"
+msgstr "[@realliujiaxu](https://github.com/realliujiaxu)"
 
 #: ../../source/community/contributors.md:21
 msgid "Contributors"
 msgstr "贡献者"
 
 #: ../../source/community/contributors.md:23
-#, fuzzy
 msgid ""
 "Every release of vLLM Ascend would not have been possible without the "
 "following contributors:"
-msgstr "每个 vLLM Ascend 版本的发布都离不开以下贡献者："
+msgstr "vLLM Ascend 的每个版本都凝聚了以下贡献者的智慧与付出："
 
 #: ../../source/community/contributors.md:25
-#, fuzzy
 msgid "Updated on 2025-12-30:"
-msgstr "更新于 2025-06-10："
+msgstr "更新于 2025-12-30："
 
 #: ../../source/community/contributors.md
 msgid "Number"
-msgstr "数字"
+msgstr "序号"
 
 #: ../../source/community/contributors.md
 msgid "Contributor"
@@ -204,186 +195,156 @@ msgid "Commit ID"
 msgstr "提交 ID"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "263"
-msgstr "63"
+msgstr "263"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@hu-qi](https://github.com/hu-qi)"
-msgstr "[@wuhuikx](https://github.com/wuhuikx)"
+msgstr "[@hu-qi](https://github.com/hu-qi)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "2025/12/30"
-msgstr "2025/5/30"
+msgstr "2025/12/30"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid ""
 "[c85cc04](https://github.com/vllm-project/vllm-"
 "ascend/commit/c85cc045f893293e3b44e24d2e1f01ddc5849ea8)"
 msgstr ""
-"[6b853f1](https://github.com/vllm-project/vllm-"
-"ascend/commit/6b853f15fe69ba335d2745ebcf14a164d0bcc505)"
+"[c85cc04](https://github.com/vllm-project/vllm-"
+"ascend/commit/c85cc045f893293e3b44e24d2e1f01ddc5849ea8)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "262"
-msgstr "62"
+msgstr "262"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@ZCG12345](https://github.com/ZCG12345)"
-msgstr "[@zhanghw0354](https://github.com/zhanghw0354)"
+msgstr "[@ZCG12345](https://github.com/ZCG12345)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid ""
 "[45c3c27](https://github.com/vllm-project/vllm-"
 "ascend/commit/45c3c279e2b31c85c8739c45b43d8c47710e447b)"
 msgstr ""
-"[4495fc6](https://github.com/vllm-project/vllm-"
-"ascend/commit/4495fc68389e3fb1ef14534c202948931e38446b)"
+"[45c3c27](https://github.com/vllm-project/vllm-"
+"ascend/commit/45c3c279e2b31c85c8739c45b43d8c47710e447b)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "261"
-msgstr "61"
+msgstr "261"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@Fager10086](https://github.com/Fager10086)"
-msgstr "[@wwfu109](https://github.com/wwfu109)"
+msgstr "[@Fager10086](https://github.com/Fager10086)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "2025/12/29"
-msgstr "2025/1/29"
+msgstr "2025/12/29"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid ""
 "[51da5ea](https://github.com/vllm-project/vllm-"
 "ascend/commit/51da5ea5438749fa057a7bb60977750e3ac22392)"
 msgstr ""
-"[20dedba](https://github.com/vllm-project/vllm-"
-"ascend/commit/20dedba5d1fc84b7ae8b49f9ce3e3649389e2193)"
+"[51da5ea](https://github.com/vllm-project/vllm-"
+"ascend/commit/51da5ea5438749fa057a7bb60977750e3ac22392)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "260"
-msgstr "60"
+msgstr "260"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@jiazhengyi](https://github.com/jiazhengyi)"
-msgstr "[@ji-huazhong](https://github.com/ji-huazhong)"
+msgstr "[@jiazhengyi](https://github.com/jiazhengyi)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid ""
 "[d5f7283](https://github.com/vllm-project/vllm-"
 "ascend/commit/d5f72835e65e6b6b8cf8e173a9048c926890881b)"
 msgstr ""
-"[eb28342](https://github.com/vllm-project/vllm-"
-"ascend/commit/eb283428ddc17207b6866118f9bc15454b5b8801)"
+"[d5f7283](https://github.com/vllm-project/vllm-"
+"ascend/commit/d5f72835e65e6b6b8cf8e173a9048c926890881b)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "259"
-msgstr "59"
+msgstr "259"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@zhanzy178](https://github.com/zhanzy178)"
-msgstr "[@hfadzxy](https://github.com/hfadzxy)"
+msgstr "[@zhanzy178](https://github.com/zhanzy178)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid ""
 "[d8e15da](https://github.com/vllm-project/vllm-"
 "ascend/commit/d8e15dae6c5e563c3284309d4557afb4d4a17feb)"
 msgstr ""
-"[e9ada68](https://github.com/vllm-project/vllm-"
-"ascend/commit/e9ada685ece798f9fe0d4a287e3f5246a8a7207b)"
+"[d8e15da](https://github.com/vllm-project/vllm-"
+"ascend/commit/d8e15dae6c5e563c3284309d4557afb4d4a17feb)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "258"
-msgstr "58"
+msgstr "258"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@jiangkuaixue123](https://github.com/jiangkuaixue123)"
-msgstr "[@ShiyaNiu](https://github.com/ShiyaNiu)"
+msgstr "[@jiangkuaixue123](https://github.com/jiangkuaixue123)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "2025/12/27"
-msgstr "2025/2/27"
+msgstr "2025/12/27"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid ""
 "[e91e11d](https://github.com/vllm-project/vllm-"
 "ascend/commit/e91e11d3b0a961f2e0e034cd738632653e5f6bdc)"
 msgstr ""
-"[59ea23d](https://github.com/vllm-project/vllm-"
-"ascend/commit/59ea23d0d394879d7f33de6fd22242539b9c3cc5)"
+"[e91e11d](https://github.com/vllm-project/vllm-"
+"ascend/commit/e91e11d3b0a961f2e0e034cd738632653e5f6bdc)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "257"
-msgstr "57"
+msgstr "257"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@pisceskkk](https://github.com/pisceskkk)"
-msgstr "[@wxsIcey](https://github.com/wxsIcey)"
+msgstr "[@pisceskkk](https://github.com/pisceskkk)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "2025/12/26"
-msgstr "2025/2/26"
+msgstr "2025/12/26"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid ""
 "[da0b113](https://github.com/vllm-project/vllm-"
 "ascend/commit/da0b113cf57111c309be2a609aa2541a83b6cca6)"
 msgstr ""
-"[e8131b9](https://github.com/vllm-project/vllm-"
-"ascend/commit/e8131b99cf199f50a304e6e6fb125a1b95bcc92b)"
+"[da0b113](https://github.com/vllm-project/vllm-"
+"ascend/commit/da0b113cf57111c309be2a609aa2541a83b6cca6)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "256"
-msgstr "56"
+msgstr "256"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@maoxx241](https://github.com/maoxx241)"
-msgstr "[@baymax591](https://github.com/baymax591)"
+msgid "[@maoxx241](https://github.com/maoxx241)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid ""
 "[7372225](https://github.com/vllm-project/vllm-"
 "ascend/commit/7372225bcb0bd4896f43e989cef8109bfe45b13c)"
 msgstr ""
-"[87975fa](https://github.com/vllm-project/vllm-"
-"ascend/commit/87975fa058fe3f90d204ded42a08989a8dcb413e)"
+"[7372225](https://github.com/vllm-project/vllm-"
+"ascend/commit/7372225bcb0bd4896f43e989cef8109bfe45b13c)"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "255"
-msgstr "55"
+msgstr "255"
 
 #: ../../source/community/contributors.md
-#, fuzzy
 msgid "[@cookieyyds](https://github.com/cookieyyds)"
-msgstr "[@xleoken](https://github.com/xleoken)"
+msgstr "[@cookieyyds](https://github.com/cookieyyds)"
 
 #: ../../source/community/contributors.md
 #, fuzzy
