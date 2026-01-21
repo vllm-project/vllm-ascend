@@ -53,23 +53,15 @@ docker run --rm \
 
 The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
 
-### Install Triton Ascend
+### Install Clang
 
-The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required when you run Qwen3 Next, please follow the instructions below to install it and its dependency.
-
-Install the Ascend BiSheng toolkit, execute the command:
+We strongly recommend you to install clang make triton ascend stable enough. For Ubuntu, the command is
 
 ```bash
-BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20260105.run"
-BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-```
+apt-get -y clang-15
 
-Install Triton Ascend:
-
-```bash
-python3 -m pip install triton-ascend==3.2.0
+update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 ```
 
 ### Inference
