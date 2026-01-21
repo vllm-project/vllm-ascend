@@ -17,7 +17,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
-from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
+from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable, vllm_version_is
 
 
 class MtpProposer(EagleProposer):
@@ -244,8 +244,12 @@ class MtpProposer(EagleProposer):
         # Note(qcs): We may need to refactor these check logics.
         if self.use_cuda_graph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
                 -1]:
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
+            if vllm_version_is('0.14.0'):
+                num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                    num_scheduled_tokens)
+            else:
+                num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[
+                    num_scheduled_tokens]
         else:
             # Eager mode, no padding needed
             num_input_tokens = num_tokens

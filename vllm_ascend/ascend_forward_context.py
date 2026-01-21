@@ -49,8 +49,6 @@ def set_ascend_forward_context(
     can be attention metadata, etc.
     We add some additional param into forward_context.
     """
-    # Build kwargs for set_forward_context
-    # skip_compiled is only available in vllm >= main (after 0.13.0)
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
@@ -61,7 +59,7 @@ def set_ascend_forward_context(
         "batch_descriptor": batch_descriptor,
     }
 
-    if not vllm_version_is("0.13.0"):
+    if not vllm_version_is("0.14.0"):
         forward_context_kwargs["skip_compiled"] = skip_compiled
 
     with set_forward_context(**forward_context_kwargs):
