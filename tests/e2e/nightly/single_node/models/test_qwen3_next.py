@@ -10,7 +10,7 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
-    "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "vllm-ascend/Qwen3-Next-80B-A3B-Instruct",
 ]
 
 MODES = ["aclgraph"]
