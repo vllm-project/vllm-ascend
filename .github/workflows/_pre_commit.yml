@@ -60,12 +60,14 @@ jobs:
         TERM: xterm-256color
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       run: |
-        PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
-        git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-        export PYTHONPATH
         pre-commit run --all-files --hook-stage manual --show-diff-on-failure
     - name: Run mypy
       run: |
+        PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+        export PYTHONPATH
+        git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+        # Run mypy for Python 3.10, 3.11, 3.12 manually
+        # Note: We are now separating mypy from pre-commit hooks for performance reasons.
         for python_version in "3.10" "3.11" "3.12"; do
           echo "============================"
           tools/mypy.sh 1 "$python_version"
