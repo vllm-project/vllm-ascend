@@ -578,8 +578,12 @@ class NPUModelRunner(GPUModelRunner):
         if (self.use_aclgraph and total_num_scheduled_tokens
                 <= self.cudagraph_batch_sizes[-1]):
             # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                total_num_scheduled_tokens)
+            if vllm_version_is('0.14.0'):
+                num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                    total_num_scheduled_tokens)
+            else:
+                num_input_tokens = self.cudagraph_dispatcher._bs_to_padded_graph_size[
+                    total_num_scheduled_tokens]
         elif self.use_aclgraph and enable_sp(self.vllm_config):
             # When using aclgraph, if total_num_scheduled_tokens exceeds the maximum graph size,
             # the model will fall back to running its FX graph in eager mode.

@@ -178,8 +178,7 @@ class AscendWorkerProc(WorkerProc):
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
         }
-        # For vllm 0.13.0, is_driver_worker is not needed.
-        if not vllm_version_is('0.13.0'):
+        if not vllm_version_is('0.14.0'):
             process_kwargs["is_driver_worker"] = is_driver_worker
         # Run EngineCore busy loop in background process.
         proc = context.Process(
