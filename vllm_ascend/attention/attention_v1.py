@@ -25,6 +25,18 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import (  # type: ignore
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionImpl,
+    AttentionLayer,
+    AttentionMetadataBuilder,
+    AttentionType,
+)
+from vllm.v1.attention.backends.registry import (  # type: ignore
+    AttentionBackendEnum,
+    register_backend,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
@@ -44,34 +56,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
-
-if vllm_version_is("0.13.0"):
-    from vllm.attention.backends.abstract import (  # type: ignore
-        AttentionBackend,
-        AttentionImpl,
-        AttentionLayer,
-        AttentionType,
-    )
-    from vllm.attention.backends.registry import (  # type: ignore
-        AttentionBackendEnum,
-        register_backend,
-    )
-    from vllm.v1.attention.backends.utils import AttentionCGSupport, AttentionMetadataBuilder
-else:
-    from vllm.v1.attention.backend import (  # type: ignore
-        AttentionBackend,
-        AttentionCGSupport,
-        AttentionImpl,
-        AttentionLayer,
-        AttentionMetadataBuilder,
-        AttentionType,
-    )
-    from vllm.v1.attention.backends.registry import (  # type: ignore
-        AttentionBackendEnum,
-        register_backend,
-    )
-
+from vllm_ascend.utils import weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
