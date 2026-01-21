@@ -461,11 +461,13 @@ class KVPoolWorker:
             for layer_id in range(self.num_layers):
                 yield
 
-    def get_finished(self,
-                     finished_req_ids: set[str], meta:AscendConnectorMetadata) -> tuple[set[str], set[str]]:
+    def get_finished(
+            self, finished_req_ids: set[str],
+            meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         done_sending = (
             self.get_and_clear_finished_requests(
-                finished_req_ids, meta  # type: ignore[union-attr]
+                finished_req_ids,
+                meta  # type: ignore[union-attr]
             ) if self.kv_role in ['kv_producer', 'kv_both']
             or self.consumer_is_to_put else set())
 
@@ -480,7 +482,8 @@ class KVPoolWorker:
             self.tp_rank)
         return done_sending, done_recving
 
-    def get_and_clear_finished_requests(self, finished_req_ids, meta:AscendConnectorMetadata) -> set[str]:
+    def get_and_clear_finished_requests(
+            self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
         finished_sending = set()
         for req_id in meta.preempted_req_ids:
             self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
