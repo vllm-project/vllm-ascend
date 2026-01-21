@@ -220,19 +220,26 @@ def split_decodes_and_prefills(
     """
     long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
     query_lens_pcp_full = long_seq_metadata.query_lens_pcp_full_cpu if long_seq_metadata else None
-    max_query_len_pcp_full = long_seq_metadata.max_query_len_pcp_full if long_seq_metadata else 0
-    max_query_len = common_attn_metadata.max_query_len if max_query_len_pcp_full == 0 else max_query_len_pcp_full
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
-
-    if max_query_len <= decode_threshold:
-        return num_reqs, 0, num_tokens, 0
+    seq_lens = common_attn_metadata.seq_lens_cpu
 
     query_lens = (query_start_loc[1:] - query_start_loc[:-1]) if query_lens_pcp_full is None else query_lens_pcp_full
-    is_prefill = query_lens > decode_threshold
+
+    # A new request has no prior context (num_computed_tokens == 0),
+    # which means seq_lens == query_lens. New requests need prefill
+    # treatment even if query_lens <= decode_threshold (e.g., for Mamba
+    # state initialization). Exclude padding (query_lens == 0).
+    is_new_request = (seq_lens[:num_reqs] == query_lens[:num_reqs]) & (query_lens[:num_reqs] > 0)
+
+    is_prefill = (query_lens[:num_reqs] > decode_threshold) | is_new_request
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
+
+    if query_lens[0].item() > decode_threshold or is_new_request[0].item():
+        # first request is not decode, so no decode requests
+        return 0, num_reqs, 0, num_tokens
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
     num_decodes = first_prefill
