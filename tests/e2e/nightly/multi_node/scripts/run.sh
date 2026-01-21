@@ -131,24 +131,6 @@ install_triton_ascend() {
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
     clang -v
-
-    BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
-    BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-
-    if ! wget -q -O "${BISHENG_NAME}" "${BISHENG_URL}"; then
-        echo "Failed to download ${BISHENG_NAME}"
-        return 1
-    fi
-    chmod +x "${BISHENG_NAME}"
-
-    if ! "./${BISHENG_NAME}" --install; then
-        rm -f "${BISHENG_NAME}"
-        echo "Failed to install ${BISHENG_NAME}"
-        return 1
-    fi
-    rm -f "${BISHENG_NAME}"
-
-    export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
     which bishengir-compile
     python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
     echo "====> Triton ascend installation completed"

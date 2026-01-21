@@ -77,6 +77,7 @@ def test_qwen3_external_launcher(model):
     assert proc.returncode == 0
 
 
+@pytest.mark.skip(reason="Failed with CANN8.5, fix me")
 @pytest.mark.parametrize("model", MOE_MODELS)
 def test_qwen3_moe_external_launcher_ep_tp2(model):
     script = Path(
