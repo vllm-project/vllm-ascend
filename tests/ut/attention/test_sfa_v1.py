@@ -13,7 +13,7 @@ if 'torch_npu._inductor' not in sys.modules:
 from vllm_ascend.attention.sfa_v1 import (AscendSFABackend, AscendSFAImpl,
                                           AscendSFAMetadata,
                                           AscendSFAMetadataBuilder)
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import enable_dsa_cp, vllm_version_is
 
 
 class TestAscendSFABackend(TestBase):
@@ -124,7 +124,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
             )
 
         self.parent_init_patcher = patch(
-            "vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__",
+            ("vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__"
+ if vllm_version_is("0.13.0") else
+ "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__"),
             mock_parent_init)
         self.parent_init_patcher.start()
 
