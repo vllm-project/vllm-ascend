@@ -31,19 +31,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can using our official docker image to run `DeepSeek-V3.2` directly..
 
-:::{note}
-We strongly recommend you to install triton ascend package to speed up the inference.
-
-The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is for better performance, please follow the instructions below to install it and its dependency.
-
-Install Triton Ascend:
-
-```bash
-python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
-```
-
-:::
-
 :::::{tab-set}
 :sync-group: install
 

@@ -65,7 +65,7 @@ jobs:
           apt-get -y install clang-15
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+          python3 -m pip install triton-ascend==3.2.0
 
       - name: Run unit test
         env:
