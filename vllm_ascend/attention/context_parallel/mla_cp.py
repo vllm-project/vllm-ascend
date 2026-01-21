@@ -666,7 +666,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
-            attn_output, softmax_lse = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score(
                 q_nope,
                 k_nope,
                 k_nope,
