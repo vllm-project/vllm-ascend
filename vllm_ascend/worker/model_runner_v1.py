@@ -1412,7 +1412,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
-            with set_ascend_forward_context(
+            with (
+                set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_input_tokens,
@@ -1422,26 +1423,17 @@ class NPUModelRunner(GPUModelRunner):
                     num_actual_tokens=scheduler_output.
                     total_num_scheduled_tokens,
                     model_instance=self.model,
-                    skip_compiled=has_encoder_input):
-                self.maybe_setup_kv_connector(scheduler_output)
-
+                    skip_compiled=has_encoder_input),
+                self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
+            ):
                 hidden_states = self._generate_process_reqs_hidden_states(
                     num_input_tokens, input_ids, positions,
                     intermediate_tensors, inputs_embeds, model_kwargs)
-
-            self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = self.get_finished_kv_transfer(
-                scheduler_output)
 
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
 
-        kv_connector_output = KVConnectorOutput(
-            finished_sending=finished_sending,
-            finished_recving=finished_recving)
-        finished_sending = None
-        finished_recving = None
         with ProfileExecuteDuration().capture_async("post process"):
             # Broadcast PP output for external_launcher (torchrun)
             # to make sure we are synced across pp ranks
