@@ -20,6 +20,7 @@ FROM quay.io/ascend/cann:8.5.0-910b-openeuler24.03-py3.11
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG MOONCAKE_TAG="v0.3.8.post1"
 ARG SOC_VERSION="ascend910b1"
+ARG TARGETPLATFORM
 
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
@@ -28,6 +29,37 @@ ENV SOC_VERSION=$SOC_VERSION \
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 WORKDIR /workspace
+
+# Install pypto-isa dependencies
+ARG PYPTO_VERSION=8.5.0
+RUN ARCH=$(case "${TARGETPLATFORM}" in \
+        "linux/amd64") echo "x86_64" ;; \
+        "linux/arm64") echo "aarch64" ;; \
+        *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
+    esac) && \
+    ARCH_SHORT=$(case "${TARGETPLATFORM}" in \
+        "linux/amd64") echo "x86" ;; \
+        "linux/arm64") echo "aarch64" ;; \
+        *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
+    esac) && \
+    PTO_ISA_URL=http://container-obsfs-filesystem.obs.cn-north-4.myhuaweicloud.com/package/cann/pto-isa/version_compile/master/202601/20260112/ubuntu_${ARCH_SHORT}/cann-pto-isa_${PYPTO_VERSION}_linux-${ARCH}.run && \
+    wget --quiet ${PTO_ISA_URL} -O ~/cann-pto-isa.run && \
+    chmod +x ~/cann-pto-isa.run && \
+    ~/cann-pto-isa.run --quiet --full && \
+    rm -f ~/cann-pto-isa.run && \
+    source /usr/local/Ascend/cann/set_env.sh
+
+# Install pypto dependencies
+ARG PYPTO_BRANCH=master
+RUN apt-get update -y && \
+    apt-get install -y git vim wget net-tools gcc g++ cmake make && \
+    git clone --depth 1 -b ${PYPTO_BRANCH} https://gitcode.com/cann/pypto.git /vllm-workspace/pypto && \
+    cd /vllm-workspace/pypto && \
+    python3 -m pip install -r python/requirements.txt && \
+    python3 -m pip install . --verbose && \
+    python3 -m pip cache purge && \
+    rm -rf /var/cache/apt/* && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY . /vllm-workspace/vllm-ascend/
 

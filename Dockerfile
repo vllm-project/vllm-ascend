@@ -46,7 +46,8 @@ RUN ARCH=$(case "${TARGETPLATFORM}" in \
     wget --quiet ${PTO_ISA_URL} -O ~/cann-pto-isa.run && \
     chmod +x ~/cann-pto-isa.run && \
     ~/cann-pto-isa.run --quiet --full && \
-    rm -f ~/cann-pto-isa.run
+    rm -f ~/cann-pto-isa.run && \
+    source /usr/local/Ascend/cann/set_env.sh
 
 # Install pypto dependencies
 ARG PYPTO_BRANCH=master
