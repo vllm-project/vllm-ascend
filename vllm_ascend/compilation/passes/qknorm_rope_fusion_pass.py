@@ -138,7 +138,7 @@ class QKNormPartialRopeFusionPattern:
                                         rope_dim=self.rotary_dim,
                                         is_neox_style=True)
 
-            return query.view(query_shape), key.view(key_shape), v
+            return query.view(q.shape), key.view(k.shape), v
 
         def replacement(
             qkv: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
@@ -303,7 +303,7 @@ class QKNormPartialRopeFusionPatternWithBias:
                                         rope_dim=self.rotary_dim,
                                         is_neox_style=True)
 
-            return query.view(query_shape), key.view(key_shape), v
+            return query.view(q.shape), key.view(k.shape), v
 
         def replacement(
             qkv: torch.Tensor,
