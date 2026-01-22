@@ -21,6 +21,8 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
+from vllm_ascend.utils import enable_custom_op
+
 
 class AscendRMSNorm(RMSNorm):
 
@@ -57,6 +59,9 @@ class AscendRMSNorm(RMSNorm):
                 residual = x.to(orig_dtype)
                 x, _ = torch_npu.npu_rms_norm(x, self.weight,
                                               self.variance_epsilon)
+            elif enable_custom_op():
+                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    x, residual, self.weight, self.bias, self.variance_epsilon)
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(
                     x, residual, self.weight, self.variance_epsilon)
@@ -88,6 +93,10 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
                 residual = x.to(orig_dtype)
                 x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
                                               self.variance_epsilon)
+            elif enable_custom_op():
+                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    x, residual, 1.0 + self.weight, None,
+                    self.variance_epsilon)
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(
                     x, residual, 1.0 + self.weight, self.variance_epsilon)
