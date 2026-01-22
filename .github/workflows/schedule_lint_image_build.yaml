@@ -1,7 +1,15 @@
 name: 'Image build lint'
 on:
+  schedule:
+    # Runs at 00:00 UTC+8 every day
+    - cron: '0 20 * * *' 
   workflow_dispatch:
-    
+  push:
+    paths:
+      - 'Dockerfile.lint'
+      - 'requirements-lint.txt'
+      - 'requirements-dev.txt'
+      - 'requirements.txt'
 
 # only cancel in-progress runs of the same workflow
 concurrency:
