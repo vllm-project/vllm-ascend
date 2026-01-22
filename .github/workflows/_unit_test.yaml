@@ -41,7 +41,7 @@ jobs:
         run: |
           ISA_NAME="cann-pto-isa_8.5.0_linux-aarch64.run"
           ISA_URL="http://container-obsfs-filesystem.obs.cn-north-4.myhuaweicloud.com/package/cann/pto-isa/version_compile/master/202601/20260112/ubuntu_aarch64/${ISA_NAME}"
-          wget -O "${ISA_NAME}" "${ISA_URL}" && chmod a+x "${ISA_NAME}" && "./${ISA_NAME}" --full && rm "${ISA_NAME}"
+          wget -O "${ISA_NAME}" "${ISA_URL}" && chmod a+x "${ISA_NAME}" && "./${ISA_NAME}" --quiet --full && rm "${ISA_NAME}"
           source /usr/local/Ascend/cann/set_env.sh
           apt-get install -y git vim wget net-tools gcc g++ cmake make
           git clone -b master --depth 1 https://gitcode.com/cann/pypto.git && cd pypto

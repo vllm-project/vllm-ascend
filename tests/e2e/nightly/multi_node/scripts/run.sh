@@ -107,7 +107,7 @@ install_pypto() {
         return 1
     fi
     chmod +x ./cann-pto-isa_8.5.0_linux-aarch64.run
-    ./cann-pto-isa_8.5.0_linux-aarch64.run --full
+    ./cann-pto-isa_8.5.0_linux-aarch64.run --quiet --full
     source /usr/local/Ascend/cann/set_env.sh
     rm -f cann-pto-isa_8.5.0_linux-aarch64.run
     echo "====> pypto-isa install completed"
