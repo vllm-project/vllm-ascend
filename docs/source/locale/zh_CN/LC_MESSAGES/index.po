@@ -4,7 +4,6 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
@@ -63,7 +62,6 @@ msgstr ""
 "中提出的原则，提供了一个硬件可插拔接口，实现了 Ascend NPU 与 vLLM 集成的解耦。"
 
 #: ../../source/index.md:28
-#, fuzzy
 msgid ""
 "By using vLLM Ascend plugin, popular open-source models, including "
 "Transformer-like, Mixture-of-Experts, Embedding, Multi-modal LLMs can run"
@@ -75,4 +73,3 @@ msgstr ""
 #: ../../source/index.md:30
 msgid "Documentation"
 msgstr "文档"
-
