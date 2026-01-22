@@ -277,18 +277,18 @@ class NPUModelRunner(GPUModelRunner):
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
         # Persistent batch.
-        self.input_ids = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int32,
-                                     device=self.device)
-        self.positions = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int64,
-                                     device=self.device)
-        self.query_start_loc = torch.zeros(self.max_num_reqs + 1,
-                                           dtype=torch.int32,
-                                           device=self.device)
-        self.seq_lens = torch.zeros(self.max_num_reqs,
-                                    dtype=torch.int32,
-                                    device=self.device)
+        # self.input_ids = torch.zeros(self.max_num_tokens,
+        #                              dtype=torch.int32,
+        #                              device=self.device)
+        # self.positions = torch.zeros(self.max_num_tokens,
+        #                              dtype=torch.int64,
+        #                              device=self.device)
+        # self.query_start_loc = torch.zeros(self.max_num_reqs + 1,
+        #                                    dtype=torch.int32,
+        #                                    device=self.device)
+        # self.seq_lens = torch.zeros(self.max_num_reqs,
+        #                             dtype=torch.int32,
+        #                             device=self.device)
 
         set_cos_and_sin(vllm_config, self.max_num_reqs,
                         self.uniform_decode_query_len, self.dtype, self.device)
