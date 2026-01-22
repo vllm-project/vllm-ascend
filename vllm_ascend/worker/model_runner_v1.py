@@ -566,9 +566,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_spec_tokens)
 
         if self.pcp_size > 1:
-            if not self.vllm_config.model_config.use_mla:
-                self.pcp_manager.generate_kv_idx(scheduler_output,
-                                                 self.input_batch)
             num_scheduled_tokens[:
                                  num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
                                      num_scheduled_tokens[:num_reqs],
@@ -2331,6 +2328,7 @@ class NPUModelRunner(GPUModelRunner):
             self.max_num_tokens = math.ceil(self.max_num_tokens /
                                             (self.pcp_size * 2)) * 2
         super().profile_run()
+        self.eplb_warmup()
         self.max_num_tokens = origin_max_num_tokens
 
     def eplb_warmup(self):

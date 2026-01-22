@@ -83,7 +83,7 @@ def init_eplb_config(ascend_config, layer_id, moe_config):
                                                      n_redundant)
 
     if ep_size == 1:
-        return None, None, n_redundant
+        return None, None, None, n_redundant
     global_expert_map = []
     for rankid in range(ep_size):
         expert_map = torch.full((n_experts, ), -1, dtype=torch.int32)
@@ -91,11 +91,13 @@ def init_eplb_config(ascend_config, layer_id, moe_config):
         expert_map[local_placement] = torch.arange(local_placement.shape[0],
                                                    dtype=torch.int32)
         global_expert_map.append(expert_map)
-    local_expert_map = global_expert_map[moe_config.ep_rank].npu()
+        if rankid == moe_config.ep_rank:
+            local_expert_map = expert_map.npu()
     log2phy = generate_log2phy_map(
         global_expert_map, moe_config.ep_rank).npu() if eplb_enable else None
 
-    return local_expert_map, log2phy, n_redundant
+    return torch.stack(
+        global_expert_map), local_expert_map, log2phy, n_redundant
 
 
 def generate_log2phy_map(global_expert_map, ep_rank):

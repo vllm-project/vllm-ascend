@@ -152,7 +152,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            global_num_experts=global_num_experts,
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb,
@@ -208,7 +207,7 @@ class AscendFusedMoE(FusedMoE):
         self.n_shared_experts = num_shared_experts
         num_experts += num_shared_experts if self.mix_placement else 0
         self.moe_config.num_experts = num_experts
-        self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
+        self.global_expert_map, self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
             ascend_config, self.moe_instance_id, self.moe_config)
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = (ascend_config.dynamic_eplb
