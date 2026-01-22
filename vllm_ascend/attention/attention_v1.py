@@ -335,10 +335,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
-            prefill=prefill_metadata,
-            decode_meta=decode_metadata,
-            use_hybrid_attn=use_hybrid_attn,
-            pcp_unpad_mask=pcp_unpad_mask,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
         )

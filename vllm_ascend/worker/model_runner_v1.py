@@ -832,7 +832,7 @@ class NPUModelRunner(GPUModelRunner):
         self.seq_lens.copy_to_gpu()
 
         # Fill unused with -1. Needed for reshape_and_cache
-        self.query_start_loc[num_reqs + 1:].fill_(-1)
+        self.query_start_loc.gpu[num_reqs + 1:].fill_(-1)
         self.seq_lens.gpu[num_reqs:].fill_(0)
 
         if self.pcp_size > 1 and self.pcp_use_hybrid_attn:
