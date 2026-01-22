@@ -375,6 +375,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
+
+        # In sfa, prefill and decode have the same calculation formula,
+        # so do not distinguish between prefill and decode here.
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
         assert self.indexer is not None, "Indexer is required for DSA."
