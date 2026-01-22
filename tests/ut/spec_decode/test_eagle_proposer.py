@@ -103,7 +103,8 @@ class TestEagleProposerInitialization(TestBase):
 
         self.assertEqual(proposer.hidden_size, 2048)
         self.assertTrue(proposer.use_cuda_graph)
-        self.assertEqual(proposer.hidden_states.shape, (1024, 2048))
+        expected_max_num_tokens = proposer.max_num_tokens
+        self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 2048))
 
     def test_initialization_mtp_full_graph_async(self):
         self.vllm_config.speculative_config.method = "mtp"
