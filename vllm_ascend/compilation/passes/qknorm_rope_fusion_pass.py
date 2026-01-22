@@ -378,7 +378,7 @@ class QKNormRopeFusionPass(VllmInductorPass):
                 num_heads=layer.num_heads,
                 num_kv_heads=layer.num_kv_heads,
                 eps=epsilon,
-                rotary=64,
+                rotary_dim=64,
             ).register(self.pattern_match_passes)
 
             QKNormPartialRopeFusionPatternWithBias(
@@ -387,7 +387,7 @@ class QKNormRopeFusionPass(VllmInductorPass):
                 num_heads=layer.num_heads,
                 num_kv_heads=layer.num_kv_heads,
                 eps=epsilon,
-                rotary=64,
+                rotary_dim=64,
             ).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
