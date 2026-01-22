@@ -32,3 +32,8 @@ def register_model():
 def register_connector():
     from vllm_ascend.distributed import register_connector
     register_connector()
+
+
+def register_afd_connector():
+    from vllm_ascend.distributed import register_afd_connector
+    register_afd_connector()

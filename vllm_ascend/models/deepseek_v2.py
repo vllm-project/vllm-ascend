@@ -66,7 +66,7 @@ from vllm_ascend.models.layers.sfa import (AscendSFAModules,
                                            AscendSparseFlashAttention, Indexer)
 from typing import Any, Optional, Union
 from vllm_ascend.ops.common_fused_moe import AscendFusedMoE, AscendAFD
-from vllm.distributed.afd_transfer.afd_connector.metadata import M2NAFDConnectorMetadata
+from vllm_ascend.distributed.metadata import M2NAFDConnectorMetadata
 
 class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
 
@@ -438,6 +438,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         ascend_config = get_ascend_config()
 
         self.hidden_size = config.hidden_size
+        self.top_k = getattr(config, 'num_experts_per_tok', 8)
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
