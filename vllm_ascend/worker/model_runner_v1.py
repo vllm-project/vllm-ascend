@@ -292,7 +292,9 @@ class NPUModelRunner(GPUModelRunner):
 
         set_cos_and_sin(vllm_config, self.max_num_reqs,
                         self.uniform_decode_query_len, self.dtype, self.device)
-
+        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs,
+                                self.uniform_decode_query_len)
+        set_mc2_mask(vllm_config, self.device)
         self.uses_mrope = self.model_config.uses_mrope
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
