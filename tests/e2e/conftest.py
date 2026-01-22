@@ -453,9 +453,9 @@ class VllmRunner:
             if images is not None and (image := images[i]) is not None:
                 multi_modal_data["image"] = image
             if videos is not None and (video := videos[i]) is not None:
-                multi_modal_data["video"] = video
+                multi_modal_data["video"] = video # type: ignore
             if audios is not None and (audio := audios[i]) is not None:
-                multi_modal_data["audio"] = audio
+                multi_modal_data["audio"] = audio # type: ignore
 
             text_prompt_kwargs: dict[str, Any] = {
                 "multi_modal_data": multi_modal_data or None
