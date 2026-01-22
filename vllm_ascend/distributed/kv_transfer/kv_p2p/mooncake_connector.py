@@ -13,7 +13,7 @@ from collections import defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, OrderedDict, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, OrderedDict, Tuple, TypedDict
 
 import msgspec
 import numpy as np
@@ -58,6 +58,11 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+
+
+class RemotePortInfo(TypedDict):
+    num: int
+    host: str
 
 
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
@@ -382,7 +387,7 @@ class KVCacheRecvingThread(threading.Thread):
                     remote_handshake_port: int,
                     offset: int,
                     tp_num_need_pulls: int,
-                    remote_port_send_num: dict[int, dict[str, int | str]] = {},
+                    remote_port_send_num: dict[int, RemotePortInfo] = {},
                     all_task_done: bool = False):
         """Add a new request to the queue for processing."""
         logger.debug(f"Adding request {request_id} to the queue.")
@@ -454,8 +459,9 @@ class KVCacheRecvingThread(threading.Thread):
             self._send_done_signal_to_free_remote_port(request_id, remote_host,
                                                        remote_port_send_num)
 
-    def _send_done_signal_to_free_remote_port(self, request_id, remote_host,
-                                              remote_port_send_num):
+    def _send_done_signal_to_free_remote_port(
+            self, request_id: str, remote_host: str,
+            remote_port_send_num: dict[int, RemotePortInfo]):
         if self.side_channel_port != self.local_handshake_port \
             or not remote_port_send_num:
             return
@@ -704,9 +710,10 @@ class KVCacheRecvingThread(threading.Thread):
                 logger.debug("Returned socket to pool for %s:%d", remote_host,
                              remote_handshake_port)
 
-    def _send_done_recv_signal(self, request_id: str, remote_host: str,
-                               remote_handshake_port: int,
-                               remote_port_send_num: dict[int, dict[str, int | str]]):
+    def _send_done_recv_signal(
+            self, request_id: str, remote_host: str,
+            remote_handshake_port: int,
+            remote_port_send_num: dict[int, RemotePortInfo]):
         logger.debug("Sending done recving signal for request %s to %s:%d",
                      request_id, remote_host, remote_handshake_port)
         sock: Optional[zmq.Socket] = None  # type: ignore
@@ -1171,7 +1178,7 @@ class MooncakeConnectorWorker:
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping: dict[
             str, Optional[List[List[int]]]] = {}
-        self.remote_port_send_num: dict[str, dict[int, dict[str, int | str]]] = {}
+        self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -1457,16 +1464,20 @@ class MooncakeConnectorWorker:
 
             return local_remote_block_port_mappings
 
-        def get_remote_port_send_num(local_remote_block_port_mappings):
-            remote_port_send_num: dict[int, dict[str, int | str]] = {}
+        def get_remote_port_send_num(
+                local_remote_block_port_mappings: dict[int, list[list[int]]]
+        ) -> dict[int, RemotePortInfo]:
+            remote_port_send_num: dict[int, RemotePortInfo] = {}
             for port in range(self._prefill_tp_size * meta.remote_pcp_size):
-                remote_host = meta.remote_multi_nodes_meta_mapping[str(port)]['host']
-                remote_port_send_num[meta.remote_port + port] = {}
-                remote_port_send_num[meta.remote_port + port]['num'] = 0
-                remote_port_send_num[meta.remote_port + port]['host'] = remote_host
-            for local_port in local_remote_block_port_mappings.keys():
-                remote_port_head_list = local_remote_block_port_mappings[
-                    local_port]
+                remote_host = str(meta.remote_multi_nodes_meta_mapping[str(
+                    port)]['host'])
+                remote_port_send_num[meta.remote_port + port] = {
+                    'num': 0,
+                    'host': remote_host
+                }
+
+            for remote_port_head_list in local_remote_block_port_mappings.values(
+            ):
                 for remote_port_list in remote_port_head_list:
                     for remote_port in remote_port_list:
                         remote_port_send_num[remote_port]['num'] += 1
