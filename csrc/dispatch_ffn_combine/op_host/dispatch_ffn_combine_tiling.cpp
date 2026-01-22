@@ -260,11 +260,11 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     tilingData->cocTiling.initRoutingQuantTilingKey = initRoutingQuantTilingKey;
 
     uint64_t maxWindowSize = GetMaxWindowSize();
-    uint64_t actualSize = static_cast<uint64_t>(info.M) * info.topK * info.K * sizeof(int8_t) * 3 + 3 * MB_SIZE ;
+    uint64_t actualSize = static_cast<uint64_t>(info.M) * info.topK * info.K * sizeof(int8_t) * 3 + 10 * MB_SIZE ;
     OP_TILING_CHECK((actualSize > maxWindowSize),
         OP_LOGE(nodeName, "HCCL_BUFFSIZE is too SMALL, m = %lu, k = %lu, topK = %lu"
-            " NEEDED_HCCL_BUFFSIZE is ((m * k * topK * sizeof(int8_t)) * 3 + 3MB)= %luMB, HCCL_BUFFSIZE=%luMB.",
-            info.M, info.K, info.topK, actualSize / MB_SIZE + 1UL, maxWindowSize / MB_SIZE),
+            " expected HCCL_BUFFSIZE is ((m * k * topK * sizeof(int8_t)) * 3 + 3MB)= %luMB, HCCL_BUFFSIZE=%luMB.",
+            info.M, info.K, info.topK, (actualSize + MB_SIZE - 1) / MB_SIZE, maxWindowSize / MB_SIZE),
         return ge::GRAPH_FAILED);
 
     // 4. workspace
