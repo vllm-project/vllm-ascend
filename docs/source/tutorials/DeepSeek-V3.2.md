@@ -48,7 +48,7 @@ export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
 Install Triton Ascend:
 
 ```bash
-python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+python3 -m pip install triton-ascend==3.2.0
 ```
 
 :::
@@ -313,6 +313,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -388,6 +389,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",

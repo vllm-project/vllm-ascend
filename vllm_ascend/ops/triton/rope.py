@@ -15,7 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 from vllm.triton_utils import tl, triton
-
+import torch
+from typing import Tuple
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
@@ -157,12 +158,14 @@ def _triton_rope(
                  mask=second_k_mask)
 
 
-def rope_forward_triton(q,
-                        k,
-                        cos,
-                        sin,
+def rope_forward_triton(
+                        q: torch.Tensor,
+                        k: torch.Tensor,
+                        cos: torch.Tensor,
+                        sin: torch.Tensor,
                         rope_dim: int = -1,
-                        is_neox_style: bool = True):
+                        is_neox_style: bool = True
+                       ) -> Tuple[torch.Tensor, torch.Tensor]:  
     if not q.is_contiguous():
         q = q.contiguous()
     if not k.is_contiguous():
