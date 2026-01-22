@@ -31,28 +31,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can using our official docker image to run `DeepSeek-V3.2` directly..
 
-:::{note}
-We strongly recommend you to install triton ascend package to speed up the inference.
-
-The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is for better performance, please follow the instructions below to install it and its dependency.
-
-Install the Ascend BiSheng toolkit, execute the command:
-
-```bash
-BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20260105.run"
-BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-```
-
-Install Triton Ascend:
-
-```bash
-python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
-```
-
-:::
-
 :::::{tab-set}
 :sync-group: install
 
@@ -313,6 +291,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -388,6 +367,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -438,8 +418,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
-        export VLLM_ASCEND_ENABLE_MLAPO=1
 
 
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
@@ -517,8 +495,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
-        export VLLM_ASCEND_ENABLE_MLAPO=1
 
 
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \

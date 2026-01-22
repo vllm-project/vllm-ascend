@@ -79,7 +79,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
@@ -132,6 +132,9 @@ if get_ascend_device_type() == AscendDeviceType._310P:
     torch_npu.npu.set_compile_mode(jit_compile=False)
 
 
+SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
+
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
@@ -167,6 +170,10 @@ def graph_capture(device: torch.device):
 
     with torch.npu.stream(stream), maybe_ca_context:
         yield graph_capture_context
+
+
+def get_tp_context(drafter):
+    return getattr(drafter, "tp_group_context", nullcontext())
 
 
 class ExecuteModelState(NamedTuple):
@@ -225,6 +232,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.max_num_reqs,
                 self.device,
                 self.vllm_config,
+                self.use_async_scheduling,
                 self.pin_memory,
             )
             # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
@@ -1079,7 +1087,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_size * self.dcp_size > 1:
                 self.long_seq_metadata = self.pcp_manager.generate_pcp_metadata(
                     total_num_scheduled_tokens, self.query_lens,
-                    self.input_batch)
+                    self.input_batch, num_scheduled_tokens)
                 blk_table.slot_mapping.gpu[maybe_pcp_full_tokens:].fill_(-1)
                 if self.pcp_size > 1:
                     slot_mapping_pcp = self.pcp_manager.get_padded_slot_mapping(
@@ -1712,12 +1720,21 @@ class NPUModelRunner(GPUModelRunner):
                     hidden_states.tensors, all_gather_group=get_tp_group())
                 logits = None
             else:
-                # Sometimes, after the model is compiled through the AOT backend,
-                # the model output may become a list containing only one Tensor object.
-                if isinstance(hidden_states, list) and \
-                        len(hidden_states) == 1 and \
-                        isinstance(hidden_states[0], torch.Tensor):
-                    hidden_states = hidden_states[0]
+                if self.input_batch.pooling_params:
+                    if vllm_version_is('0.13.0'):
+                        pool_output = self._pool(
+                            hidden_states,
+                            scheduler_output.total_num_scheduled_tokens,
+                            num_scheduled_tokens_np)
+                    else:
+                        pool_output = self._pool(
+                            hidden_states,
+                            scheduler_output.total_num_scheduled_tokens,
+                            num_scheduled_tokens_np, kv_connector_output)
+                    if self.debugger is not None:
+                        self.debugger.stop()
+                        self.debugger.step()
+                    return pool_output
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             if broadcast_pp_output:
@@ -2051,6 +2068,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: np.ndarray,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
+        is_graph_capturing: bool = False,
     ) -> Optional[dict[str, Any]]:
         attn_metadata: Optional[dict[str, Any]] = None
 
@@ -2060,7 +2078,12 @@ class NPUModelRunner(GPUModelRunner):
 
             attn_metadata = {}
 
-            seq_lens = max_query_len
+            # The reason why we use a fixed seq_len rather than max_query_len is that
+            # _npu_paged_attention_get_workspace only returns max workspace with specific
+            # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
+            # in inference. This will be removed once npu_fused_infer_attention_score
+            # outperforms _npu_paged_attention on all cases.
+            seq_lens = SEQ_LEN_WITH_MAX_PA_WORKSPACE if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config) else max_query_len
             self.seq_lens.np[:num_reqs] = seq_lens
             self.seq_lens.np[num_reqs:] = 0
             self.seq_lens.copy_to_gpu()
@@ -2082,7 +2105,8 @@ class NPUModelRunner(GPUModelRunner):
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
                 long_seq_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
-                    num_tokens, self.query_lens, self.input_batch)
+                    num_tokens, self.query_lens, self.input_batch,
+                    num_scheduled_tokens)
                 if long_seq_metadata is not None:
                     pcp_world_size = get_pcp_group().world_size
                     dcp_world_size = get_dcp_group().world_size
@@ -2308,6 +2332,7 @@ class NPUModelRunner(GPUModelRunner):
             max_query_len=max_query_len,
             aclgraph_runtime_mode=cudagraph_runtime_mode,
             force_attention=force_attention,
+            is_graph_capturing=is_graph_capturing,
             num_scheduled_tokens=num_scheduled_tokens,
         )
 
@@ -2425,14 +2450,8 @@ class NPUModelRunner(GPUModelRunner):
                                         dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         # TODO: need to rum a dummy sampler for generate task
-        # Sometimes, after the model is compiled through the AOT backend,
-        # the model output may become a list containing only one Tensor object.
-        if isinstance(hidden_states, list) and \
-            len(hidden_states) == 1 and \
-            isinstance(hidden_states[0], torch.Tensor):
-            hidden_states = hidden_states[0]
-            hidden_states = hidden_states[logit_indices]
-            output = self.model.compute_logits(hidden_states)
+        hidden_states = hidden_states[logit_indices]
+        output = self.model.compute_logits(hidden_states)
         return output
 
     def profile_run(self) -> None:
@@ -2468,7 +2487,8 @@ class NPUModelRunner(GPUModelRunner):
                 model_register(self.model, self.model_config)
             if self.drafter:
                 logger.info("Loading drafter model...")
-                self.drafter.load_model(self.model)
+                with get_tp_context(self.drafter):
+                    self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
                     self.model.set_aux_hidden_state_layers(
                         self.model.get_eagle3_aux_hidden_state_layers())
@@ -2844,11 +2864,15 @@ class NPUModelRunner(GPUModelRunner):
         kernel_block_sizes = []
         for kv_cache_group_id, kv_cache_group in enumerate(
                 kv_cache_config.kv_cache_groups):
-
-            if isinstance(kv_cache_group.kv_cache_spec,
-                          EncoderOnlyAttentionSpec):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                # All layers in the UniformTypeKVCacheSpecs have the same type,
+                # Pick an arbitrary one to dispatch.
+                kv_cache_spec = next(
+                    iter(kv_cache_spec.kv_cache_specs.values()))
+            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
-            elif isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
+            elif isinstance(kv_cache_spec, AttentionSpec):
                 # This is an attention backend that supports virtual
                 # block splitting. Get the supported block sizes from
                 # the backend.

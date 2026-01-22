@@ -10,9 +10,8 @@ env_common:
   SERVER_PORT: 8080
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
-  VLLM_ASCEND_ENABLE_MLAPO: 1
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: 0
   ASCEND_A3_EBA_ENABLE: 1
 
 
@@ -37,9 +36,9 @@ deployment:
       --gpu-memory-utilization 0.85
       --trust-remote-code
       --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
+      --compilation-config '{"cudagraph_capture_sizes": [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48], "cudagraph_mode": "FULL_DECODE_ONLY"}' 
       --tokenizer-mode deepseek_v32
       --reasoning-parser deepseek_v3
-      --api-server-count 4
 
   -
     server_cmd: >
@@ -61,6 +60,7 @@ deployment:
       --gpu-memory-utilization 0.85
       --trust-remote-code
       --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
+      --compilation-config '{"cudagraph_capture_sizes": [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48], "cudagraph_mode": "FULL_DECODE_ONLY"}' 
       --tokenizer-mode deepseek_v32
       --reasoning-parser deepseek_v3
 benchmarks:
@@ -73,7 +73,7 @@ benchmarks:
     max_out_len: 3000
     batch_size: 512
     request_rate: 11.2
-    baseline: 594.915
+    baseline: 905.6805
     threshold: 0.97
   acc:
     case_type: accuracy

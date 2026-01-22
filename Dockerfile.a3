@@ -15,10 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11
+FROM quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-ARG MOONCAKE_TAG=v0.3.7.post2
+ARG MOONCAKE_TAG=v0.3.8.post1
 ARG SOC_VERSION="ascend910_9391"
 
 COPY . /vllm-workspace/vllm-ascend/
@@ -62,6 +62,14 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
     python3 -m pip install -v -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip cache purge
+
+# Install clang-15 (for triton-ascend)
+RUN apt-get update -y && \
+    apt-get -y install clang-15 && \
+    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
+    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
+    rm -rf /var/cache/apt/* && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \

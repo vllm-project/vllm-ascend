@@ -9,7 +9,36 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
+from vllm_ascend import envs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
+
+
+def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
+    scheduler_config = vllm_config.scheduler_config
+    cache_config = vllm_config.cache_config
+    model_config = vllm_config.model_config
+
+    chunked_prefill_workspace_size = min(
+        # Make sure there is enough for 8 full length request or at least
+        # 4 pages of cache per request
+        max(8 * model_config.max_model_len, 4 * scheduler_config.max_num_seqs * cache_config.block_size),
+        # For long-context models try not to over-allocate limiting
+        # kv-cache space, limiting it to 128k tokens,
+        # which would result in the workspace being:
+        #   2*(576)*(128*1024) = 288mb
+        # (assuming 576 MLA head dim, and fp16)
+        # which would result in up-projected context being
+        #   2*(192*128)*(128*1024) = 6gb
+        # (assuming 192 QK head dim, 128 heads, and fp16)
+        128 * 1024,
+    )
+
+    chunked_prefill_workspace_size = max(
+        chunked_prefill_workspace_size,
+        scheduler_config.max_num_seqs * cache_config.block_size,
+    )
+
+    return chunked_prefill_workspace_size
 
 
 def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
@@ -43,8 +72,6 @@ class AscendPrefillContextParallelMetadata:
     pcp_use_hybrid_attn: bool
 
     pcp_allgather_restore_idx: torch.Tensor = None
-
-    cp_kv_recover_idx_for_chunk: torch.Tensor = None
 
     num_actual_tokens_pcp_padded: int = 0
 
@@ -286,3 +313,8 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
     )
     nz_mat = torch.reshape(nz_mat, (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3]))
     return nz_mat
+
+
+def enabling_malpo(vllm_config: VllmConfig) -> bool:
+    is_decode_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+    return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)

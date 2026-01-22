@@ -11,7 +11,7 @@ scipy
 pandas
 setuptools>=64
 setuptools-scm>=8
-torch==2.8.0
+torch==2.9.0
 torchvision
 wheel
 pandas-stubs
@@ -28,8 +28,9 @@ numba
 # Install torch_npu
 #--pre
 #--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
-torch-npu==2.8.0
+torch-npu==2.9.0
 
 arctic-inference==0.1.1
 transformers>=4.57.3
 fastapi<0.124.0
+triton-ascend==3.2.0
