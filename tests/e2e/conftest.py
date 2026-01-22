@@ -28,7 +28,7 @@ import shlex
 import subprocess
 import sys
 import time
-from typing import Any, Optional, Tuple, TypeVar, Union, cast
+from typing import Any, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import openai
