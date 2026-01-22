@@ -15,7 +15,7 @@ jobs:
     runs-on: linux-amd64-cpu-8-hk
     container:
       # Build it from https://github.com/nv-action/vllm-benchmarks/blob/main/Dockerfile
-      image: quay.io/wangli12345/hello-world:lint
+      image: quay.io/ascend-ci/vllm-ascend
     steps:
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v6
@@ -60,6 +60,7 @@ jobs:
         TERM: xterm-256color
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       run: |
+        git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pre-commit run --all-files --hook-stage manual --show-diff-on-failure
     - name: Run mypy
       run: |
