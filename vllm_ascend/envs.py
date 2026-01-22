@@ -92,7 +92,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
-    "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "0"))),
+    # Whether to enable MLAPO optimization for DeepSeek W8A8 series models.
+    # This option is enabled by default. MLAPO can improve performance, but
+    # it will consume more NPU memory. If reducing NPU memory usage is a higher priority
+    # for your DeepSeek W8A8 scene, then disable it.
+    "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
     # Whether to enable weight cast format to FRACTAL_NZ.
     # 0: close nz;
     # 1: only quant case enable nz;

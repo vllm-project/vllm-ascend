@@ -22,7 +22,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata, ascend_chunked_prefill_workspace_size,
     enable_cp, maybe_save_kv_layer_to_connector, split_decodes_and_prefills,
-    trans_rope_weight, transdata, wait_for_kv_layer_from_connector)
+    trans_rope_weight, transdata, wait_for_kv_layer_from_connector,
+    enabling_malpo)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
     update_draft_graph_params_workspaces, update_graph_params_workspaces)
@@ -741,7 +742,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
+        self.enable_mlapo = enabling_malpo(self.vllm_config)
 
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         self.layer_sharding_kwargs = []
@@ -1491,7 +1492,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # MLA Preprocess
         if self.enable_mlapo and \
-            not has_prefill and \
             attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv)

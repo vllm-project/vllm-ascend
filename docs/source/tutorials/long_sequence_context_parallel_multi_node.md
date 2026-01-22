@@ -224,7 +224,6 @@ export OMP_NUM_THREADS=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_MLAPO="1"
 export VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL=1
 
 vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
