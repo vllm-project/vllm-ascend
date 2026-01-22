@@ -10,31 +10,31 @@
 
 /*!
  * \file apply_top_k_top_p_with_sorted.cpp
- * \brief
+ * \brief Custom kernel entry point for ApplyTopKTopPWithSortedCustom operator.
  */
 
 #include "apply_top_k_top_p_with_sorted.h"
 #include "apply_top_p_with_sorted.h"
 using namespace AscendC;
-using namespace ApplyTopKTopPWithSortedOp;
-using namespace ApplyTopPWithSortedOp;
+using namespace ApplyTopKTopPWithSortedCustomOp;
+using namespace ApplyTopPWithSortedCustomOp;
 
-extern "C" __global__ __aicore__ void apply_top_k_top_p_with_sorted(GM_ADDR sorted_value, GM_ADDR sorted_indices,
+extern "C" __global__ __aicore__ void apply_top_k_top_p_with_sorted_custom(GM_ADDR sorted_value, GM_ADDR sorted_indices,
     GM_ADDR p, GM_ADDR k, GM_ADDR out, GM_ADDR workSpace, GM_ADDR tiling) {
     TPipe pipe;
     GET_TILING_DATA(tilingData, tiling);
     if (TILING_KEY_IS(0)) {
-        ApplyTopKTopPWithSortedOp::ApplyTopKTopPWithSorted<DTYPE_OUT, float, DTYPE_OUT> op;
+        ApplyTopKTopPWithSortedCustomOp::ApplyTopKTopPWithSortedCustom<DTYPE_OUT, float, DTYPE_OUT> op;
         op.InitTilingData(tilingData, sorted_value, sorted_indices, p, k, out);
         op.InitBuffer(&pipe);
         op.Process();
     } else if (TILING_KEY_IS(1)) {
-        ApplyTopKTopPWithSortedOp::ApplyTopKTopPWithSorted<DTYPE_OUT, float, DTYPE_OUT> op;
+        ApplyTopKTopPWithSortedCustomOp::ApplyTopKTopPWithSortedCustom<DTYPE_OUT, float, DTYPE_OUT> op;
         op.InitTilingData(tilingData, sorted_value, sorted_indices, p, k, out);
         op.InitBuffer(&pipe);
         op.ProcessTopK();
     } else if (TILING_KEY_IS(2)) {
-        ApplyTopPWithSortedOp::ApplyTopPWithSorted<DTYPE_OUT, float, DTYPE_OUT> op;
+        ApplyTopPWithSortedCustomOp::ApplyTopPWithSortedCustom<DTYPE_OUT, float, DTYPE_OUT> op;
         op.InitTilingData(tilingData, sorted_value, sorted_indices, p, k, out, workSpace);
         op.InitBuffer(&pipe);
         op.ProcessTopP();

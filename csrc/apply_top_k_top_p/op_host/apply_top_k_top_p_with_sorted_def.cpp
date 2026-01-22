@@ -10,14 +10,14 @@
 
 /*!
  * \file apply_top_k_top_p_with_sorted_def.cpp
- * \brief
+ * \brief Custom operator definition for ApplyTopKTopPWithSortedCustom to avoid name conflict with CANN built-in.
  */
 #include "register/op_def_registry.h"
 
 namespace ops {
-class ApplyTopKTopPWithSorted : public OpDef {
+class ApplyTopKTopPWithSortedCustom : public OpDef {
 public:
-    explicit ApplyTopKTopPWithSorted(const char *name) : OpDef(name)
+    explicit ApplyTopKTopPWithSortedCustom(const char *name) : OpDef(name)
     {
         this->Input("sorted_value")
             .ParamType(REQUIRED)
@@ -96,5 +96,5 @@ private:
     }
 };
 
-OP_ADD(ApplyTopKTopPWithSorted);
+OP_ADD(ApplyTopKTopPWithSortedCustom);
 } // namespace ops
