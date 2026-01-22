@@ -22,51 +22,45 @@ msgstr ""
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:1
 msgid "Using lm-eval"
-msgstr "使用 lm-eval"
+msgstr "使用 lm-eval 进行准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:2
-#, fuzzy
 msgid "This document guides you to conduct accuracy testing using [lm-eval][1]."
-msgstr ""
-"本文将指导你如何使用 [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness)"
-" 进行准确率测试。"
+msgstr "本文档将指导您如何使用 [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) 进行模型准确率测试。"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:4
 msgid "Online Server"
-msgstr ""
+msgstr "在线服务器模式"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:5
 msgid "1. Start the vLLM server"
-msgstr ""
+msgstr "1. 启动 vLLM 服务器"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:6
-#, fuzzy
 msgid "You can run docker container to start the vLLM server on a single NPU:"
-msgstr "你可以在单个NPU上运行docker容器："
+msgstr "您可以在单个 NPU 上通过 Docker 容器启动 vLLM 服务器："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:35
 msgid "The vLLM server is started successfully, if you see logs as below:"
-msgstr ""
+msgstr "如果您看到如下日志，表明 vLLM 服务器已成功启动："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:43
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:163
-#, fuzzy
 msgid "2. Run GSM8K using lm-eval for accuracy testing"
-msgstr "2. 使用 lm-eval 运行 ceval 准确性测试"
+msgstr "2. 使用 lm-eval 运行 GSM8K 准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:45
 msgid "You can query the result with input prompts:"
-msgstr ""
+msgstr "您可以使用输入提示（prompt）来查询结果："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:72
 msgid "The output format matches the following:"
-msgstr ""
+msgstr "输出格式应如下所示："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:102
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:164
-#, fuzzy
 msgid "Install lm-eval in the container:"
-msgstr "在容器中安装 lm-eval。"
+msgstr "在容器中安装 lm-eval："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:109
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:171
@@ -74,55 +68,51 @@ msgid "Run the following command:"
 msgstr "运行以下命令："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:120
-#, fuzzy
 msgid "After 30 minutes, the output is as shown below:"
-msgstr "1-2 分钟后，输出如下所示："
+msgstr "大约 30 分钟后，输出结果如下所示："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:132
 msgid "Offline Server"
-msgstr ""
+msgstr "离线推理模式"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:133
 msgid "1. Run docker container"
-msgstr "1. 运行 docker 容器"
+msgstr "1. 运行 Docker 容器"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:135
 msgid "You can run docker container on a single NPU:"
-msgstr "你可以在单个NPU上运行docker容器："
+msgstr "您可以在单个 NPU 上运行 Docker 容器："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:182
-#, fuzzy
 msgid "After 1 to 2 minutes, the output is shown below:"
-msgstr "1-2 分钟后，输出如下所示："
+msgstr "大约 1 到 2 分钟后，输出结果如下所示："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:194
 msgid "Use Offline Datasets"
-msgstr ""
+msgstr "使用离线数据集"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:196
 msgid ""
 "Take GSM8K (single dataset) and MMLU (multi-subject dataset) as examples,"
 " and you can see more from [here][2]."
-msgstr ""
+msgstr "以 GSM8K（单一数据集）和 MMLU（多学科数据集）为例。您可以从[此处][2]查看更多数据集信息。"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:210
 msgid "Set [gsm8k.yaml][3] as follows:"
-msgstr ""
+msgstr "请按以下方式设置 [gsm8k.yaml][3] 配置文件："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:273
 msgid "Set [_default_template_yaml][4] as follows:"
-msgstr ""
+msgstr "请按以下方式设置 [_default_template_yaml][4] 配置文件："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:296
 msgid "You can see more usage on [Lm-eval Docs][5]."
-msgstr ""
+msgstr "您可以在 [lm-eval 官方文档][5] 上查看更多使用方法。"
 
 #~ msgid ""
 #~ "You can see more usage on [Lm-"
 #~ "eval Docs](https://github.com/EleutherAI/lm-evaluation-"
 #~ "harness/blob/main/docs/README.md)."
 #~ msgstr ""
-#~ "你可以在 [Lm-eval 文档](https://github.com/EleutherAI"
-#~ "/lm-evaluation-harness/blob/main/docs/README.md) "
-#~ "上查看更多用法。"
-
+#~ "更多使用方法请参考 [lm-eval 官方文档](https://github.com/EleutherAI"
+#~ "/lm-evaluation-harness/blob/main/docs/README.md)。"

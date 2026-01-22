@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:1
 msgid "Service Profiling Guide"
-msgstr "服务化性能采集指南"
+msgstr "服务性能分析指南"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:3
 msgid ""
@@ -32,7 +32,7 @@ msgid ""
 "processes, identifying critical functions or iterations, recording key "
 "events, and capturing diverse types of information, we can quickly "
 "pinpoint performance bottlenecks."
-msgstr "在推理服务过程中，我们有时需要监控推理服务框架的内部执行流程以定位性能问题。通过采集关键流程的起止时间、识别关键函数或迭代、记录关键事件并捕获多种类型的信息，可以快速定位性能瓶颈。"
+msgstr "在推理服务过程中，我们有时需要监控推理服务框架的内部执行流程，以识别性能问题。通过采集关键流程的起止时间戳、识别关键函数或迭代、记录关键事件并捕获多种类型的信息，我们可以快速定位性能瓶颈。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:5
 msgid ""
@@ -40,9 +40,7 @@ msgid ""
 "ascend service framework and operators. It covers the full workflow from "
 "preparation and collection to analysis and visualization, helping you "
 "quickly get started with the profiling tool."
-msgstr ""
-"本部分将指导你如何采集 vllm-ascend "
-"的服务化框架性能数据以及算子性能数据，覆盖从准备、采集、解析到结果展示的完整流程，帮助你快速上手性能采集工具。"
+msgstr "本指南将引导您采集 vllm-ascend 服务框架及算子的性能数据，涵盖从准备、采集、分析到可视化的完整工作流程，帮助您快速上手性能分析工具。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:7
 msgid "Quick Start"
@@ -58,7 +56,7 @@ msgstr "使用 pip 安装 `msserviceprofiler` 包："
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:17
 msgid "1 Preparation"
-msgstr "1 准备采集"
+msgstr "1 准备阶段"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:18
 msgid ""
@@ -67,9 +65,7 @@ msgid ""
 "and set the environment variable `PROFILING_SYMBOLS_PATH` to specify the "
 "YAML configuration file for the symbols that need to be imported. After "
 "that, start the vLLM service according to your deployment method."
-msgstr ""
-"在启动服务之前，请设置环境变量`SERVICE_PROF_CONFIG_PATH`指定需要加载的性能分析配置文件，并设置环境变量`PROFILING_SYMBOLS_PATH`来指定需要导入的符号的"
-" YAML 配置文件。之后，根据您的部署方式启动 vLLM 服务。"
+msgstr "在启动服务前，设置环境变量 `SERVICE_PROF_CONFIG_PATH` 指向性能分析配置文件，并设置环境变量 `PROFILING_SYMBOLS_PATH` 来指定需要导入的符号 YAML 配置文件。之后，根据您的部署方式启动 vLLM 服务。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:30
 msgid ""
@@ -78,9 +74,7 @@ msgid ""
 "configuration will be generated automatically. If needed, you can "
 "customize it in advance according to the instructions in the `Profiling "
 "Configuration File` section below."
-msgstr ""
-"其中 `ms_service_profiler_config.json` "
-"为采集配置文件。若指定路径下不存在该文件，将自动生成一份默认配置。若有需要，可参照 `采集配置文件说明` 章节提前进行自定义配置。"
+msgstr "`ms_service_profiler_config.json` 文件是性能分析配置文件。如果指定路径下不存在该文件，系统将自动生成一份默认配置。如有需要，您可以根据下文`性能分析配置文件`章节的说明提前进行自定义配置。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:32
 msgid ""
@@ -92,14 +86,11 @@ msgid ""
 " your specified path for future configuration. You can customize it "
 "according to the instructions in the `Symbols Configuration File` section"
 " below."
-msgstr ""
-"`service_profiling_symbols.yaml` 为需要导入的埋点配置文件。你也可以选择不设置环境变量 "
-"`PROFILING_SYMBOLS_PATH`，此时将使用默认的配置文件；若你指定的路径下不存在该文件，系统同样会在你指定的路径生成一份配置文件以便后续修改。可参考"
-" `点位配置文件说明` 一节进行自定义。"
+msgstr "`service_profiling_symbols.yaml` 是需要导入的性能分析点配置文件。您也可以选择**不设置**环境变量 `PROFILING_SYMBOLS_PATH`，此时将使用默认配置文件；如果您指定的路径下不存在该文件，系统同样会在该路径生成一份配置文件以便后续修改。您可以参考下文`符号配置文件`章节进行自定义配置。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:34
 msgid "2 Enable Profiling"
-msgstr "2 开启采集"
+msgstr "2 启用性能分析"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:35
 msgid ""
@@ -107,9 +98,7 @@ msgid ""
 "field from `0` to `1` in the configuration file "
 "`ms_service_profiler_config.json`. This can be accomplished by executing "
 "the following sed command:"
-msgstr ""
-"将配置文件`ms_service_profiler_config.json`中的 `enable` 字段由 `0` 修改为 "
-"`1`，即可开启性能数据采集的开关，可以通过执行下面sed指令完成采集服务的开启："
+msgstr "要启用性能数据采集开关，请将配置文件 `ms_service_profiler_config.json` 中的 `enable` 字段从 `0` 修改为 `1`。可以通过执行以下 sed 命令实现："
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:41
 msgid "3 Send Requests"
@@ -117,11 +106,11 @@ msgstr "3 发送请求"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:42
 msgid "Choose a request-sending method that suits your actual profiling needs:"
-msgstr "根据实际采集需求选择请求发送方式："
+msgstr "根据实际性能分析需求选择合适的请求发送方式："
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:55
 msgid "4 Analyze Data"
-msgstr "4 解析数据"
+msgstr "4 分析数据"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:65
 msgid "5 View Results"
@@ -129,17 +118,14 @@ msgstr "5 查看结果"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:67
 msgid "After analysis, the `output` directory will contain:"
-msgstr "解析完成后，`output` 目录下会生成："
+msgstr "分析完成后，`output` 目录下将包含以下文件："
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:68
 msgid ""
 "`chrome_tracing.json`: Chrome tracing format data, which can be opened in"
 " [MindStudio "
 "Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html)."
-msgstr ""
-"`chrome_tracing.json`：Chrome 追踪格式数据，可在 [MindStudio "
-"Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html)"
-" 中打开。"
+msgstr "`chrome_tracing.json`：Chrome 追踪格式数据，可在 [MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html) 中打开。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:69
 msgid "`profiler.db`: Performance data in database format."
@@ -151,7 +137,7 @@ msgstr "`request.csv`：请求相关数据。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:71
 msgid "`request_summary.csv`: Overall request metrics."
-msgstr "`request_summary.csv`：请求总体统计指标。"
+msgstr "`request_summary.csv`：请求总体指标统计。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:72
 msgid "`kvcache.csv`: KV Cache-related data."
@@ -163,11 +149,11 @@ msgstr "`batch.csv`：批次调度相关数据。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:74
 msgid "`batch_summary.csv`: Overall batch scheduling metrics."
-msgstr "`batch_summary.csv`：批次调度总体统计指标。"
+msgstr "`batch_summary.csv`：批次调度总体指标统计。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:75
 msgid "`service_summary.csv`: Overall service-level metrics."
-msgstr "`service_summary.csv`：服务化维度总体统计指标。"
+msgstr "`service_summary.csv`：服务层面总体指标统计。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:79
 msgid "Appendix"
@@ -175,13 +161,13 @@ msgstr "附录"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:81
 msgid "1 Profiling Configuration File"
-msgstr "1 采集配置文件说明"
+msgstr "1 性能分析配置文件说明"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:83
 msgid ""
 "The profiling configuration file controls profiling parameters and "
 "behavior."
-msgstr "采集配置文件用于控制性能数据采集的参数与行为。"
+msgstr "性能分析配置文件用于控制性能分析的参数与行为。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:85
 msgid "File Format"
@@ -209,7 +195,7 @@ msgstr "enable"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "Switch for profiling: <br />0: disable<br />1: enable<br />Default: 0"
-msgstr "是否开启性能数据采集的开关：<br />0：关闭<br />1：开启<br />默认值：0"
+msgstr "性能分析开关：<br />0：禁用<br />1：启用<br />默认值：0"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "Yes"
@@ -223,7 +209,7 @@ msgstr "prof_dir"
 msgid ""
 "Directory to store collected performance data. <br />Default: "
 "$HOME/.ms_service_profiler"
-msgstr "采集到性能数据的存放路径，支持用户自定义。<br />默认值：$HOME/.ms_service_profiler"
+msgstr "性能数据存储目录。<br />默认值：$HOME/.ms_service_profiler"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "No"
@@ -235,7 +221,7 @@ msgstr "profiler_level"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "Data collection level. Default is \"INFO\" (normal level)."
-msgstr "数据采集等级。默认值为\"INFO\"，指普通级别的性能数据。"
+msgstr "数据采集等级。默认值为 \"INFO\"（普通级别）。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "host_system_usage_freq"
@@ -246,9 +232,7 @@ msgid ""
 "Sampling frequency of host CPU and memory metrics. Disabled by default. "
 "Range: integer 1–50, unit: Hz (times per second). Set to -1 to disable. "
 "<br />Note: Enabling this may consume significant memory."
-msgstr ""
-"CPU和内存系统指标采集频率，默认关闭不采集。范围整数1~50，单位hz，表示每秒采集的次数。设置为-1时关闭采集该指标。<br "
-"/>说明：开启该功能可能占用较大内存"
+msgstr "主机 CPU 和内存指标采样频率。默认禁用。范围：整数 1–50，单位：Hz（次/秒）。设置为 -1 可禁用。<br />注意：启用此功能可能会消耗较多内存。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "npu_memory_usage_freq"
@@ -259,9 +243,7 @@ msgid ""
 "Sampling frequency of NPU memory utilization. Disabled by default. Range:"
 " integer 1–50, unit: Hz (times per second). Set to -1 to disable. <br "
 "/>Note: Enabling this may consume significant memory."
-msgstr ""
-"NPU Memory使用率指标的采集频率，默认关闭不采集。范围整数1~50，单位hz，表示每秒采集的次数。设置为-1时关闭采集该指标。<br "
-"/>说明：开启该功能可能占用较大内存"
+msgstr "NPU 内存使用率采样频率。默认禁用。范围：整数 1–50，单位：Hz（次/秒）。设置为 -1 可禁用。<br />注意：启用此功能可能会消耗较多内存。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "acl_task_time"
@@ -274,11 +256,7 @@ msgid ""
 "enable; calls `aclprofCreateConfig` with `ACL_PROF_TASK_TIME_L0`.<br />2:"
 " enable MSPTI-based data dumping; uses MSPTI for profiling and requires: "
 "`export LD_PRELOAD=$ASCEND_TOOLKIT_HOME/lib64/libmspti.so`"
-msgstr ""
-"开启采集算子下发耗时、算子执行耗时数据的开关，取值为：<br />0：关闭。默认值，配置为0或其他非法值均表示关闭。<br "
-"/>1：开启。该功能开启时调用aclprofCreateConfig接口的ACL_PROF_TASK_TIME_L0参数。<br "
-"/>2：开启基于MSPTI接口的数据落盘。该功能开启时调用MSPTI接口进行性能数据采集，需要配置如下环境变量：export "
-"LD_PRELOAD=$ASCEND_TOOLKIT_HOME/lib64/libmspti.so"
+msgstr "采集算子下发延迟和执行延迟的开关：<br />0：禁用（默认值；0 或无效值表示禁用）。<br />1：启用；使用 `ACL_PROF_TASK_TIME_L0` 参数调用 `aclprofCreateConfig`。<br />2：启用基于 MSPTI 的数据落盘；使用 MSPTI 进行性能分析，需要设置：`export LD_PRELOAD=$ASCEND_TOOLKIT_HOME/lib64/libmspti.so`"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "acl_prof_task_time_level"
@@ -295,14 +273,7 @@ msgid ""
 " L0 until program exit; invalid values fall back to defaults.<br />Level "
 "and duration can be combined, e.g., `\"acl_prof_task_time_level\": "
 "\"L1,10\"`."
-msgstr ""
-"设置性能数据采集的Level等级和时长，取值为：<br "
-"/>L0：Level0等级，表示采集算子下发耗时、算子执行耗时数据。与L1相比，由于不采集算子基本信息数据，采集时性能开销较小，可更精准统计相关耗时数据。<br"
-" "
-"/>L1：Level1等级，采集AscendCL接口的性能数据，包括Host与Device之间、Device间的同步异步内存复制时延；采集算子下发耗时、算子执行耗时数据以及算子基本信息数据，提供更全面的性能分析数据。<br"
-" />time：采集时长，取值范围为1~999的正整数，单位s。<br "
-"/>默认未配置本参数，表示采集L0数据，且采集到程序执行结束。配置其他非法值时取默认值。<br "
-"/>采集的Level等级和时长可同时配置，例如\"acl_prof_task_time_level\": \"L1,10\"。"
+msgstr "性能分析的级别和时长：<br />L0：仅采集算子下发和执行延迟；开销较低（不采集算子基本信息）。<br />L1：采集 AscendCL 接口性能（主机-设备和设备间同步/异步内存复制延迟），以及算子下发、执行和基本信息，用于全面分析。<br />time：性能分析时长，整数 1–999，单位：秒。<br />如未设置，默认为 L0 直到程序退出；无效值将回退到默认值。<br />级别和时长可以组合，例如 `\"acl_prof_task_time_level\": \"L1,10\"`。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "api_filter"
@@ -314,9 +285,7 @@ msgid ""
 "\"matmul\" dumps all API data whose `name` contains \"matmul\". String, "
 "case-sensitive; use \"；\" to separate multiple targets. Empty means dump "
 "all. <br />Effective only when `acl_task_time` is 2."
-msgstr ""
-"对性能数据进行过滤，配置该参数可自定义采集配置的API性能数据，例如传入\"matmul\"会落盘所有API数据中name字段包含matmul的性能数据。str类型，区分大小写，多个不同的筛选目标用\"；\"隔开，默认为空，表示落盘所有数据。<br"
-" />仅当acl_task_time参数值为2时生效。"
+msgstr "筛选要导出的 API 性能数据。例如，指定 \"matmul\" 将导出所有 `name` 字段包含 \"matmul\" 的 API 数据。字符串类型，区分大小写；使用 \"；\" 分隔多个目标。为空表示导出所有数据。<br />仅当 `acl_task_time` 为 2 时生效。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "kernel_filter"
@@ -328,9 +297,7 @@ msgid ""
 " \"matmul\" dumps all kernel data whose `name` contains \"matmul\". "
 "String, case-sensitive; use \"；\" to separate multiple targets. Empty "
 "means dump all. <br />Effective only when `acl_task_time` is 2."
-msgstr ""
-"对性能数据进行过滤，配置该参数可自定义采集配置的kernel性能数据，例如传入\"matmul\"会落盘所有kernel数据中name字段包含matmul的性能数据。str类型，区分大小写，多个不同的筛选目标用\"；\"隔开，默认为空，表示落盘所有数据。<br"
-" />仅当acl_task_time参数值为2时生效。"
+msgstr "筛选要导出的内核性能数据。例如，指定 \"matmul\" 将导出所有 `name` 字段包含 \"matmul\" 的内核数据。字符串类型，区分大小写；使用 \"；\" 分隔多个目标。为空表示导出所有数据。<br />仅当 `acl_task_time` 为 2 时生效。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "timelimit"
@@ -341,7 +308,7 @@ msgid ""
 "Profiling duration for the service. The process stops automatically after"
 " this time. Range: integer 0–7200, unit: seconds. Default 0 means "
 "unlimited."
-msgstr "设置服务化性能数据采集的时长，配置该参数后，采集进程将在运行指定的时间后自动停止，取值范围为0~7200的整数，单位s，默认值0（表示不限制采集时间）"
+msgstr "服务性能分析时长。进程将在此时长后自动停止。范围：整数 0–7200，单位：秒。默认值 0 表示无限制。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "domain"
@@ -357,13 +324,7 @@ msgid ""
 " missing data. See [Reference Table "
 "1](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/devaids/Profiling/mindieprofiling_0009.html"
 "#ZH-CN_TOPIC_0000002370256365__table1985410131831)."
-msgstr ""
-"设置采集指定domain域下的性能数据，减少采集数据量。输入参数为字符串格式，英文分号作为分隔符，区分大小写，例如：\"Request; "
-"KVCache\"。<br />默认为空，表示采集当前所有domain域内性能数据。<br "
-"/>当前已有domain域为：Request、KVCache、ModelExecute、BatchSchedule、Communication。<br"
-" />说明：<br "
-"/>若指定domain域不全，采集数据不满足解析输出件生成时，会有告警提示。[查看表1](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/devaids/Profiling/mindieprofiling_0009.html"
-"#ZH-CN_TOPIC_0000002370256365__table1985410131831)"
+msgstr "限制性能分析到指定的域以减少数据量。字符串类型，以分号分隔，区分大小写，例如：\"Request; KVCache\"。<br />为空表示所有可用域。<br />可用域包括：Request、KVCache、ModelExecute、BatchSchedule、Communication。<br />注意：如果选择的域不完整，由于数据缺失，分析输出可能会显示警告。参见[参考表 1](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/devaids/Profiling/mindieprofiling_0009.html#ZH-CN_TOPIC_0000002370256365__table1985410131831)。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:103
 msgid "Example Configuration"
@@ -371,13 +332,13 @@ msgstr "配置示例"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:119
 msgid "2 Symbols Configuration File"
-msgstr "2 点位配置文件说明"
+msgstr "2 符号配置文件说明"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:121
 msgid ""
 "The symbols configuration file defines which functions/methods to profile"
 " and supports flexible configuration with custom attribute collection."
-msgstr "点位配置文件用于定义需要采集的函数/方法，支持灵活配置与自定义属性采集。"
+msgstr "符号配置文件用于定义需要分析的函数/方法，并支持通过自定义属性采集进行灵活配置。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:123
 msgid "2.1 File Name and Loading"
@@ -388,20 +349,18 @@ msgid ""
 "Default load "
 "path:`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`("
 " According to the installed version of vllm )"
-msgstr ""
-"默认加载路径：`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`（随已安装的"
-" vllm 版本变化）"
+msgstr "默认加载路径：`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`（根据已安装的 vllm 版本确定）"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:127
 msgid ""
 "If you need to customize the profiling points, it is highly recommended "
 "to copy a profiling configuration file to your working directory using "
 "the `PROFILING_SYMBOLS_PATH` environment variable."
-msgstr "如需自定义采集点，推荐通过设置环境变量`PROFILING_SYMBOLS_PATH`，将一份点位配置文件复制到工作目录进行修改使用。"
+msgstr "如果需要自定义性能分析点，强烈建议通过设置环境变量 `PROFILING_SYMBOLS_PATH`，将一份性能分析配置文件复制到工作目录进行修改使用。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:129
 msgid "2.2 Field Descriptions"
-msgstr "2.2 配置字段说明"
+msgstr "2.2 字段说明"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "Field"
@@ -438,7 +397,7 @@ msgstr "`\"timer\"`（默认）或 `\"pkg.mod:func\"`（自定义）"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "Domain tag"
-msgstr "埋点域标识"
+msgstr "分析域标识"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "`\"KVCache\"`, `\"ModelExecute\"`"
@@ -450,7 +409,7 @@ msgstr "name"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "Event name"
-msgstr "埋点名称"
+msgstr "事件名称"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "`\"EngineCoreExecute\"`"
@@ -490,7 +449,7 @@ msgstr "自定义属性采集"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "Only support for `\"timer\"` handler. See the section below"
-msgstr "只支持 `\"timer\"` handler。详见下方自定义属性采集机制"
+msgstr "仅支持 `\"timer\"` 处理函数。详见下方章节"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:141
 msgid "2.3 Examples"
@@ -517,7 +476,7 @@ msgid ""
 "The `attributes` field supports flexible custom attribute collection and "
 "allows operations and transformations on function arguments and return "
 "values."
-msgstr "`attributes` 字段支持灵活的自定义属性采集，可对函数参数与返回值进行多种操作与转换。"
+msgstr "`attributes` 字段支持灵活的自定义属性采集，并允许对函数参数和返回值进行操作与转换。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:172
 msgid "Basic Syntax"
@@ -525,7 +484,7 @@ msgstr "基本语法"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:174
 msgid "Argument access: use the parameter name directly, e.g., `input_ids`"
-msgstr "参数访问：直接使用参数名，如 `input_ids`"
+msgstr "参数访问：直接使用参数名，例如 `input_ids`"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:175
 msgid "Return value access: use the `return` keyword"
@@ -533,11 +492,11 @@ msgstr "返回值访问：使用 `return` 关键字"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:176
 msgid "Pipeline operations: use `|` to chain multiple operations"
-msgstr "管道操作：使用 `|` 分隔多个操作"
+msgstr "管道操作：使用 `|` 连接多个操作"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:177
 msgid "Attribute access: use `attr` to access object attributes"
-msgstr "属性访问：使用 `attr` 获取对象属性"
+msgstr "属性访问：使用 `attr` 访问对象属性"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:194
 msgid "Expression Notes"
@@ -545,13 +504,13 @@ msgstr "表达式说明"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:196
 msgid "`len(input_ids)`: get the length of parameter `input_ids`."
-msgstr "`len(input_ids)`：获取 `input_ids` 参数的长度。"
+msgstr "`len(input_ids)`：获取参数 `input_ids` 的长度。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:197
 msgid ""
 "`len(return) | str`: get the length of the return value and convert to "
 "string (equivalent to `str(len(return))`)."
-msgstr "`len(return) | str`：获取返回值长度并转换为字符串（等价于 `str(len(return))`）。"
+msgstr "`len(return) | str`：获取返回值的长度并转换为字符串（等价于 `str(len(return))`）。"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:198
 msgid ""
@@ -577,7 +536,7 @@ msgstr "属性访问：`return | attr attr_name`"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:205
 msgid "Pipeline composition: chain operations with `|`"
-msgstr "管道组合：多个操作通过 `|` 连接"
+msgstr "管道组合：使用 `|` 连接多个操作"
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:207
 msgid "Advanced Examples"
@@ -591,13 +550,13 @@ msgstr "2.5 自定义处理函数"
 msgid ""
 "When `handler` specifies a custom function, it must match the following "
 "signature:"
-msgstr "当 `handler` 字段指定自定义处理函数时，该函数需满足以下签名："
+msgstr "当 `handler` 字段指定自定义处理函数时，该函数需符合以下签名："
 
 #: ../../source/developer_guide/performance_and_debug/service_profiling_guide.md:250
 msgid ""
 "If the custom handler fails to import, the system will automatically fall"
 " back to the default timer mode."
-msgstr "若自定义处理函数导入失败，系统会自动回退至默认计时器模式。"
+msgstr "如果自定义处理函数导入失败，系统将自动回退到默认计时器模式。"
 
 #~ msgid "cd ${path_to_store_profiling_files}"
 #~ msgstr "cd ${profiling 文件存放路径}"
@@ -611,44 +570,43 @@ msgstr "若自定义处理函数导入失败，系统会自动回退至默认计
 #~ msgid ""
 #~ "xxxx-xxxx is the directory automatically"
 #~ " created based on vLLM startup time"
-#~ msgstr "xxxx-xxxx 为采集工具根据 vLLM 启动时间自动创建的存放目录"
+#~ msgstr "xxxx-xxxx 是根据 vLLM 启动时间自动创建的目录"
 
 #~ msgid "Analyze data"
-#~ msgstr "解析数据"
+#~ msgstr "分析数据"
 
 #~ msgid "No handler specified -> default timer"
-#~ msgstr "未指定 handler -> 默认 timer"
+#~ msgstr "未指定 handler -> 默认计时器"
 
 #~ msgid "Get tensor shape"
 #~ msgstr "获取张量形状"
 
 #~ msgid "Get specific value from a dict"
-#~ msgstr "获取字典中的特定值"
+#~ msgstr "从字典中获取特定值"
 
 #~ msgid "Conditional expression (requires custom handler support)"
 #~ msgstr "条件表达式（需要自定义处理函数支持）"
 
 #~ msgid "Complex data processing"
-#~ msgstr "复杂的数据处理"
+#~ msgstr "复杂数据处理"
 
 #~ msgid "Custom handler"
 #~ msgstr "自定义处理函数"
 
 #~ msgid "original_func: the original function object"
-#~ msgstr "original_func: 原始函数对象"
+#~ msgstr "original_func：原始函数对象"
 
 #~ msgid "this: the bound object (for methods)"
-#~ msgstr "this: 调用对象（对于方法调用）"
+#~ msgstr "this：绑定对象（针对方法）"
 
 #~ msgid "*args: positional arguments"
-#~ msgstr "*args: 位置参数"
+#~ msgstr "*args：位置参数"
 
 #~ msgid "**kwargs: keyword arguments"
-#~ msgstr "**kwargs: 关键字参数"
+#~ msgstr "**kwargs：关键字参数"
 
 #~ msgid "processing result"
 #~ msgstr "处理结果"
 
 #~ msgid "Custom logic"
-#~ msgstr "自定义处理逻辑"
-
+#~ msgstr "自定义逻辑"

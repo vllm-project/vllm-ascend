@@ -25,68 +25,56 @@ msgid "Using OpenCompass"
 msgstr "使用 OpenCompass"
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:2
-#, fuzzy
 msgid ""
 "This document guides you to conduct accuracy testing using "
 "[OpenCompass](https://github.com/open-compass/opencompass)."
-msgstr ""
-"本文档将指导你如何使用 [OpenCompass](https://github.com/open-compass/opencompass) "
-"进行准确率测试。"
+msgstr "本文档指导您如何使用 [OpenCompass](https://github.com/open-compass/opencompass) 进行模型准确率测试。"
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:4
-#, fuzzy
 msgid "1. Online Server"
-msgstr "1. 在线服务"
+msgstr "1. 在线服务器模式"
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:6
 msgid "You can run docker container to start the vLLM server on a single NPU:"
-msgstr "你可以运行 docker 容器，在单个 NPU 上启动 vLLM 服务器："
+msgstr "您可以通过运行 Docker 容器，在单个 NPU 上启动 vLLM 服务器："
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:34
-#, fuzzy
 msgid "The vLLM server is started successfully, if you see information as below:"
-msgstr "如果你的服务启动成功，你会看到如下所示的信息："
+msgstr "如果您看到如下信息，表明 vLLM 服务器已成功启动："
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:42
-#, fuzzy
 msgid ""
 "Once your server is started, you can query the model with input prompts "
 "in a new terminal."
-msgstr "一旦你的服务器启动后，你可以在新的终端中用输入提示词查询模型："
+msgstr "服务器启动后，您可以在新的终端中使用输入提示词（prompt）查询模型："
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:55
-#, fuzzy
 msgid "2. Run C-Eval using OpenCompass for accuracy testing"
-msgstr "2. 使用 OpenCompass 运行 ceval 准确率测试"
+msgstr "2. 使用 OpenCompass 运行 C-Eval 准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:56
-#, fuzzy
 msgid ""
 "Install OpenCompass and configure the environment variables in the "
 "container:"
-msgstr "在容器中安装 OpenCompass 并配置环境变量。"
+msgstr "在容器中安装 OpenCompass 并配置环境变量："
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:68
-#, fuzzy
 msgid ""
 "Add the following content to "
 "`opencompass/configs/eval_vllm_ascend_demo.py`:"
-msgstr "添加 `opencompass/configs/eval_vllm_ascend_demo.py`，内容如下："
+msgstr "在 `opencompass/configs/eval_vllm_ascend_demo.py` 文件中添加以下内容："
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:108
 msgid "Run the following command:"
 msgstr "运行以下命令："
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:114
-#, fuzzy
 msgid "After 1 to 2 minutes, the output is shown below:"
-msgstr "1-2 分钟后，输出如下所示："
+msgstr "大约 1 到 2 分钟后，输出结果如下所示："
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:124
 msgid ""
 "You can see more usage on [OpenCompass "
 "Docs](https://opencompass.readthedocs.io/en/latest/index.html)."
-msgstr ""
-"你可以在 [OpenCompass "
-"文档](https://opencompass.readthedocs.io/en/latest/index.html) 查看更多用法。"
+msgstr "更多使用方法请参考 [OpenCompass 官方文档](https://opencompass.readthedocs.io/en/latest/index.html)。"
 
