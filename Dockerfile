@@ -65,7 +65,8 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
     python3 -m pip cache purge
 
 # Install clang-15 (for triton-ascend)
-RUN apt-get -y install clang-15 && \
+RUN apt-get update -y && \
+    apt-get -y install clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     rm -rf /var/cache/apt/* && \
