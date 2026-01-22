@@ -40,7 +40,9 @@ constexpr int32_t BUFFER_NUM = 2;
 constexpr int32_t GATHER_SECOND_NUM = 2;
 constexpr uint32_t MAX_QUANT_ROW_ONCE = 8;
 constexpr uint32_t QUANT_SPACE_FACTOR = 176 * 1024 / 11;  // up to 176KB for quant
+#ifndef OPT_RANK_OFFSET
 #define OPT_RANK_OFFSET 512
+#endif
 
 #define CEIL_UP(x) ((x + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN)
 #define CEIL(x, y) (((x) + (y - 1)) / (y))

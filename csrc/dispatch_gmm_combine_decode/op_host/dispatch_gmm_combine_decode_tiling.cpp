@@ -91,6 +91,12 @@ static ge::graphStatus CheckGmm1Shape(gert::TilingContext *context, DispatchGmmC
     auto gmm1FirstTensorElement = context->GetDynamicInputTensor(INPUT_GMM1_WEIGHT_INDEX, 0);
     auto gmm1FirstTensorElementShape = gmm1FirstTensorElement->GetOriginShape();
     uint32_t elementDims = gmm1FirstTensorElementShape.GetDimNum();
+    ge::DataType gmm1DataType = gmm1FirstTensorElement->GetDataType();
+    if (gmm1DataType == ge::DT_BF16 || gmm1DataType == ge::DT_FLOAT16) {
+        tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W = true;
+    } else {
+        tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W = false;
+    }
 
     OPS_ERR_IF(elementDims != 2 && elementDims != 3, OPS_LOG_E(nodeName, "gmm1Weight shape is invalid."),
             return ge::GRAPH_FAILED);
@@ -383,16 +389,26 @@ static ge::graphStatus SetWorkSpace(gert::TilingContext *context, const char *no
     } else {
         maxTokenNum = maxBatchSize * epRankSize * std::min(topK, moeExpertNumPerRank);
     }
+    uint32_t wTypeSize = tilingData.disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W ? TOKEN_DTYPE_BYTE_SIZE : sizeeof(int8_t);
 
-    size_t x1TokenSize = maxTokenNum * h * sizeof(int8_t);
-    size_t x2TokenSize = maxTokenNum * gmm2HLen * sizeof(int8_t);
+    // hbm      input                    = x:  float16 or bf16
+    // buf1     dispatch (Only AIV)     => x1: float16 or bf16
+    // buf2     gmm1 (Only AIC)         => y1: float
+    //          sync
+    // buf3     swiglu (Only AIV)       => x2: float16 or bf16
+    //          sync ?
+    // buf4     gmm2 (AIC & AIV)        => y2: float16 or bf16
+    // hbm      combine (Only AIV)      => output: float16 or bf16
+
+    size_t x1TokenSize = maxTokenNum * h * wTypeSize; // x1: float16 or bf16
+    size_t x2TokenSize = maxTokenNum * gmm2HLen * wTypeSize; // x2: float16 or bf16
     size_t maxTokenSize = x1TokenSize < x2TokenSize ? x2TokenSize : x1TokenSize;
     maxTokenSize = CeilUp(maxTokenSize, GM_ALIGN_SIZE);
-    size_t tokenScaleSize = CeilUp(maxTokenNum * sizeof(float), GM_ALIGN_SIZE);
+    size_t tokenScaleSize = tilingData.disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W ? 0 : CeilUp(maxTokenNum * sizeof(float), GM_ALIGN_SIZE);
     size_t CVSwapBufferSize =
         CeilUp(aicNum * L1_TILE_BYTE_SIZE * CUBE_WORKSPACE_STAGE * sizeof(int32_t), GM_ALIGN_SIZE);
-    size_t swigluOutSize = maxTokenNum * gmm1HLen * sizeof(float);
-    size_t gmm2DepOutSize = maxTokenNum * h * TOKEN_DTYPE_BYTE_SIZE;
+    size_t swigluOutSize = maxTokenNum * gmm1HLen * sizeof(float); // y1: float
+    size_t gmm2DepOutSize = maxTokenNum * h * TOKEN_DTYPE_BYTE_SIZE; // y2: float
     size_t maxSwigluGmm2Size = swigluOutSize < gmm2DepOutSize ? gmm2DepOutSize : swigluOutSize;
     maxSwigluGmm2Size = CeilUp(maxSwigluGmm2Size, GM_ALIGN_SIZE);
     size_t groupListSize = CeilUp(moeExpertNumPerRank * sizeof(int64_t), GM_ALIGN_SIZE);
@@ -461,6 +477,9 @@ static ge::graphStatus DispatchGmmCombineDecodeTilingFuncImpl(gert::TilingContex
     }
     if (tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isTensorList) {
         tilingKey |= EXEC_FLAG_TENSOR_LIST;
+    }
+    if (tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W) {
+        tilingKey |= EXEC_FLAG_BF16_FP16_W;
     }
     context->SetTilingKey(tilingKey);
     context->SetBlockDim(aicNum);

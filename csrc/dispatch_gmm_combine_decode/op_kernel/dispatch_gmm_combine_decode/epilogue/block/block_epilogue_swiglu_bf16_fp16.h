@@ -119,6 +119,8 @@ public:
         int32_t eventMTE2V = 0;
         int32_t eventMTE3V = 0;
         int32_t eventVMTE3 = 0;
+        int32_t eventMTE3MTE2 = 0;
+        int32_t eventMTE2MTE3 = 0;
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
             ubCList[i] = resource.ubBuf.template GetBufferByByte<ElementC>(ubOffset);
             ubOffset += TileShape::COUNT * sizeof(ElementC);
@@ -135,17 +137,14 @@ public:
 
             eventUbCVMTE2List[i] = eventVMTE2++;
             eventUbCMTE2VList[i] = eventMTE2V++;
-            eventUbScaleVMTE2List[i] = eventVMTE2++;
-            eventUbScaleMTE2VList[i] = eventMTE2V++;
-            eventUbPerTokenScaleVMTE2List[i] = eventVMTE2++;
-            eventUbPerTokenScaleMTE2VList[i] = eventMTE2V++;
             eventUbDMTE3VList[i] = eventMTE3V++;
             eventUbDVMTE3List[i] = eventVMTE3++;
+            eventUbMTE3MTE2List[i] = eventMTE3MTE2++;
+            eventUbMTE2MTE3List[i] = eventMTE2MTE3++;
 
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[i]);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbPerTokenScaleVMTE2List[i]);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventUbMTE3MTE2List[i]);
         }
         ubTmpMxN = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
         ubOffset += TileShape::COUNT * sizeof(float);
@@ -159,9 +158,8 @@ public:
     {
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[i]);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbPerTokenScaleVMTE2List[i]);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(eventUbMTE3MTE2List[i]);
         }
     }
 
@@ -211,84 +209,38 @@ public:
             auto &ubC = ubCList[ubListId];
             LayoutC layoutUbC{actualTileShape, ubTileStride};
 
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
-            copyGmToUbC(ubC, gmTileC, layoutUbC, layoutGmTileC);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
-
-            auto scaleTileOffset = tileOffset.template GetCoordByAxis<1>();
-            auto scaleTileShape = actualTileShape.template GetCoordByAxis<1>();
-
-            auto gmTileScale = gmScale[params.layoutScale.GetOffset(scaleTileOffset)];
-            auto layoutGmTileScale = params.layoutScale.GetTileLayout(scaleTileShape);
-
-            auto &ubFp32Scale = ubFp32ScaleList[ubListId];
-            auto layoutFp32UbScale = LayoutScale::template MakeLayoutInUb<ElementFp32Scale>(scaleTileShape);
-            auto &ubRawScale = ubRawScaleList[ubListId];
-            auto layoutRawUbScale = LayoutScale::template MakeLayoutInUb<ElementRawScale>(scaleTileShape);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
-            if constexpr (!std::is_same_v<ElementRawScale, ElementFp32Scale>) {
-                copyGmToUbScale(ubRawScale, gmTileScale, layoutRawUbScale, layoutGmTileScale);
-            } else {
-                copyGmToUbScale(ubFp32Scale, gmTileScale, layoutFp32UbScale, layoutGmTileScale);
-            }
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbScaleMTE2VList[ubListId]);
-
-            auto perTokenScaleTileOffset = tileOffset.template GetCoordByAxis<0>();
-            auto perTokenScaleTileShape = actualTileShape.template GetCoordByAxis<0>();
-
-            auto gmTilePerTokenScale = gmPerTokenScale[params.layoutPerTokenScale.GetOffset(perTokenScaleTileOffset)];
-            auto layoutGmTilePerTokenScale = params.layoutPerTokenScale.GetTileLayout(perTokenScaleTileShape);
-
-            auto &ubPerTokenScale = ubPerTokenScaleList[ubListId];
-            auto layoutUbPerTokenScale =
-                LayoutScale::template MakeLayoutInUb<ElementPerTokenScale>(perTokenScaleTileShape);
-
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbPerTokenScaleVMTE2List[ubListId]);
-            copyGmToUbPerTokenScale(ubPerTokenScale, gmTilePerTokenScale, layoutUbPerTokenScale,
-                                    layoutGmTilePerTokenScale);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbPerTokenScaleMTE2VList[ubListId]);
-
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
-            AscendC::Cast(ubTmpMxN, ubC, AscendC::RoundMode::CAST_RINT, TileShape::COUNT);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbScaleMTE2VList[ubListId]);
-            if constexpr (!std::is_same_v<ElementRawScale, ElementFp32Scale>) {
-                AscendC::Cast(ubFp32Scale, ubRawScale, AscendC::RoundMode::CAST_NONE, TileShape::COLUMN);
-                AscendC::PipeBarrier<PIPE_V>();
-            }
-            tileRowBroadcastMul(ubTmpMxN, ubTmpMxN, ubFp32Scale);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbPerTokenScaleMTE2VList[ubListId]);
-            tileBroadcastOneBlk(ubTmpMx32B, ubPerTokenScale);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbPerTokenScaleVMTE2List[ubListId]);
-
             auto &ubD = ubDList[ubListId];
             LayoutD layoutUbD{actualTileShape, ubTileStride};
-            AscendC::PipeBarrier<PIPE_V>();
-            // after dequant, the left half does x / (x + exp(-Dequant(x))), the right dose nothing
+            auto gmTileD = gmD[params.layoutD.GetOffset(tileOffset)];
+            auto layoutGmTileD = params.layoutD.GetTileLayout(actualTileShape);
+
             if (isLeft) {
-                tileOneBlkColumnBroadcastMul(ubTmpMxN, ubTmpMxN, ubTmpMx32B);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::Muls(ubDenominatorMxN, ubTmpMxN, -1.0f, TileShape::COUNT);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
+                copyGmToUbC(ubC, gmTileC, layoutUbC, layoutGmTileC);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
+                AscendC::Muls(ubDenominatorMxN, ubC, -1.0f, TileShape::COUNT);
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Exp(ubDenominatorMxN, ubDenominatorMxN, TileShape::COUNT);
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Adds(ubDenominatorMxN, ubDenominatorMxN, 1.0f, TileShape::COUNT);
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
-                AscendC::Div(ubD, ubTmpMxN, ubDenominatorMxN, TileShape::COUNT);
+                AscendC::Div(ubD, ubC, ubDenominatorMxN, TileShape::COUNT);
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
+                copyUbToGmD(gmTileD, ubD, layoutGmTileD, layoutUbD);
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
             } else {
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
-                tileOneBlkColumnBroadcastMul(ubD, ubTmpMxN, ubTmpMx32B);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(eventUbMTE3MTE2List[ubListId]);
+                copyGmToUbC(ubC, gmTileC, layoutUbC, layoutGmTileC);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(eventUbMTE2MTE3List[ubListId]);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(eventUbMTE2MTE3List[ubListId]);
+                copyUbToGmD(gmTileD, ubC, layoutGmTileD, layoutUbD);
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventUbMTE3MTE2List[ubListId]);
             }
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
 
-            auto gmTileD = gmD[params.layoutD.GetOffset(tileOffset)];
-            auto layoutGmTileD = params.layoutD.GetTileLayout(actualTileShape);
-
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
-            copyUbToGmD(gmTileD, ubD, layoutGmTileD, layoutUbD);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
             ubListId = (ubListId + 1 < UB_STAGES) ? (ubListId + 1) : 0;
         }
     }
@@ -304,12 +256,10 @@ private:
 
     int32_t eventUbCVMTE2List[UB_STAGES];
     int32_t eventUbCMTE2VList[UB_STAGES];
-    int32_t eventUbScaleVMTE2List[UB_STAGES];
-    int32_t eventUbScaleMTE2VList[UB_STAGES];
-    int32_t eventUbPerTokenScaleVMTE2List[UB_STAGES];
-    int32_t eventUbPerTokenScaleMTE2VList[UB_STAGES];
     int32_t eventUbDMTE3VList[UB_STAGES];
     int32_t eventUbDVMTE3List[UB_STAGES];
+    int32_t eventUbMTE3MTE2List[UB_STAGES];
+    int32_t eventUbMTE2MTE3List[UB_STAGES];
 
     uint32_t ubListId{0};
 

@@ -34,7 +34,7 @@
 #include "dispatch_gmm_combine_decode_base.h"
 
 using namespace Catlass;
-
+namespace DispatchGmmCombineDecodeImpl {
 using MmadAtlasA2Custom =
     Gemm::MmadAtlasA2PreloadAsyncWithCallback<CUSTOM_PRELOAD_STAGES, CUSTOM_L1_STAGES, CUSTOM_L0A_STAGES,
                                               CUSTOM_L0B_STAGES, CUSTOM_L0C_STAGES, CUSTOM_ENABLE_UNIT_FLAG,
@@ -436,4 +436,5 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Process()
                                gmScale2_, layoutW2Scale, gmX2Scale, layoutX2Scale, gmGmm2DepOut,
                                layoutOutput, gmWorkspace, &combiner);
 }
+} // namespace DispatchGmmCombineDecodeImpl
 #endif  // DISPATCH_GMM_COMBINE_DECODE_H
