@@ -235,3 +235,32 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@patch.dict(os.environ, {"HCCL_OP_EXPANSION_MODE": "AIV"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+@patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner("vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+                    tensor_parallel_size=2,
+                    quantization="ascend",
+                    enable_expert_parallel=True,
+                    compilation_config={
+                        "cudagraph_capture_sizes": [3, 6, 9, 12],
+                        "cudagraph_mode": "FULL_DECODE_ONLY"
+                    },
+                    speculative_config={
+                        "num_speculative_tokens": 2,
+                        "method": "deepseek_mtp"
+                    },
+                    additional_config={
+                        "layer_sharding":["q_b_proj", "o_proj"]
+                    },
+                    reasoning_parser="deepseek_v3",
+                    tokenizer_mode="deepseek_v32") as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
