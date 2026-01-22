@@ -3,7 +3,6 @@ model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 2
 npu_per_node: 8
 env_common:
-  VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_ASCEND_BALANCE_SCHEDULING: 1
   HCCL_INTRA_PCIE_ENABLE: 1
   HCCL_INTRA_ROCE_ENABLE: 0

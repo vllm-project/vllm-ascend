@@ -30,9 +30,13 @@ if [ $PYTHON_VERSION == "local" ]; then
     PYTHON_VERSION=$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 fi
 
+# Define colors
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
 run_mypy() {
-    echo "Running mypy on $1"
-    mypy --follow-imports skip --python-version "${PYTHON_VERSION}" "$@"
+    echo -e "${GREEN}Running mypy for $1 on python version: ${PYTHON_VERSION}${NC}"
+    mypy --follow-imports skip --check-untyped-defs --python-version "${PYTHON_VERSION}" "$@"
 }
 
 run_mypy vllm_ascend

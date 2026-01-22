@@ -26,6 +26,7 @@ import torch
 from vllm.utils.network_utils import get_open_port
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from tests.e2e.conftest import wait_until_npu_memory_free
 
 MODELS = [
     # Offline data parallel mode will be not supported/useful for dense models
@@ -137,6 +138,7 @@ def _run_worker_process(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4, 36])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
+@wait_until_npu_memory_free(target_free_percentage=0.6)
 def test_models_aclgraph_capture_replay_metrics_dp2(
     model: str,
     max_tokens: int,
