@@ -303,6 +303,8 @@ export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
 vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --host 0.0.0.0 \
   --port $2 \
@@ -322,8 +324,8 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
   --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+  --additional-config '{"recompute_scheduler_enable":true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
@@ -378,6 +380,8 @@ export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
 vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --host 0.0.0.0 \
   --port $2 \
@@ -397,8 +401,8 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
   --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+  --additional-config '{"recompute_scheduler_enable":true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
@@ -469,12 +473,12 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --max-num-batched-tokens 256 \
   --max-num-seqs 28 \
   --trust-remote-code \
-  --gpu-memory-utilization 0.95 \
+  --gpu-memory-utilization 0.92 \
   --quantization ascend \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 16, 32, 48, 64, 80, 96, 112]}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
   --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
@@ -546,12 +550,12 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --max-num-batched-tokens 256 \
   --max-num-seqs 28 \
   --trust-remote-code \
-  --gpu-memory-utilization 0.95 \
+  --gpu-memory-utilization 0.92 \
   --quantization ascend \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 16, 32, 48, 64, 80, 96, 112]}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
   --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
@@ -570,6 +574,17 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
       }
   }'
 ```
+
+**Notice:**
+The parameters are explained as follows:
+
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+- `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
+- `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
+- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+- `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
+- `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
 
 6. run server for each node
 
@@ -681,6 +696,16 @@ Not test yet.
 ### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+The performance result is:  
+
+**Hardware**: A3-752T, 4 node
+
+**Deployment**: 2P1D, Prefill node: DP2+TP8, Decode Node: DP32+TP1
+
+**Input/Output**: 3.5k/1.5k
+
+**Performance**: TTFT = 6.16s, TPOT = 48.82ms, Average performance of each card is 478 TPS (Token Per Secon).
 
 ### Using vLLM Benchmark
 
