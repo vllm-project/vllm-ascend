@@ -62,7 +62,7 @@ jobs:
         # For now, we only build amd64 lint image
         platforms: 'linux/amd64'
         context: .
-        file: Dockerfile.lint
+        file: .github/workflows/dockerfiles/Dockerfile.lint
         push: true
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
