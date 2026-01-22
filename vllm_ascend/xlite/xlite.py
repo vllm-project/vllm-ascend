@@ -25,8 +25,8 @@ from vllm.distributed import (get_ep_group,
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-from xlite._C import (AttnMHA, Model, ModelAttnMeta, ModelConfig, Runtime,
-                      ScoringFuncSoftmax) # type: ignore
+from xlite._C import (AttnMHA, Model, ModelAttnMeta, ModelConfig, Runtime, # type: ignore[attr-defined]
+                      ScoringFuncSoftmax)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
