@@ -25,7 +25,10 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
-from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
@@ -537,8 +540,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        # use triton mrope for Qwen3-VL
-        if self.mrope_section == _QWEN3_VL_MROPE_SECTION:
+        if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
             return self.forward_triton(positions, query, key)
 
         if self.mrope_section != [16, 24, 24] or \
