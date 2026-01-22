@@ -286,18 +286,18 @@ class PCPManager:
             max_scheduled_prefill_tokens = 0
             self.pcp_padded_tokens_fla = 0
             if num_decode_reqs > 0:
-                num_padded_scheduled_tokens[:num_decode_reqs] = num_padded_scheduled_tokens[:num_decode_reqs] // self.pcp_size
+                num_padded_scheduled_tokens[:num_decode_reqs] = num_padded_scheduled_tokens[:num_decode_reqs] // self.pcp_world_size
             # have prefills
             if num_reqs - num_decode_reqs > 0:
                 prefill_tokens_tensor = torch.Tensor(num_scheduled_tokens[num_decode_tokens:])
-                # [num_prefill_reqs, pcp_size, 1] [[3,2]] [[2,2,2,1],[2,1,1,1]]
+                # [num_prefill_reqs, pcp_world_size, 1] [[3,2]] [[2,2,2,1],[2,1,1,1]]
                 num_prefill_tokens_allranks = self._get_cp_local_seq_lens(
-                    prefill_tokens_tensor, self.pcp_size, 1, 1).long().numpy()
+                    prefill_tokens_tensor, self.pcp_world_size, 1, 1).long().numpy()
                 # [3] [2]  |  [2,2] [2,1] [2,1] [1,1]
                 num_prefill_scheduled_tokens_linear = num_prefill_tokens_allranks[:, self.pcp_rank, 0]
                 num_padded_scheduled_tokens[num_decode_reqs:] = num_prefill_scheduled_tokens_linear
                 # [[3,5]] | [[0,0,0,0,0],[0,0,0,0,0]]
-                num_prefill_tokens_start_loc = np.zeros((num_reqs - num_decode_reqs, self.pcp_size + 1), dtype=np.int64)
+                num_prefill_tokens_start_loc = np.zeros((num_reqs - num_decode_reqs, self.pcp_world_size + 1), dtype=np.int64)
                 # [[0,3,5]] | [[0,2,4,6,7],[0,2,3,4,5]]
                 num_prefill_tokens_start_loc[:, 1:] = np.cumsum(num_prefill_tokens_allranks[..., 0], axis=-1)
                 # [0] [3] | [0,0] [2,2] [4,3] [6,4] [7,5]
@@ -322,7 +322,7 @@ class PCPManager:
                 _, prefill_arange_allranks = self._get_cumsum_and_arange(num_prefill_tokens_allranks.flatten())
                 # [0,1] [0,1,2,3,0,1,2,3]
                 _, prefill_rank_offset = self._get_cumsum_and_arange(
-                    np.ones(num_reqs - num_decode_reqs, dtype=np.int64) * self.pcp_size
+                    np.ones(num_reqs - num_decode_reqs, dtype=np.int64) * self.pcp_world_size
                 )
                 # [0,0,0,3,3] [0,M,2M,3M,0,M,2M,3M] -> [0,0,M,M,2M,2M,3M,0,0,M,M,2M,3M] + D
                 prefill_all_offset = np.repeat(prefill_rank_offset * max_scheduled_tokens, num_prefill_tokens_allranks.flatten()) + num_decode_tokens
@@ -342,7 +342,7 @@ class PCPManager:
             enter_fa_decode_restore_idx = None
             if num_decode_reqs > 0:
                 # [0,1,2], [4,4,4] -> [0,0,0,0,1,1,1,1,2,2,2,2]
-                num_decode_pcp_size = np.ones(num_decode_reqs, dtype=np.int64) * self.pcp_size
+                num_decode_pcp_size = np.ones(num_decode_reqs, dtype=np.int64) * self.pcp_world_size
                 decode_reqs_offset = np.repeat(np.arange(num_decode_reqs, dtype=np.int64), num_decode_pcp_size)
                 decode_ranks_offset = self._get_cumsum_and_arange(num_decode_pcp_size)[1] * max_scheduled_tokens
                 enter_fa_decode_restore_idx = np.add(decode_reqs_offset, decode_ranks_offset)
@@ -360,12 +360,12 @@ class PCPManager:
 
             if num_reqs > num_decode_reqs:
                 all_positions_prefill = [
-                    get_current_rank_positions(cu_padded_tokens, rank_i)[num_decode_tokens:] - num_decode_tokens * self.pcp_size
-                    for rank_i in range(self.pcp_size)
+                    get_current_rank_positions(cu_padded_tokens, rank_i)[num_decode_tokens:] - num_decode_tokens * self.pcp_world_size
+                    for rank_i in range(self.pcp_world_size)
                 ]
                 all_positions_prefill_tensor = torch.from_numpy(np.concatenate(all_positions_prefill))
                 all_enter_fla_restore_idx = all_positions_prefill_tensor.float().argsort()
-                unpad_mask_prefill = self.pcp_unpad_mask_cpu[num_decode_reqs * self.pcp_size:]
+                unpad_mask_prefill = self.pcp_unpad_mask_cpu[num_decode_reqs * self.pcp_world_size:]
                 # [0] | [0,7]
                 ori_tokens_start_loc = np.roll(np.cumsum(num_scheduled_tokens[num_decode_tokens:]), 1)
                 ori_tokens_start_loc[0] = 0
