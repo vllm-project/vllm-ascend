@@ -441,8 +441,6 @@ Before you start, please
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
-        export VLLM_ASCEND_ENABLE_MLAPO=1
-
 
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
@@ -519,8 +517,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
-        export VLLM_ASCEND_ENABLE_MLAPO=1
 
 
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
