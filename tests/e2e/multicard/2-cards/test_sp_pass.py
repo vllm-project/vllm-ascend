@@ -7,7 +7,7 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 DENSE_MODELS = [
-    "Qwen/Qwen3-VL-2B-Instruct", "Qwen/Qwen3-0.6B"
+    "Qwen/Qwen3-VL-2B-Instruct", "Qwen/Qwen3-8B"
 ]
 
 
