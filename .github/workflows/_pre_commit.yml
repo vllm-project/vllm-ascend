@@ -60,7 +60,6 @@ jobs:
         TERM: xterm-256color
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       run: |
-        sleep 10000
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pre-commit run --all-files --hook-stage manual --show-diff-on-failure
     - name: Run mypy
