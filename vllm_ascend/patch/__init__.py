@@ -286,3 +286,48 @@
 #    Future Plan:
 #       Keep this patch in vllm-ascend v0.13.0.
 #
+# ** 13. File: platform/patch_kv_cache_coordinator.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator`
+#    Why:
+#       Add this patch to support MultiBlockPool.
+#    How：
+#       Add a new branch to make `KVCacheCoordinatorWithMultiPool` could be routed by. This will only take effect when USE_MULTI_BLOCK_POOL is True.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support MultiBlockPool, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#
+# ** 14. File: platform/patch_kv_cache_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_utils.get_kv_cache_groups`
+#    Why:
+#       Add this patch to support kvcache group with different page sizes in the specs.
+#    How：
+#       Implement a new func to make KVCacheGroupSpec for different page sizes without unifying their page sizes.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support this feature, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`
+#    Why:
+#       Add this patch to create KVCacheConfig to support kvcache group with different page size in the specs.
+#    How：
+#       Add a new branch to avoid shared the memory pools between the groups.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support this feature, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#
+# ** 15. File: platform/patch_vllm_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.VllmConfig.__post_init__`
+#    Why:
+#       Add this patch to enable hybrid kv cache in Prefill Disaggregation scenario.
+#    How：
+#       Disable `need_disable_hybrid_kv_cache_manager` if Prefill Disaggregation is enabled.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support this feature, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#

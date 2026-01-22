@@ -18,6 +18,7 @@ import os
 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_ec_connector  # noqa
+import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_lora_model_manager  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
@@ -29,6 +30,8 @@ USE_MULTI_BLOCK_POOL = False
 
 if USE_MULTI_BLOCK_POOL:
     import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
+    import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
+    import vllm_ascend.patch.platform.patch_vllm_config  # noqa
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
         "EXPERT_MAP_RECORD", "false") == "true":
