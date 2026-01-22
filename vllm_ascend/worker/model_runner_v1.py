@@ -721,15 +721,6 @@ class NPUModelRunner(GPUModelRunner):
             # Eager mode.
             num_input_tokens = total_num_scheduled_tokens
 
-        # Get the attention state.
-        attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens,
-                                            num_valid_tokens)
-        self.attn_state = attn_state  # type: ignore
-
-        # Determine if it's a splitfuse batch
-        with_prefill = attn_state not in [
-            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
-        ]
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         # Get info across DP ranks.
@@ -1050,25 +1041,10 @@ class NPUModelRunner(GPUModelRunner):
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
 
-        if self.speculative_config and self.pcp_size > 1:
-            self._generate_pcp_mtp_input(
-                num_reqs, scheduler_output.total_num_scheduled_tokens,
-                scheduler_output.num_scheduled_tokens)
-        long_seq_metadata = self._generate_pcp_metadata(
-            total_num_scheduled_tokens=sum(num_scheduled_tokens_padded) if self.pcp_size > 1 and self.pcp_use_hybrid_attn else total_num_scheduled_tokens,
-            num_scheduled_tokens=sum(num_scheduled_tokens),
-            pcp_unpad_mask=pcp_unpad_mask)
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-            if self.pcp_size > 1:
-                if self.pcp_use_hybrid_attn:
-                    slot_mapping_size = sum(num_scheduled_tokens_padded) * self.pcp_size - total_num_pcp_pads
-                else:
-                    slot_mapping_size = total_num_scheduled_tokens * self.pcp_size - total_num_pcp_pads
-            else:
-                slot_mapping_size = total_num_scheduled_tokens
             encoder_seq_lens, encoder_seq_lens_cpu = self._get_encoder_seq_lens(
                 scheduler_output.num_scheduled_tokens or {},
                 kv_cache_group_spec.kv_cache_spec,
@@ -1254,7 +1230,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_input_tokens, num_tokens_across_dp,
                 maybe_padded_num_tokens, logits_indices, spec_decode_metadata,
                 input_ids, inputs_embeds, intermediate_tensors,
-                max_num_scheduled_tokens, max_num_tokens_across_pcp)
+                max_num_scheduled_tokens, model_kwargs, max_num_tokens_across_pcp)
 
     # all-gather one hidden-states in sp scene
     @staticmethod
@@ -1605,53 +1581,6 @@ class NPUModelRunner(GPUModelRunner):
 
         return draft_token_ids
 
-    def _pool(
-        self,
-        hidden_states: torch.Tensor,
-        num_scheduled_tokens: int,
-        num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]] = None,
-        finished_recving: Optional[set[str]] = None,
-        kv_connector_output: Optional["KVConnectorOutput"] = None,
-    ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs ==\
-            len(self.input_batch.pooling_params), \
-        "Either all or none of the requests in" \
-        " a batch must be pooling request"
-
-        hidden_states = hidden_states[:num_scheduled_tokens]
-        pooling_metadata = self.input_batch.pooling_metadata
-        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
-                                              device=hidden_states.device)
-        seq_lens_cpu = self.seq_lens_cpu[:self.input_batch.num_reqs]
-
-        model = cast(VllmModelForPooling, self.model)
-        raw_pooler_output = model.pooler(
-            hidden_states=hidden_states,
-            pooling_metadata=pooling_metadata,
-        )
-        raw_pooler_output = json_map_leaves(
-            lambda x: x.to("cpu", non_blocking=True),
-            raw_pooler_output,
-        )
-        torch.npu.synchronize()
-
-        pooler_output: list[Optional[torch.Tensor]] = []
-        for raw_output, seq_len, prompt_len in zip(
-                raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens):
-            output = raw_output if seq_len == prompt_len else None
-            pooler_output.append(output)
-
-        return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=[],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=pooler_output,
-            kv_connector_output=kv_connector_output,
-        )
-
     @staticmethod
     def get_finished_kv_transfer(
         scheduler_output: "SchedulerOutput",
@@ -1698,9 +1627,9 @@ class NPUModelRunner(GPUModelRunner):
             (attn_metadata, positions, num_scheduled_tokens_np,
              num_input_tokens, num_tokens_across_dp, maybe_padded_num_tokens,
              logits_indices, spec_decode_metadata, input_ids, inputs_embeds,
-             intermediate_tensors, max_query_len,
+             intermediate_tensors, max_query_len, model_kwargs,
              max_num_tokens_across_pcp) = (self._prepare_inputs(scheduler_output,
-                                                    intermediate_tensors))
+                                                   intermediate_tensors))
 
             if self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
@@ -1740,35 +1669,13 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=scheduler_output.
                     total_num_scheduled_tokens,
-                    prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
-                    weight_prefetch_method=self.weight_prefetch_method,
                     max_tokens_across_pcp=max_num_tokens_across_pcp if self.pcp_size > 1 else 0):
                 self.maybe_setup_kv_connector(scheduler_output)
-                # import torch_npu
-                # profiling = False
-                # if profiling:
-                #     torch.npu.synchronize()
-                #     prof_save_path = "/home/g00955623/profiling/qwen_next"
-                #     experimental_config = torch_npu.profiler._ExperimentalConfig(
-                #         profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
-                #         aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization)
-                
-                #     with torch_npu.profiler.profile(
-                #             activities=[
-                #                 torch_npu.profiler.ProfilerActivity.NPU,
-                #                 torch_npu.profiler.ProfilerActivity.CPU],
-                #             with_stack=True,
-                #             record_shapes=True,
-                #             profile_memory=True,
-                #             experimental_config=experimental_config,
-                #             schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1, skip_first=0),
-                #             on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
-                #                 prof_save_path + "_generate")) as prof:
+
                 hidden_states = self._generate_process_reqs_hidden_states(
-                    attn_metadata, self.with_prefill, maybe_padded_num_tokens,
-                    input_ids, positions, intermediate_tensors, inputs_embeds)
-                        # torch.npu.synchronize()
+                    maybe_padded_num_tokens, input_ids, positions,
+                    intermediate_tensors, inputs_embeds, model_kwargs)
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfer(
@@ -1805,21 +1712,6 @@ class NPUModelRunner(GPUModelRunner):
                     hidden_states.tensors, all_gather_group=get_tp_group())
                 logits = None
             else:
-                if self.input_batch.pooling_params:
-                    if vllm_version_is('0.13.0'):
-                        pool_output = self._pool(
-                            hidden_states,
-                            scheduler_output.total_num_scheduled_tokens,
-                            num_scheduled_tokens_np)
-                    else:
-                        pool_output = self._pool(
-                            hidden_states,
-                            scheduler_output.total_num_scheduled_tokens,
-                            num_scheduled_tokens_np, kv_connector_output)
-                    if self.debugger is not None:
-                        self.debugger.stop()
-                        self.debugger.step()
-                    return pool_output
                 # Sometimes, after the model is compiled through the AOT backend,
                 # the model output may become a list containing only one Tensor object.
                 if isinstance(hidden_states, list) and \
