@@ -20,8 +20,6 @@ jobs:
 
   build:
     name: vllm-ascend lint image build
-    # Only arm64 build on openEuler arm64, only amd64 build on Ubuntu amd64
-    # Push event or PR with both 'ready' and 'ready-for-test' labels
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
