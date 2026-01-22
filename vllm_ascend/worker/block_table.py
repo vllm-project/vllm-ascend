@@ -247,17 +247,18 @@ class BlockTable:
 class MultiGroupBlockTable:
     """The BlockTables for each KV cache group."""
 
-    def __init__(self,
-                 max_num_reqs: int,
-                 max_model_len: int,
-                 max_num_batched_tokens: int,
-                 pin_memory: bool,
-                 device: torch.device,
-                 block_sizes: list[int],
-                 num_speculative_tokens: int = 0,
-                 kernel_sizes: Optional[list[list[int]]] = None,
-                 cp_kv_cache_interleave_size: int = 1,
-                 kv_cache_groups: list[KVCacheGroupSpec] = None) -> None:
+    def __init__(
+            self,
+            max_num_reqs: int,
+            max_model_len: int,
+            max_num_batched_tokens: int,
+            pin_memory: bool,
+            device: torch.device,
+            block_sizes: list[int],
+            num_speculative_tokens: int = 0,
+            kernel_sizes: Optional[list[list[int]]] = None,
+            cp_kv_cache_interleave_size: int = 1,
+            kv_cache_groups: list[KVCacheGroupSpec] | None = None) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
         # so the block_size which used for calc max_num_blocks_per_req

@@ -49,7 +49,7 @@ class NPUInputBatch(InputBatch):
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
-        kv_cache_groups: list[KVCacheGroupSpec] = None,
+        kv_cache_groups: list[KVCacheGroupSpec] | None = None,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
