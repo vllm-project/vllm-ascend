@@ -159,14 +159,12 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 local_total_toks = local_chunked_kv_lens_rank.sum()
                 chunked_req_mask = self._get_chunked_req_mask(local_context_lens_allranks)
                 local_chunk_starts = torch.zeros(
-                    (len(local_context_lens_allranks)), dtype=torch.int32, device=self.device
+                    (len(local_context_lens_allranks),), dtype=torch.int32, device=self.device
                 )
-                cp_kv_recover_idx_for_chunk = common_long_seq_metadata.cp_kv_recover_idx_for_chunk
-                kv_inverse_idx_for_chunk = (
-                    torch.argsort(cp_kv_recover_idx_for_chunk.to(torch.float32))
-                    if cp_kv_recover_idx_for_chunk is not None
-                    else None
+                kv_inverse_idx_for_chunk = torch.argsort(
+                    common_long_seq_metadata.pcp_allgather_restore_idx[pcp_size * num_decode_tokens :].to(torch.float32)
                 )
+                cp_kv_recover_idx_for_chunk = torch.argsort(kv_inverse_idx_for_chunk)
 
                 batch_chunk_seq_mask = local_context_lens_allranks[:, self.pcp_rank, self.dcp_rank] == 0
                 batch_chunk_seq_mask = torch.repeat_interleave(
