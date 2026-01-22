@@ -100,6 +100,25 @@ check_and_config() {
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 }
 
+install_pypto() {
+        echo "====> Installing pypto"
+    if ! wget -q http://container-obsfs-filesystem.obs.cn-north-4.myhuaweicloud.com/package/cann/pto-isa/version_compile/master/202601/20260112/ubuntu_aarch64/cann-pto-isa_8.5.0_linux-aarch64.run; then
+        echo "Failed to download cann-pto-isa_8.5.0_linux-aarch64.run"
+        return 1
+    fi
+    chmod +x ./cann-pto-isa_8.5.0_linux-aarch64.run
+    ./cann-pto-isa_8.5.0_linux-aarch64.run --quiet --full
+    source /usr/local/Ascend/cann/set_env.sh
+    rm -f cann-pto-isa_8.5.0_linux-aarch64.run
+    echo "====> pypto-isa install completed"
+    apt-get update && apt-get install -y git vim wget net-tools gcc g++ cmake make
+    git clone -b master --depth 1 https://gitcode.com/cann/pypto.git && cd pypto
+    python3 -m pip install -r python/requirements.txt
+    python3 -m pip install . --verbose
+    rm -rf ../pypto
+    echo "====> pypto install completed"
+}
+
 install_extra_components() {
     echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
     
