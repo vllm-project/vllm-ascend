@@ -4,14 +4,13 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-01-21 10:23+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"PO-Revision-Date: 2026-01-22 18:40+0800\n"
+"Last-Translator: Gemini\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -23,5 +22,4 @@ msgstr ""
 #: ../../source/user_guide/deployment_guide/index.md:1
 #: ../../source/user_guide/deployment_guide/index.md:3
 msgid "Deployment Guide"
-msgstr ""
-
+msgstr "部署指南"

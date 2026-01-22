@@ -22,12 +22,10 @@ msgid "Support Matrix"
 msgstr "支持矩阵"
 
 #: ../../source/user_guide/support_matrix/index.md:1
-#, fuzzy
 msgid "Features and Models"
 msgstr "特性与模型"
 
 #: ../../source/user_guide/support_matrix/index.md:3
-#, fuzzy
 msgid "This section provides a detailed matrix supported by vLLM Ascend."
 msgstr "本节提供了 vLLM Ascend 的详细支持矩阵。"
 

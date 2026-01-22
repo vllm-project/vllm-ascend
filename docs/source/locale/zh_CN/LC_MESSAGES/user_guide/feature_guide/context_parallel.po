@@ -4,14 +4,13 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-01-21 10:23+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"PO-Revision-Date: 2026-01-22 18:20+0800\n"
+"Last-Translator: Gemini\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -22,11 +21,11 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:1
 msgid "Context Parallel Guide"
-msgstr ""
+msgstr "上下文并行指南"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:3
 msgid "Overview"
-msgstr ""
+msgstr "概述"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:5
 msgid ""
@@ -35,10 +34,12 @@ msgid ""
 "Parallel) and `DCP` (Decode Context Parallel), which reduces NPU memory "
 "usage and improves inference speed in long sequence LLM inference."
 msgstr ""
+"本指南介绍如何使用上下文并行（Context Parallel），这是一种长序列推理优化技术。"
+"上下文并行包括 `PCP`（预填充上下文并行）和 `DCP`（解码上下文并行），能够降低长序列 LLM 推理中的 NPU 显存占用并提高推理速度。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:7
 msgid "Benefits of Context Parallel"
-msgstr ""
+msgstr "上下文并行的优势"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:8
 msgid ""
@@ -48,6 +49,8 @@ msgid ""
 "implement context parallel separately for them. The major considerations "
 "are:"
 msgstr ""
+"上下文并行主要解决长上下文请求的服务问题。由于预填充（Prefill）和解码（Decode）呈现出截然不同的特性，"
+"且具有不同的 SLO（服务水平目标），我们需要分别为它们实现上下文并行。主要考量点包括："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:10
 msgid ""
@@ -55,6 +58,7 @@ msgid ""
 "(time to first token) by amortizing the computation time of the prefill "
 "across query tokens."
 msgstr ""
+"对于长上下文预填充，我们可以使用上下文并行通过在查询 Token 之间分摊预填充的计算时间，从而降低 TTFT（首字延迟）。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:11
 msgid ""
@@ -62,6 +66,7 @@ msgid ""
 "duplication and offer more space for KV cache to increase the batchsize "
 "(and hence the throughput)."
 msgstr ""
+"对于长上下文解码，我们可以使用上下文并行来减少 KV Cache 的重复，并为 KV Cache 提供更多空间以增加 Batch Size（从而提高吞吐量）。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:13
 msgid ""
@@ -69,119 +74,120 @@ msgid ""
 "parallel, please refer to the [context parallel developer "
 "guide](../../developer_guide/feature_guide/context_parallel.md)."
 msgstr ""
+"欲了解更多关于上下文并行的理论和实现细节，请参考 [上下文并行开发者指南](../../developer_guide/feature_guide/context_parallel.md)。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:15
 msgid "Supported Scenarios"
-msgstr ""
+msgstr "支持场景"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:16
 msgid ""
 "Currently context parallel can be used together with most other features,"
 " supported features are as follows:"
-msgstr ""
+msgstr "目前上下文并行可以与大多数其他功能协同使用，支持的功能如下："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "Eager"
-msgstr ""
+msgstr "Eager 模式"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "Graph"
-msgstr ""
+msgstr "图模式 (Graph)"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "Prefix <br> Cache"
-msgstr ""
+msgstr "前缀缓存 <br> (Prefix Cache)"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "Chunked <br> Prefill"
-msgstr ""
+msgstr "分块预填充 <br> (Chunked Prefill)"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "SpecDecode <br> (MTP)"
-msgstr ""
+msgstr "投机解码 <br> (MTP)"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "PD <br> disaggregation"
-msgstr ""
+msgstr "PD 分离 <br> (PD disaggregation)"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "MLAPO"
-msgstr ""
+msgstr "MLAPO"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "**PCP**"
-msgstr ""
+msgstr "**PCP**"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "✅"
-msgstr ""
+msgstr "✅"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "**DCP**"
-msgstr ""
+msgstr "**DCP**"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:22
 msgid "How to use Context Parallel"
-msgstr ""
+msgstr "如何使用上下文并行"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:23
 msgid ""
 "You can enable `PCP` and `DCP` by `prefill_context_parallel_size` and "
 "`decode_context_parallel_size`, refer to the following example:"
-msgstr ""
+msgstr "您可以通过 `prefill_context_parallel_size` 和 `decode_context_parallel_size` 启用 `PCP` 和 `DCP`，参考如下示例："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:25
 msgid "Offline example:"
-msgstr ""
+msgstr "离线示例："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:44
 msgid "Online example:"
-msgstr ""
+msgstr "在线示例："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:53
 msgid ""
 "The total world_size is `tensor_parallel_size` * "
 "`prefill_context_parallel_size`, so the examples above need 4 NPUs for "
 "each."
-msgstr ""
+msgstr "总的 world_size 是 `tensor_parallel_size` * `prefill_context_parallel_size`，因此上述示例每个都需要 4 个 NPU。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:55
 msgid "Constraints"
-msgstr ""
+msgstr "限制条件"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:56
 msgid "While using DCP, the following constraints must be met:"
-msgstr ""
+msgstr "使用 DCP 时，必须满足以下限制条件："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:57
 msgid "For MLA based model, such as Deepseek-R1:"
-msgstr ""
+msgstr "对于基于 MLA 的模型，如 DeepSeek-R1："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:58
 msgid "`tensor_parallel_size >= decode_context_parallel_size`"
-msgstr ""
+msgstr "`tensor_parallel_size >= decode_context_parallel_size`"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:59
 #, python-format
 msgid "`tensor_parallel_size % decode_context_parallel_size == 0`"
-msgstr ""
+msgstr "`tensor_parallel_size % decode_context_parallel_size == 0`"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:60
 msgid "For GQA based model, such as Qwen3-235B:"
-msgstr ""
+msgstr "对于基于 GQA 的模型，如 Qwen3-235B："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:61
 msgid ""
 "`(tensor_parallel_size // num_key_value_heads) >= "
 "decode_context_parallel_size`"
-msgstr ""
+msgstr "`(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:62
 #, python-format
 msgid ""
 "`(tensor_parallel_size // num_key_value_heads) % "
 "decode_context_parallel_size == 0`"
-msgstr ""
+msgstr "`(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:64
 msgid ""
@@ -191,10 +197,13 @@ msgid ""
 "`block_size`(default: 128), which specify cp to split KV cache in a "
 "block-interleave style. For example:"
 msgstr ""
+"在需要进行 KV Cache 传输的场景（如 KV Pooling、PD 分离）中使用上下文并行时，为了简化 KV Cache 传输，"
+"必须将 `cp_kv_cache_interleave_size` 设置为与 KV Cache `block_size`（默认值：128）相同的值，"
+"这将指定上下文并行以块交织（block-interleave）风格切分 KV Cache。例如："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:75
 msgid "Experimental Results"
-msgstr ""
+msgstr "实验结果"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:76
 msgid ""
@@ -203,92 +212,93 @@ msgid ""
 "deploy PD-disaggregate instances in the environment of 64 cards Ascend "
 "910C*64G (A3), the configuration and performance data are as follows."
 msgstr ""
+"为了评估上下文并行在长序列 LLM 推理场景中的有效性，我们使用了 **DeepSeek-R1-W8A8** 和 **Qwen3-235B** 模型，"
+"并在 64 卡 Ascend 910C*64G (A3) 环境下部署 PD 分离实例，配置和性能数据如下。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:78
 msgid "DeepSeek-R1-W8A8:"
-msgstr ""
+msgstr "DeepSeek-R1-W8A8："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "Configuration"
-msgstr ""
+msgstr "配置"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "Input length <br> 32k"
-msgstr ""
+msgstr "输入长度 <br> 32k"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "Input length <br> 64k"
-msgstr ""
+msgstr "输入长度 <br> 64k"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "Input length <br> 128k"
-msgstr ""
+msgstr "输入长度 <br> 128k"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "P node: (DP2 TP8 EP16) *2 <br> D node: (DP32 EP32) *1"
-msgstr ""
+msgstr "P 节点: (DP2 TP8 EP16) *2 <br> D 节点: (DP32 EP32) *1"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 9.3s <br> TPOT: 72ms"
-msgstr ""
+msgstr "TTFT: 9.3s <br> TPOT: 72ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 22.8s <br> TPOT: 74ms"
-msgstr ""
+msgstr "TTFT: 22.8s <br> TPOT: 74ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 73.2s <br> TPOT: 82ms"
-msgstr ""
+msgstr "TTFT: 73.2s <br> TPOT: 82ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "P node: (PCP2 TP8 DCP8 EP16) *2 <br> D node: (DP32 EP32) *1"
-msgstr ""
+msgstr "P 节点: (PCP2 TP8 DCP8 EP16) *2 <br> D 节点: (DP32 EP32) *1"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 7.9s <br> TPOT: 74ms"
-msgstr ""
+msgstr "TTFT: 7.9s <br> TPOT: 74ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 15.9s <br> TPOT: 78ms"
-msgstr ""
+msgstr "TTFT: 15.9s <br> TPOT: 78ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 46.0s <br> TPOT: 83ms"
-msgstr ""
+msgstr "TTFT: 46.0s <br> TPOT: 83ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:84
 msgid "Qwen3-235B:"
-msgstr ""
+msgstr "Qwen3-235B："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "Input length <br> 120k"
-msgstr ""
+msgstr "输入长度 <br> 120k"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 5.1s <br> TPOT: 65ms"
-msgstr ""
+msgstr "TTFT: 5.1s <br> TPOT: 65ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 13.1s <br> TPOT: 85ms"
-msgstr ""
+msgstr "TTFT: 13.1s <br> TPOT: 85ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 33.9s <br> TPOT: 120ms"
-msgstr ""
+msgstr "TTFT: 33.9s <br> TPOT: 120ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "P node: (PCP2 TP8 DCP2 EP16) *2 <br> D node: (DP32 EP32) *1"
-msgstr ""
+msgstr "P 节点: (PCP2 TP8 DCP2 EP16) *2 <br> D 节点: (DP32 EP32) *1"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 3.0s <br> TPOT: 66ms"
-msgstr ""
+msgstr "TTFT: 3.0s <br> TPOT: 66ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 8.9s <br> TPOT: 86ms"
-msgstr ""
+msgstr "TTFT: 8.9s <br> TPOT: 86ms"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 22.7s <br> TPOT: 121ms"
-msgstr ""
-
+msgstr "TTFT: 22.7s <br> TPOT: 121ms"

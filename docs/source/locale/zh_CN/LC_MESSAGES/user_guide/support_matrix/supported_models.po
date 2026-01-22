@@ -4,14 +4,13 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
-#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version:  vllm-ascend\n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-01-21 10:23+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"PO-Revision-Date: 2026-01-22 16:18+0800\n"
+"Last-Translator: Gemini\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -21,19 +20,16 @@ msgstr ""
 "Generated-By: Babel 2.17.0\n"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:1
-#, fuzzy
 msgid "Supported Models"
-msgstr "支持"
+msgstr "支持的模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:3
-#, fuzzy
 msgid ""
 "Get the latest info here: https://github.com/vllm-project/vllm-"
 "ascend/issues/1608"
-msgstr "[#496](https://github.com/vllm-project/vllm-ascend/issues/496)"
+msgstr "在此处获取最新信息：https://github.com/vllm-project/vllm-ascend/issues/1608"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:5
-#, fuzzy
 msgid "Text-Only Language Models"
 msgstr "纯文本语言模型"
 
@@ -47,91 +43,88 @@ msgid "Model"
 msgstr "模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Support"
-msgstr "支持"
+msgstr "支持情况"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Note"
-msgstr "注释"
+msgstr "备注"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "BF16"
-msgstr ""
+msgstr "BF16"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Supported Hardware"
-msgstr "支持"
+msgstr "支持的硬件"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "W8A8"
-msgstr ""
+msgstr "W8A8"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Chunked Prefill"
-msgstr ""
+msgstr "分块预填充 (Chunked Prefill)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Automatic Prefix Cache"
-msgstr ""
+msgstr "自动前缀缓存"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "LoRA"
-msgstr ""
+msgstr "LoRA"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Speculative Decoding"
-msgstr ""
+msgstr "猜测性解码"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Async Scheduling"
-msgstr ""
+msgstr "异步调度"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Tensor Parallel"
-msgstr ""
+msgstr "张量并行"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Pipeline Parallel"
-msgstr ""
+msgstr "流水线并行"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Expert Parallel"
-msgstr ""
+msgstr "专家并行"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Data Parallel"
-msgstr ""
+msgstr "数据并行"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Prefill-decode Disaggregation"
-msgstr ""
+msgstr "预填充-解码分离"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Piecewise AclGraph"
-msgstr ""
+msgstr "分段 AclGraph"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Fullgraph AclGraph"
-msgstr ""
+msgstr "全图 AclGraph"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "max-model-len"
-msgstr ""
+msgstr "最大模型长度"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "MLP Weight Prefetch"
-msgstr ""
+msgstr "MLP 权重预取"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Doc"
-msgstr ""
+msgstr "文档"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "DeepSeek V3/3.1"
-msgstr "DeepSeek v3"
+msgstr "DeepSeek V3/3.1"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "✅"
@@ -139,28 +132,27 @@ msgstr "✅"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "A2/A3"
-msgstr ""
+msgstr "A2/A3"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "240k"
-msgstr ""
+msgstr "240k"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[DeepSeek-V3.1](../../tutorials/DeepSeek-V3.1.md)"
-msgstr ""
+msgstr "[DeepSeek-V3.1 教程](../../tutorials/DeepSeek-V3.1.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "DeepSeek V3.2"
-msgstr "DeepSeek v3"
+msgstr "DeepSeek V3.2"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "160k"
-msgstr ""
+msgstr "160k"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[DeepSeek-V3.2](../../tutorials/DeepSeek-V3.2.md)"
-msgstr ""
+msgstr "[DeepSeek-V3.2 教程](../../tutorials/DeepSeek-V3.2.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "DeepSeek R1"
@@ -168,16 +160,15 @@ msgstr "DeepSeek R1"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "128k"
-msgstr ""
+msgstr "128k"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[DeepSeek-R1](../../tutorials/DeepSeek-R1.md)"
-msgstr ""
+msgstr "[DeepSeek-R1 教程](../../tutorials/DeepSeek-R1.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "DeepSeek Distill (Qwen/Llama)"
-msgstr "DeepSeek 精炼（Qwen/LLama）"
+msgstr "DeepSeek Distill (Qwen/Llama)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3"
@@ -185,21 +176,19 @@ msgstr "Qwen3"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen3-Dense](../../tutorials/Qwen3-Dense.md)"
-msgstr ""
+msgstr "[Qwen3-Dense 教程](../../tutorials/Qwen3-Dense.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen3-based"
-msgstr "Qwen3-Moe"
+msgstr "Qwen3-based"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen3-Coder"
-msgstr "Qwen3-Moe"
+msgstr "Qwen3-Coder"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen3-Coder-30B-A3B tutorial](../../tutorials/Qwen3-Coder-30B-A3B.md)"
-msgstr ""
+msgstr "[Qwen3-Coder-30B-A3B 教程](../../tutorials/Qwen3-Coder-30B-A3B.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3-Moe"
@@ -207,20 +196,19 @@ msgstr "Qwen3-Moe"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "256k"
-msgstr ""
+msgstr "256k"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen3-235B-A22B](../../tutorials/Qwen3-235B-A22B.md)"
-msgstr ""
+msgstr "[Qwen3-235B-A22B 教程](../../tutorials/Qwen3-235B-A22B.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen3-Next"
-msgstr "Qwen3-Moe"
+msgstr "Qwen3-Next"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen3-Next](../../tutorials/Qwen3-Next.md)"
-msgstr ""
+msgstr "[Qwen3-Next 教程](../../tutorials/Qwen3-Next.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen2.5"
@@ -228,44 +216,39 @@ msgstr "Qwen2.5"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen2.5-7B](../../tutorials/Qwen2.5-7B.md)"
-msgstr ""
+msgstr "[Qwen2.5-7B 教程](../../tutorials/Qwen2.5-7B.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen2"
-msgstr "Qwen2.5"
+msgstr "Qwen2"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen2-based"
-msgstr "Qwen2-VL"
+msgstr "Qwen2-based"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "QwQ-32B"
 msgstr "QwQ-32B"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Llama2/3/3.1/3.2"
-msgstr "LLama3.1/3.2"
+msgstr "Llama2/3/3.1/3.2"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Internlm"
 msgstr "Internlm"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "[#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)"
-msgstr "[#496](https://github.com/vllm-project/vllm-ascend/issues/496)"
+msgstr "[#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Baichuan"
-msgstr "百川"
+msgstr "Baichuan"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Baichuan2"
-msgstr "百川"
+msgstr "Baichuan2"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Phi-4-mini"
@@ -281,11 +264,11 @@ msgstr "MiniCPM3"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Ernie4.5"
-msgstr ""
+msgstr "Ernie4.5"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Ernie4.5-Moe"
-msgstr ""
+msgstr "Ernie4.5-Moe"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Gemma-2"
@@ -297,52 +280,47 @@ msgstr "Gemma-3"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Phi-3/4"
-msgstr ""
+msgstr "Phi-3/4"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Mistral/Mistral-Instruct"
-msgstr ""
+msgstr "Mistral/Mistral-Instruct"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "GLM-4.x"
-msgstr "GLM-4v"
+msgstr "GLM-4.x"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "../../tutorials/GLM4.x.md"
-msgstr ""
+msgstr "../../tutorials/GLM4.x.md"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Kimi-K2-Thinking"
-msgstr ""
+msgstr "Kimi-K2-Thinking"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Kimi-K2-Thinking](../../tutorials/Kimi-K2-Thinking.md)"
-msgstr ""
+msgstr "[Kimi-K2-Thinking 教程](../../tutorials/Kimi-K2-Thinking.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "GLM-4"
-msgstr "GLM-4v"
+msgstr "GLM-4"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "❌"
 msgstr "❌"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "[#2255](https://github.com/vllm-project/vllm-ascend/issues/2255)"
-msgstr "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
+msgstr "[#2255](https://github.com/vllm-project/vllm-ascend/issues/2255)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "GLM-4-0414"
-msgstr "GLM-4v"
+msgstr "GLM-4-0414"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "[#2258](https://github.com/vllm-project/vllm-ascend/issues/2258)"
-msgstr "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
+msgstr "[#2258](https://github.com/vllm-project/vllm-ascend/issues/2258)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "ChatGLM"
@@ -353,13 +331,12 @@ msgid "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
 msgstr "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "DeepSeek V2.5"
-msgstr "DeepSeek v2.5"
+msgstr "DeepSeek V2.5"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "🟡"
-msgstr ""
+msgstr "🟡"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Need test"
@@ -371,46 +348,43 @@ msgstr "Mllama"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "MiniMax-Text"
-msgstr ""
+msgstr "MiniMax-Text"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:46
 msgid "Pooling Models"
 msgstr "池化模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen3-Embedding"
-msgstr "Qwen3-Moe"
+msgstr "Qwen3-Embedding"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen3_embedding](../../tutorials/Qwen3_embedding.md)"
-msgstr ""
+msgstr "[Qwen3_embedding 教程](../../tutorials/Qwen3_embedding.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen3-Reranker"
-msgstr "Qwen3-Moe"
+msgstr "Qwen3-Reranker"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen3_reranker](../../tutorials/Qwen3_reranker.md)"
-msgstr ""
+msgstr "[Qwen3_reranker 教程](../../tutorials/Qwen3_reranker.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Molmo"
 msgstr "Molmo"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "[1942](https://github.com/vllm-project/vllm-ascend/issues/1942)"
-msgstr "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
+msgstr "[1942](https://github.com/vllm-project/vllm-ascend/issues/1942)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "XLM-RoBERTa-based"
-msgstr "基于XLM-RoBERTa"
+msgstr "XLM-RoBERTa-based"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Bert"
-msgstr ""
+msgstr "Bert"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:56
 msgid "Multimodal Language Models"
@@ -426,62 +400,57 @@ msgstr "Qwen2.5-VL"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "30k"
-msgstr ""
+msgstr "30k"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen-VL-Dense](../../tutorials/Qwen-VL-Dense.md)"
-msgstr ""
+msgstr "[Qwen-VL-Dense 教程](../../tutorials/Qwen-VL-Dense.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen3-VL"
-msgstr "Qwen2-VL"
+msgstr "Qwen3-VL"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen3-VL-MOE"
-msgstr "Qwen3-Moe"
+msgstr "Qwen3-VL-MOE"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen3-VL-MOE](../../tutorials/Qwen3-VL-235B-A22B-Instruct.md)"
-msgstr ""
+msgstr "[Qwen3-VL-MOE 教程](../../tutorials/Qwen3-VL-235B-A22B-Instruct.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3-Omni-30B-A3B-Thinking"
-msgstr ""
+msgstr "Qwen3-Omni-30B-A3B-Thinking"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid ""
 "[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/Qwen3-Omni-30B-A3B-"
 "Thinking.md)"
-msgstr ""
+msgstr "[Qwen3-Omni-30B-A3B-Thinking 教程](../../tutorials/Qwen3-Omni-30B-A3B-Thinking.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen2.5-Omni"
-msgstr "Qwen2.5"
+msgstr "Qwen2.5-Omni"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen2.5-Omni](../../tutorials/Qwen2.5-Omni.md)"
-msgstr ""
+msgstr "[Qwen2.5-Omni 教程](../../tutorials/Qwen2.5-Omni.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen3-Omni"
-msgstr "Qwen3-Moe"
+msgstr "Qwen3-Omni"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "QVQ"
-msgstr ""
+msgstr "QVQ"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Qwen2-Audio"
-msgstr "Qwen2-VL"
+msgstr "Qwen2-Audio"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Aria"
-msgstr ""
+msgstr "Aria"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "LLaVA-Next"
@@ -492,94 +461,77 @@ msgid "LLaVA-Next-Video"
 msgstr "LLaVA-Next-Video"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "MiniCPM-V"
-msgstr "MiniCPM"
+msgstr "MiniCPM-V"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Mistral3"
-msgstr "Mistral"
+msgstr "Mistral3"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Phi-3-Vision/Phi-3.5-Vision"
-msgstr "Phi-3-Vison/Phi-3.5-Vison"
+msgstr "Phi-3-Vision/Phi-3.5-Vision"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Gemma3"
-msgstr "Gemma-3"
+msgstr "Gemma3"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Llama3.2"
-msgstr "LLama3.1/3.2"
+msgstr "Llama3.2"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "PaddleOCR-VL"
-msgstr ""
+msgstr "PaddleOCR-VL"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "Llama4"
-msgstr "LLama4"
+msgstr "Llama4"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "[1972](https://github.com/vllm-project/vllm-ascend/issues/1972)"
-msgstr "[#496](https://github.com/vllm-project/vllm-ascend/issues/496)"
+msgstr "[1972](https://github.com/vllm-project/vllm-ascend/issues/1972)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Keye-VL-8B-Preview"
-msgstr ""
+msgstr "Keye-VL-8B-Preview"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "[1963](https://github.com/vllm-project/vllm-ascend/issues/1963)"
-msgstr "[#496](https://github.com/vllm-project/vllm-ascend/issues/496)"
+msgstr "[1963](https://github.com/vllm-project/vllm-ascend/issues/1963)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Florence-2"
-msgstr ""
+msgstr "Florence-2"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "[2259](https://github.com/vllm-project/vllm-ascend/issues/2259)"
-msgstr "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
+msgstr "[2259](https://github.com/vllm-project/vllm-ascend/issues/2259)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "GLM-4V"
-msgstr "GLM-4v"
+msgstr "GLM-4V"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "[2260](https://github.com/vllm-project/vllm-ascend/issues/2260)"
-msgstr "[#496](https://github.com/vllm-project/vllm-ascend/issues/496)"
+msgstr "[2260](https://github.com/vllm-project/vllm-ascend/issues/2260)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL"
-msgstr ""
+msgstr "InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "[2064](https://github.com/vllm-project/vllm-ascend/issues/2064)"
-msgstr "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
+msgstr "[2064](https://github.com/vllm-project/vllm-ascend/issues/2064)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Whisper"
-msgstr ""
+msgstr "Whisper"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#, fuzzy
 msgid "[2262](https://github.com/vllm-project/vllm-ascend/issues/2262)"
-msgstr "[#496](https://github.com/vllm-project/vllm-ascend/issues/496)"
+msgstr "[2262](https://github.com/vllm-project/vllm-ascend/issues/2262)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Ultravox"
 msgstr "Ultravox"
-
-#~ msgid "Model Support"
-#~ msgstr "模型支持"
-

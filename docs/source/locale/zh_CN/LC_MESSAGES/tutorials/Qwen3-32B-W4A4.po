@@ -4,14 +4,13 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-01-21 10:23+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"PO-Revision-Date: 2026-01-22 17:15+0800\n"
+"Last-Translator: Gemini\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -22,11 +21,11 @@ msgstr ""
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:1
 msgid "Qwen3-32B-W4A4"
-msgstr ""
+msgstr "Qwen3-32B-W4A4"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:3
 msgid "Introduction"
-msgstr ""
+msgstr "简介"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:5
 msgid ""
@@ -34,22 +33,25 @@ msgid ""
 "efficiency on Ascend devices. And W4A4 is supported since `v0.11.0rc1`. "
 "For modelslim, W4A4 is supported since `tag_MindStudio_8.2.RC1.B120_002`."
 msgstr ""
+"W4A4 平坦量化（Flat Quantization）旨在提升昇腾设备上的模型压缩率和推理效率。"
+"vLLM-Ascend 从 `v0.11.0rc1` 版本开始支持 W4A4。 "
+"对于 modelslim 工具，W4A4 从 `tag_MindStudio_8.2.RC1.B120_002` 版本开始支持。"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:8
 msgid "The following steps will show how to quantize Qwen3 32B to W4A4."
-msgstr ""
+msgstr "以下步骤将展示如何将 Qwen3 32B 模型量化为 W4A4 格式。"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:10
 msgid "Environment Preparation"
-msgstr ""
+msgstr "环境准备"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:12
 msgid "Run Docker Container"
-msgstr ""
+msgstr "运行 Docker 容器"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:35
 msgid "Install modelslim and Convert Model"
-msgstr ""
+msgstr "安装 modelslim 并转换模型"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:38
 msgid ""
@@ -57,32 +59,33 @@ msgid ""
 "we uploaded, see https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-"
 "W4A4"
 msgstr ""
+"您可以选择自行转换模型，或者直接使用我们已上传的量化模型，"
+"详见：https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:68
 msgid "Verify the Quantized Model"
-msgstr ""
+msgstr "验证量化模型"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:70
 msgid "The converted model files look like:"
-msgstr ""
+msgstr "转换后的模型文件结构如下："
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:95
 msgid "Deployment"
-msgstr ""
+msgstr "部署"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:97
 msgid "Online Serving on Single NPU"
-msgstr ""
+msgstr "单 NPU 在线服务"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:103
 msgid "Once your server is started, you can query the model with input prompts."
-msgstr ""
+msgstr "服务器启动后，您可以使用输入提示词查询模型。"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:118
 msgid "Offline Inference on Single NPU"
-msgstr ""
+msgstr "单 NPU 离线推理"
 
 #: ../../source/tutorials/Qwen3-32B-W4A4.md:121
 msgid "To enable quantization for ascend, quantization method must be \"ascend\"."
-msgstr ""
-
+msgstr "若要在昇腾设备上启用量化，量化方法（quantization method）必须设置为 \"ascend\"。"

@@ -49,7 +49,7 @@ msgstr "通用常见问题"
 
 #: ../../source/faqs.md:10
 msgid "1. What devices are currently supported?"
-msgstr "1. 目前支持哪些设备？"
+msgstr "1.目前支持哪些设备？"
 
 #: ../../source/faqs.md:12
 msgid ""
@@ -117,7 +117,7 @@ msgstr ""
 
 #: ../../source/faqs.md:27
 msgid "2. How to get our docker containers?"
-msgstr "2. 如何获取我们的 Docker 容器？"
+msgstr "2.如何获取我们的 Docker 容器？"
 
 #: ../../source/faqs.md:29
 msgid ""
@@ -156,7 +156,7 @@ msgstr "**在无网络环境下导入 Docker 镜像：**"
 
 #: ../../source/faqs.md:68
 msgid "3. What models does vllm-ascend supports?"
-msgstr "3. vllm-ascend 支持哪些模型？"
+msgstr "3.vllm-ascend 支持哪些模型？"
 
 #: ../../source/faqs.md:70
 msgid ""
@@ -167,7 +167,7 @@ msgstr ""
 
 #: ../../source/faqs.md:72
 msgid "4. How to get in touch with our community?"
-msgstr "4. 如何与我们的社区取得联系？"
+msgstr "4.如何与我们的社区取得联系？"
 
 #: ../../source/faqs.md:74
 msgid ""
@@ -205,7 +205,7 @@ msgstr ""
 
 #: ../../source/faqs.md:81
 msgid "5. What features does vllm-ascend V1 supports?"
-msgstr "5. vllm-ascend V1 支持哪些功能？"
+msgstr "5.vllm-ascend V1 支持哪些功能？"
 
 #: ../../source/faqs.md:83
 msgid ""
@@ -218,7 +218,7 @@ msgstr ""
 msgid ""
 "6. How to solve the problem of \"Failed to infer device type\" or "
 "\"libatb.so: cannot open shared object file\"?"
-msgstr "6. 如何解决“无法推断设备类型”或“libatb.so：无法打开共享对象文件”的问题？"
+msgstr "6.如何解决“无法推断设备类型”或“libatb.so：无法打开共享对象文件”的问题？"
 
 #: ../../source/faqs.md:87
 msgid ""
@@ -252,7 +252,7 @@ msgstr "如果上述步骤仍无法解决问题，请随时提交 GitHub issue�
 
 #: ../../source/faqs.md:102
 msgid "7. How vllm-ascend work with vLLM?"
-msgstr "7. vllm-ascend 如何与 vLLM 协同工作？"
+msgstr "7.vllm-ascend 如何与 vLLM 协同工作？"
 
 #: ../../source/faqs.md:103
 msgid ""
@@ -266,7 +266,7 @@ msgstr ""
 
 #: ../../source/faqs.md:105
 msgid "8. Does vllm-ascend support Prefill Disaggregation feature?"
-msgstr "8. vllm-ascend 支持预填充解耦 (Prefill Disaggregation) 功能吗？"
+msgstr "8.vllm-ascend 支持预填充解耦 (Prefill Disaggregation) 功能吗？"
 
 #: ../../source/faqs.md:107
 msgid ""
@@ -279,7 +279,7 @@ msgstr ""
 
 #: ../../source/faqs.md:109
 msgid "9. Does vllm-ascend support quantization method?"
-msgstr "9. vllm-ascend 支持量化方法吗？"
+msgstr "9.vllm-ascend 支持量化方法吗？"
 
 #: ../../source/faqs.md:111
 msgid ""
@@ -289,7 +289,7 @@ msgstr "目前，vllm-ascend 已支持 w8a8、w4a8 和 w4a4 量化方法。"
 
 #: ../../source/faqs.md:113
 msgid "10. How to run a W8A8 DeepSeek model?"
-msgstr "10. 如何运行 W8A8 DeepSeek 模型？"
+msgstr "10.如何运行 W8A8 DeepSeek 模型？"
 
 #: ../../source/faqs.md:115
 msgid ""
@@ -301,7 +301,7 @@ msgstr ""
 
 #: ../../source/faqs.md:117
 msgid "11. How is vllm-ascend tested?"
-msgstr "11. vllm-ascend 是如何进行测试的？"
+msgstr "11.vllm-ascend 是如何进行测试的？"
 
 #: ../../source/faqs.md:119
 msgid ""
@@ -350,7 +350,7 @@ msgstr "最后，在未来的每个正式版本发布时，我们都会公开性
 
 #: ../../source/faqs.md:131
 msgid "12. How to fix the error \"InvalidVersion\" when using vllm-ascend?"
-msgstr "12. 使用 vllm-ascend 时出现 “InvalidVersion” 错误如何解决？"
+msgstr "12.使用 vllm-ascend 时出现 “InvalidVersion” 错误如何解决？"
 
 #: ../../source/faqs.md:132
 msgid ""
@@ -367,7 +367,7 @@ msgstr ""
 
 #: ../../source/faqs.md:134
 msgid "13. How to handle the out-of-memory issue?"
-msgstr "13. 如何处理内存溢出 (OOM) 问题？"
+msgstr "13.如何处理内存溢出 (OOM) 问题？"
 
 #: ../../source/faqs.md:135
 msgid ""
@@ -419,7 +419,7 @@ msgstr ""
 
 #: ../../source/faqs.md:145
 msgid "14. Failed to enable NPU graph mode when running DeepSeek."
-msgstr "14. 运行 DeepSeek 时无法启用 NPU 图模式。"
+msgstr "14.运行 DeepSeek 时无法启用 NPU 图模式。"
 
 #: ../../source/faqs.md:146
 msgid ""
@@ -447,7 +447,7 @@ msgstr ""
 msgid ""
 "15. Failed to reinstall vllm-ascend from source after uninstalling vllm-"
 "ascend."
-msgstr "15. 卸载 vllm-ascend 后无法从源码重新安装 vllm-ascend。"
+msgstr "15.卸载 vllm-ascend 后无法从源码重新安装 vllm-ascend。"
 
 #: ../../source/faqs.md:156
 msgid ""
@@ -461,7 +461,7 @@ msgstr ""
 
 #: ../../source/faqs.md:158
 msgid "16. How to generate deterministic results when using vllm-ascend?"
-msgstr "16. 使用 vllm-ascend 时如何生成确定性结果？"
+msgstr "16.使用 vllm-ascend 时如何生成确定性结果？"
 
 #: ../../source/faqs.md:159
 msgid "There are several factors that affect output certainty:"
@@ -481,7 +481,7 @@ msgstr "设置以下环境变量参数："
 msgid ""
 "17. How to fix the error \"ImportError: Please install vllm[audio] for "
 "audio support\" for the Qwen2.5-Omni model？"
-msgstr "17. Qwen2.5-Omni 模型报错 “ImportError: Please install vllm[audio] for audio support” 如何解决？"
+msgstr "17.Qwen2.5-Omni 模型报错 “ImportError: Please install vllm[audio] for audio support” 如何解决？"
 
 #: ../../source/faqs.md:196
 msgid ""
@@ -499,7 +499,7 @@ msgstr ""
 msgid ""
 "18. How to troubleshoot and resolve size capture failures resulting from "
 "stream resource exhaustion, and what are the underlying causes?"
-msgstr "18. 如何排查并解决因流资源耗尽导致的尺寸捕获（Size Capture）失败，其根本原因是什么？"
+msgstr "18.如何排查并解决因流资源耗尽导致的尺寸捕获（Size Capture）失败，其根本原因是什么？"
 
 #: ../../source/faqs.md:207
 msgid "Recommended mitigation strategies:"
@@ -535,11 +535,11 @@ msgstr ""
 
 #: ../../source/faqs.md:214
 msgid "19. How to install custom version of torch_npu?"
-msgstr "19. 如何安装自定义版本的 torch_npu？"
+msgstr "19.如何安装自定义版本的 torch_npu？"
 
 #: ../../source/faqs.md:215
 msgid ""
-"torch-npu will be overridden  when installing vllm-ascend. If you need to"
+"torch-npu will be overridden  when installing vllm-ascend. If you need to"
 " install a specific version of torch-npu, you can manually install the "
 "specified version of torch-npu after vllm-ascend is installed."
 msgstr ""
@@ -550,7 +550,7 @@ msgstr ""
 msgid ""
 "20. On certain systems (e.g., Kylin OS), `docker pull` may fail with an "
 "`invalid tar header` error"
-msgstr "20. 在某些系统（如麒麟 OS）上，执行 `docker pull` 可能会报错 `invalid tar header`"
+msgstr "20.在某些系统（如麒麟 OS）上，执行 `docker pull` 可能会报错 `invalid tar header`"
 
 #: ../../source/faqs.md:219
 msgid ""
@@ -585,7 +585,7 @@ msgstr "将 `vllm_ascend_<tag>.tar` 文件（其中 `<tag>` 是您使用的镜�
 msgid ""
 "21. Why am I getting an error when executing the script to start a Docker"
 " container? The error message is: \"operation not permitted\"."
-msgstr "21. 为什么执行启动 Docker 容器的脚本时会报错 “operation not permitted”？"
+msgstr "21.为什么执行启动 Docker 容器的脚本时会报错 “operation not permitted”？"
 
 #: ../../source/faqs.md:245
 msgid ""
@@ -602,7 +602,7 @@ msgstr ""
 
 #: ../../source/faqs.md:247
 msgid "22. How to achieve low latency in a small batch scenario?"
-msgstr "22. 如何在小 Batch 场景下实现低延迟？"
+msgstr "22.如何在小 Batch 场景下实现低延迟？"
 
 #: ../../source/faqs.md:248
 msgid ""

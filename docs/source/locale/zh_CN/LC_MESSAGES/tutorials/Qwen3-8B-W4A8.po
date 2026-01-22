@@ -4,14 +4,13 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-01-21 10:23+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"PO-Revision-Date: 2026-01-22 17:50+0800\n"
+"Last-Translator: Gemini\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -22,19 +21,19 @@ msgstr ""
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:1
 msgid "Qwen3-8B-W4A8"
-msgstr ""
+msgstr "Qwen3-8B-W4A8"
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:3
 msgid "Run Docker Container"
-msgstr ""
+msgstr "运行 Docker 容器"
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:5
 msgid "w4a8 quantization feature is supported by v0.9.1rc2 and later."
-msgstr ""
+msgstr "W4A8 量化功能由 v0.9.1rc2 及更高版本支持。"
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:29
 msgid "Install modelslim and Convert Model"
-msgstr ""
+msgstr "安装 modelslim 并转换模型"
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:31
 msgid ""
@@ -42,32 +41,33 @@ msgid ""
 "we uploaded, see https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-"
 "W4A8"
 msgstr ""
+"您可以选择自行转换模型，或者直接使用我们已上传的量化模型，详见："
+"https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8"
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:71
 msgid "Verify the Quantized Model"
-msgstr ""
+msgstr "验证量化模型"
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:72
 msgid "The converted model files look like:"
-msgstr ""
+msgstr "转换后的模型文件结构如下："
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:90
 msgid ""
 "Run the following script to start the vLLM server with the quantized "
 "model:"
-msgstr ""
+msgstr "运行以下脚本，使用量化模型启动 vLLM 服务器："
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:98
 msgid "Once your server is started, you can query the model with input prompts."
-msgstr ""
+msgstr "服务器启动后，您可以使用输入提示词查询模型。"
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:113
 msgid ""
 "Run the following script to execute offline inference on single-NPU with "
 "the quantized model:"
-msgstr ""
+msgstr "运行以下脚本，使用量化模型在单 NPU 上执行离线推理："
 
 #: ../../source/tutorials/Qwen3-8B-W4A8.md:116
 msgid "To enable quantization for ascend, quantization method must be \"ascend\"."
-msgstr ""
-
+msgstr "若要在昇腾设备上启用量化，量化方法（quantization method）必须设置为 \"ascend\"。"

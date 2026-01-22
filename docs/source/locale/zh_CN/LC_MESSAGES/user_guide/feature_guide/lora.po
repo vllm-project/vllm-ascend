@@ -4,14 +4,13 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
-#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version:  vllm-ascend\n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-01-21 10:23+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"PO-Revision-Date: 2026-01-22 16:30+0800\n"
+"Last-Translator: Gemini\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -26,7 +25,7 @@ msgstr "LoRA 适配器指南"
 
 #: ../../source/user_guide/feature_guide/lora.md:3
 msgid "Overview"
-msgstr ""
+msgstr "概述"
 
 #: ../../source/user_guide/feature_guide/lora.md:4
 msgid ""
@@ -34,24 +33,24 @@ msgid ""
 "can be found in [vLLM official "
 "document](https://docs.vllm.ai/en/latest/features/lora.html)."
 msgstr ""
-"与 vLLM 类似，vllm-ascend 也支持 LoRA。用法及更多详情可参见 [vLLM "
+"与 vLLM 类似，vllm-ascend 也支持 LoRA。具体的用法及更多详情可参见 [vLLM "
 "官方文档](https://docs.vllm.ai/en/latest/features/lora.html)。"
 
 #: ../../source/user_guide/feature_guide/lora.md:6
-#, fuzzy
 msgid ""
 "You can refer to [Supported "
 "Models](https://docs.vllm.ai/en/latest/models/supported_models.html#list-"
 "of-text-only-language-models) to find which models support LoRA in vLLM."
 msgstr ""
-"你也可以参考[这个链接](https://docs.vllm.ai/en/latest/models/supported_models.html"
-"#list-of-text-only-language-models)来查找哪些模型在 vLLM 中支持 LoRA。"
+"您可以参考 [受支持的模型列表](https://docs.vllm.ai/en/latest/models/supported_models.html#list-of-text-only-language-models) "
+"来查找哪些模型在 vLLM 中支持 LoRA。"
 
 #: ../../source/user_guide/feature_guide/lora.md:8
 msgid ""
 "You can run LoRA with ACLGraph mode now. Please refer to [Graph Mode "
 "Guide](./graph_mode.md) for a better LoRA performance."
 msgstr ""
+"您现在可以在 ACLGraph 模式下运行 LoRA。为了获得更好的 LoRA 性能，请参考 [图模式 (Graph Mode) 指南](./graph_mode.md)。"
 
 #: ../../source/user_guide/feature_guide/lora.md:10
 msgid ""
@@ -60,20 +59,24 @@ msgid ""
 "model: https://www.modelscope.cn/models/vllm-ascend/llama-2-7b-sql-lora-"
 "test/files"
 msgstr ""
+"模型下载地址：基础模型："
+"https://www.modelscope.cn/models/vllm-ascend/Llama-2-7b-hf/files；"
+"LoRA 模型："
+"https://www.modelscope.cn/models/vllm-ascend/llama-2-7b-sql-lora-test/files"
 
 #: ../../source/user_guide/feature_guide/lora.md:15
 msgid "Example"
-msgstr ""
+msgstr "示例"
 
 #: ../../source/user_guide/feature_guide/lora.md:16
 msgid ""
 "We provide a simple LoRA example here, which enables the ACLGraph mode by"
 " default."
-msgstr ""
+msgstr "我们在此提供了一个简单的 LoRA 示例，该示例默认启用了 ACLGraph 模式。"
 
 #: ../../source/user_guide/feature_guide/lora.md:24
 msgid "Custom LoRA Operators"
-msgstr ""
+msgstr "定制 LoRA 算子"
 
 #: ../../source/user_guide/feature_guide/lora.md:26
 msgid ""
@@ -82,6 +85,8 @@ msgid ""
 "\"csrc/kernels\" directory of [vllm-ascend repo](https://github.com/vllm-"
 "project/vllm-ascend.git)."
 msgstr ""
+"我们已经实现了 LoRA 相关的 AscendC 算子，例如 bgmv_shrink, bgmv_expand, sgmv_shrink 和 sgmv_expand。"
+"您可以在 [vllm-ascend 仓库](https://github.com/vllm-project/vllm-ascend.git) 的 \"csrc/kernels\" 目录下找到它们。"
 
 #~ msgid "Tips"
 #~ msgstr "提示"
@@ -94,8 +99,6 @@ msgstr ""
 #~ "#fallback-to-eager-mode) to disable "
 #~ "graph mode and try again."
 #~ msgstr ""
-#~ "如果你在使用 LoRA 运行 vllm-ascend "
-#~ "时失败，可以按照[此说明](https://vllm-"
+#~ "如果您在使用 LoRA 运行 vllm-ascend 失败，可以参考 [此说明](https://vllm-"
 #~ "ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html"
-#~ "#fallback-to-eager-mode)禁用图模式后再重试。"
-
+#~ "#fallback-to-eager-mode) 禁用图模式后重试。"
