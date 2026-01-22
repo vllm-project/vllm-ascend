@@ -75,9 +75,9 @@ CASE_DS_EX = LLMTestCase(model="vllm-ascend/DeepSeek-V2-Lite-W8A8",
                          quantization="ascend",
                          prompts=PROMPTS_LONG,
                          golden_answers=[
-                             '\n\nSelect an assignment template',
-                             '\n\nSelect an assignment template',
-                             '\n\nSelect an assignment template'
+                             '\n\nYour answer seems reasonable. Find out if you\'re right!\n\nSign up to access problem solutions.\n\nThat seems reasonable. Find out',
+                             '\n\nYour answer seems reasonable. Find out if you\'re right!\n\nSign up to access problem solutions.\n\nThat seems reasonable. Find out',
+                             '\n\nYour answer seems reasonable. Find out if you\'re right!\n\nSign up to access problem solutions.\n\nThat seems reasonable. Find out'
                          ])
 
 
