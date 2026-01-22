@@ -87,6 +87,8 @@ def split_qkv_rmsnorm_rope_kernel(
             sizes=(Q_BLOCK_SIZE // HEAD_DIM, ROPE_DIM),
             strides=(1, 1),
         )
+        sin = tl.broadcast_to(sin, rope_part.shape)
+        cos = tl.broadcast_to(cos, rope_part.shape)
         x1 = tl.extract_slice(
             rope_part,
             offsets=(0, 0),
@@ -164,6 +166,8 @@ def split_qkv_rmsnorm_rope_kernel(
             sizes=(Q_BLOCK_SIZE // HEAD_DIM, ROPE_DIM),
             strides=(1, 1),
         )
+        sin = tl.broadcast_to(sin, rope_part.shape)
+        cos = tl.broadcast_to(cos, rope_part.shape)
         x1 = tl.extract_slice(
             rope_part,
             offsets=(0, 0),
