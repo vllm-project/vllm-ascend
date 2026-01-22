@@ -164,7 +164,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         ends = ends[skip_block_num:]
         keys = keys[skip_block_num:]
 
-        logger.info(
+        logger.debug(
             "Storing KV cache for %d out of %d blocks "
             "(skip_block_num=%d) for request %s",
             len(keys),
