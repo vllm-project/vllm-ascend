@@ -81,7 +81,7 @@ jobs:
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
           export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+          python3 -m pip install triton-ascend==3.2.0
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -207,7 +207,8 @@ jobs:
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
           export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+          python3 -m pip install triton-ascend==3.2.0
+          pip show triton-ascend
 
       - name: Run vllm-project/vllm-ascend test (light)
         env:
@@ -222,6 +223,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'full' }}
         run: |
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_qwen3_performance.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_data_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_expert_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
@@ -314,7 +316,7 @@ jobs:
           BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
           wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
           export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+          python3 -m pip install triton-ascend==3.2.0
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         working-directory: ./vllm-ascend

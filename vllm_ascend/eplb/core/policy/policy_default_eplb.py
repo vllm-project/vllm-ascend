@@ -24,7 +24,7 @@ class DynamicTable:
     placement_table = None
 
 
-class DynamicEplb(EplbPolicy):
+class DefaultEplb(EplbPolicy):
 
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
