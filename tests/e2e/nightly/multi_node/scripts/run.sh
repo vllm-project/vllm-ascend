@@ -108,14 +108,15 @@ install_pypto() {
     fi
     chmod +x ./cann-pto-isa_8.5.0_linux-aarch64.run
     ./cann-pto-isa_8.5.0_linux-aarch64.run --full
-     source /usr/local/Ascend/cann/set_env.sh
+    source /usr/local/Ascend/cann/set_env.sh
     rm -f cann-pto-isa_8.5.0_linux-aarch64.run
-    echo "====> cann pypto-isa install completed"
+    echo "====> pypto-isa install completed"
     apt-get update && apt-get install -y git vim wget net-tools gcc g++ cmake make
     git clone -b master --depth 1 https://gitcode.com/cann/pypto.git && cd pypto
     python3 -m pip install -r python/requirements.txt
     python3 -m pip install . --verbose
     rm -rf ../pypto
+    echo "====> pypto install completed"
 }
 
 install_extra_components() {
