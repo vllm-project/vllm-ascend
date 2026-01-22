@@ -27,6 +27,8 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
@@ -115,6 +117,8 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
@@ -256,6 +260,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
         self.vllm_config.model_config.use_mla = False
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(4)
         ])
@@ -370,6 +376,8 @@ class TestEagleProposerHelperMethods(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
