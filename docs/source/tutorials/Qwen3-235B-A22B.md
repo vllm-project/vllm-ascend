@@ -324,13 +324,6 @@ In this section, we provide simple scripts to re-produce our latest performance.
 - HDK/driver 25.3.RC1
 - triton_ascend 3.2.0
 
-**Notice:**
-triton_ascend is required for reproducing best performance of Qwen3-235B in vLLM-Ascend. If it is not installed in your environment, please follow the instructions below:
-
-```bash
-python3 -m pip install triton-ascend==3.2.0
-```
-
 ### Single Node A3 （64G*16）
 
 Example server scripts:
