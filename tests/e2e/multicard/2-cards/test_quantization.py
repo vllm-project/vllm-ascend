@@ -17,6 +17,7 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 from modelscope import snapshot_download  # type: ignore
+import pytest
 
 from tests.e2e.conftest import VllmRunner
 
@@ -44,6 +45,7 @@ def test_qwen2_5_w8a8_external_quantized_tp2():
         print(f"Generated text: {vllm_output[i][1]!r}")
 
 
+@pytest.mark.skip(reason="CANN8.5 failed, capture stream failed, fix me")
 def test_qwen3_moe_w8a8_dynamic_llm_compressor():
     example_prompts = [
         "The president of the United States is",
