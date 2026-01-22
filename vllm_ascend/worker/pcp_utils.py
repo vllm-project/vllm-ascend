@@ -109,6 +109,7 @@ class PCPManager:
                                                     dtype=torch.int32,
                                                     device=device,
                                                     pin_memory=pin_memory)
+        self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type == "qwen3_next"
 
     def _get_cumsum_and_arange(
         self,

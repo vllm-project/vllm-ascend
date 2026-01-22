@@ -675,8 +675,6 @@ class NPUModelRunner(GPUModelRunner):
             
         max_num_tokens_across_pcp = 0
         if self.pcp_size > 1:
-            if not self.vllm_config.model_config.use_mla:
-                self.generate_kv_idx(scheduler_output)
             tokens, tokens_padded, max_num_tokens_across_pcp, position_pcp, pcp_unpad_mask = self.pcp_manager.update_tokens_for_pcp(
                                      num_scheduled_tokens[:num_reqs],
                                      self.arange_np,
