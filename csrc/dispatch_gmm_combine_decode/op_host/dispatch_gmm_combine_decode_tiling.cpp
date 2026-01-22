@@ -389,7 +389,7 @@ static ge::graphStatus SetWorkSpace(gert::TilingContext *context, const char *no
     } else {
         maxTokenNum = maxBatchSize * epRankSize * std::min(topK, moeExpertNumPerRank);
     }
-    uint32_t wTypeSize = tilingData.disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W ? TOKEN_DTYPE_BYTE_SIZE : sizeeof(int8_t);
+    uint32_t wTypeSize = tilingData.disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W ? TOKEN_DTYPE_BYTE_SIZE : sizeof(int8_t);
 
     // hbm      input                    = x:  float16 or bf16
     // buf1     dispatch (Only AIV)     => x1: float16 or bf16

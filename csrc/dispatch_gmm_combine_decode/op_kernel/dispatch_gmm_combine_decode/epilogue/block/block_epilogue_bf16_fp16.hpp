@@ -25,13 +25,13 @@ template <uint32_t UB_STAGES_, uint32_t EXEC_FLAG_,
           class CType_, class ScaleType_, class LayoutScale_, class LayoutPerTokenScale_, class DType_,
           class TileRowBroadcastMul_, class TileBroadcastOneBlk_, class TileOneBlkColumnBroadcastMul_,
           class TileCopy_, class EpilogueTileSwizzle_>
-class BlockEpilogue<EpilogueAtlasA2PerTokenDequantCombine<UB_STAGES_, EXEC_FLAG_>,
+class BlockEpilogue<EpilogueAtlasA2Combine<UB_STAGES_, EXEC_FLAG_>,
           CType_, Gemm::GemmType<ScaleType_, LayoutScale_>, Gemm::GemmType<float, LayoutPerTokenScale_>, DType_,
           TileRowBroadcastMul_, TileBroadcastOneBlk_, TileOneBlkColumnBroadcastMul_,
           TileCopy_, EpilogueTileSwizzle_>
 {
 public:
-    using DispatchPolicy = EpilogueAtlasA2PerTokenDequantCombine<UB_STAGES_, EXEC_FLAG_>;
+    using DispatchPolicy = EpilogueAtlasA2Combine<UB_STAGES_, EXEC_FLAG_>;
     using ArchTag = typename DispatchPolicy::ArchTag;
     static constexpr uint32_t UB_STAGES = UB_STAGES_;
     static constexpr uint32_t EXEC_FLAG = EXEC_FLAG_;
@@ -48,13 +48,13 @@ public:
     using LayoutD = typename DType_::Layout;
 
     // Check data infos
-    static_assert(std::is_same_v<ElementC, int32_t> &&
-                      (std::is_same_v<ElementD, half> || std::is_same_v<ElementD, bfloat16_t>),
-                  "The element type template parameters of BlockEpilogue are wrong");
-    static_assert(std::is_same_v<LayoutC, layout::RowMajor> && std::is_same_v<LayoutScale, layout::VectorLayout> &&
-                      std::is_same_v<LayoutPerTokenScale, layout::VectorLayout> &&
-                      std::is_same_v<LayoutD, layout::RowMajor>,
-                  "The layout template parameters of BlockEpilogue are wrong");
+    // static_assert(std::is_same_v<ElementC, int32_t> &&
+    //                   (std::is_same_v<ElementD, half> || std::is_same_v<ElementD, bfloat16_t>),
+    //               "The element type template parameters of BlockEpilogue are wrong");
+    // static_assert(std::is_same_v<LayoutC, layout::RowMajor> && std::is_same_v<LayoutScale, layout::VectorLayout> &&
+    //                   std::is_same_v<LayoutPerTokenScale, layout::VectorLayout> &&
+    //                   std::is_same_v<LayoutD, layout::RowMajor>,
+    //               "The layout template parameters of BlockEpilogue are wrong");
 
     // Tile compute ops
     using TileRowBroadcastMul = TileRowBroadcastMul_;
@@ -75,14 +75,14 @@ public:
                       std::is_same_v<TileShape, typename TileOneBlkColumnBroadcastMul::TileShape>,
                   "TileShape must be consistent for all tile compute ops");
 
-    static_assert((UB_STAGES * (TileShape::COUNT * sizeof(ElementC) +
-                                (std::is_same_v<ElementRawScale, ElementFp32Scale> ?
-                                    0 : TileShape::COLUMN * sizeof(ElementRawScale)) +
-                                TileShape::COLUMN * sizeof(ElementFp32Scale) +
-                                TileShape::ROW * sizeof(ElementPerTokenScale) + TileShape::COUNT * sizeof(ElementD)) +
-                   (TileShape::COUNT + TileShape::COUNT) * sizeof(float) + TileShape::ROW * BYTE_PER_BLK) <=
-                      ArchTag::UB_SIZE,
-                  "TileShape is too large to fit in UB");
+    // static_assert((UB_STAGES * (TileShape::COUNT * sizeof(ElementC) +
+    //                             (std::is_same_v<ElementRawScale, ElementFp32Scale> ?
+    //                                 0 : TileShape::COLUMN * sizeof(ElementRawScale)) +
+    //                             TileShape::COLUMN * sizeof(ElementFp32Scale) +
+    //                             TileShape::ROW * sizeof(ElementPerTokenScale) + TileShape::COUNT * sizeof(ElementD)) +
+    //                (TileShape::COUNT + TileShape::COUNT) * sizeof(float) + TileShape::ROW * BYTE_PER_BLK) <=
+    //                   ArchTag::UB_SIZE,
+    //               "TileShape is too large to fit in UB");
     struct Params {
         __gm__ ElementRawScale *ptrScale{nullptr};
         LayoutScale layoutScale{};

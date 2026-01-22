@@ -26,7 +26,7 @@
 #include "dispatch_gmm_combine_decode/gemm/dispatch_policy.h"
 #include "dispatch_gmm_combine_decode/epilogue/block/block_epilogue.h"
 #include "dispatch_gmm_combine_decode/gemm/block/block_mmad.h"
-#include "dispatch_gmm_combine_decode/gemm/kernel/grouped_matmul_slice_m_swiglu_quant_multistage_workspace_bf16_fp16.h"
+#include "dispatch_gmm_combine_decode/gemm/kernel/grouped_matmul_slice_m_swiglu_multistage_workspace_bf16_fp16.h"
 
 #include "dispatch_gmm_combine_decode/raw_distributed/cam_moe_distribute_dispatch.h"
 
@@ -43,7 +43,7 @@ using MmadAtlasA2Custom =
                                               CUSTOM_ENABLE_SHUFFLE_K>;
 
 using Gmm1L1TileShape = GemmShape<FP16_BF16_L1M, FP16_BF16_L1N, GMM1_L1K>;
-using Gmm1L0TileShape = GemmShape<GMM1_L1M, GMM1_L1N, GMM1_L0K>;
+using Gmm1L0TileShape = GemmShape<Gmm1L1TileShape::M, Gmm1L1TileShape::N, GMM1_L0K>;
 using Gmm1EpilogueTileShape = MatrixShape<GMM1_EPIM, Gmm1L1TileShape::N>;
 using Gmm1BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<GMM1_SWIZZLE_OFFSET, GMM1_SWIZZLE_DIRECTION>;
 
@@ -81,7 +81,7 @@ CATLASS_DEVICE void GmmDeqSwigluQuant(GemmCoord problemShape, uint32_t groupCoun
     using BlockMmad = Gemm::Block::BlockMmad<DispatchPolicy, L1TileShape, L0TileShape, AType, BType, CType>;
 
     constexpr uint32_t ubStages = 1;
-    using EpilogueDispatchPolicy = Epilogue::EpilogueAtlasA2PerTokenDequantSwiglu<ubStages, 0>;
+    using EpilogueDispatchPolicy = Epilogue::EpilogueAtlasA2Swiglu<ubStages, 0>;
     using ScaleType = Gemm::GemmType<W1ScaleType, layout::VectorLayout>;
     using PerTokenScaleType = Gemm::GemmType<float, layout::VectorLayout>;
     using DType = Gemm::GemmType<float, layout::RowMajor>;
@@ -110,9 +110,9 @@ CATLASS_DEVICE void GmmDeqSwigluQuant(GemmCoord problemShape, uint32_t groupCoun
 
     using GemmKernel = typename std::conditional<
         (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE),
-        Gemm::Kernel::GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspace<
+        Gemm::Kernel::GroupedMatmulSliceMSwigluQuantMultiStageWorkspace<
             TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>,
-        Gemm::Kernel::GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspaceWithShallowDispatch<
+        Gemm::Kernel::GroupedMatmulSliceMSwigluQuantMultiStageWorkspaceWithShallowDispatch<
             TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>>::type;
 
     if constexpr (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) {
@@ -197,7 +197,7 @@ CATLASS_DEVICE void GmmDeq(GemmCoord problemShape, uint32_t groupCount, GM_ADDR 
     using BlockMmad = Gemm::Block::BlockMmad<DispatchPolicy, L1TileShape, L0TileShape, AType, BType, CType>;
 
     constexpr uint32_t ubStages = 1;
-    using EpilogueDispatchPolicy = Epilogue::EpilogueAtlasA2PerTokenDequantCombine<ubStages, EXEC_FLAG>;
+    using EpilogueDispatchPolicy = Epilogue::EpilogueAtlasA2Combine<ubStages, EXEC_FLAG>;
     using ScaleType = Gemm::GemmType<W2ScaleType, layout::VectorLayout>;
     using PerTokenScaleType = Gemm::GemmType<float, layout::VectorLayout>;
     using DType = Gemm::GemmType<ExpandXType, layout::RowMajor>;
@@ -223,7 +223,7 @@ CATLASS_DEVICE void GmmDeq(GemmCoord problemShape, uint32_t groupCount, GM_ADDR 
 
     // kernel level
     using ElementGroupList = int64_t;
-    using GemmKernel = Gemm::Kernel::GroupedMatmulSliceMPerTokenDequantMultiStageWorkspace<
+    using GemmKernel = Gemm::Kernel::GroupedMatmulSliceMMultiStageWorkspace<
         TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>;
 
     typename GemmKernel::Params params{

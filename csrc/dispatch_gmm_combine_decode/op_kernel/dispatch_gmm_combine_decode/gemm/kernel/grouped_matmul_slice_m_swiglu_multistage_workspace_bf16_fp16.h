@@ -22,57 +22,57 @@
 
 #include "../../../dispatch_gmm_combine_decode_base.h"
 
-constexpr uint32_t STATE_OFFSET = 512;
-constexpr uint64_t WIN_STATE_OFFSET = 512 * 1024;
-constexpr uint64_t STATE_WIN_OFFSET = 900 * 1024;
-constexpr uint64_t GROUP_TOKEN_NUM_OFFSET = 932 * 1024;
-constexpr uint64_t SOFT_SYNC_OFFSET = 964 * 1024;
-constexpr uint32_t SELF_STATE_OFFSET = 256 * 1024;
-constexpr uint32_t SUM_TMP_TENSOR_SIZE = 1024;
-constexpr uint32_t UB_ALIGN = 32;
-constexpr uint32_t TOKEN_EXTRA_SPACE = 512;
-constexpr uint32_t INT32_COUNT_PER_BLOCK = 8;
-constexpr uint32_t SOFT_SYNC_SPACE_SIZE = 512;
-constexpr int64_t LOOP_TMP_SIZE = 4096;
-constexpr int32_t SUB_AIV_NUM = 2;
-constexpr int32_t ODD_EVEN_BASE = 2;
-constexpr int32_t BUFFER_NUM = 2;
-constexpr int32_t GATHER_SECOND_NUM = 2;
-constexpr uint32_t MAX_QUANT_ROW_ONCE = 8;
-constexpr uint32_t QUANT_SPACE_FACTOR = 176 * 1024 / 11;  // up to 176KB for quant
-#ifndef OPT_RANK_OFFSET
-#define OPT_RANK_OFFSET 512
-#endif
+// constexpr uint32_t STATE_OFFSET = 512;
+// constexpr uint64_t WIN_STATE_OFFSET = 512 * 1024;
+// constexpr uint64_t STATE_WIN_OFFSET = 900 * 1024;
+// constexpr uint64_t GROUP_TOKEN_NUM_OFFSET = 932 * 1024;
+// constexpr uint64_t SOFT_SYNC_OFFSET = 964 * 1024;
+// constexpr uint32_t SELF_STATE_OFFSET = 256 * 1024;
+// constexpr uint32_t SUM_TMP_TENSOR_SIZE = 1024;
+// constexpr uint32_t UB_ALIGN = 32;
+// constexpr uint32_t TOKEN_EXTRA_SPACE = 512;
+// constexpr uint32_t INT32_COUNT_PER_BLOCK = 8;
+// constexpr uint32_t SOFT_SYNC_SPACE_SIZE = 512;
+// constexpr int64_t LOOP_TMP_SIZE = 4096;
+// constexpr int32_t SUB_AIV_NUM = 2;
+// constexpr int32_t ODD_EVEN_BASE = 2;
+// constexpr int32_t BUFFER_NUM = 2;
+// constexpr int32_t GATHER_SECOND_NUM = 2;
+// constexpr uint32_t MAX_QUANT_ROW_ONCE = 8;
+// constexpr uint32_t QUANT_SPACE_FACTOR = 176 * 1024 / 11;  // up to 176KB for quant
+// #ifndef OPT_RANK_OFFSET
+// #define OPT_RANK_OFFSET 512
+// #endif
 
-#define CEIL_UP(x) ((x + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN)
-#define CEIL(x, y) (((x) + (y - 1)) / (y))
-#define UB_BLOCK_SIZE (32)
-#define GET_WIND_STATE_ADDR_BY_RANK_ID(rankId)                                                                    \
-    (((epRankId == rankId)                                                                                        \
-          ? ((GM_ADDR)(winContext_->localWindowsExp))                                                             \
-          : ((GM_ADDR)(((HcclRankRelationResV2 *)(winContext_->remoteRes[rankId].nextDevicePtr))->windowsExp))) + \
-     dataState * WIN_STATE_OFFSET)
-#define GET_WIND_ADDR_BY_RANK_ID(rankId)                                                                         \
-    (((epRankId == rankId)                                                                                       \
-          ? ((GM_ADDR)(winContext_->localWindowsIn))                                                             \
-          : ((GM_ADDR)(((HcclRankRelationResV2 *)(winContext_->remoteRes[rankId].nextDevicePtr))->windowsIn))) + \
-     winDataSizeOffset + rankId * OPT_RANK_OFFSET)
-#define TOKEN_FLAG_1 (0x55555555)
-#define TOKEN_FLAG_2 (0x33333333)
-#define V_TO_C_FLAG_1 (0x03030303)
-#define V_TO_C_FLAG_2 (0x05050505)
-#define CV_FLAG_INDEX 0
-#define GROUP_ID_INDEX 1
-#define PRE_COUNT_INDEX 2
-#define SELF_COUNT_INDEX 3
-#define TOTAL_COUNT_INDEX 4
-#define GROUP_TOKEN_COUNT 3  // equal to SELF_COUNT_INDEX
-#define GROUP_INFO_SIZE 32
+// #define CEIL_UP(x) ((x + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN)
+// #define CEIL(x, y) (((x) + (y - 1)) / (y))
+// #define UB_BLOCK_SIZE (32)
+// #define GET_WIND_STATE_ADDR_BY_RANK_ID(rankId)                                                                    \
+//     (((epRankId == rankId)                                                                                        \
+//           ? ((GM_ADDR)(winContext_->localWindowsExp))                                                             \
+//           : ((GM_ADDR)(((HcclRankRelationResV2 *)(winContext_->remoteRes[rankId].nextDevicePtr))->windowsExp))) + \
+//      dataState * WIN_STATE_OFFSET)
+// #define GET_WIND_ADDR_BY_RANK_ID(rankId)                                                                         \
+//     (((epRankId == rankId)                                                                                       \
+//           ? ((GM_ADDR)(winContext_->localWindowsIn))                                                             \
+//           : ((GM_ADDR)(((HcclRankRelationResV2 *)(winContext_->remoteRes[rankId].nextDevicePtr))->windowsIn))) + \
+//      winDataSizeOffset + rankId * OPT_RANK_OFFSET)
+// #define TOKEN_FLAG_1 (0x55555555)
+// #define TOKEN_FLAG_2 (0x33333333)
+// #define V_TO_C_FLAG_1 (0x03030303)
+// #define V_TO_C_FLAG_2 (0x05050505)
+// #define CV_FLAG_INDEX 0
+// #define GROUP_ID_INDEX 1
+// #define PRE_COUNT_INDEX 2
+// #define SELF_COUNT_INDEX 3
+// #define TOTAL_COUNT_INDEX 4
+// #define GROUP_TOKEN_COUNT 3  // equal to SELF_COUNT_INDEX
+// #define GROUP_INFO_SIZE 32
 
 namespace Catlass::Gemm::Kernel {
 
 template <class ArchTag, typename ElementOutput_>
-class BlockQuant
+class SwigluPost
 {
 public:
     using ElementInput = float;
@@ -117,7 +117,7 @@ public:
     };
 
     CATLASS_DEVICE
-    BlockQuant(Arch::Resource<ArchTag> const &resource, Params const &params_) : params(params_)
+    SwigluPost(Arch::Resource<ArchTag> const &resource, Params const &params_) : params(params_)
     {
         int64_t ubOffset = 0;
         tileRow = params_.tileRow;
@@ -140,7 +140,7 @@ public:
     }
 
     CATLASS_DEVICE
-    ~BlockQuant()
+    ~SwigluPost()
     {
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
@@ -217,57 +217,57 @@ private:
     Epilogue::Tile::CopyUb2Gm<ArchTag, OutputType> copyUbToGmOutput;
 };
 
-__aicore__ inline static void EncreaseSyncFlag(__gm__ uint8_t *flagAddr, uint8_t idx)
-{
-    // flag++, like set flag
-    AscendC::PipeBarrier<PIPE_ALL>();
-    AscendC::GlobalTensor<uint8_t> global;
-    global.SetGlobalBuffer(flagAddr + idx * SOFT_SYNC_SPACE_SIZE);
-    __asm__ __volatile__("");
-    AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE, AscendC::DcciDst::CACHELINE_OUT>(
-        global);
-    __asm__ __volatile__("");
-    uint8_t value = global.GetValue(0);
-    global.SetValue(0, value + 1);
-    __asm__ __volatile__("");
-    AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE, AscendC::DcciDst::CACHELINE_OUT>(
-        global);
-    __asm__ __volatile__("");
-    AscendC::PipeBarrier<PIPE_ALL>();
-}
+// __aicore__ inline static void EncreaseSyncFlag(__gm__ uint8_t *flagAddr, uint8_t idx)
+// {
+//     // flag++, like set flag
+//     AscendC::PipeBarrier<PIPE_ALL>();
+//     AscendC::GlobalTensor<uint8_t> global;
+//     global.SetGlobalBuffer(flagAddr + idx * SOFT_SYNC_SPACE_SIZE);
+//     __asm__ __volatile__("");
+//     AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE, AscendC::DcciDst::CACHELINE_OUT>(
+//         global);
+//     __asm__ __volatile__("");
+//     uint8_t value = global.GetValue(0);
+//     global.SetValue(0, value + 1);
+//     __asm__ __volatile__("");
+//     AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE, AscendC::DcciDst::CACHELINE_OUT>(
+//         global);
+//     __asm__ __volatile__("");
+//     AscendC::PipeBarrier<PIPE_ALL>();
+// }
 
-__aicore__ inline static void CheckSyncFlag(__gm__ uint8_t *flagAddr, uint8_t idx, uint32_t target)
-{
-    //  check flag, like wait flag
-    AscendC::PipeBarrier<PIPE_ALL>();
-    AscendC::GlobalTensor<uint8_t> global;
-    global.SetGlobalBuffer(flagAddr + idx * SOFT_SYNC_SPACE_SIZE);
-    while (true) {
-        __asm__ __volatile__("");
-        AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
-                                          AscendC::DcciDst::CACHELINE_OUT>(global);
-        __asm__ __volatile__("");
-        uint8_t value = global.GetValue(0);
-        if (value >= target) {
-            __asm__ __volatile__("");
-            AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
-                                              AscendC::DcciDst::CACHELINE_OUT>(global);
-            __asm__ __volatile__("");
-            break;
-        }
-    }
-    AscendC::PipeBarrier<PIPE_ALL>();
-}
+// __aicore__ inline static void CheckSyncFlag(__gm__ uint8_t *flagAddr, uint8_t idx, uint32_t target)
+// {
+//     //  check flag, like wait flag
+//     AscendC::PipeBarrier<PIPE_ALL>();
+//     AscendC::GlobalTensor<uint8_t> global;
+//     global.SetGlobalBuffer(flagAddr + idx * SOFT_SYNC_SPACE_SIZE);
+//     while (true) {
+//         __asm__ __volatile__("");
+//         AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
+//                                           AscendC::DcciDst::CACHELINE_OUT>(global);
+//         __asm__ __volatile__("");
+//         uint8_t value = global.GetValue(0);
+//         if (value >= target) {
+//             __asm__ __volatile__("");
+//             AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
+//                                               AscendC::DcciDst::CACHELINE_OUT>(global);
+//             __asm__ __volatile__("");
+//             break;
+//         }
+//     }
+//     AscendC::PipeBarrier<PIPE_ALL>();
+// }
 
-__aicore__ inline static void CalQuantRow(const uint32_t column, uint32_t &row)
-{
-    row = QUANT_SPACE_FACTOR / column;
-    row = row < MAX_QUANT_ROW_ONCE ? row : MAX_QUANT_ROW_ONCE;
-}
+// __aicore__ inline static void CalQuantRow(const uint32_t column, uint32_t &row)
+// {
+//     row = QUANT_SPACE_FACTOR / column;
+//     row = row < MAX_QUANT_ROW_ONCE ? row : MAX_QUANT_ROW_ONCE;
+// }
 
 template <TemplateMC2TypeClass, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_, uint32_t WORKSPACE_STAGES_,
           class ElementGroupList_>
-class GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspace
+class GroupedMatmulSliceMSwigluQuantMultiStageWorkspace
 {
 public:
     using BlockMmad = BlockMmad_;
@@ -290,16 +290,16 @@ public:
     using LayoutD = typename BlockEpilogue::LayoutD;
     using EpilogueParams = typename BlockEpilogue::Params;
 
-    using ElementDequantScale = typename BlockQuant<ArchTag>::ElementDequantScale;
-    using LayoutDequantScale = typename BlockQuant<ArchTag>::LayoutDequantScale;
-    using ElementOutput = typename BlockQuant<ArchTag>::ElementOutput;
-    using LayoutOutput = typename BlockQuant<ArchTag>::LayoutOutput;
+    using XType = ExpandXType;
+    using ElementDequantScale = typename SwigluPost<ArchTag, XType>::ElementDequantScale;
+    using LayoutDequantScale = typename SwigluPost<ArchTag, XType>::LayoutDequantScale;
+    using ElementOutput = typename SwigluPost<ArchTag, XType>::ElementOutput;
+    using LayoutOutput = typename SwigluPost<ArchTag, XType>::LayoutOutput;
 
     using BlockScheduler = BlockScheduler_;
     static constexpr uint32_t WORKSPACE_STAGES = WORKSPACE_STAGES_;
     using ElementGroupList = ElementGroupList_;
 
-    using XType = ExpandXType;
 
     // Parameters structure
     struct Params {
@@ -396,7 +396,7 @@ public:
 
     // Methods
     CATLASS_DEVICE
-    GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspace() {}
+    GroupedMatmulSliceMSwigluQuantMultiStageWorkspace() {}
 
     template <int32_t CORE_TYPE = g_coreType>
     CATLASS_DEVICE void operator()(Params const &params);
@@ -793,7 +793,7 @@ public:
                                     tokenLength);
                 AscendC::PipeBarrier<PIPE_MTE3>();
                 AscendC::DataCopy(dstWinGMTensor[(tokenIndex - preCnt) * axisHCommuBf16Fp16 + tokenLength],
-                                    xInt32Tensor[index](hOutSize / sizeof(int32_t)), 8);
+                                    xInTensor[index][hOutSize / sizeof(XType)], 8);
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
         }
@@ -824,8 +824,7 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::V_S>(1);
 
         AscendC::LocalTensor<XType> xInTensor[BUFFER_NUM];
-        AscendC::LocalTensor<int8_t> yInt8Tensor[BUFFER_NUM];
-        AscendC::LocalTensor<float> yFp32Tensor[BUFFER_NUM];
+        AscendC::LocalTensor<int32_t> xInt32Tensor[BUFFER_NUM];
 
         AscendC::GlobalTensor<XType> srcWinGMTensor;
         srcWinGMTensor.SetGlobalBuffer((__gm__ XType *)gmX);
@@ -874,7 +873,7 @@ public:
 
                 AscendC::DataCopy(dstWinGMTensor, xInTensor[index], tokenLength);
                 AscendC::PipeBarrier<PIPE_MTE3>();
-                AscendC::DataCopy(dstWinGMTensor[tokenLength], xInt32Tensor[index](hOutSize / sizeof(int32_t)), 8);
+                AscendC::DataCopy(dstWinGMTensor[tokenLength], xInTensor[index][hOutSize / sizeof(XType)], 8);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
             }
         }
@@ -1473,11 +1472,11 @@ public:
             uint32_t quantRowOnce = 0;
             CalQuantRow(nOut, quantRowOnce);
             auto swigluLayout = layout::RowMajor{totalTokenCount, n};
-            typename BlockQuant<ArchTag, XType>::Params quantParams{
+            typename SwigluPost<ArchTag, XType>::Params quantParams{
                 gmSwigluOutput,   swigluLayout,        params.ptrDequantScale, params.layoutDequantScale,
                 params.ptrOutput, params.layoutOutput, quantRowOnce,           nOut};
 
-            BlockQuant<ArchTag, XType> blockQuant(resource, quantParams);
+            SwigluPost<ArchTag, XType> blockQuant(resource, quantParams);
             MatrixCoord quantShape(totalTokenCount, nOut);
             MatrixCoord quantBlockShape((uint16_t)(subBlockNum * quantRowOnce), nOut);
             Epilogue::Tile::EpilogueHorizontalTileSwizzle quantSwizzle(quantShape, quantBlockShape);
@@ -1544,6 +1543,7 @@ private:
     uint32_t scaleParamPad{0};
     uint32_t hCommuSize{0};
     uint32_t axisHCommu{0};
+    uint32_t axisHCommuBf16Fp16{0};
     uint32_t axisBS{0};
     uint32_t activeMaskBsCnt{0};
     uint32_t axisK{0};
@@ -1597,7 +1597,7 @@ namespace Catlass::Gemm::Kernel {
 
 template <TemplateMC2TypeClass, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_, uint32_t WORKSPACE_STAGES_,
           class ElementGroupList_>
-class GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspaceWithShallowDispatch
+class GroupedMatmulSliceMSwigluQuantMultiStageWorkspaceWithShallowDispatch
 {
 public:
     using BlockMmad = BlockMmad_;
@@ -1620,10 +1620,11 @@ public:
     using LayoutD = typename BlockEpilogue::LayoutD;
     using EpilogueParams = typename BlockEpilogue::Params;
 
-    using ElementDequantScale = typename BlockQuant<ArchTag>::ElementDequantScale;
-    using LayoutDequantScale = typename BlockQuant<ArchTag>::LayoutDequantScale;
-    using ElementOutput = typename BlockQuant<ArchTag>::ElementOutput;
-    using LayoutOutput = typename BlockQuant<ArchTag>::LayoutOutput;
+    using XType = ExpandXType;
+    using ElementDequantScale = typename SwigluPost<ArchTag, XType>::ElementDequantScale;
+    using LayoutDequantScale = typename SwigluPost<ArchTag, XType>::LayoutDequantScale;
+    using ElementOutput = typename SwigluPost<ArchTag, XType>::ElementOutput;
+    using LayoutOutput = typename SwigluPost<ArchTag, XType>::LayoutOutput;
 
     using BlockScheduler = BlockScheduler_;
     static constexpr uint32_t WORKSPACE_STAGES = WORKSPACE_STAGES_;
@@ -1680,7 +1681,7 @@ public:
 
     // Methods
     CATLASS_DEVICE
-    GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspaceWithShallowDispatch()
+    GroupedMatmulSliceMSwigluQuantMultiStageWorkspaceWithShallowDispatch()
     {
         Arch::FlagID flagId = 0;
         for (uint32_t stageId = 0; stageId < WORKSPACE_STAGES; ++stageId) {
@@ -1869,7 +1870,7 @@ public:
             uint32_t quantRowOnce = 0;
             CalQuantRow(nOut, quantRowOnce);
             auto swigluLayout = layout::RowMajor{mActual, n};
-            typename BlockQuant<ArchTag, XType>::Params quantParams{ptrD,
+            typename SwigluPost<ArchTag, XType>::Params quantParams{ptrD,
                                                              swigluLayout,
                                                              params.ptrDequantScale,
                                                              params.layoutDequantScale,
@@ -1878,7 +1879,7 @@ public:
                                                              quantRowOnce,
                                                              nOut};
 
-            BlockQuant<ArchTag, XType> blockQuant(resource, quantParams);
+            SwigluPost<ArchTag, XType> blockQuant(resource, quantParams);
             MatrixCoord quantShape(mActual, nOut);
             MatrixCoord quantBlockShape((uint16_t)(AscendC::GetSubBlockNum() * quantRowOnce), nOut);
             Epilogue::Tile::EpilogueHorizontalTileSwizzle quantSwizzle(quantShape, quantBlockShape);
@@ -1896,7 +1897,7 @@ private:
     friend struct AicSetFunc;
 
     struct AicWaitFunc {
-        using MatmulKernel = GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspaceWithShallowDispatch<
+        using MatmulKernel = GroupedMatmulSliceMSwigluQuantMultiStageWorkspaceWithShallowDispatch<
             TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>;
 
         CATLASS_DEVICE
@@ -1913,7 +1914,7 @@ private:
     };
 
     struct AicSetFunc {
-        using MatmulKernel = GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspaceWithShallowDispatch<
+        using MatmulKernel = GroupedMatmulSliceMSwigluQuantMultiStageWorkspaceWithShallowDispatch<
             TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>;
 
         CATLASS_DEVICE

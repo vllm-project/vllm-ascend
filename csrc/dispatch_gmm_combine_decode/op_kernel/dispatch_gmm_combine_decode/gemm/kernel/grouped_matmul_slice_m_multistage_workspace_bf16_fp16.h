@@ -24,7 +24,7 @@ namespace Catlass::Gemm::Kernel {
 
 template <TemplateMC2TypeClass, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_,
           uint32_t WORKSPACE_STAGES_, class ElementGroupList_>
-class GroupedMatmulSliceMPerTokenDequantMultiStageWorkspace
+class GroupedMatmulSliceMMultiStageWorkspace
 {
 public:
     using BlockMmad = BlockMmad_;
@@ -99,7 +99,7 @@ public:
 
     // Methods
     CATLASS_DEVICE
-    GroupedMatmulSliceMPerTokenDequantMultiStageWorkspace()
+    GroupedMatmulSliceMMultiStageWorkspace()
     {
         Arch::FlagID flagId = 0;
         for (uint32_t stageId = 0; stageId < WORKSPACE_STAGES; ++stageId) {
@@ -336,7 +336,7 @@ private:
 
     struct AicWaitFunc {
         using MatmulKernel =
-            GroupedMatmulSliceMPerTokenDequantMultiStageWorkspace<TemplateMC2TypeFunc, BlockMmad, BlockEpilogue,
+            GroupedMatmulSliceMMultiStageWorkspace<TemplateMC2TypeFunc, BlockMmad, BlockEpilogue,
                                                                   BlockScheduler, WORKSPACE_STAGES, ElementGroupList>;
 
         CATLASS_DEVICE
@@ -354,7 +354,7 @@ private:
 
     struct AicSetFunc {
         using MatmulKernel =
-            GroupedMatmulSliceMPerTokenDequantMultiStageWorkspace<TemplateMC2TypeFunc, BlockMmad, BlockEpilogue,
+            GroupedMatmulSliceMMultiStageWorkspace<TemplateMC2TypeFunc, BlockMmad, BlockEpilogue,
                                                                   BlockScheduler, WORKSPACE_STAGES, ElementGroupList>;
 
         CATLASS_DEVICE
