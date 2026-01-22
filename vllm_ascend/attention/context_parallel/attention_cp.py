@@ -260,6 +260,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_decodes=num_decodes,
             prefill=prefill_metadata,
             decode_meta=decode_metadata,
+            use_hybrid_attn=use_hybrid_attn,
+            pcp_unpad_mask=pcp_unpad_mask,
         )
         return attn_metadata
 
