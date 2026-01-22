@@ -123,15 +123,6 @@ jobs:
           pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-      - name: Install Ascend toolkit & triton_ascend
-        shell: bash -l {0}
-        run: |
-          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
-          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
-
       - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
