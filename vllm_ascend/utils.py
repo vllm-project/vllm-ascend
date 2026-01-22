@@ -835,17 +835,6 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             _ENABLE_SP = True
             logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
 
-        if not _ENABLE_SP:
-            return _ENABLE_SP
-
-        assert vllm_config.parallel_config.tensor_parallel_size > 1, (
-            "Flash Comm v1 (Sequence Parallelism) is only supported when tp_size > 1."
-        )
-
-        assert not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel, (
-            "Flash Comm v1 (Sequence Parallelism) requires enable_expert_parallel=True for MoE models."
-        )
-
     return _ENABLE_SP
 
 

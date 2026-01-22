@@ -381,11 +381,19 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        if is_vl_model(vllm_config) and enable_flash_comm_v1():
-            raise ValueError("""Flash Comm V1 is not supported for VL models. \
+        if enable_flash_comm_v1():
+            assert not is_vl_model(vllm_config), """Flash Comm V1 is not supported for VL models. \
                 Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
                 For optimal performance with VL models, we recommend enabling Sequence Parallelism \
-                via --compilation-config '{"pass_config": {"enable_sp": true}}'.""")
+                via --compilation-config '{"pass_config": {"enable_sp": true}}'."""
+
+            assert vllm_config.parallel_config.tensor_parallel_size > 1, (
+                "Flash Comm v1 is only supported when tp_size > 1."
+            )
+
+            assert not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel, (
+                "Flash Comm v1 requires enable_expert_parallel=True for MoE models."
+            )
 
         # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
         # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
