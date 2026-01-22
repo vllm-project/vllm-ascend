@@ -22,6 +22,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
+from vllm.logger import logger
+
 
 @triton.jit
 def split_qkv_rmsnorm_rope_kernel(
@@ -68,8 +70,11 @@ def split_qkv_rmsnorm_rope_kernel(
         )
         squares = input_values * input_values
         variances = tl.sum(squares, axis=1) / HEAD_DIM
-        reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(Q_BLOCK_SIZE // HEAD_DIM, 1)
-        normalized_values = input_values * reciprocal_std  # (Q_BLOCK_SIZE//HEAD_DIM, HEAD_DIM)
+        reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(
+            Q_BLOCK_SIZE // HEAD_DIM, 1)
+        normalized_values = (input_values * reciprocal_std
+                             )  # (Q_BLOCK_SIZE//HEAD_DIM, HEAD_DIM)
+        logger.error(f"[zjk] [qqq] {input_values.shape=} {input_values.dtype=}; {reciprocal_std.shape=} {reciprocal_std.dtype=}; {normalized_values.shape=} {normalized_values.dtype=}; {weight_values.shape=} {weight_values.dtype=}")
         if BIAS:
             normalized_values = (normalized_values * weight_values + bias_values).to(tl.bfloat16)
         else:
@@ -81,7 +86,7 @@ def split_qkv_rmsnorm_rope_kernel(
         roped_q = normalized_values
         rope_part = tl.extract_slice(
             normalized_values,
-            offsets=(0,0),
+            offsets=(0, 0),
             sizes=(Q_BLOCK_SIZE // HEAD_DIM, ROPE_DIM),
             strides=(1, 1),
         )
@@ -114,6 +119,7 @@ def split_qkv_rmsnorm_rope_kernel(
             strides=(1, 1),
         )
         roped_part = cat_x * sin + rope_part * cos
+        logger.error(f"[zjk] [qqq] {cat_x.shape=} {cat_x.dtype=}; {sin.shape=} {sin.dtype=}; {rope_part.shape=} {rope_part.dtype=}; {cos.shape=} {cos.dtype=}; {roped_part.shape=} {roped_part.dtype=}")
         roped_q = tl.insert_slice(
             roped_q,
             roped_part,
@@ -158,7 +164,7 @@ def split_qkv_rmsnorm_rope_kernel(
         roped_k = normalized_values
         rope_part = tl.extract_slice(
             normalized_values,
-            offsets=(0,0),
+            offsets=(0, 0),
             sizes=(Q_BLOCK_SIZE // HEAD_DIM, ROPE_DIM),
             strides=(1, 1),
         )
@@ -191,6 +197,7 @@ def split_qkv_rmsnorm_rope_kernel(
             strides=(1, 1),
         )
         roped_part = cat_x * sin + rope_part * cos
+        logger.error(f"[zjk] [kkk] {cat_x.shape=} {cat_x.dtype=}; {sin.shape=} {sin.dtype=}; {rope_part.shape=} {rope_part.dtype=}; {cos.shape=} {cos.dtype=}; {roped_part.shape=} {roped_part.dtype=}")
         roped_k = tl.insert_slice(
             roped_k,
             roped_part,
