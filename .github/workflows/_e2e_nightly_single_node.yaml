@@ -29,7 +29,7 @@ on:
       image:
         required: false
         type: string
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
       tests:
         required: true
         type: string
@@ -110,17 +110,12 @@ jobs:
           fi
           cd ..
 
-      - name: Install Ascend toolkit & triton_ascend
+      - name: Install clang
         shell: bash -l {0}
         run: |
           apt-get update && apt-get -y install clang-15
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
-          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install triton-ascend==3.2.0
 
       - name: Run vllm-project/vllm-ascend test
         env:

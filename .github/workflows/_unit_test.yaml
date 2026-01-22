@@ -59,18 +59,6 @@ jobs:
           python3 -m pip install -v . --extra-index https://download.pytorch.org/whl/cpu/
           python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
 
-      - name: Install Ascend toolkit & triton_ascend
-        shell: bash -l {0}
-        run: |
-          apt-get -y install clang-15
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
-          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install triton-ascend==3.2.0
-
       - name: Run unit test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn

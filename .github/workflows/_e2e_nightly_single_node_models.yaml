@@ -83,7 +83,10 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -103,18 +106,6 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
-
-      - name: Install Ascend toolkit & triton_ascend
-        shell: bash -l {0}
-        run: |
-          apt-get update && apt-get -y install clang-15
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20          
-          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
-          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install triton-ascend==3.2.0
 
       - name: Install tensorflow (for Molmo-7B-D-0924)
         if: ${{ inputs.runner == 'linux-aarch64-a2-1' && contains(inputs.model_list, 'Molmo-7B-D-0924') }}
