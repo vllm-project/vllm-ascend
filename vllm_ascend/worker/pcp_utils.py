@@ -21,6 +21,7 @@ from typing import List
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
@@ -278,22 +279,122 @@ class PCPManager:
             positions[:num_decode_tokens] = self._get_cumsum_and_arange(
                 num_scheduled_tokens[:num_decode_reqs], arange_np)[1]
 
-        # Build the restore index used after allgather.
-        padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
-        padded_pos_start_loc[0] = 0
-        all_positions_lst = [
-            get_current_rank_positions(padded_pos_start_loc, rank_i)
-            for rank_i in range(self.pcp_world_size)
-        ]
-        all_positions = np.concatenate(all_positions_lst)
-        self.pcp_allgather_restore_idx.np[:all_positions.shape[0]] = (
-            all_positions.argsort())
-        self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
+        if self.pcp_use_hybrid_attn:
+            max_scheduled_prefill_tokens = 0
+            self.pcp_padded_tokens_fla = 0
+            if num_decode_reqs > 0:
+                num_padded_scheduled_tokens[:num_decode_reqs] = num_padded_scheduled_tokens[:num_decode_reqs] // self.pcp_size
+            # have prefills
+            if num_reqs - num_decode_reqs > 0:
+                prefill_tokens_tensor = torch.Tensor(num_scheduled_tokens[num_decode_tokens:])
+                # [num_prefill_reqs, pcp_size, 1] [[3,2]] [[2,2,2,1],[2,1,1,1]]
+                num_prefill_tokens_allranks = self._get_cp_local_seq_lens(
+                    prefill_tokens_tensor, self.pcp_size, 1, 1).long().numpy()
+                # [3] [2]  |  [2,2] [2,1] [2,1] [1,1]
+                num_prefill_scheduled_tokens_linear = num_prefill_tokens_allranks[:, self.pcp_rank, 0]
+                num_padded_scheduled_tokens[num_decode_reqs:] = num_prefill_scheduled_tokens_linear
+                # [[3,5]] | [[0,0,0,0,0],[0,0,0,0,0]]
+                num_prefill_tokens_start_loc = np.zeros((num_reqs - num_decode_reqs, self.pcp_size + 1), dtype=np.int64)
+                # [[0,3,5]] | [[0,2,4,6,7],[0,2,3,4,5]]
+                num_prefill_tokens_start_loc[:, 1:] = np.cumsum(num_prefill_tokens_allranks[..., 0], axis=-1)
+                # [0] [3] | [0,0] [2,2] [4,3] [6,4] [7,5]
+                num_prefill_tokens_cu_ranks = num_prefill_tokens_start_loc[:, self.pcp_rank]
+                # [0,1,2] [0,1] | [0,1,0,1] [0,1,0] [0,1,0] [0,0]
+                # -> [0,1,2] [3,4] | [0,1,0,1] [2,3,2] [4,5,3] [6,4]
+                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens)
+                positions_linear[num_decode_reqs:] = positions_linear[num_decode_reqs:] + np.repeat(
+                    num_prefill_tokens_cu_ranks, num_prefill_scheduled_tokens_linear
+                )
 
-        return (
-            pcp_tokens[:num_reqs],
-            positions,
-        )
+                max_scheduled_prefill_tokens = sum(num_prefill_tokens_allranks[:, 0, 0])
+                self.pcp_padded_tokens_fla += max_scheduled_prefill_tokens - sum(num_prefill_scheduled_tokens_linear)
+            
+            max_scheduled_tokens = max_scheduled_prefill_tokens + num_decode_tokens
+            enter_fa_prefill_restore_idx = None
+            if num_reqs - num_decode_reqs > 0:
+                # prefill reorder idx
+                # [[3,2]] [[2,2,2,1],[2,2,1,1],[1,1,1,1]]
+                num_prefill_tokens_allranks = num_prefill_tokens_allranks[..., 0]
+                # [0,1,2,0,1] [0,1,0,1,0,1,0,|0,1,0,1,0,0]
+                _, prefill_arange_allranks = self._get_cumsum_and_arange(num_prefill_tokens_allranks.flatten())
+                # [0,1] [0,1,2,3,0,1,2,3]
+                _, prefill_rank_offset = self._get_cumsum_and_arange(
+                    np.ones(num_reqs - num_decode_reqs, dtype=np.int64) * self.pcp_size
+                )
+                # [0,0,0,3,3] [0,M,2M,3M,0,M,2M,3M] -> [0,0,M,M,2M,2M,3M,0,0,M,M,2M,3M] + D
+                prefill_all_offset = np.repeat(prefill_rank_offset * max_scheduled_tokens, num_prefill_tokens_allranks.flatten()) + num_decode_tokens
+
+                # [0,0,0,0,|2,2,2,1,|4,4,3,2] -> [0,0,0,0,0,0,0,|2,2,2,2,2,1,|4,4,3,2]
+                # [[0,0]] -> [0,0,0,0,0]
+                prefill_local_start_local = np.zeros_like(num_prefill_tokens_allranks)
+                prefill_local_start_local[1:, :] = np.cumsum(num_prefill_tokens_allranks, axis=0)[:-1, :]
+                prefill_local_offset = np.repeat(prefill_local_start_local.flatten(), num_prefill_tokens_allranks.flatten())
+                prefill_all_offset = np.add(prefill_all_offset, prefill_local_offset)
+                # [0,1,2,3,4]  [0,1,M,M+1,2M,2M+1,3M,0,1,M,M+1,2M,3M]
+                enter_fa_prefill_restore_idx = np.add(prefill_all_offset, prefill_arange_allranks)
+            else:
+                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens)
+
+            # decode reorder idx
+            enter_fa_decode_restore_idx = None
+            if num_decode_reqs > 0:
+                # [0,1,2], [4,4,4] -> [0,0,0,0,1,1,1,1,2,2,2,2]
+                num_decode_pcp_size = np.ones(num_decode_reqs, dtype=np.int64) * self.pcp_size
+                decode_reqs_offset = np.repeat(np.arange(num_decode_reqs, dtype=np.int64), num_decode_pcp_size)
+                decode_ranks_offset = self._get_cumsum_and_arange(num_decode_pcp_size)[1] * max_scheduled_tokens
+                enter_fa_decode_restore_idx = np.add(decode_reqs_offset, decode_ranks_offset)
+
+            if enter_fa_decode_restore_idx is not None and enter_fa_prefill_restore_idx is not None:
+                pcp_enter_fa_restore_idx = torch.from_numpy(
+                    np.concatenate([enter_fa_decode_restore_idx, enter_fa_prefill_restore_idx])
+                )
+            elif enter_fa_decode_restore_idx is not None:
+                pcp_enter_fa_restore_idx = torch.from_numpy(enter_fa_decode_restore_idx)
+
+            elif enter_fa_prefill_restore_idx is not None:
+                pcp_enter_fa_restore_idx = torch.from_numpy(enter_fa_prefill_restore_idx)
+            self.pcp_enter_fa_restore_idx[:pcp_enter_fa_restore_idx.shape[0]].copy_(pcp_enter_fa_restore_idx.long(), non_blocking=True)
+
+            if num_reqs > num_decode_reqs:
+                all_positions_prefill = [
+                    get_current_rank_positions(cu_padded_tokens, rank_i)[num_decode_tokens:] - num_decode_tokens * self.pcp_size
+                    for rank_i in range(self.pcp_size)
+                ]
+                all_positions_prefill_tensor = torch.from_numpy(np.concatenate(all_positions_prefill))
+                all_enter_fla_restore_idx = all_positions_prefill_tensor.float().argsort()
+                unpad_mask_prefill = self.pcp_unpad_mask_cpu[num_decode_reqs * self.pcp_size:]
+                # [0] | [0,7]
+                ori_tokens_start_loc = np.roll(np.cumsum(num_scheduled_tokens[num_decode_tokens:]), 1)
+                ori_tokens_start_loc[0] = 0
+                # [0,1,2] [3,4] | [0,1,7,8] [2,3,9] [4,5,10] [6,11]
+                enter_fla_scatter_idx = positions_linear[num_decode_reqs:] + \
+                    np.repeat(ori_tokens_start_loc, num_prefill_scheduled_tokens_linear)
+                enter_fla_restore_idx = torch.index_select(
+                    all_enter_fla_restore_idx[unpad_mask_prefill], 0, torch.from_numpy(enter_fla_scatter_idx)
+                )
+                self.pcp_allgather_restore_idx[:enter_fla_restore_idx.shape[0]].copy_(
+                    enter_fla_restore_idx.long(), non_blocking=True)
+
+                positions_prefill = all_positions_prefill[self.pcp_rank]
+                pcp_fa_query_idx_tensor = torch.from_numpy(positions_prefill)                
+                self.pcp_fa_query_idx[:pcp_fa_query_idx_tensor.shape[0]].copy_(
+                    pcp_fa_query_idx_tensor.long(), non_blocking=True)
+
+            return num_padded_scheduled_tokens, pcp_tokens, max_scheduled_tokens, positions_linear, self.pcp_unpad_mask_cpu
+        else:
+            # Build the restore index used after allgather.
+            padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
+            padded_pos_start_loc[0] = 0
+            all_positions_lst = [
+                get_current_rank_positions(padded_pos_start_loc, rank_i)
+                for rank_i in range(self.pcp_world_size)
+            ]
+            all_positions = np.concatenate(all_positions_lst)
+            self.pcp_allgather_restore_idx.np[:all_positions.shape[0]] = (
+                all_positions.argsort())
+            self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
+
+            return pcp_tokens[:num_reqs], None, sum(pcp_tokens), positions, self.pcp_unpad_mask_cpu
 
     def get_logits_indices(self, cu_num_tokens: np.ndarray, num_reqs: int):
         return (torch.from_numpy(cu_num_tokens) * self.pcp_world_size -
@@ -330,18 +431,27 @@ class PCPManager:
         # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
         # ignores the padding from CUDA Graph.
         from vllm.distributed.parallel_state import get_pcp_group
-        hidden_states = get_pcp_group().all_gather(
-            hidden_states[:self.num_actual_tokens_pcp_padded //
-                          self.pcp_world_size],
-            0,
-        )
-        restore_idx = self.pcp_allgather_restore_idx.gpu[:hidden_states.
-                                                         shape[0]]
-        return torch.index_select(
-            hidden_states,
-            0,
-            restore_idx,
-        )
+        if not self.pcp_use_hybrid_attn:
+            hidden_states = get_pcp_group().all_gather(
+                hidden_states[:self.num_actual_tokens_pcp_padded //
+                            self.pcp_world_size],
+                0,
+            )
+            restore_idx = self.pcp_allgather_restore_idx.gpu[:hidden_states.
+                                                            shape[0]]
+            return torch.index_select(
+                hidden_states,
+                0,
+                restore_idx,
+            )
+        else:
+            if self.pcp_padded_tokens_fla > 0:
+                hidden_states = F.pad(hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode='constant', value=0)
+            hidden_states = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
+            restore_idx = self.pcp_enter_fa_restore_idx[:hidden_states.shape[0]]
+            return torch.index_select(
+                hidden_states, 0,
+                self.pcp_enter_fa_restore_idx[:hidden_states.shape[0]])
 
     def generate_pcp_mtp_input(
         self,
@@ -497,8 +607,14 @@ class PCPManager:
         self.cp_kv_recover_idx_for_chunk = cp_kv_recover_idx_for_chunk.to(
             torch.float32).argsort().to(torch.int32)
 
-    def generate_pcp_metadata(self, total_num_scheduled_tokens, query_lens,
-                              input_batch):
+    def generate_pcp_metadata(
+        self,
+        total_num_scheduled_tokens,
+        query_lens,
+        input_batch,
+        num_scheduled_tokens,
+        pcp_unpad_mask
+    ):
         from vllm_ascend.attention.utils import \
             AscendPrefillContextParallelMetadata
         num_reqs = input_batch.num_reqs or query_lens.size(0)
@@ -663,8 +779,13 @@ class PCPManager:
                     'head_attn_nomask_seqlens': head_attn_nomask_seqlens,
                     'tail_attn_nomask_seqlens': tail_attn_nomask_seqlens
                 }
-                long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:
-                                                                                                 num_actual_tokens_pcp_padded]
+                if not self.pcp_use_hybrid_attn:
+                    long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:
+                                                                                                     num_actual_tokens_pcp_padded]
+                else:
+                    long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:
+                                                                                                     num_scheduled_tokens - num_decodes]
+
                 long_seq_metadata.cp_kv_recover_idx_for_chunk = self.cp_kv_recover_idx_for_chunk
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
