@@ -72,6 +72,9 @@ class AscendConfig:
         self.gate_eplb = additional_config.get("gate_eplb", False)
         self.num_wait_worker_iterations = additional_config.get(
             "num_wait_worker_iterations", 30)
+        eplb_config = additional_config.get("eplb_config", {})
+        self.refresh_eplb_config(eplb_config)
+
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp",
             False) and vllm_config.parallel_config.enable_expert_parallel
@@ -146,6 +149,19 @@ class AscendConfig:
                 raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can "
                     "only be used in D node.")
+
+    def refresh_eplb_config(self, config):
+        self.expert_map_path = config.get("expert_map_path", None)
+        self.eplb_policy_type = config.get("eplb_policy_type", 1)
+        self.expert_map_record_path = config.get(
+            "expert_map_record_path",
+            None)  # Provide path to export expert map
+        self.init_redundancy_expert = config.get("num_redundant_experts", 0)
+        self.dynamic_eplb = config.get("dynamic_eplb", False)
+        self.num_iterations_eplb_update = config.get(
+            "expert_heat_collection_interval", 4000)
+        self.num_wait_worker_iterations = config.get(
+            "algorithm_execution_interval", 150)
 
 
 class FinegrainedTPConfig:
