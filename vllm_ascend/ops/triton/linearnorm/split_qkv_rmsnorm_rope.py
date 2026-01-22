@@ -226,7 +226,7 @@ def split_qkv_rmsnorm_rope_impl(
     q_hidden_size: int,
     kv_hidden_size: int,
     head_dim: int,
-    rope_dim: int,
+    rotary_dim: int,
     eps: float,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
@@ -266,8 +266,8 @@ def split_qkv_rmsnorm_rope_impl(
         KV_BLOCK_SIZE,
         BIAS,
         head_dim,
-        rope_dim,
-        rope_dim // 2,
+        rotary_dim,
+        rotary_dim // 2,
     )
     return q_output, k_output, v_output
 
@@ -281,7 +281,7 @@ def split_qkv_rmsnorm_rope_impl_fake(
     q_hidden_size: int,
     kv_hidden_size: int,
     head_dim: int,
-    rope_dim: int,
+    rotary_dim: int,
     eps: float,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
