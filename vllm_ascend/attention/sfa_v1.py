@@ -20,7 +20,6 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         ascend_chunked_prefill_workspace_size,
                                          maybe_save_kv_layer_to_connector,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
@@ -132,6 +131,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     understand this class
     """
 
+    # _attn_mask_builder = None
     def __init__(
         self,
         kv_cache_spec,
@@ -141,11 +141,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        super().__init__(
-            kv_cache_spec, layer_names, vllm_config, device,
-            metadata_cls if metadata_cls is not None else AscendSFAMetadata,
-            supports_dcp_with_varlen)
-
+        self.metadata_cls = (metadata_cls if metadata_cls is not None else
+                             AscendSFAMetadata)
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.device = device
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len +
                            self.block_size - 1) // self.block_size
@@ -168,11 +168,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             == CUDAGraphMode.FULL_DECODE_ONLY
         ), "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
-
-    @staticmethod
-    def determine_chunked_prefill_workspace_size(
-            vllm_config: VllmConfig) -> int:
-        return ascend_chunked_prefill_workspace_size(vllm_config)
 
     @classmethod
     def get_cudagraph_support(

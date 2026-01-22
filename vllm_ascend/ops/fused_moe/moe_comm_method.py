@@ -343,7 +343,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 ep_rank_size=self.token_dispatcher.ep_world_size,
                 ep_rank_id=self.token_dispatcher.ep_rank_id,
                 moe_expert_num=self.moe_config.num_experts,
-                global_bs=self.token_dispatcher.global_bs)
+                global_bs=self.token_dispatcher.fused_global_bs)
         else:
             raise ValueError(
                 f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")

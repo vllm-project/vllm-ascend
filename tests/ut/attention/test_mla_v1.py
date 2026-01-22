@@ -208,38 +208,11 @@ class TestAscendMLAMetadata(TestBase):
 
 class TestAscendMLAMetadataBuilder(TestBase):
 
-    def setUp(self):
-        # Mock parent class __init__ to avoid complex initialization,
-        # but still set the essential attributes that child class needs
-        def mock_parent_init(self, kv_cache_spec, layer_names, vllm_config,
-                             device, metadata_cls, supports_dcp_with_varlen):
-            self.metadata_cls = metadata_cls
-            self.kv_cache_spec = kv_cache_spec
-            self.model_config = vllm_config.model_config
-            self.vllm_config = vllm_config
-            self.device = device
-            self.chunked_prefill_workspace_size = 128 * 1024
-            self.chunked_prefill_workspace = torch.empty(
-                (self.chunked_prefill_workspace_size,
-                 vllm_config.model_config.get_head_size()),
-                dtype=vllm_config.model_config.dtype,
-                device=device,
-            )
-
-        self.parent_init_patcher = patch(
-            "vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__",
-            mock_parent_init)
-        self.parent_init_patcher.start()
-
-    def tearDown(self):
-        self.parent_init_patcher.stop()
-
     def test_ascend_mla_metadata_builder_default(self):
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
@@ -265,7 +238,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
@@ -302,12 +274,10 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = 'cpu'
         torch.Tensor.pin_memory = lambda x: x  # noqa
 
@@ -344,9 +314,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.model_config.get_head_size.return_value = 64
-        mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
@@ -385,12 +352,10 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = 'cpu'
         mock_vllm_config.speculative_config = None
 
@@ -409,12 +374,10 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = 'cpu'
         mock_vllm_config.speculative_config = None
 
@@ -435,34 +398,11 @@ class TestAscendMLAMetadataBuilder(TestBase):
 class TestAscendMLAMetadataBuilderBuild(TestBase):
 
     def setUp(self):
-        # Mock parent class __init__ to avoid complex initialization,
-        # but still set the essential attributes that child class needs
-        def mock_parent_init(self, kv_cache_spec, layer_names, vllm_config,
-                             device, metadata_cls, supports_dcp_with_varlen):
-            self.metadata_cls = metadata_cls
-            self.kv_cache_spec = kv_cache_spec
-            self.model_config = vllm_config.model_config
-            self.vllm_config = vllm_config
-            self.device = device
-            self.chunked_prefill_workspace_size = 128 * 1024
-            self.chunked_prefill_workspace = torch.empty(
-                (self.chunked_prefill_workspace_size,
-                 vllm_config.model_config.get_head_size()),
-                dtype=vllm_config.model_config.dtype,
-                device=device,
-            )
-
-        self.parent_init_patcher = patch(
-            "vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__",
-            mock_parent_init)
-        self.parent_init_patcher.start()
-
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
         self.mock_vllm_config.cache_config = CacheConfig(block_size=32)
         mock_scheduler_config = MagicMock(spec=SchedulerConfig)
         mock_scheduler_config.max_num_seqs = 8
         mock_scheduler_config.chunked_prefill_enabled = True
-        mock_scheduler_config.enable_chunked_prefill = True
         self.mock_vllm_config.scheduler_config = mock_scheduler_config
         self.mock_vllm_config.speculative_config = None
         self.mock_device = torch.device("cpu")
@@ -482,9 +422,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         else:
             self.kv_cache_spec.head_size = 64
         self.kv_cache_spec.num_heads = 32
-
-    def tearDown(self):
-        self.parent_init_patcher.stop()
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch('vllm_ascend.attention.attention_mask.get_pcp_group')
