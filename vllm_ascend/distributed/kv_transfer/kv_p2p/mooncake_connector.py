@@ -1475,8 +1475,11 @@ class MooncakeConnectorWorker:
         ) -> dict[int, RemotePortInfo]:
             remote_port_send_num: dict[int, RemotePortInfo] = {}
             for port in range(self._prefill_tp_size * meta.remote_pcp_size):
-                remote_host = str(meta.remote_multi_nodes_meta_mapping[str(
-                    port)]['host'])
+                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(port), None)
+                if remote_host_info is None:
+                    remote_host = meta.remote_host
+                else:
+                    remote_host = remote_host_info['host']
                 remote_port_send_num[meta.remote_port + port] = {
                     'num': 0,
                     'host': remote_host
