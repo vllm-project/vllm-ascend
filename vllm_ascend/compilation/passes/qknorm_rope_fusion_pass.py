@@ -150,7 +150,7 @@ class QKNormPartialRopeFusionPattern:
                 q_hidden_size=self.q_size,
                 kv_hidden_size=self.kv_size,
                 head_dim=self.head_dim,
-                rotary_dim=self.rotary_dim
+                rotary_dim=self.rotary_dim,
                 eps=self.eps,
                 q_bias=None,
                 k_bias=None,
