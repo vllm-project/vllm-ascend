@@ -36,6 +36,7 @@ from .base import (AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme,
 from .registry import get_scheme_class, register_scheme
 # Import all scheme classes for external access
 from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
+from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 from .w4a8 import (AscendW4A8DynamicFusedMoEMethod,
                    AscendW4A8DynamicLinearMethod)
 from .w4a16 import AscendW4A16FusedMoEMethod
@@ -77,4 +78,5 @@ __all__ = [
     "AscendW4A8DynamicFusedMoEMethod",
     "AscendW4A16FusedMoEMethod",
     "AscendW4A4FlatQuantDynamicLinearMethod",
+    "AscendW4A4LaosDynamicLinearMethod",
 ]

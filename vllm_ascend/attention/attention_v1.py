@@ -46,9 +46,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 
-# isort: off
 if vllm_version_is("0.13.0"):
-    from vllm.v1.attention.backends.utils import AttentionCGSupport, AttentionMetadataBuilder
     from vllm.attention.backends.abstract import (  # type: ignore
         AttentionBackend,
         AttentionImpl,
@@ -59,20 +57,21 @@ if vllm_version_is("0.13.0"):
         AttentionBackendEnum,
         register_backend,
     )
+    from vllm.v1.attention.backends.utils import AttentionCGSupport, AttentionMetadataBuilder
 else:
     from vllm.v1.attention.backend import (  # type: ignore
         AttentionBackend,
         AttentionCGSupport,
         AttentionImpl,
         AttentionLayer,
-        AttentionType,
         AttentionMetadataBuilder,
+        AttentionType,
     )
     from vllm.v1.attention.backends.registry import (  # type: ignore
         AttentionBackendEnum,
         register_backend,
     )
-# isort: on
+
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647

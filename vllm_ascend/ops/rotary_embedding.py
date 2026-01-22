@@ -187,6 +187,7 @@ def _rope_forward_oot(
         self.cos_sin_cache = self.cos_sin_cache.to(query.device)
     if self.cos_sin_cache.dtype != query.dtype:
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
+    cos, sin = get_cos_and_sin_slice()
     # adopt custom kernel path for rotary_embedding
     if _custom_rotary_embedding_enabled(
             query, is_neox_style, self.head_size) and get_ascend_device_type(
@@ -204,7 +205,6 @@ def _rope_forward_oot(
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
-        cos, sin = get_cos_and_sin_slice()
         if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
                 -1] == 128 and cos is not None and sin is not None:
             # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
@@ -217,28 +217,43 @@ def _rope_forward_oot(
             query, key = torch_npu.npu_apply_rotary_pos_emb(
                 query, key, cos, sin)
         elif self.rotary_dim < self.head_size:
-            num_tokens = query.shape[0]
-            query = query.view(num_tokens, -1, self.head_size)
-            key = key.view(num_tokens, -1, self.head_size)
-            q_rot = query[..., :self.rotary_dim]
-            q_pass = query[..., self.rotary_dim:]
-            k_rot = key[..., :self.rotary_dim]
-            k_pass = key[..., self.rotary_dim:]
-            q_rot = q_rot.contiguous().view(num_tokens, -1)
-            k_rot = k_rot.contiguous().view(num_tokens, -1)
-            torch_npu._npu_rotary_embedding(
-                positions,
-                q_rot,
-                k_rot,
-                self.head_size,
-                self.cos_sin_cache,
-                is_neox_style,
-            )
-            q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
-            k_rot = k_rot.view(num_tokens, -1, self.rotary_dim)
-            q = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
-            k = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
-            return q, k
+            if  HAS_TRITON:
+       
+                cos = cos.view(-1, self.rotary_dim)
+                sin = sin.view(-1, self.rotary_dim)
+                q = query.contiguous().view(query.shape[0], -1,
+                                                    self.head_size)
+                k = key.contiguous().view(key.shape[0], -1, self.head_size)
+                query, key = torch.ops.vllm.rope_forward_triton(q,
+                                            k,
+                                            cos,
+                                            sin,
+                                            rope_dim=self.rotary_dim,
+                                            is_neox_style=True)
+                return query.view(query_shape), key.view(key_shape)
+            else:
+                num_tokens = query.shape[0]
+                query = query.view(num_tokens, -1, self.head_size)
+                key = key.view(num_tokens, -1, self.head_size)
+                q_rot = query[..., :self.rotary_dim]
+                q_pass = query[..., self.rotary_dim:]
+                k_rot = key[..., :self.rotary_dim]
+                k_pass = key[..., self.rotary_dim:]
+                q_rot = q_rot.contiguous().view(num_tokens, -1)
+                k_rot = k_rot.contiguous().view(num_tokens, -1)
+                torch_npu._npu_rotary_embedding(
+                    positions,
+                    q_rot,
+                    k_rot,
+                    self.head_size,
+                    self.cos_sin_cache,
+                    is_neox_style,
+                )
+                q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
+                k_rot = k_rot.view(num_tokens, -1, self.rotary_dim)
+                q = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
+                k = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
+                return q, k
         else:
             # TODO: Remove the contiguous in the future.
             query = query.contiguous().view(query.shape[0], -1)
@@ -571,7 +586,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        if HAS_TRITON and positions.ndim == 2:
+        if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
             # todo: need cann update in 8.5.0
             return self.forward_triton(positions, query, key)
 
