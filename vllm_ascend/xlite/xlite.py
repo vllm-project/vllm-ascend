@@ -25,7 +25,7 @@ from vllm.distributed import (get_ep_group,
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-from xlite._C import (AttnMHA, Model, ModelAttnMeta, ModelConfig, Runtime,
+from xlite._C import (AttnMHA, Model, ModelAttnMeta, ModelConfig, Runtime, # type: ignore[attr-defined]
                       ScoringFuncSoftmax)
 
 import vllm_ascend.envs as envs_ascend
@@ -214,10 +214,10 @@ class QwenMoeXliteModel(LlamaXliteModel):
         config.def_dp_size = vllm_config.parallel_config.data_parallel_size
         config.moe_ep_size = ep_group.world_size if vllm_config.parallel_config.enable_expert_parallel else 1
         config.moe_tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else ep_group.world_size
-        config.experts_weight_transpose = True
+        config.experts_weight_transpose = True # type: ignore
         config.moe_intermediate_size = hf_config.moe_intermediate_size
-        config.norm_topk_prob = hf_config.norm_topk_prob
-        config.scoring_func = ScoringFuncSoftmax
+        config.norm_topk_prob = hf_config.norm_topk_prob # type: ignore
+        config.scoring_func = ScoringFuncSoftmax # type: ignore
         return config
 
     def _build_model(self, runnable: nn.Module, vllm_config: VllmConfig,
