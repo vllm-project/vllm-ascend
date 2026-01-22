@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/tutorials/pd_colocated_mooncake_multi_instance.md:1
 msgid "PD-Colocated with Mooncake Multi-Instance"
-msgstr "PD 共置与 Mooncake 多实例"
+msgstr "PD-Colocated with Mooncake Multi-Instance"
 
 #: ../../source/tutorials/pd_colocated_mooncake_multi_instance.md:3
 msgid "Getting Started"

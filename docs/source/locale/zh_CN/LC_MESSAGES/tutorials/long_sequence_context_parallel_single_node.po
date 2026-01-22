@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/tutorials/long_sequence_context_parallel_single_node.md:1
 msgid "Long-Sequence Context Parallel (Qwen3-235B-A22B)"
-msgstr "长序列上下文并行（Qwen3-235B-A22B）"
+msgstr "Long-Sequence Context Parallel (Qwen3-235B-A22B)"
 
 #: ../../source/tutorials/long_sequence_context_parallel_single_node.md:3
 msgid "Getting Start"

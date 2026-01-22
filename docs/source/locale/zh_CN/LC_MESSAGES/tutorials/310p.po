@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/tutorials/310p.md:1
 msgid "Atlas 300I"
-msgstr "Atlas 300I 系列"
+msgstr "Atlas 300I "
 
 #: ../../source/tutorials/310p.md:4
 msgid ""

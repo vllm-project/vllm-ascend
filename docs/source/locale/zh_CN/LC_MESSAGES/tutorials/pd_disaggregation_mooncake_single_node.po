@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:1
 msgid "Prefill-Decode Disaggregation (Qwen2.5-VL)"
-msgstr "预填充-解码分离（Qwen2.5-VL）"
+msgstr "Prefill-Decode Disaggregation (Qwen2.5-VL)"
 
 #: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:3
 msgid "Getting Start"

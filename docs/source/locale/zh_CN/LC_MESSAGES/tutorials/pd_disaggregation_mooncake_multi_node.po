@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/tutorials/pd_disaggregation_mooncake_multi_node.md:1
 msgid "Prefill-Decode Disaggregation (Deepseek)"
-msgstr "预填充-解码分离（Deepseek）"
+msgstr "Prefill-Decode Disaggregation (Deepseek)"
 
 #: ../../source/tutorials/pd_disaggregation_mooncake_multi_node.md:3
 msgid "Getting Start"
