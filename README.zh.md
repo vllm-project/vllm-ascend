@@ -46,8 +46,8 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 - 操作系统：Linux
 - 软件：
     - Python >= 3.10, < 3.12
-    - CANN == 8.3.rc2 (Ascend HDK 版本参考[这里](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
-    - PyTorch == 2.8.0, torch-npu == 2.8.0
+    - CANN == 8.5.0 (Ascend HDK 版本参考[这里](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
+    - PyTorch == 2.9.0, torch-npu == 2.9.0
     - vLLM (与vllm-ascend版本一致)
 
 ## 开始使用
