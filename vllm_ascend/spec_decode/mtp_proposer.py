@@ -250,14 +250,10 @@ class MtpProposer(EagleProposer):
         assert self.runner is not None
 
         # Note(qcs): We may need to refactor these check logics.
-        if self.runner.use_aclgraph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
+        if self.use_cuda_graph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
                 -1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
-        elif self.use_aclgraph and num_tokens <= self.runner.cudagraph_batch_sizes[
-                -1]:
-            # Acl graph mode, add padding to the batch size
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
         else:
             # Eager mode, no padding needed
             num_input_tokens = num_tokens
@@ -301,6 +297,7 @@ class MtpProposer(EagleProposer):
         # update the graph_pad_size in common_attn_metadata, to tell the
         # builder padding some elements.
         common_attn_metadata.graph_pad_size = graph_pad_size
+        common_attn_metadata.num_input_tokens = num_input_tokens
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata_mtp = builder.build(0, common_attn_metadata,
                                           self.runner.get_model())
