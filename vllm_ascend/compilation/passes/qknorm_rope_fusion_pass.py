@@ -93,7 +93,7 @@ class QKNormPartialRopeFusionPattern:
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6, rotary_dim=None):
         self.vllm_config = vllm_config
         self.head_dim = head_dim
-        if rotary_dim == None:
+        if rotary_dim is None:
             rotary_dim = head_dim
         self.rotary_dim = rotary_dim
         self.num_heads = num_heads
@@ -246,7 +246,7 @@ class QKNormRopeFusionPatternWithBias:
 class QKNormPartialRopeFusionPatternWithBias:
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6, rotary_dim=None):
         self.head_dim = head_dim
-        if rotary_dim == None:
+        if rotary_dim is None:
             rotary_dim = head_dim
         self.rotary_dim = rotary_dim
         self.num_heads = num_heads
