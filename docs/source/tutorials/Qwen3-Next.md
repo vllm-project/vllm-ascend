@@ -53,17 +53,6 @@ docker run --rm \
 
 The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
 
-### Install Clang
-
-We strongly recommend you to install clang make triton ascend stable enough. For Ubuntu, the command is
-
-```bash
-apt-get -y clang-15
-
-update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-```
-
 ### Inference
 
 :::::{tab-set}

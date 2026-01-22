@@ -228,6 +228,14 @@ jobs:
           #pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_shared_expert_dp.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_single_request_aclgraph.py
 
+      - name: Run vllm-project/vllm-ascend test (non triton)
+        if: ${{ inputs.type == 'full' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          python3 -m pip uninstall -y triton-ascend
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
+
   e2e-4-cards:
     name: multicard-4
     needs: [e2e-2-cards]

@@ -31,18 +31,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can using our official docker image to run `DeepSeek-V3.2` directly..
 
-:::{note}
-We strongly recommend you to install clang make triton ascend stable enough. For Ubuntu, the command is
-
-```bash
-apt-get -y clang-15
-
-update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-```
-
-:::
-
 :::::{tab-set}
 :sync-group: install
 
