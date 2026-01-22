@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"POT-Creation-Date: 2026-01-22 17:09+0800\n"
 "PO-Revision-Date: 2026-01-22 19:30+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -36,36 +36,37 @@ msgid ""
 "advanced functions like image detection, multi-modal dialogue, and multi-"
 "image reasoning."
 msgstr ""
-"阿里云的 Qwen-VL（视觉-语言）系列包含了一系列强大的大型视觉语言模型 (LVLM)，旨在实现全面的多模态理解。"
-"它们接受图像、文本和边界框作为输入，并输出文本和检测框，从而支持图像检测、多模态对话和多图推理等高级功能。"
+"阿里云的 Qwen-VL（视觉-语言）系列包含了一系列强大的大型视觉语言模型 "
+"(LVLM)，旨在实现全面的多模态理解。它们接受图像、文本和边界框作为输入，并输出文本和检测框，从而支持图像检测、多模态对话和多图推理等高级功能。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:7
 msgid ""
 "This document will show the main verification steps of the model, "
 "including supported features, feature configuration, environment "
 "preparation, NPU deployment, accuracy and performance evaluation."
-msgstr ""
-"本文档将展示该模型的主要验证步骤，包括支持的功能、功能配置、环境准备、NPU 部署、精度和性能评估。"
+msgstr "本文档将展示该模型的主要验证步骤，包括支持的功能、功能配置、环境准备、NPU 部署、精度和性能评估。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:9
 msgid ""
-"This tutorial uses the vLLM-Ascend `v0.11.0rc2` version for "
-"demonstration, showcasing the `Qwen3-VL-235B-A22B-Instruct` model as an "
+"This tutorial uses the vLLM-Ascend `v0.11.0rc2` version for "
+"demonstration, showcasing the `Qwen3-VL-235B-A22B-Instruct` model as an "
 "example for multi-NPU deployment."
 msgstr ""
-"本教程使用 vLLM-Ascend `v0.11.0rc2` 版本进行演示，以 `Qwen3-VL-235B-A22B-Instruct` 模型为例展示多 NPU 部署。"
+"本教程使用 vLLM-Ascend `v0.11.0rc2` 版本进行演示，以 `Qwen3-VL-235B-A22B-Instruct` "
+"模型为例展示多 NPU 部署。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:11
 msgid "Supported Features"
 msgstr "支持的功能"
 
-#: ../../source/tutorials/Qwen3_reranker.md:8
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:13
 msgid ""
 "Refer to [supported "
 "features](../user_guide/support_matrix/supported_models.md) to get the "
 "model's supported feature matrix."
 msgstr ""
-"请参考 [支持功能列表](../user_guide/support_matrix/supported_models.md) 以获取该模型支持的功能矩阵。"
+"请参考 [支持功能列表](../user_guide/support_matrix/supported_models.md) "
+"以获取该模型支持的功能矩阵。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:15
 msgid ""
@@ -87,8 +88,10 @@ msgid ""
 "× 16) node，2 Atlas 800 A2（64G * 8）nodes. [Download model "
 "weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/)"
 msgstr ""
-"`Qwen3-VL-235B-A22B-Instruct` (BF16 版本)：需要 1 台 Atlas 800 A3 (64G × 16) 节点，或 2 台 Atlas 800 A2 (64G * 8) 节点。"
-"[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/)"
+"`Qwen3-VL-235B-A22B-Instruct` (BF16 版本)：需要 1 台 Atlas 800 A3 (64G × 16) "
+"节点，或 2 台 Atlas 800 A2 (64G * 8) "
+"节点。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-"
+"Instruct/)"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:23
 msgid ""
@@ -106,7 +109,8 @@ msgid ""
 "node communication according to [verify multi-node communication "
 "environment](../installation.md#verify-multi-node-communication)."
 msgstr ""
-"如果您想部署多节点环境，需要根据 [验证多节点通信环境](../installation.md#verify-multi-node-communication) 进行验证。"
+"如果您想部署多节点环境，需要根据 [验证多节点通信环境](../installation.md#verify-multi-node-"
+"communication) 进行验证。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:29
 msgid "Installation"
@@ -122,15 +126,17 @@ msgid ""
 "Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas "
 "800 A3)."
 msgstr ""
-"例如，使用镜像 `quay.io/ascend/vllm-ascend:v0.11.0rc2`（适用于 Atlas 800 A2）"
-"和 `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`（适用于 Atlas 800 A3）。"
+"例如，使用镜像 `quay.io/ascend/vllm-ascend:v0.11.0rc2`（适用于 Atlas 800 A2）和 "
+"`quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`（适用于 Atlas 800 A3）。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:37
 msgid ""
 "Select an image based on your machine type and start the docker image on "
 "your node, refer to [using docker](../installation.md#set-up-using-"
 "docker)."
-msgstr "根据您的机器类型选择镜像并在节点上启动 Docker 镜像，请参考 [使用 Docker](../installation.md#set-up-using-docker)。"
+msgstr ""
+"根据您的机器类型选择镜像并在节点上启动 Docker 镜像，请参考 [使用 Docker](../installation.md#set-up-"
+"using-docker)。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md
 msgid "Build from source"
@@ -144,7 +150,9 @@ msgstr "您可以从源码构建所有内容。"
 msgid ""
 "Install `vllm-ascend`, refer to [set up using python](../installation.md"
 "#set-up-using-python)."
-msgstr "安装 `vllm-ascend`，请参考 [使用 Python 安装](../installation.md#set-up-using-python)。"
+msgstr ""
+"安装 `vllm-ascend`，请参考 [使用 Python 安装](../installation.md#set-up-using-"
+"python)。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:84
 msgid ""
@@ -164,7 +172,9 @@ msgstr "使用多进程 (MP) 进行多节点部署（推荐）"
 msgid ""
 "Assume you have Atlas 800 A3 (64G*16) nodes (or 2 * A2), and want to "
 "deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes."
-msgstr "假设您拥有 Atlas 800 A3 (64G*16) 节点（或 2 台 A2），并希望跨多个节点部署 `Qwen3-VL-235B-A22B-Instruct` 模型。"
+msgstr ""
+"假设您拥有 Atlas 800 A3 (64G*16) 节点（或 2 台 A2），并希望跨多个节点部署 `Qwen3-VL-235B-A22B-"
+"Instruct` 模型。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:91
 msgid "Node 0"
@@ -194,9 +204,10 @@ msgid ""
 "testing performance, it is generally recommended that `--max-num-seqs` * "
 "`--data-parallel-size` >= the actual total concurrency."
 msgstr ""
-"`--max-num-seqs` 表示每个数据并行 (DP) 组允许处理的最大请求数。如果发送到服务的请求超过此限制，"
-"多余的请求将处于等待状态且不会被调度。请注意，等待状态的时间也会计入 TTFT 和 TPOT 等指标。"
-"因此，在测试性能时，通常建议使 `--max-num-seqs` * `--data-parallel-size` >= 实际的总并发量。"
+"`--max-num-seqs` 表示每个数据并行 (DP) "
+"组允许处理的最大请求数。如果发送到服务的请求超过此限制，多余的请求将处于等待状态且不会被调度。请注意，等待状态的时间也会计入 TTFT 和 "
+"TPOT 等指标。因此，在测试性能时，通常建议使 `--max-num-seqs` * `--data-parallel-size` >= "
+"实际的总并发量。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:184
 msgid ""
@@ -212,8 +223,7 @@ msgid ""
 "(1) If the input length of a request is greater than `--max-num-batched-"
 "tokens`, it will be divided into multiple rounds of computation according"
 " to `--max-num-batched-tokens`;"
-msgstr ""
-"(1) 如果请求的输入长度大于 `--max-num-batched-tokens`，它将根据该值被拆分为多轮计算；"
+msgstr "(1) 如果请求的输入长度大于 `--max-num-batched-tokens`，它将根据该值被拆分为多轮计算；"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:186
 msgid ""
@@ -243,18 +253,21 @@ msgid ""
 "memory-utilization` too high may lead to OOM (Out of Memory) issues "
 "during actual inference. The default value is `0.9`."
 msgstr ""
-"`--gpu-memory-utilization` 代表 vLLM 用于实际推理的显存 (HBM) 比例。其核心功能是计算可用的 kv_cache 大小。"
-"在预热阶段（vLLM 中称为 profile run），vLLM 会记录在输入大小为 `--max-num-batched-tokens` 的推理过程中的峰值显存占用。"
-"可用 kv_cache 的计算公式为：`--gpu-memory-utilization` * HBM 总量 - 峰值显存占用。因此，该值设置得越大，"
-"可用的 kv_cache 就越多。然而，由于预热阶段的显存占用可能与实际推理不同（例如由于专家并行 EP 负载不均），"
-"设置过高可能导致实际推理中出现 OOM（内存溢出）。默认值为 `0.9`。"
+"`--gpu-memory-utilization` 代表 vLLM 用于实际推理的显存 (HBM) 比例。其核心功能是计算可用的 "
+"kv_cache 大小。在预热阶段（vLLM 中称为 profile run），vLLM 会记录在输入大小为 `--max-num-"
+"batched-tokens` 的推理过程中的峰值显存占用。可用 kv_cache 的计算公式为：`--gpu-memory-"
+"utilization` * HBM 总量 - 峰值显存占用。因此，该值设置得越大，可用的 kv_cache "
+"就越多。然而，由于预热阶段的显存占用可能与实际推理不同（例如由于专家并行 EP 负载不均），设置过高可能导致实际推理中出现 "
+"OOM（内存溢出）。默认值为 `0.9`。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:189
 msgid ""
 "`--enable-expert-parallel` indicates that EP is enabled. Note that vLLM "
 "does not support a mixed approach of ETP and EP; that is, MoE can either "
 "use pure EP or pure TP."
-msgstr "`--enable-expert-parallel` 表示启用专家并行 (EP)。请注意，vLLM 不支持 ETP 和 EP 混合模式；即 MoE 只能使用纯 EP 或纯 TP。"
+msgstr ""
+"`--enable-expert-parallel` 表示启用专家并行 (EP)。请注意，vLLM 不支持 ETP 和 EP 混合模式；即 MoE"
+" 只能使用纯 EP 或纯 TP。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:190
 msgid ""
@@ -278,9 +291,10 @@ msgid ""
 "mainly used to reduce the cost of operator dispatch. Currently, "
 "\"FULL_DECODE_ONLY\" is recommended."
 msgstr ""
-"`--compilation-config` 包含与 aclgraph 图模式相关的配置。最重要的配置是 \"cudagraph_mode\" 和 \"cudagraph_capture_sizes\"，"
-"其含义如下：\"cudagraph_mode\" 代表具体的图模式，目前支持 \"PIECEWISE\" 和 \"FULL_DECODE_ONLY\"。"
-"图模式主要用于降低算子分发（dispatch）开销，目前推荐使用 \"FULL_DECODE_ONLY\"。"
+"`--compilation-config` 包含与 aclgraph 图模式相关的配置。最重要的配置是 \"cudagraph_mode\" 和"
+" \"cudagraph_capture_sizes\"，其含义如下：\"cudagraph_mode\" 代表具体的图模式，目前支持 "
+"\"PIECEWISE\" 和 \"FULL_DECODE_ONLY\"。图模式主要用于降低算子分发（dispatch）开销，目前推荐使用 "
+"\"FULL_DECODE_ONLY\"。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:194
 msgid ""
@@ -291,16 +305,18 @@ msgid ""
 "Currently, the default setting is recommended. Only in some scenarios is "
 "it necessary to set this separately to achieve optimal performance."
 msgstr ""
-"\"cudagraph_capture_sizes\" 代表图模式的不同层级。默认值为 [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]。"
-"在图模式下，各层级图的输入是固定的，层级间的输入会自动填充（Padding）到下一级。目前建议使用默认设置，"
-"仅在某些特定场景下需要单独设置以达到最佳性能。"
+"\"cudagraph_capture_sizes\" 代表图模式的不同层级。默认值为 [1, 2, 4, 8, 16, 24, 32, "
+"40,..., `--max-num-"
+"seqs`]。在图模式下，各层级图的输入是固定的，层级间的输入会自动填充（Padding）到下一级。目前建议使用默认设置，仅在某些特定场景下需要单独设置以达到最佳性能。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:195
 msgid ""
 "`export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 "
 "optimization is enabled. Currently, this optimization is only supported "
 "for MoE in scenarios where tp_size > 1."
-msgstr "`export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` 表示启用 Flashcomm1 优化。目前该优化仅支持 tp_size > 1 的 MoE 场景。"
+msgstr ""
+"`export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` 表示启用 Flashcomm1 优化。目前该优化仅支持 "
+"tp_size > 1 的 MoE 场景。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:197
 msgid ""
@@ -357,7 +373,9 @@ msgstr "详见 [使用 AISBench](../developer_guide/evaluation/using_ais_bench.m
 msgid ""
 "After execution, you can get the result, here is the result of `Qwen3-VL-"
 "235B-A22B-Instruct` in `vllm-ascend:0.11.0rc2` for reference only."
-msgstr "执行后可获取结果，以下为 `vllm-ascend:0.11.0rc2` 下 `Qwen3-VL-235B-A22B-Instruct` 的测试结果，仅供参考。"
+msgstr ""
+"执行后可获取结果，以下为 `vllm-ascend:0.11.0rc2` 下 `Qwen3-VL-235B-A22B-Instruct` "
+"的测试结果，仅供参考。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
 msgid "dataset"
@@ -384,12 +402,20 @@ msgid "aime2024"
 msgstr "aime2024"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "-"
+msgstr "-"
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
 msgid "accuracy"
 msgstr "准确率"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
 msgid "gen"
 msgstr "生成"
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "93"
+msgstr "93"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:249
 msgid "Performance"
@@ -400,7 +426,9 @@ msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
-msgstr "详见 [使用 AISBench 进行性能评估](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+msgstr ""
+"详见 [使用 AISBench 进行性能评估](../developer_guide/evaluation/using_ais_bench.md"
+"#execute-performance-evaluation)。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:255
 msgid "Using vLLM Benchmark"
@@ -415,7 +443,9 @@ msgid ""
 "Refer to [vllm "
 "benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
 "for more details."
-msgstr "更多细节请参考 [vLLM Benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+msgstr ""
+"更多细节请参考 [vLLM "
+"Benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
 
 #: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:261
 msgid "There are three `vllm bench` subcommand:"
@@ -442,3 +472,4 @@ msgid ""
 "After about several minutes, you can get the performance evaluation "
 "result."
 msgstr "大约几分钟后，您即可获得性能评估结果。"
+
