@@ -103,7 +103,7 @@ class TestMtpProposer:
         runner._use_aclgraph.return_value = True
         proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
 
-        assert proposer.use_aclgraph is True
+        assert proposer.use_cuda_graph is True
 
     @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")

@@ -90,7 +90,7 @@ class MtpProposer(EagleProposer):
                 attn_metadata_mtp = builder.build_for_graph_capture(
                     common_attn_metadata, attn_state)
                 attn_metadata = {}
-                for layer_name in self.attn_layer_name:
+                for layer_name in self.attn_layer_names:
                     attn_metadata[layer_name] = attn_metadata_mtp
             else:
                 attn_metadata = None
@@ -305,7 +305,7 @@ class MtpProposer(EagleProposer):
         attn_metadata_mtp = builder.build(0, common_attn_metadata,
                                           self.runner.get_model())
         attn_metadata = {}
-        for layer_name in self.attn_layer_name:
+        for layer_name in self.attn_layer_names:
             attn_metadata[layer_name] = attn_metadata_mtp
 
         for step in range(self.num_speculative_tokens):
@@ -334,7 +334,7 @@ class MtpProposer(EagleProposer):
                         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
                             hidden_states)
 
-                    for layer_name in self.attn_layer_name:
+                    for layer_name in self.attn_layer_names:
                         decode_metadata = getattr(attn_metadata[layer_name],
                                                   "decode", None)
                         if self.use_async_scheduling and decode_metadata is not None:
@@ -405,7 +405,7 @@ class MtpProposer(EagleProposer):
             if step == self.num_speculative_tokens - 1 or with_prefill:
                 break
 
-            attn_metadata_i = attn_metadata[self.attn_layer_name[0]]
+            attn_metadata_i = attn_metadata[self.attn_layer_names[0]]
 
             if step == 0:
                 positions = target_positions[last_token_indices]

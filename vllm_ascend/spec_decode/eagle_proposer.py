@@ -179,31 +179,81 @@ class EagleProposer(VllmEagleProposer):
         draft_indexer_layer_names = indexer_layers - target_indexer_layer_names
         draft_attn_layer_names = draft_attn_layer_names - draft_indexer_layer_names
         assert len(draft_attn_layer_names) == 1
-        self.attn_layer_name = list(draft_attn_layer_names)
-        self.attn_layer_names = self.attn_layer_name
+        self.attn_layer_names = list(sorted(draft_attn_layer_names))
+
+        if supports_multimodal(model):
+            # handle multimodality
+            if self.get_model_name(model) in [
+                    "Qwen2_5_VLForConditionalGeneration",
+                    "Qwen3VLForConditionalGeneration",
+            ]:
+                self.model.config.image_token_index = model.config.image_token_id
+            elif self.get_model_name(
+                    model) == "PixtralForConditionalGeneration":
+                self.model.config.image_token_index = (
+                    model.config.vision_config.image_token_id)
+            else:
+                self.model.config.image_token_index = (
+                    model.config.image_token_index)
+            target_language_model = model.get_language_model()
+        else:
+            target_language_model = model
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
-            # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
-            # check if mtp model use main model's embedding and LMhead
-            if hasattr(model, "model") and hasattr(model.model, "embed_tokens") and \
-                    torch.equal(self.model.model.embed_tokens.weight,
-                                model.model.embed_tokens.weight):
-                logger.info(
-                    "The EAGLE head shares the same vocab embedding" \
-                    " with the target model."
-                )
-                self.model.model.embed_tokens = model.model.embed_tokens
+            if hasattr(target_language_model.model, "embed_tokens"):
+                target_embed_tokens = target_language_model.model.embed_tokens
+            elif hasattr(target_language_model.model, "embedding"):
+                target_embed_tokens = target_language_model.model.embedding
             else:
-                logger.info(
-                    " The EAGLE head loaded its own vocab embedding" \
-                    " weights instead of sharing them with the target model."
+                raise AttributeError(
+                    "Target model does not have 'embed_tokens' or 'embedding' attribute"
                 )
+
+            share_embeddings = False
+            if hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE model
+                if not self.model.has_own_embed_tokens:
+                    share_embeddings = True
+                    logger.info(
+                        "Detected EAGLE model without its own embed_tokens in the"
+                        " checkpoint. Sharing target model embedding weights with the"
+                        " draft model.")
+                elif (isinstance(target_embed_tokens.weight, torch.Tensor)
+                      and isinstance(self.model.model.embed_tokens.weight,
+                                     torch.Tensor)
+                      # TODO: Offload to CPU for comparison to avoid extra NPU memory
+                      # usage in CI testing environments with limited NPU memory
+                      and torch.equal(
+                          target_embed_tokens.weight.cpu(),
+                          self.model.model.embed_tokens.weight.cpu(),
+                      )):
+                    share_embeddings = True
+                    logger.info(
+                        "Detected EAGLE model with embed_tokens identical to the target"
+                        " model. Sharing target model embedding weights with the draft"
+                        " model.")
+                else:
+                    logger.info(
+                        "Detected EAGLE model with distinct embed_tokens weights. "
+                        "Keeping separate embedding weights from the target model."
+                    )
+            else:
+                # MTP model
+                share_embeddings = True
+                logger.info(
+                    "Detected MTP model. "
+                    "Sharing target model embedding weights with the draft model."
+                )
+
+            if share_embeddings:
+                if hasattr(self.model.model, "embed_tokens"):
+                    del self.model.model.embed_tokens
+                self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
-                "Since PP > 1 or other reasons the model head loaded its own vocab embedding" \
-                " weights instead of sharing them with the target model."
-            )
+                "The draft model's vocab embedding will be loaded separately"
+                " from the target model.")
 
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
@@ -287,7 +337,7 @@ class EagleProposer(VllmEagleProposer):
             attn_metadata_eagle = builder.build_for_graph_capture(
                 common_attn_metadata, AscendAttentionState.ChunkedPrefill)
             attn_metadata = {}
-            for layer_name in self.attn_layer_name:
+            for layer_name in self.attn_layer_names:
                 attn_metadata[layer_name] = attn_metadata_eagle
 
         model_input_ids = self.input_ids[:num_tokens]
@@ -400,7 +450,7 @@ class EagleProposer(VllmEagleProposer):
         # update global cos, sin
         update_cos_sin(self.positions[:num_input_tokens])
         per_layer_attn_metadata = {}
-        for layer_name in self.attn_layer_name:
+        for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
         with set_ascend_forward_context(
                 per_layer_attn_metadata,

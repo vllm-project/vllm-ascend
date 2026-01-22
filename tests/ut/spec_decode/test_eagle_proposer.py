@@ -162,6 +162,7 @@ class TestEagleProposerLoadModel(TestBase):
         weight = torch.zeros(0)
 
         mock_model = MagicMock()
+        mock_model.supports_multimodal = False
         mock_model.lm_head = MagicMock()
         mock_model.multimodal_cpu_fields = None
         mock_model.merge_by_field_config = None
@@ -174,7 +175,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.proposer.load_model(mock_model)
         mock_get_model.assert_called_once()
-        self.assertEqual(self.proposer.attn_layer_name, ["layer3"])
+        self.assertEqual(self.proposer.attn_layer_names, ["layer3"])
         self.assertIs(self.proposer.model.model.embed_tokens,
                       mock_model.model.embed_tokens)
 
@@ -205,7 +206,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.assertIsNot(self.proposer.model.model.embed_tokens,
                          mock_model.model.embed_tokens)
-        self.assertEqual(self.proposer.attn_layer_name, ["layer2"])
+        self.assertEqual(self.proposer.attn_layer_names, ["layer2"])
 
     @patch(
         "vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
@@ -235,7 +236,7 @@ class TestEagleProposerLoadModel(TestBase):
         self.proposer.name = SpecDcodeType.EAGLE
 
         self.proposer.load_model(mock_model)
-        mock_model.get_language_model.assert_called_once()
+        self.assertEqual(mock_model.get_language_model.call_count, 2)
         self.assertIs(self.proposer.model.lm_head,
                       mock_model.get_language_model.return_value.lm_head)
 
