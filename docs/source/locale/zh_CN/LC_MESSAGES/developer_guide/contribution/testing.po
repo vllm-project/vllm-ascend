@@ -10,8 +10,8 @@ msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-01-21 10:23+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"PO-Revision-Date: 2026-01-22 10:00+0800\n"
+"Last-Translator: Your Name <email@example.com>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -25,19 +25,16 @@ msgid "Testing"
 msgstr "测试指南"
 
 #: ../../source/developer_guide/contribution/testing.md:3
-#, fuzzy
 msgid ""
 "This document explains how to write E2E tests and unit tests to verify "
 "the implementation of your feature."
 msgstr "本文档介绍如何编写端到端（E2E）测试和单元测试，以验证您所实现功能的正确性。"
 
 #: ../../source/developer_guide/contribution/testing.md:5
-#, fuzzy
 msgid "Setup a test environment"
 msgstr "搭建测试环境"
 
 #: ../../source/developer_guide/contribution/testing.md:7
-#, fuzzy
 msgid ""
 "The fastest way to setup a test environment is to use the main branch's "
 "container image:"
@@ -48,7 +45,6 @@ msgid "Local (CPU)"
 msgstr "本地环境（CPU）"
 
 #: ../../source/developer_guide/contribution/testing.md:18
-#, fuzzy
 msgid "You can run the unit tests on CPUs with the following steps:"
 msgstr "您可以按照以下步骤在 CPU 上运行单元测试："
 
@@ -70,7 +66,6 @@ msgid "Running tests"
 msgstr "运行测试"
 
 #: ../../source/developer_guide/contribution/testing.md:141
-#, fuzzy
 msgid "Unit tests"
 msgstr "单元测试"
 
@@ -79,7 +74,6 @@ msgid "There are several principles to follow when writing unit tests:"
 msgstr "编写单元测试时需遵循以下原则："
 
 #: ../../source/developer_guide/contribution/testing.md:145
-#, fuzzy
 msgid ""
 "The test file path should be consistent with the source file and start "
 "with the `test_` prefix, such as: `vllm_ascend/worker/worker.py` --> "
@@ -87,7 +81,6 @@ msgid ""
 msgstr "测试文件路径应与源代码文件路径保持一致，并以 `test_` 为前缀，例如：`vllm_ascend/worker/worker.py` → `tests/ut/worker/test_worker.py`"
 
 #: ../../source/developer_guide/contribution/testing.md:146
-#, fuzzy
 msgid ""
 "The vLLM Ascend test uses unittest framework. See "
 "[here](https://docs.python.org/3/library/unittest.html#module-unittest) "
@@ -95,7 +88,6 @@ msgid ""
 msgstr "vLLM Ascend 测试使用 unittest 框架。编写单元测试的方法可参考[此处](https://docs.python.org/3/library/unittest.html#module-unittest)。"
 
 #: ../../source/developer_guide/contribution/testing.md:147
-#, fuzzy
 msgid ""
 "All unit tests can be run on CPUs, so you must mock the device-related "
 "function to host."
@@ -112,12 +104,10 @@ msgid "You can run the unit tests using `pytest`:"
 msgstr "您可以使用 `pytest` 运行单元测试："
 
 #: ../../source/developer_guide/contribution/testing.md
-#, fuzzy
 msgid "Single-card"
 msgstr "单卡测试"
 
 #: ../../source/developer_guide/contribution/testing.md
-#, fuzzy
 msgid "Multi-card"
 msgstr "多卡测试"
 
@@ -126,7 +116,6 @@ msgid "E2E test"
 msgstr "端到端（E2E）测试"
 
 #: ../../source/developer_guide/contribution/testing.md:198
-#, fuzzy
 msgid ""
 "Although vllm-ascend CI provides the [E2E test](https://github.com/vllm-"
 "project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml) on"
@@ -134,12 +123,10 @@ msgid ""
 msgstr "虽然 vllm-ascend 的 CI 在 Ascend CI 上提供了[端到端测试](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml)，但您也可以在本地环境中运行这些测试。"
 
 #: ../../source/developer_guide/contribution/testing.md:208
-#, fuzzy
 msgid "You can't run the E2E test on CPUs."
 msgstr "注意：端到端测试无法在 CPU 上运行。"
 
 #: ../../source/developer_guide/contribution/testing.md:247
-#, fuzzy
 msgid ""
 "This will reproduce the E2E test. See "
 "[vllm_ascend_test.yaml](https://github.com/vllm-project/vllm-"
@@ -181,7 +168,6 @@ msgid ""
 msgstr "正确性测试示例：[`tests/e2e/singlecard/test_aclgraph_accuracy.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_aclgraph_accuracy.py)"
 
 #: ../../source/developer_guide/contribution/testing.md:257
-#, fuzzy
 msgid ""
 "The CI resource is limited, and you might need to reduce the number of "
 "layers of a model. Below is an example of how to generate a reduced layer"
@@ -189,7 +175,6 @@ msgid ""
 msgstr "由于 CI 资源有限，您可能需要创建精简层数的模型进行测试。以下是一个生成精简层数模型的示例："
 
 #: ../../source/developer_guide/contribution/testing.md:258
-#, fuzzy
 msgid ""
 "Fork the original model repo in modelscope. All the files in the repo "
 "except for weights are required."
@@ -214,7 +199,6 @@ msgid "Run doctest"
 msgstr "运行文档测试（doctest）"
 
 #: ../../source/developer_guide/contribution/testing.md:280
-#, fuzzy
 msgid ""
 "vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to"
 " run all doctests in the doc files. The doctest is a good way to make "
@@ -223,7 +207,6 @@ msgid ""
 msgstr "vllm-ascend 提供了 `vllm-ascend/tests/e2e/run_doctests.sh` 命令，用于运行所有文档文件中的 doctest。Doctest 是确保文档内容及时更新且示例代码保持可执行性的有效方法，您可以通过以下方式在本地运行："
 
 #: ../../source/developer_guide/contribution/testing.md:288
-#, fuzzy
 msgid ""
 "This will reproduce the same environment as the CI. See "
 "[vllm_ascend_doctest.yaml](https://github.com/vllm-project/vllm-"

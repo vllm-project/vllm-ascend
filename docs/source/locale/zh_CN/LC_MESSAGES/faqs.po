@@ -395,7 +395,6 @@ msgid ""
 msgstr "在 NPU 的高带宽内存 (HBM) 容量有限的场景下，推理期间的动态内存分配/释放可能会加剧内存碎片，从而导致 OOM。解决方法如下："
 
 #: ../../source/faqs.md:139
-#, fuzzy
 msgid ""
 "**Limit `--max-model-len`**:  It can save the HBM usage for kv cache "
 "initialization step."

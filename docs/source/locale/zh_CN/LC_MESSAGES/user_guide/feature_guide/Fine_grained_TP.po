@@ -64,7 +64,6 @@ msgid ""
 msgstr "细粒度张量并行通过有针对性的权重分片，带来两个主要的性能优势："
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:15
-#, fuzzy
 msgid ""
 "**Reduced Per-Device Memory Footprint**：   Finegrained TP shards large "
 "weight matrices（如 LM Head、o_proj）across devices, lowering peak memory "
@@ -76,7 +75,6 @@ msgstr ""
 "或在显存受限的硬件上进行部署。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:18
-#, fuzzy
 msgid ""
 "**Faster Memory Access in GEMMs**：   In decode-heavy workloads, GEMM "
 "performance is often memory-bound. Weight sharding reduces per-device "

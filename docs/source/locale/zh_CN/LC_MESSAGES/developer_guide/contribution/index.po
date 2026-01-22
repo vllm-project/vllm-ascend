@@ -10,8 +10,8 @@ msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-01-21 10:23+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"PO-Revision-Date: 2026-01-22 10:00+0800\n"
+"Last-Translator: Your Name <email@example.com>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -29,19 +29,16 @@ msgid "Contributing"
 msgstr "贡献指南"
 
 #: ../../source/developer_guide/contribution/index.md:3
-#, fuzzy
 msgid "Building and Testing"
 msgstr "构建与测试"
 
 #: ../../source/developer_guide/contribution/index.md:4
-#, fuzzy
 msgid ""
 "It's recommended to set up a local development environment to build vllm-"
 "ascend and run tests before you submit a PR."
 msgstr "建议在提交拉取请求（PR）之前，先搭建本地开发环境来构建 vllm-ascend 并运行测试。"
 
 #: ../../source/developer_guide/contribution/index.md:7
-#, fuzzy
 msgid "Set up a development environment"
 msgstr "搭建开发环境"
 
@@ -52,7 +49,6 @@ msgid ""
 msgstr "理论上，vllm-ascend 的构建仅支持 Linux 系统，因为其依赖项 `torch_npu` 仅支持 Linux。"
 
 #: ../../source/developer_guide/contribution/index.md:12
-#, fuzzy
 msgid ""
 "But you can still set up a development environment on Linux/Windows/macOS"
 " for linting and running basic tests."
@@ -67,7 +63,6 @@ msgid "Run CI locally"
 msgstr "本地运行 CI 测试"
 
 #: ../../source/developer_guide/contribution/index.md:36
-#, fuzzy
 msgid "After completing \"Run lint\" setup, you can run CI locally:"
 msgstr "完成“本地代码规范检查”的环境搭建后，您可在本地运行 CI 测试："
 
@@ -80,12 +75,10 @@ msgid "🎉 Congratulations! You have completed the development environment setu
 msgstr "🎉 恭喜！您已完成开发环境的搭建。"
 
 #: ../../source/developer_guide/contribution/index.md:71
-#, fuzzy
 msgid "Testing locally"
 msgstr "本地测试"
 
 #: ../../source/developer_guide/contribution/index.md:73
-#, fuzzy
 msgid ""
 "You can refer to [Testing](./testing.md)  to set up a testing environment"
 " and running tests locally."
@@ -144,7 +137,6 @@ msgid ""
 msgstr "`[Core]`：vllm-ascend 核心逻辑（如平台、注意力机制、通信器、模型运行器）中的新功能或优化。"
 
 #: ../../source/developer_guide/contribution/index.md:91
-#, fuzzy
 msgid "`[Kernel]` for changes affecting compute kernels and ops."
 msgstr "`[Kernel]`：影响计算内核和算子的更改。"
 
