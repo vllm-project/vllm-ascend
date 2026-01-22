@@ -196,6 +196,7 @@ main() {
     check_npu_info
     check_and_config
     show_vllm_info
+    install_pypto
     install_triton_ascend
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
