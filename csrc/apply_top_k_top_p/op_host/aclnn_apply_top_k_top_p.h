@@ -10,10 +10,10 @@
 
 /*!
  * \file aclnn_apply_top_k_top_p.h
- * \brief Custom implementation of ApplyTopKTopP operator to avoid name conflict with CANN built-in operator.
+ * \brief
  */
-#ifndef OP_API_INC_APPLY_TOP_K_TOP_P_CUSTOM_H_
-#define OP_API_INC_APPLY_TOP_K_TOP_P_CUSTOM_H_
+#ifndef OP_API_INC_APPLY_TOP_K_TOP_P_H_
+#define OP_API_INC_APPLY_TOP_K_TOP_P_H_
 
 #include "aclnn/aclnn_base.h"
 
@@ -22,33 +22,33 @@ extern "C" {
 #endif
 
 /**
- * @brief aclnnApplyTopKTopPCustom first phase interface, calculates workspace size based on the computation flow.
+ * @brief aclnnApplyTopKTopP的第一段接口，根据具体的计算流程，计算workspace大小。
  * @domain aclnn_ops_infer
- * @param [in] logits: aclTensor on NPU device, supports FLOAT, FLOAT16, BFLOAT16, supports non-contiguous Tensor, ND format.
- * @param [in] p: aclTensor on NPU device, supports FLOAT, FLOAT16, BFLOAT16, supports non-contiguous Tensor, ND format.
- * @param [in] k: aclTensor on NPU device, supports INT32, supports non-contiguous Tensor, ND format.
- * @param [in] out: aclTensor on NPU device, supports FLOAT, FLOAT16, BFLOAT16, supports non-contiguous Tensor, ND format.
- * @param [out] workspaceSize: returns the workspace size needed on NPU device.
- * @param [out] executor: returns the op executor containing the computation flow.
- * @return aclnnStatus: returns status code.
+ * @param [in] logits: npu device侧的aclTensor，数据类型支持FLOAT、FLOAT16、BFLOAT16，支持非连续的Tensor，数据格式支持ND。
+ * @param [in] p: npu device侧的aclTensor，数据类型支持FLOAT、FLOAT16、BFLOAT16，支持非连续的Tensor，数据格式支持ND。
+ * @param [in] k: npu device侧的aclTensor，数据类型支持INT32，支持非连续的Tensor，数据格式支持ND。
+ * @param [in] out: npu device侧的aclTensor，数据类型支持FLOAT、FLOAT16、BFLOAT16，支持非连续的Tensor，数据格式支持ND。
+ * @param [out] workspaceSize: 返回用户需要在npu device侧申请的workspace大小。
+ * @param [out] executor: 返回op执行器，包含算子计算流程。
+ * @return aclnnStatus: 返回状态码。
  */
-aclnnStatus aclnnApplyTopKTopPCustomGetWorkspaceSize(const aclTensor* logits, const aclTensor* p,
+aclnnStatus aclnnApplyTopKTopPGetWorkspaceSize(const aclTensor* logits, const aclTensor* p,
                                                          const aclTensor* k, aclTensor* out, uint64_t* workspaceSize,
                                                          aclOpExecutor** executor);
 
 /**
- * @brief aclnnApplyTopKTopPCustom second phase interface, executes the computation.
- * @param [in] workspace: workspace memory address on NPU device.
- * @param [in] workspaceSize: workspace size on NPU device, obtained from aclnnApplyTopKTopPCustomGetWorkspaceSize.
- * @param [in] stream: acl stream.
- * @param [in] executor: op executor containing the computation flow.
- * @return aclnnStatus: returns status code.
+ * @brief aclnnApplyTopKTopP的第二段接口，用于执行计算。
+ * @param [in] workspace: 在npu device侧申请的workspace内存起址。
+ * @param [in] workspaceSize: 在npu device侧申请的workspace大小，由第一段接口aaclnnApplyTopKTopPGetWorkspaceSize获取。
+ * @param [in] stream: acl stream流。
+ * @param [in] executor: op执行器，包含了算子计算流程。
+ * @return aclnnStatus: 返回状态码。
  */
-aclnnStatus aclnnApplyTopKTopPCustom(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
+aclnnStatus aclnnApplyTopKTopP(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                          aclrtStream stream);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif  // OP_API_INC_APPLY_TOP_K_TOP_P_CUSTOM_H_
+#endif  // OP_API_INC_APPLY_TOP_K_TOP_P_H_

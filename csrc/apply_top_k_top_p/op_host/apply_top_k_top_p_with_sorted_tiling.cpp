@@ -10,7 +10,7 @@
 
 /*!
  * \file apply_top_k_top_p_with_sorted_tiling.cpp
- * \brief Custom tiling implementation for ApplyTopKTopPWithSortedCustom operator.
+ * \brief
  */
 
 #include <iostream>
@@ -49,13 +49,13 @@ namespace {
 } // namespace
 
 namespace optiling {
-class ApplyTopKTopPWithSortedCustomTiling {
+class ApplyTopKTopPWithSortedTiling {
 public:
-    explicit ApplyTopKTopPWithSortedCustomTiling(gert::TilingContext* context) : tilingcontext(context){};
+    explicit ApplyTopKTopPWithSortedTiling(gert::TilingContext* context) : tilingcontext(context){};
     ge::graphStatus Init();
     ge::graphStatus RunKernelTiling();
 private:
-    ApplyTopKTopPWithSortedCustomTilingData tilingData;
+    ApplyTopKTopPWithSortedTilingData tilingData;
     gert::TilingContext* tilingcontext = nullptr;
     ge::graphStatus CheckShape();
     void SetTilingKey();
@@ -95,7 +95,7 @@ private:
     uint64_t platformUbSize_ = 0;
 };
 
-ge::graphStatus ApplyTopKTopPWithSortedCustomTiling::CheckShape() {
+ge::graphStatus ApplyTopKTopPWithSortedTiling::CheckShape() {
     auto sortedValueShapePtr = tilingcontext->GetInputShape(SORTED_VALUE_INPUT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(tilingcontext, sortedValueShapePtr);
     auto sortedValueShape = sortedValueShapePtr->GetStorageShape();
@@ -151,9 +151,9 @@ ge::graphStatus ApplyTopKTopPWithSortedCustomTiling::CheckShape() {
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus ApplyTopKTopPWithSortedCustomTiling::Init() {
+ge::graphStatus ApplyTopKTopPWithSortedTiling::Init() {
     opName_ = tilingcontext->GetNodeName();
-    OP_LOGD(opName_, "TilingForApplyTopKTopPWithSortedCustom init.");
+    OP_LOGD(opName_, "TilingForApplyTopKTopPWithSorted init.");
     auto platformInfo = platform_ascendc::PlatformAscendC(tilingcontext->GetPlatformInfo());
     coreNum_ = platformInfo.GetCoreNumAiv();
     platformInfo.GetCoreMemSize(platform_ascendc::CoreMemType::UB, platformUbSize_);
@@ -172,7 +172,7 @@ ge::graphStatus ApplyTopKTopPWithSortedCustomTiling::Init() {
     return ge::GRAPH_SUCCESS;
 }
 
-void ApplyTopKTopPWithSortedCustomTiling::SetTilingKey() {
+void ApplyTopKTopPWithSortedTiling::SetTilingKey() {
     tilingKey_ += onlyTopK_;
     tilingKey_ += onlyTopP_;
     tilingcontext->SetTilingKey(tilingKey_);
@@ -181,7 +181,7 @@ void ApplyTopKTopPWithSortedCustomTiling::SetTilingKey() {
     }
 }
 
-void ApplyTopKTopPWithSortedCustomTiling::GetUsedCore()
+void ApplyTopKTopPWithSortedTiling::GetUsedCore()
 {
     if (coreNum_ > 0) {
         batchPerCore_ = coreNum_ == uint32_t(0) ? batchSize_ : batchSize_ / coreNum_;
@@ -190,7 +190,7 @@ void ApplyTopKTopPWithSortedCustomTiling::GetUsedCore()
     }
 }
 
-void ApplyTopKTopPWithSortedCustomTiling::CalDataPerCore()
+void ApplyTopKTopPWithSortedTiling::CalDataPerCore()
 {
     uint32_t inputDataTypeByte = DATATYPE_LEN_MAP[tilingcontext->GetInputDesc(SORTED_VALUE_INPUT_INDEX)->GetDataType()];
     uint32_t dataPerBlock = BLOCK_BYTES / inputDataTypeByte;
@@ -214,7 +214,7 @@ void ApplyTopKTopPWithSortedCustomTiling::CalDataPerCore()
     }
 }
 
-void ApplyTopKTopPWithSortedCustomTiling::FillTilingData()
+void ApplyTopKTopPWithSortedTiling::FillTilingData()
 {
     tilingData.set_batchSize(batchSize_);
     tilingData.set_vocabSize(vocabSize_);
@@ -231,7 +231,7 @@ void ApplyTopKTopPWithSortedCustomTiling::FillTilingData()
     tilingData.set_iterateTimes(iterateTimes_);
 }
 
-void ApplyTopKTopPWithSortedCustomTiling::PrintTilingData()
+void ApplyTopKTopPWithSortedTiling::PrintTilingData()
 {
     OP_LOGD(opName_, "batchSize: %u.", tilingData.get_batchSize());
     OP_LOGD(opName_, "vocabSize: %u.", tilingData.get_vocabSize());
@@ -248,9 +248,9 @@ void ApplyTopKTopPWithSortedCustomTiling::PrintTilingData()
     OP_LOGD(opName_, "iterateTimes: %u.", tilingData.get_iterateTimes());
 }
 
-ge::graphStatus ApplyTopKTopPWithSortedCustomTiling::RunKernelTiling()
+ge::graphStatus ApplyTopKTopPWithSortedTiling::RunKernelTiling()
 {
-    OP_LOGD(opName_, "TilingForApplyTopKTopPWithSortedCustom start.");
+    OP_LOGD(opName_, "TilingForApplyTopKTopPWithSorted start.");
 
     SetTilingKey();
     GetUsedCore();
@@ -268,27 +268,27 @@ ge::graphStatus ApplyTopKTopPWithSortedCustomTiling::RunKernelTiling()
     tilingcontext->GetRawTilingData()->SetDataSize(tilingData.GetDataSize());
     tilingcontext->SetBlockDim(usedCoreNum_);
 
-    OP_LOGD(opName_, "TilingForApplyTopKTopPWithSortedCustom end.");
+    OP_LOGD(opName_, "TilingForApplyTopKTopPWithSorted end.");
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus TilingForApplyTopKTopPWithSortedCustom(gert::TilingContext* context)
+static ge::graphStatus TilingForApplyTopKTopPWithSorted(gert::TilingContext* context)
 {
-    ApplyTopKTopPWithSortedCustomTiling tilingObject(context);
+    ApplyTopKTopPWithSortedTiling tilingObject(context);
     auto ret = tilingObject.Init();
     if (ret != ge::GRAPH_SUCCESS) {
         OP_LOGE(context->GetNodeName(), "tiling Init failed.");
         return ge::GRAPH_FAILED;
     }
     ret = tilingObject.RunKernelTiling();
-    OP_LOGD(context->GetNodeName(), "TilingForApplyTopKTopPWithSortedCustom end.");
+    OP_LOGD(context->GetNodeName(), "TilingForApplyTopKTopPWithSorted end.");
     return ret;
 }
 
-static ge::graphStatus TilingPrepareForApplyTopKTopPWithSortedCustom(gert::TilingParseContext* context)
+static ge::graphStatus TilingPrepareForApplyTopKTopPWithSorted(gert::TilingParseContext* context)
 {
-    OP_LOGD(context->GetNodeName(), "TilingPrepareForApplyTopKTopPWithSortedCustom start");
-    auto compileInfo = context->GetCompiledInfo<TilingForApplyTopKTopPWithSortedCustomCompileInfo>();
+    OP_LOGD(context->GetNodeName(), "TilingPrepareForApplyTopKTopPWithSorted start");
+    auto compileInfo = context->GetCompiledInfo<TilingForApplyTopKTopPWithSortedCompileInfo>();
     OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
     auto platformInfo = context->GetPlatformInfo();
     OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
@@ -304,11 +304,11 @@ static ge::graphStatus TilingPrepareForApplyTopKTopPWithSortedCustom(gert::Tilin
     uint64_t totalUbSize = 0;
     platformInfo->GetLocalMemSize(fe::LocalMemType::UB, totalUbSize);
     OP_LOGD(context->GetNodeName(), "total ub size is %lu", totalUbSize);
-    OP_LOGD(context->GetNodeName(), "TilingPrepareForApplyTopKTopPWithSortedCustom end");
+    OP_LOGD(context->GetNodeName(), "TilingPrepareForApplyTopKTopPWithSorted end");
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(ApplyTopKTopPWithSortedCustom)
-    .Tiling(TilingForApplyTopKTopPWithSortedCustom)
-    .TilingParse<TilingForApplyTopKTopPWithSortedCustomCompileInfo>(TilingPrepareForApplyTopKTopPWithSortedCustom);
+IMPL_OP_OPTILING(ApplyTopKTopPWithSorted)
+    .Tiling(TilingForApplyTopKTopPWithSorted)
+    .TilingParse<TilingForApplyTopKTopPWithSortedCompileInfo>(TilingPrepareForApplyTopKTopPWithSorted);
 } // namespace optiling

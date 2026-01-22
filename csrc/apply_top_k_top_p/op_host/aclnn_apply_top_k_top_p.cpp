@@ -10,7 +10,7 @@
 
 /*!
  * \file aclnn_apply_top_k_top_p.cpp
- * \brief Custom implementation of ApplyTopKTopP operator to avoid name conflict with CANN built-in operator.
+ * \brief
  */
 #include "aclnn_apply_top_k_top_p.h"
 #include "apply_top_k_top_p_with_sorted.h"
@@ -38,7 +38,7 @@ static const int64_t EXPECTED_DIM_ONE = 1;
 static const int64_t EXPECTED_DIM_TWO = 2;
 static constexpr size_t DIM_ONE = 1;
 
-// Supported data types according to API definition
+// 根据API定义，需要列出所能支持的所有dtype
 static const std::initializer_list<op::DataType> DTYPE_SUPPORT_LIST = {
     op::DataType::DT_FLOAT, op::DataType::DT_FLOAT16, op::DataType::DT_BF16};
 
@@ -57,7 +57,7 @@ static bool CheckNotNull(const aclTensor* logits, const aclTensor* p, const aclT
 
 static bool CheckDtypeValid(const aclTensor* logits, const aclTensor* p, const aclTensor *k, const aclTensor* out)
 {
-  // Check if data type is in the supported list
+  // 检查数据类型是否在支持列表内
   OP_CHECK_DTYPE_NOT_SUPPORT(logits, DTYPE_SUPPORT_LIST, return false);
   if (p != nullptr) {
     OP_CHECK_DTYPE_NOT_SUPPORT(p, DTYPE_SUPPORT_LIST, return false);
@@ -67,7 +67,7 @@ static bool CheckDtypeValid(const aclTensor* logits, const aclTensor* p, const a
   }
   OP_CHECK_DTYPE_NOT_SUPPORT(out, DTYPE_SUPPORT_LIST, return false);
 
-  // Check if data types match
+  // 检查数据类型是否相同
   if (p != nullptr) {
     OP_CHECK_DTYPE_NOT_MATCH(p, logits->GetDataType(), return false);
   }
@@ -121,33 +121,34 @@ static bool CheckFormatValid(const aclTensor* logits, const aclTensor* p, const 
 
 static aclnnStatus CheckParams(const aclTensor* logits, const aclTensor* p, const aclTensor *k, const aclTensor* out)
 {
-  // 1. Check if parameters are null pointers
+  // 错误码等DFX方案细化后刷新，错误日志在check接口内打印
+  // 1. 检查参数是否为空指针
   CHECK_RET(CheckNotNull(logits, p, k, out), ACLNN_ERR_PARAM_NULLPTR);
 
-  // 2. Check if input data types are within API supported range
+  // 2. 检查输入的数据类型是否在API支持的数据类型范围之内，需要根据api定义校验
   CHECK_RET(CheckDtypeValid(logits, p, k, out), ACLNN_ERR_PARAM_INVALID);
 
-  // 3. Check if shape meets constraints
+  // 3. 检查shape是否满足约束
   CHECK_RET(CheckShapeValid(logits, p, k, out), ACLNN_ERR_PARAM_INVALID);
 
-  // 4. Check if format meets constraints
+  // 4. 检查format是否满足约束
   CHECK_RET(CheckFormatValid(logits, p, k, out), ACLNN_ERR_PARAM_INVALID);
 
   return ACLNN_SUCCESS;
 }
 } // namespace
 
-aclnnStatus aclnnApplyTopKTopPCustomGetWorkspaceSize(
+aclnnStatus aclnnApplyTopKTopPGetWorkspaceSize(
     const aclTensor* logits, const aclTensor* p, const aclTensor* k, aclTensor* out, uint64_t* workspaceSize,
     aclOpExecutor** executor)
 {
   OP_CHECK_COMM_INPUT(workspaceSize, executor);
-  L2_DFX_PHASE_1(aclnnApplyTopKTopPCustom, DFX_IN(logits, p, k), DFX_OUT(out));
-  // Create OpExecutor
+  L2_DFX_PHASE_1(aclnnApplyTopKTopP, DFX_IN(logits, p, k), DFX_OUT(out));
+  // 固定写法，创建OpExecutor
   auto uniqueExecutor = CREATE_EXECUTOR();
   CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
-  // Parameter check
+  // 固定写法，参数检查
   auto ret = CheckParams(logits, p, k, out);
   CHECK_RET(ret == ACLNN_SUCCESS, ret);
   bool pIsEmpty = false;
@@ -159,11 +160,12 @@ aclnnStatus aclnnApplyTopKTopPCustomGetWorkspaceSize(
     kIsEmpty = k->IsEmpty();
   }
   if (logits->IsEmpty() || pIsEmpty || kIsEmpty) {
+    // 根据实际支持情况补充
     *workspaceSize = 0;
     uniqueExecutor.ReleaseTo(executor);
     return ACLNN_SUCCESS;
   }
-  // Convert input to contiguous tensor
+  // 固定写法，将输入selfRef转换成连续的tensor
   auto logitsContiguous = l0op::Contiguous(logits, uniqueExecutor.get());
   CHECK_RET(logitsContiguous != nullptr, ACLNN_ERR_INNER_NULLPTR);
   const aclTensor* pContiguous = nullptr;
@@ -186,22 +188,22 @@ aclnnStatus aclnnApplyTopKTopPCustomGetWorkspaceSize(
     CHECK_RET(sortedValue != nullptr, ACLNN_ERR_INNER_NULLPTR);
     const aclTensor* sortedIndices = std::get<1>(sortResult);
     CHECK_RET(sortedIndices != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    auto res = l0op::ApplyTopKTopPWithSortedCustom(sortedValue, sortedIndices, pContiguous, kContiguous, uniqueExecutor.get());
+    auto res = l0op::ApplyTopKTopPWithSorted(sortedValue, sortedIndices, pContiguous, kContiguous, uniqueExecutor.get());
     CHECK_RET(res != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    // Copy computation result to output, out may be non-contiguous tensor
+    // 固定写法，将计算结果拷贝到输出out上，out可能是非连续的tensor
     viewCopyResult = l0op::ViewCopy(res, out, uniqueExecutor.get());
   }
   CHECK_RET(viewCopyResult != nullptr, ACLNN_ERR_INNER_NULLPTR);
-  // Get workspace size needed for computation
+  // 固定写法，获取计算过程中需要使用的workspace大小
   *workspaceSize = uniqueExecutor->GetWorkspaceSize();
-  uniqueExecutor.ReleaseTo(executor);
+  uniqueExecutor.ReleaseTo(executor);  // 需要把 uniqueExecutor持有executor转移给executor
   return ACLNN_SUCCESS;
 }
 
-aclnnStatus aclnnApplyTopKTopPCustom(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, aclrtStream stream)
+aclnnStatus aclnnApplyTopKTopP(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, aclrtStream stream)
 {
-   L2_DFX_PHASE_2(aclnnApplyTopKTopPCustom);
-  // Execute computation using framework capabilities
+   L2_DFX_PHASE_2(aclnnApplyTopKTopP);
+  // 固定写法，调用框架能力，完成计算
   return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }
 

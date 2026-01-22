@@ -10,15 +10,15 @@
 
 /*!
  * \file apply_top_p_with_sorted.h
- * \brief Custom kernel implementation for ApplyTopPWithSortedCustom operator.
+ * \brief
  */
-#ifndef APPLY_TOP_P_WITH_SORTED_CUSTOM_H_KERNEL
-#define APPLY_TOP_P_WITH_SORTED_CUSTOM_H_KERNEL
+#ifndef APPLY_TOP_P_WITH_SORTED_H_KERNEL
+#define APPLY_TOP_P_WITH_SORTED_H_KERNEL
 
 #include "kernel_operator.h"
 
 using namespace AscendC;
-namespace ApplyTopPWithSortedCustomOp {
+namespace ApplyTopPWithSortedOp {
 constexpr uint16_t FLOAT16_NEG_INF = 0xFC00; // -inf 64512
 constexpr uint16_t BF16_NEG_INF = 0xFF80; // -inf 65408
 constexpr int32_t FLOAT32_NEG_INF = 0xFF800000; // -inf -2139095040
@@ -32,11 +32,11 @@ constexpr uint32_t FLOAT_BYTES = 4;
 constexpr uint32_t SOFTMAX_UB_NUM = 2;
 
 template <typename inputT, typename calT, typename outputT>
-class ApplyTopPWithSortedCustom {
+class ApplyTopPWithSorted {
 public:
     __aicore__ inline ApplyTopPWithSorted(){};
     __aicore__ inline void InitTilingData(
-        const ApplyTopKTopPWithSortedCustomTilingData &__restrict tilingData, GM_ADDR sorted_value, GM_ADDR sorted_indices, GM_ADDR p, GM_ADDR k, GM_ADDR out, GM_ADDR workspace);
+        const ApplyTopKTopPWithSortedTilingData &__restrict tilingData, GM_ADDR sorted_value, GM_ADDR sorted_indices, GM_ADDR p, GM_ADDR k, GM_ADDR out, GM_ADDR workspace);
     __aicore__ inline void InitBuffer(TPipe *inputPipe);
     __aicore__ inline void ProcessTopP();
 private:
@@ -176,8 +176,8 @@ private:
 };
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::InitTilingData(
-    const ApplyTopKTopPWithSortedCustomTilingData &__restrict tilingData, GM_ADDR sorted_value, GM_ADDR sorted_indices,
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::InitTilingData(
+    const ApplyTopKTopPWithSortedTilingData &__restrict tilingData, GM_ADDR sorted_value, GM_ADDR sorted_indices,
     GM_ADDR p, GM_ADDR k, GM_ADDR out, GM_ADDR workspace) {
     batchSize_ = tilingData.batchSize;
     vocabSize_ = tilingData.vocabSize;
@@ -218,7 +218,7 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::InitTil
 
 // init used buffer
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::InitBuffer(TPipe *inputPipe) {
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::InitBuffer(TPipe *inputPipe) {
     pipe_ = inputPipe;
     pipe_->InitBuffer(calBuf_, calUbSize_);
     totalUb = calBuf_.Get<uint8_t>();
@@ -242,7 +242,7 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::InitBuf
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::GetMaxValue(int64_t baseGmIdx) {
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::GetMaxValue(int64_t baseGmIdx) {
     int64_t initGmIdx = baseGmIdx + vocabSize_ - 1;
     if constexpr (IsSameType<inputT, float>::value) {
         maxValue = -mGmSortedValue_[initGmIdx].GetValue(0);
@@ -254,7 +254,7 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::GetMaxV
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::GetPValue(uint32_t batchOffset) {
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::GetPValue(uint32_t batchOffset) {
     if constexpr (IsSameType<inputT, float>::value) {
         pValue = float(1.0) - mGmP_[batchOffset].GetValue(0);
     } else if constexpr (IsSameType<inputT, half>::value) {
@@ -265,7 +265,7 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::GetPVal
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::ProcessPreSingleBatch(uint32_t loopBatch) {
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::ProcessPreSingleBatch(uint32_t loopBatch) {
     reduceSumValue = 0;
     GetSoftmaxSum(loopBatch);
     GetSoftMaxRes(loopBatch);
@@ -273,7 +273,7 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::Process
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::ProcessTopP() {
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::ProcessTopP() {
     for (uint32_t loopBatch = 0; loopBatch < loopBatch_; loopBatch++) {
         baseGmIdx_ = batchOffset_ * vocabSize_ + loopBatch * vocabSize_;
         GetMaxValue(baseGmIdx_); // Get max value in softmax.
@@ -286,7 +286,7 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::Process
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::ScatterSingleTask(uint32_t taskIndex) {
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::ScatterSingleTask(uint32_t taskIndex) {
     if (GetBlockIdx() == taskIndex % blockNum_) {
         uint32_t bCntIndex = taskIndex / vCnt;
         uint32_t vCntIndex = taskIndex % vCnt;
@@ -335,7 +335,7 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::Scatter
     }
 }
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::GetSoftMaxRes(uint32_t loopBatch) {
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::GetSoftMaxRes(uint32_t loopBatch) {
     uint32_t loopDataNum = softmaxLength;
     for (int32_t loopInner = 0; loopInner < lineSfLoopTimes; loopInner++) {
         int64_t currentGmIdx = baseGmIdx_ + loopInner * softmaxLength;
@@ -370,7 +370,7 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::GetSoft
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::CumsumKoggleStone(uint32_t loopBatch) {
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::CumsumKoggleStone(uint32_t loopBatch) {
     uint32_t loopDataNum = softmaxLength;
     for (uint32_t iterateTime = 0; iterateTime < iterateTimes; iterateTime++) {
         int64_t iteratOffset = 1;
@@ -413,7 +413,7 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::CumsumK
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::ReduceSumWithAddsAndExpImpl(
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::ReduceSumWithAddsAndExpImpl(
     uint32_t loopDataNum) {
     Adds(softMaxResLocal, softMaxLocalFp32, maxValue, loopDataNum);
     PipeBarrier<PIPE_V>();
@@ -423,7 +423,7 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::ReduceS
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::GetSoftmaxSum(uint32_t loopBatch) {
+__aicore__ inline void ApplyTopPWithSorted<inputT, calT, outputT>::GetSoftmaxSum(uint32_t loopBatch) {
     uint32_t loopDataNum = softmaxLength;
     for (int32_t loopInner = 0; loopInner < lineSfLoopTimes; loopInner++) {
         int64_t currentGmIdx = baseGmIdx_ + loopInner * softmaxLength;
@@ -464,6 +464,6 @@ __aicore__ inline void ApplyTopPWithSortedCustom<inputT, calT, outputT>::GetSoft
     reduceSumValueInvert = 1 / reduceSumValue;
     SToVSync();
 }
-} // namespace ApplyTopPWithSortedCustomOp
+} // namespace
 
-#endif // APPLY_TOP_P_WITH_SORTED_CUSTOM_H_KERNEL
+#endif // APPLY_TOP_P_WITH_SORTED_H_KERNEL
