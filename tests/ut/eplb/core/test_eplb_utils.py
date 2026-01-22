@@ -7,9 +7,7 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
-                                                         FusedMoEParallelConfig
-                                                         )
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEParallelConfig
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils, init_eplb_config
@@ -18,7 +16,8 @@ from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils, init_eplb_config
 
 class TestAscendConfig(unittest.TestCase):
 
-    def setUp(self):
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def setUp(self, mock_fix_incompatible_config):
         vllm_config = VllmConfig()
         ascend_config = init_ascend_config(vllm_config)
         ascend_config.dynamic_eplb = True
