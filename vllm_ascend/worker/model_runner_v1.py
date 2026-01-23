@@ -1192,11 +1192,12 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded = (
                     batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 )
-                ubatch_args: Tuple[Any, ...] = (should_ubatch, num_scheduled_tokens_np, num_tokens_padded, num_reqs_padded)
-                if not vllm_version_is('0.13.0'):
-                    ubatch_args = ubatch_args + (self.parallel_config.num_ubatches,)
                 ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
-                    *ubatch_args
+                    should_ubatch,
+                    num_scheduled_tokens_np,
+                    num_tokens_padded,
+                    num_reqs_padded,
+                    self.parallel_config.num_ubatches,
                 )
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
@@ -1305,21 +1306,15 @@ class NPUModelRunner(GPUModelRunner):
                     return hidden_states
                 if self.is_pooling_model:
                     # Return the pooling output.
-                    if vllm_version_is('0.13.0'):
-                        output = self._pool(
-                            hidden_states, num_scheduled_tokens, num_scheduled_tokens_np
-                        )
-                    else:
-                        output = self._pool(
-                            hidden_states, num_scheduled_tokens, num_scheduled_tokens_np, kv_connector_output
-                        )
+                    output = self._pool(
+                        hidden_states, num_scheduled_tokens, num_scheduled_tokens_np, kv_connector_output
+                    )
                     output.kv_connector_output = kv_connector_output
                     if self.debugger is not None:
                         self.debugger.stop()
                         self.debugger.step()
                     return output
 
-                hidden_states = _get_hidden_states_tensor(hidden_states)
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
@@ -1332,7 +1327,6 @@ class NPUModelRunner(GPUModelRunner):
                         hidden_states.tensors, all_gather_group=get_tp_group())
                     logits = None
                 else:
-                    hidden_states = _get_hidden_states_tensor(hidden_states)
                     sample_hidden_states = hidden_states[logits_indices]
                     logits = self.model.compute_logits(sample_hidden_states)
 
@@ -2210,8 +2204,12 @@ class NPUModelRunner(GPUModelRunner):
         if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
             if create_mixed_batch:
                 raise NotImplementedError("create_mixed_batch is used for warmup deepgemm, vllm-ascend does not need it")
-            else:
-                seq_lens = max_query_len  # type: ignore[assignment]
+            # The reason why we use a fixed seq_len rather than max_query_len is that
+            # _npu_paged_attention_get_workspace only returns max workspace with specific
+            # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
+            # in inference. This will be removed once npu_fused_infer_attention_score
+            # outperforms _npu_paged_attention on all cases.
+            seq_lens = SEQ_LEN_WITH_MAX_PA_WORKSPACE if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config) else max_query_len  # type: ignore[assignment]
             self.seq_lens.np[:num_reqs_padded] = seq_lens
             self.seq_lens.np[num_reqs_padded:] = 0
             self.seq_lens.copy_to_gpu()
@@ -3059,15 +3057,6 @@ def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     """
     return int(tensor[1, :].min().item())
 
-
-def _get_hidden_states_tensor(hidden_states):
-    # Sometimes, after the model is compiled through the AOT backend,
-    # the model output may become a list containing only one Tensor object.
-    if isinstance(hidden_states, list) and \
-            len(hidden_states) == 1 and \
-            isinstance(hidden_states[0], torch.Tensor):
-        hidden_states = hidden_states[0]
-    return hidden_states
 
 @contextmanager
 def _torch_cuda_wrapper():
