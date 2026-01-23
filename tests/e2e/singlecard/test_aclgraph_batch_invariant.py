@@ -79,7 +79,7 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
 
 def _extract_step_logprobs(generate_output):
     """
-    extract logprobs from token IDs from VllmRunner.generate_w_logprobs()
+    extract logprobs and token IDs from VllmRunner.generate_w_logprobs()
     """
     if not isinstance(generate_output, tuple) or len(generate_output) < 3:
         return None, None
