@@ -891,10 +891,23 @@ class PCPManager:
                         split_kv_with_q_tail_nomask_idx_reqs,
                         head_attn_nomask_seqlens, chunk_seqlens)
 
+                    pcp_prefill_mask = torch.triu(
+                        torch.ones(512,
+                                   512,
+                                   device=self.device,
+                                   dtype=self.dtype), 1)
+                else:
+                    pcp_prefill_mask = torch.triu(
+                        torch.full((2048, 2048),
+                                   True,
+                                   device=self.device,
+                                   dtype=torch.bool), 1)
+
                 self.extra_long_seq_kwargs = {
                     'attn_mask_seqlens': attn_mask_seqlens,
                     'head_attn_nomask_seqlens': head_attn_nomask_seqlens,
-                    'tail_attn_nomask_seqlens': tail_attn_nomask_seqlens
+                    'tail_attn_nomask_seqlens': tail_attn_nomask_seqlens,
+                    'pcp_prefill_mask': pcp_prefill_mask
                 }
                 if not self.pcp_use_hybrid_attn:
                     long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:

@@ -1071,10 +1071,16 @@ class NPUModelRunner(GPUModelRunner):
                     device=self.device,
                 )
             else:
-                maybe_pcp_full_tokens = (
-                    num_input_tokens if self.pcp_size == 1 else
-                    total_num_scheduled_tokens * self.pcp_size -
-                    sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs]))
+                total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
+                if self.pcp_size > 1:
+                    if self.pcp_use_hybrid_attn:
+                        maybe_pcp_full_tokens = sum(num_scheduled_tokens_padded) * self.pcp_size - total_num_pcp_pads
+                        print(f"sum(num_scheduled_tokens_padded)={sum(num_scheduled_tokens_padded)}, self.pcp_size={self.pcp_size}, total_num_pcp_pads={total_num_pcp_pads}")
+                        print(f"maybe_pcp_full_tokens={maybe_pcp_full_tokens}")
+                    else:
+                        maybe_pcp_full_tokens = total_num_scheduled_tokens * self.pcp_size - total_num_pcp_pads
+                else:
+                    maybe_pcp_full_tokens = num_input_tokens
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor()
                 slot_mapping = blk_table.slot_mapping.gpu[:
@@ -1084,12 +1090,12 @@ class NPUModelRunner(GPUModelRunner):
                         total_num_scheduled_tokens:num_input_tokens].fill_(-1)
             if self.pcp_size * self.dcp_size > 1:
                 self.long_seq_metadata = self.pcp_manager.generate_pcp_metadata(
-                    total_num_scheduled_tokens, self.query_lens,
-                    self.input_batch, num_scheduled_tokens, pcp_unpad_mask=pcp_unpad_mask)
+                    total_num_scheduled_tokens if not self.pcp_use_hybrid_attn else sum(num_scheduled_tokens_padded),
+                    self.query_lens, self.input_batch, num_scheduled_tokens, pcp_unpad_mask=pcp_unpad_mask)
                 blk_table.slot_mapping.gpu[maybe_pcp_full_tokens:].fill_(-1)
                 if self.pcp_size > 1:
                     slot_mapping_pcp = self.pcp_manager.get_padded_slot_mapping(
-                        total_num_scheduled_tokens,
+                        total_num_scheduled_tokens if not self.pcp_use_hybrid_attn else sum(num_scheduled_tokens_padded),
                         slot_mapping,
                     )
                     blk_table.slot_mapping.gpu[:self.pcp_manager.

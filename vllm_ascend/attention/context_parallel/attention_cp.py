@@ -684,6 +684,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
     def reshape_and_cache(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
@@ -808,7 +809,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
         if has_decode:
-            decode_query = query[:num_decode_tokens]
+            if not attn_metadata.use_hybrid_attn or not has_prefill:
+                decode_query = query[:num_decode_tokens]
+            else:
+                decode_query = query[:num_decode_tokens * self.pcp_size: self.pcp_size]
             output_decode = self._forward_decode_pcp_dcp(decode_query, attn_metadata)
             output[:num_decode_tokens] = output_decode
         if has_prefill:
@@ -828,6 +832,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
             key = key[self.pcp_size * num_decode_tokens :].contiguous()
             value = value[self.pcp_size * num_decode_tokens :].contiguous()
+            if attn_metadata.use_hybrid_attn:
+                prefill_query = query[self.pcp_size * num_decode_tokens:]
+            else:
+                prefill_query = query[
+                    num_decode_tokens : num_actual_tokens_pcp_padded]
 
             if has_chunked_context:
                 # all_gather q for chunked prefill // overlap the computation inner current chunk

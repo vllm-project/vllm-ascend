@@ -814,7 +814,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata is None:
             return output.fill_(0)
         if key is not None and value is not None:
-            key, value = self.reshape_and_cache(key, value, kv_cache, attn_metadata)
+            query, key, value = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata)
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling":
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
