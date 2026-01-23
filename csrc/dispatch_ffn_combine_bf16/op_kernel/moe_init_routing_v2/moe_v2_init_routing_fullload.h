@@ -204,7 +204,7 @@ __aicore__ inline void MoeV2FullLoad<T>::ComputeExpertTokenCountOrCumsum()
 
     int32_t lastExpertId = expandedExpertIdx.GetValue(0);
 #ifdef __CCE_KT_TEST__
-    // CPU孪生调试无法使用多核同步，可能导致lastExpertId为未初始化的脏数据，因此需要特殊处理
+    
     if (lastExpertId > expertTokensCount.GetSize()) {
         return;
     }

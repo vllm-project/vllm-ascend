@@ -315,6 +315,7 @@ class FusedMC2CommImpl(MoECommMethod):
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
             out = torch.empty_like(hidden_states)
+            expert_token_nums = torch.empty_like(self.moe_config.num_local_experts)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=hidden_states,
                 weight1=w1,
@@ -326,7 +327,9 @@ class FusedMC2CommImpl(MoECommMethod):
                 group=self.token_dispatcher.moe_all_to_all_group_name,
                 max_output_size=65536,
                 out=out,
+                expert_token_nums = expert_token_nums,
             )
+            expert_tokens = expert_token_nums
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert expert_map is not None, "expert_map cannot be None."
             group_list_type = 1

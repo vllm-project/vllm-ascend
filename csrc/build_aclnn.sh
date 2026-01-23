@@ -48,11 +48,11 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
     # for dispatch_ffn_combine
     SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-    TARGET_DIR="$SCRIPT_DIR/dispatch_ffn_combine/op_kernel/utils/"
+    TARGET_DIR="$SCRIPT_DIR/dispatch_ffn_combine/op_kernel/"
     TARGET_FILE="$TARGET_DIR/$(basename "$HCCL_STRUCT_FILE_PATH")"
     # for dispatch_ffn_combine_bf16
     SCRIPT_DIR_BF16=$(cd "$(dirname "$0")" && pwd)
-    TARGET_DIR_BF16="$SCRIPT_DIR_BF16/dispatch_ffn_combine_bf16/op_kernel/utils/"
+    TARGET_DIR_BF16="$SCRIPT_DIR_BF16/dispatch_ffn_combine_bf16/op_kernel/"
     TARGET_FILE_BF16="$TARGET_DIR_BF16/$(basename "$HCCL_STRUCT_FILE_PATH")"
 
     echo "*************************************"

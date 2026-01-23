@@ -234,7 +234,7 @@ __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCount(bool isTail
     DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(copyLength * sizeof(int32_t)), 0, 0,
                                  0};
 #ifdef __CCE_KT_TEST__
-    // CPU孪生调试不进行输出拷贝
+
     return;
 #endif
     SetAtomicAdd<int32_t>();

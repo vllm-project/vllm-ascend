@@ -18,6 +18,11 @@ FORCE_INLINE_AICORE void gm_store(__gm__ T *addr, T val) {
     *((__gm__ T *)addr) = val;
 }
 
+FORCE_INLINE_AICORE void AicSyncAll() {
+    AscendC::CrossCoreSetFlag<0x0, PIPE_FIX>(8);
+    AscendC::CrossCoreWaitFlag<0x0>(8);
+}
+
 template<typename T>
 FORCE_INLINE_AICORE T gm_load(__gm__ T *cache) {
     return *((__gm__ T *)cache);
