@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file aclnn_apply_top_k_top_p.cpp
+ * \file aclnn_apply_top_k_top_p_custom.cpp
  * \brief
  */
-#include "aclnn_apply_top_k_top_p.h"
-#include "apply_top_k_top_p_with_sorted.h"
+#include "aclnn_apply_top_k_top_p_custom.h"
+#include "apply_top_k_top_p_custom.h"
 #include "sort.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/common/op_error_check.h"
@@ -138,12 +138,12 @@ static aclnnStatus CheckParams(const aclTensor* logits, const aclTensor* p, cons
 }
 } // namespace
 
-aclnnStatus aclnnApplyTopKTopPGetWorkspaceSize(
+aclnnStatus aclnnApplyTopKTopPCustomGetWorkspaceSize(
     const aclTensor* logits, const aclTensor* p, const aclTensor* k, aclTensor* out, uint64_t* workspaceSize,
     aclOpExecutor** executor)
 {
   OP_CHECK_COMM_INPUT(workspaceSize, executor);
-  L2_DFX_PHASE_1(aclnnApplyTopKTopP, DFX_IN(logits, p, k), DFX_OUT(out));
+  L2_DFX_PHASE_1(aclnnApplyTopKTopPCustom, DFX_IN(logits, p, k), DFX_OUT(out));
   // 固定写法，创建OpExecutor
   auto uniqueExecutor = CREATE_EXECUTOR();
   CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
@@ -188,7 +188,7 @@ aclnnStatus aclnnApplyTopKTopPGetWorkspaceSize(
     CHECK_RET(sortedValue != nullptr, ACLNN_ERR_INNER_NULLPTR);
     const aclTensor* sortedIndices = std::get<1>(sortResult);
     CHECK_RET(sortedIndices != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    auto res = l0op::ApplyTopKTopPWithSorted(sortedValue, sortedIndices, pContiguous, kContiguous, uniqueExecutor.get());
+    auto res = l0op::ApplyTopKTopPCustom(sortedValue, sortedIndices, pContiguous, kContiguous, uniqueExecutor.get());
     CHECK_RET(res != nullptr, ACLNN_ERR_INNER_NULLPTR);
     // 固定写法，将计算结果拷贝到输出out上，out可能是非连续的tensor
     viewCopyResult = l0op::ViewCopy(res, out, uniqueExecutor.get());
@@ -200,9 +200,9 @@ aclnnStatus aclnnApplyTopKTopPGetWorkspaceSize(
   return ACLNN_SUCCESS;
 }
 
-aclnnStatus aclnnApplyTopKTopP(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, aclrtStream stream)
+aclnnStatus aclnnApplyTopKTopPCustom(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, aclrtStream stream)
 {
-   L2_DFX_PHASE_2(aclnnApplyTopKTopP);
+   L2_DFX_PHASE_2(aclnnApplyTopKTopPCustom);
   // 固定写法，调用框架能力，完成计算
   return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }

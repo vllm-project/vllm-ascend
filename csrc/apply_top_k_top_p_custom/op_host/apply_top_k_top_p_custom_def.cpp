@@ -9,15 +9,15 @@
  */
 
 /*!
- * \file apply_top_k_top_p_with_sorted_def.cpp
+ * \file apply_top_k_top_p_custom_def.cpp
  * \brief
  */
 #include "register/op_def_registry.h"
 
 namespace ops {
-class ApplyTopKTopPWithSorted : public OpDef {
+class ApplyTopKTopPCustom : public OpDef {
 public:
-    explicit ApplyTopKTopPWithSorted(const char *name) : OpDef(name)
+    explicit ApplyTopKTopPCustom(const char *name) : OpDef(name)
     {
         this->Input("sorted_value")
             .ParamType(REQUIRED)
@@ -96,5 +96,5 @@ private:
     }
 };
 
-OP_ADD(ApplyTopKTopPWithSorted);
+OP_ADD(ApplyTopKTopPCustom);
 } // namespace ops

@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file aclnn_apply_top_k_top_p.h
+ * \file aclnn_apply_top_k_top_p_custom.h
  * \brief
  */
-#ifndef OP_API_INC_APPLY_TOP_K_TOP_P_H_
-#define OP_API_INC_APPLY_TOP_K_TOP_P_H_
+#ifndef OP_API_INC_APPLY_TOP_K_TOP_P_CUSTOM_H_
+#define OP_API_INC_APPLY_TOP_K_TOP_P_CUSTOM_H_
 
 #include "aclnn/aclnn_base.h"
 
@@ -22,7 +22,7 @@ extern "C" {
 #endif
 
 /**
- * @brief aclnnApplyTopKTopP的第一段接口，根据具体的计算流程，计算workspace大小。
+ * @brief aclnnApplyTopKTopPCustom的第一段接口，根据具体的计算流程，计算workspace大小。
  * @domain aclnn_ops_infer
  * @param [in] logits: npu device侧的aclTensor，数据类型支持FLOAT、FLOAT16、BFLOAT16，支持非连续的Tensor，数据格式支持ND。
  * @param [in] p: npu device侧的aclTensor，数据类型支持FLOAT、FLOAT16、BFLOAT16，支持非连续的Tensor，数据格式支持ND。
@@ -32,23 +32,23 @@ extern "C" {
  * @param [out] executor: 返回op执行器，包含算子计算流程。
  * @return aclnnStatus: 返回状态码。
  */
-aclnnStatus aclnnApplyTopKTopPGetWorkspaceSize(const aclTensor* logits, const aclTensor* p,
+aclnnStatus aclnnApplyTopKTopPCustomGetWorkspaceSize(const aclTensor* logits, const aclTensor* p,
                                                          const aclTensor* k, aclTensor* out, uint64_t* workspaceSize,
                                                          aclOpExecutor** executor);
 
 /**
- * @brief aclnnApplyTopKTopP的第二段接口，用于执行计算。
+ * @brief aclnnApplyTopKTopPCustom的第二段接口，用于执行计算。
  * @param [in] workspace: 在npu device侧申请的workspace内存起址。
- * @param [in] workspaceSize: 在npu device侧申请的workspace大小，由第一段接口aaclnnApplyTopKTopPGetWorkspaceSize获取。
+ * @param [in] workspaceSize: 在npu device侧申请的workspace大小，由第一段接口aaclnnApplyTopKTopPCustomGetWorkspaceSize获取。
  * @param [in] stream: acl stream流。
  * @param [in] executor: op执行器，包含了算子计算流程。
  * @return aclnnStatus: 返回状态码。
  */
-aclnnStatus aclnnApplyTopKTopP(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
+aclnnStatus aclnnApplyTopKTopPCustom(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                          aclrtStream stream);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif  // OP_API_INC_APPLY_TOP_K_TOP_P_H_
+#endif  // OP_API_INC_APPLY_TOP_K_TOP_P_CUSTOM_H_
