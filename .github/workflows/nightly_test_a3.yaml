@@ -172,7 +172,7 @@ jobs:
         test_config:
           - name: qwen3-30b-acc
             os: linux-aarch64-a3-4
-            tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_30b_acc.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       vllm: v0.14.0
