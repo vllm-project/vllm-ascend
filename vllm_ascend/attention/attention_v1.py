@@ -783,9 +783,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                actual_seq_qlen = torch.tensor([1] *
-                                               len(attn_metadata.seq_lens_list),
-                                               dtype=torch.int32).cumsum(dim=0)
+                actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
             # calculate atten_mask & sparse_mode by sliding_window
             if self.sliding_window is not None:
                 atten_mask = self.attn_mask_builder.get_swa_mask(torch.bool, self.sliding_window)
@@ -800,8 +798,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_query_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="TND",
-                pre_tokens=self.sliding_window
-                if self.sliding_window is not None else SWA_INT_MAX,
+                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
                 atten_mask=atten_mask,
                 sparse_mode=sparse_mode,
@@ -810,7 +807,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_size=block_size,
                 actual_seq_qlen=actual_seq_qlen,
                 actual_seq_kvlen=actual_seq_lengths_kv,
-                learnable_sink=self.sinks
+                learnable_sink=self.sinks,
             )
         else:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score(
