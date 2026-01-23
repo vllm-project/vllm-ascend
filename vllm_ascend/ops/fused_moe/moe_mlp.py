@@ -295,7 +295,8 @@ def unquant_apply_mlp(
 
     if activation == "swigluoai":
         num_experts, _, hidden_size = w1.shape
-        gate_up_out = SwigluOAIAndMul.forward_native(gate_up_out.view(-1, hidden_size))
+        layer = SwigluOAIAndMul()
+        gate_up_out = layer.forward_native(gate_up_out.view(-1, hidden_size))
     else:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
