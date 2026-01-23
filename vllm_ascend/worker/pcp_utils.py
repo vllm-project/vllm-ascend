@@ -109,7 +109,53 @@ class PCPManager:
                                                     dtype=torch.int32,
                                                     device=device,
                                                     pin_memory=pin_memory)
+        # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
+        # a faster version of creating a new tensor every time. Thus, we should
+        # not make any assumptions about the values in these tensors.
+        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int32,
+                                         device="cpu",
+                                         pin_memory=True)
+        self.positions_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int64,
+                                         device="cpu",
+                                         pin_memory=True)
+        self.positions_np = self.positions_cpu.numpy()
+
+        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=True)
+        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
+        self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
+                                        dtype=torch.int32,
+                                        device="cpu",
+                                        pin_memory=True)
+        self.seq_lens_np = self.seq_lens_cpu.numpy()
+        # self.pcp_allgather_restore_idx = torch.zeros(
+        #     self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs,
+        #     dtype=torch.int32,
+        #     device=self.device)
+        self.pcp_fa_query_idx = torch.zeros(
+            self.max_num_tokens + 2 * self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device)
+        self.pcp_enter_fa_restore_idx = torch.zeros(
+            self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device)
         self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type == "qwen3_next"
+        self.cp_kv_recover_idx_for_chunk: list[list[int]] = [
+            [] for _ in range(self.pcp_world_size)
+        ]
+
+        self.num_pcp_pads = torch.zeros(self.max_num_reqs, dtype=torch.int32)
+        self.pcp_pads_logits_hybrid_attn = torch.zeros(self.max_num_reqs, dtype=torch.int32)
+        self.pcp_padded_slot_mapping = torch.zeros(
+            self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device)
+        self.num_actual_tokens_pcp_padded = 0
 
     def _get_cumsum_and_arange(
         self,
@@ -294,17 +340,17 @@ class PCPManager:
                 num_prefill_tokens_allranks = self._get_cp_local_seq_lens(
                     prefill_tokens_tensor, self.pcp_world_size, 1, 1).long().numpy()
                 # [3] [2]  |  [2,2] [2,1] [2,1] [1,1]
-                num_prefill_scheduled_tokens_linear = num_prefill_tokens_allranks[:, self.pcp_rank, 0]
+                num_prefill_scheduled_tokens_linear = num_prefill_tokens_allranks[:, self.pcp_world_rank, 0]
                 num_padded_scheduled_tokens[num_decode_reqs:] = num_prefill_scheduled_tokens_linear
                 # [[3,5]] | [[0,0,0,0,0],[0,0,0,0,0]]
                 num_prefill_tokens_start_loc = np.zeros((num_reqs - num_decode_reqs, self.pcp_world_size + 1), dtype=np.int64)
                 # [[0,3,5]] | [[0,2,4,6,7],[0,2,3,4,5]]
                 num_prefill_tokens_start_loc[:, 1:] = np.cumsum(num_prefill_tokens_allranks[..., 0], axis=-1)
                 # [0] [3] | [0,0] [2,2] [4,3] [6,4] [7,5]
-                num_prefill_tokens_cu_ranks = num_prefill_tokens_start_loc[:, self.pcp_rank]
+                num_prefill_tokens_cu_ranks = num_prefill_tokens_start_loc[:, self.pcp_world_rank]
                 # [0,1,2] [0,1] | [0,1,0,1] [0,1,0] [0,1,0] [0,0]
                 # -> [0,1,2] [3,4] | [0,1,0,1] [2,3,2] [4,5,3] [6,4]
-                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens)
+                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens, arange_np)
                 positions_linear[num_decode_reqs:] = positions_linear[num_decode_reqs:] + np.repeat(
                     num_prefill_tokens_cu_ranks, num_prefill_scheduled_tokens_linear
                 )
@@ -319,10 +365,10 @@ class PCPManager:
                 # [[3,2]] [[2,2,2,1],[2,2,1,1],[1,1,1,1]]
                 num_prefill_tokens_allranks = num_prefill_tokens_allranks[..., 0]
                 # [0,1,2,0,1] [0,1,0,1,0,1,0,|0,1,0,1,0,0]
-                _, prefill_arange_allranks = self._get_cumsum_and_arange(num_prefill_tokens_allranks.flatten())
+                _, prefill_arange_allranks = self._get_cumsum_and_arange(num_prefill_tokens_allranks.flatten(), arange_np)
                 # [0,1] [0,1,2,3,0,1,2,3]
                 _, prefill_rank_offset = self._get_cumsum_and_arange(
-                    np.ones(num_reqs - num_decode_reqs, dtype=np.int64) * self.pcp_world_size
+                    np.ones(num_reqs - num_decode_reqs, dtype=np.int64) * self.pcp_world_size, arange_np
                 )
                 # [0,0,0,3,3] [0,M,2M,3M,0,M,2M,3M] -> [0,0,M,M,2M,2M,3M,0,0,M,M,2M,3M] + D
                 prefill_all_offset = np.repeat(prefill_rank_offset * max_scheduled_tokens, num_prefill_tokens_allranks.flatten()) + num_decode_tokens
@@ -336,7 +382,7 @@ class PCPManager:
                 # [0,1,2,3,4]  [0,1,M,M+1,2M,2M+1,3M,0,1,M,M+1,2M,3M]
                 enter_fa_prefill_restore_idx = np.add(prefill_all_offset, prefill_arange_allranks)
             else:
-                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens)
+                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens, arange_np)
 
             # decode reorder idx
             enter_fa_decode_restore_idx = None
@@ -344,7 +390,7 @@ class PCPManager:
                 # [0,1,2], [4,4,4] -> [0,0,0,0,1,1,1,1,2,2,2,2]
                 num_decode_pcp_size = np.ones(num_decode_reqs, dtype=np.int64) * self.pcp_world_size
                 decode_reqs_offset = np.repeat(np.arange(num_decode_reqs, dtype=np.int64), num_decode_pcp_size)
-                decode_ranks_offset = self._get_cumsum_and_arange(num_decode_pcp_size)[1] * max_scheduled_tokens
+                decode_ranks_offset = self._get_cumsum_and_arange(num_decode_pcp_size, arange_np)[1] * max_scheduled_tokens
                 enter_fa_decode_restore_idx = np.add(decode_reqs_offset, decode_ranks_offset)
 
             if enter_fa_decode_restore_idx is not None and enter_fa_prefill_restore_idx is not None:
@@ -365,7 +411,7 @@ class PCPManager:
                 ]
                 all_positions_prefill_tensor = torch.from_numpy(np.concatenate(all_positions_prefill))
                 all_enter_fla_restore_idx = all_positions_prefill_tensor.float().argsort()
-                unpad_mask_prefill = self.pcp_unpad_mask_cpu[num_decode_reqs * self.pcp_world_size:]
+                unpad_mask_prefill = self.pcp_unpad_mask_cpu[:pcp_padded_arange.shape[0]][num_decode_reqs * self.pcp_world_size:]
                 # [0] | [0,7]
                 ori_tokens_start_loc = np.roll(np.cumsum(num_scheduled_tokens[num_decode_tokens:]), 1)
                 ori_tokens_start_loc[0] = 0
@@ -375,10 +421,10 @@ class PCPManager:
                 enter_fla_restore_idx = torch.index_select(
                     all_enter_fla_restore_idx[unpad_mask_prefill], 0, torch.from_numpy(enter_fla_scatter_idx)
                 )
-                self.pcp_allgather_restore_idx[:enter_fla_restore_idx.shape[0]].copy_(
+                self.pcp_allgather_restore_idx.gpu[:enter_fla_restore_idx.shape[0]].copy_(
                     enter_fla_restore_idx.long(), non_blocking=True)
 
-                positions_prefill = all_positions_prefill[self.pcp_rank]
+                positions_prefill = all_positions_prefill[self.pcp_world_rank]
                 pcp_fa_query_idx_tensor = torch.from_numpy(positions_prefill)                
                 self.pcp_fa_query_idx[:pcp_fa_query_idx_tensor.shape[0]].copy_(
                     pcp_fa_query_idx_tensor.long(), non_blocking=True)
@@ -671,8 +717,14 @@ class PCPManager:
             [-1, pcp_world_size, dcp_world_size])
         return dcp_local_seq_lens
 
-    def generate_pcp_metadata(self, total_num_scheduled_tokens, query_lens,
-                              input_batch, num_scheduled_tokens):
+    def generate_pcp_metadata(
+        self,
+        total_num_scheduled_tokens,
+        query_lens,
+        input_batch,
+        num_scheduled_tokens,
+        pcp_unpad_mask = None
+    ):
         from vllm_ascend.attention.utils import \
             AscendPrefillContextParallelMetadata
         num_reqs = input_batch.num_reqs or query_lens.size(0)
@@ -735,9 +787,13 @@ class PCPManager:
                 num_computed_tokens_of_pcp_dcp = torch.cat(
                     num_computed_tokens_of_pcp_dcp_list, dim=0)
             long_seq_metadata = AscendPrefillContextParallelMetadata(
+                pcp_use_hybrid_attn=self.pcp_use_hybrid_attn,
                 num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_of_pcp_dcp.
-                numpy())
+                numpy(),
+                pcp_unpad_mask=torch.from_numpy(pcp_unpad_mask),
+                pcp_padded_tokens_fla=self.pcp_padded_tokens_fla,
+            )
             if self.pcp_world_size > 1:
                 q_head_idx, q_tail_idx = [], []
                 kv_with_q_head_nomask_idx, kv_with_q_head_mask_idx = [], []
@@ -844,7 +900,7 @@ class PCPManager:
                                                                                                      num_actual_tokens_pcp_padded]
                 else:
                     long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:
-                                                                                                     num_scheduled_tokens - num_decodes]
+                                                                                                     total_num_scheduled_tokens - num_decodes]
 
                 long_seq_metadata.cp_kv_recover_idx_for_chunk = self.cp_kv_recover_idx_for_chunk
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor

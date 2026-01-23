@@ -1085,7 +1085,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_size * self.dcp_size > 1:
                 self.long_seq_metadata = self.pcp_manager.generate_pcp_metadata(
                     total_num_scheduled_tokens, self.query_lens,
-                    self.input_batch, num_scheduled_tokens)
+                    self.input_batch, num_scheduled_tokens, pcp_unpad_mask=pcp_unpad_mask)
                 blk_table.slot_mapping.gpu[maybe_pcp_full_tokens:].fill_(-1)
                 if self.pcp_size > 1:
                     slot_mapping_pcp = self.pcp_manager.get_padded_slot_mapping(
