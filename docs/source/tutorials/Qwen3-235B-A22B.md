@@ -112,7 +112,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --seed 1024 \
 --quantization ascend \
 --served-model-name qwen3 \
---max-num-seqs 4 \
+--max-num-seqs 32 \
 --max-model-len 133000 \
 --max-num-batched-tokens 8096 \
 --enable-expert-parallel \
