@@ -22,17 +22,22 @@ import torch_npu
 
 from vllm_ascend.utils import maybe_trans_nz
 
+from .base import AscendLinearScheme
+from .registry import register_scheme
 
-class AscendW8A16LinearMethod:
+
+@register_scheme("W8A16", "linear")
+class AscendW8A16LinearMethod(AscendLinearScheme):
     """Linear method for Ascend W8A16.
-
+    
+    This scheme uses 8-bit quantized weights with 16-bit activations.
     """
 
     def __init__(self) -> None:
         pass
 
-    @staticmethod
     def get_weight(
+        self,
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype = torch.bfloat16,
@@ -42,12 +47,8 @@ class AscendW8A16LinearMethod:
         }
         return params_dict
 
-    @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
-        return {}
-
-    @staticmethod
     def get_perchannel_param(
+        self,
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
@@ -60,15 +61,8 @@ class AscendW8A16LinearMethod:
                                                    dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self,
-                           input_size: int,
-                           output_size: int,
-                           params_dtype: torch.dtype,
-                           layer_type: Optional[str] = None) -> Dict[str, Any]:
-        return {}
-
-    @staticmethod
     def apply(
+        self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,

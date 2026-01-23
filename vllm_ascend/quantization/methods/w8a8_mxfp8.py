@@ -21,9 +21,17 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 
+from .base import AscendLinearScheme
+from .registry import register_scheme
 
-class AscendW8A8MXFP8DynamicLinearMethod:
-    """Linear method for Ascend W8A8_DYNAMIC.
+
+@register_scheme("W8A8_MXFP8", "linear")
+class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
+    """Linear method for Ascend W8A8_MXFP8 (Microscaling FP8) quantization.
+    
+    This scheme uses microscaling FP8 quantization with per-group scales.
+    The activation is dynamically quantized to FP8 (E4M3FN format) with
+    microscaling, and weights are stored in FP8 format with per-group scales.
     """
     model_dtype = None
 
@@ -32,25 +40,13 @@ class AscendW8A8MXFP8DynamicLinearMethod:
         self.group_size = vllm_config.quant_config.quant_description.get(
             "group_size", 32)
 
-    @staticmethod
-    def get_weight(input_size: int, output_size: int,
+    def get_weight(self, input_size: int, output_size: int,
                    params_dtype: torch.dtype) -> Dict[str, Any]:
         params_dict = {
             "weight":
             torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)
         }
         return params_dict
-
-    @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
-        return {}
-
-    @staticmethod
-    def get_perchannel_param(
-        output_size: int,
-        params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
-        return {}
 
     def get_pergroup_param(self,
                            input_size: int,
