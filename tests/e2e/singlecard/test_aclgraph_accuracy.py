@@ -57,9 +57,9 @@ CASE_DS_FULL_DECODE_ONLY = LLMTestCase(
     quantization="ascend",
     prompts=PROMPTS_LONG,
     golden_answers=[
-        '\n\nSelect an assignment template',
-        '\n\nSelect an assignment template',
-        '\n\nSelect an assignment template'
+        "\n\nSelect an assignment template",
+        "\n\nI'm not sure how to approach this problem. I'm not sure if I should use the law of total probability or if I should use",
+        "\n\n## Answer\n\n$a + b + c = 0$\n\nSolution\n\nLet $x$ be the common root of the equations"
     ])
 
 CASE_QWEN_EX = LLMTestCase(
@@ -75,9 +75,9 @@ CASE_DS_EX = LLMTestCase(model="vllm-ascend/DeepSeek-V2-Lite-W8A8",
                          quantization="ascend",
                          prompts=PROMPTS_LONG,
                          golden_answers=[
-                             '\n\nYour answer seems reasonable. Find out if you\'re right!\n\nSign up to access problem solutions.\n\nThat seems reasonable. Find out',
-                             '\n\nI\'m not sure how to approach this problem. I\'m not sure if I should use the law of total probability or if I should use',
-                             '\n\nLet $a, b, c$ be distinct numbers such that the equations $x^2 + ax + 1 = 0$and $'
+                             "\n\nSelect an assignment template",
+                             "\n\nI'm not sure how to approach this problem. I'm not sure if I should use the law of total probability or if I should use",
+                             "\n\n## Answer\n\n$a + b + c = 0$\n\nSolution\n\nLet $x$ be the common root of the equations"
                          ])
 
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH])

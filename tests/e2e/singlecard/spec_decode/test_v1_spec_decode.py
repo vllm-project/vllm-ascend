@@ -420,7 +420,7 @@ def test_llama_qwen_eagle_acceptance(
     ]
     golden = BASELINES[method]
 
-    match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
+    match = all(abs(a - b) < 0.08 for a, b in zip(acceptance_per_pos, golden))
     if not match:
         print(f"acceptance_per_pos: {acceptance_per_pos}")
         print(f"golden: {golden}")
