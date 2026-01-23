@@ -409,6 +409,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         kv_with_q_head_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_head_mask_idx
         kv_with_q_tail_nomask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_nomask_idx
         kv_with_q_tail_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx
+        use_hybrid_attn = attn_metadata.use_hybrid_attn
+
         if use_hybrid_attn:
             fa_query_idx = attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx
             query = torch.index_select(query, 0, fa_query_idx)
@@ -422,8 +424,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         v_tail_nomask = torch.index_select(value, 0, kv_with_q_tail_nomask_idx)
         k_tail_mask = torch.index_select(key, 0, kv_with_q_tail_mask_idx)
         v_tail_mask = torch.index_select(value, 0, kv_with_q_tail_mask_idx)
-        use_hybrid_attn = attn_metadata.use_hybrid_attn
-
 
         return (
             {

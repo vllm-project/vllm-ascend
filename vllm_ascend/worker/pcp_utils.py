@@ -156,6 +156,7 @@ class PCPManager:
             dtype=torch.int32,
             device=self.device)
         self.num_actual_tokens_pcp_padded = 0
+        self.pcp_padded_tokens_fla = 0
 
     def _get_cumsum_and_arange(
         self,
@@ -920,6 +921,8 @@ class PCPManager:
                     'head_attn_nomask_seqlens']
                 long_seq_metadata.tail_attn_nomask_seqlens = self.extra_long_seq_kwargs[
                     'tail_attn_nomask_seqlens']
+                long_seq_metadata.pcp_prefill_mask = self.extra_long_seq_kwargs[
+                    'pcp_prefill_mask']
                 if self.vllm_config.model_config.use_mla:
                     long_seq_metadata.kv_with_q_head_nomask_idx_tensor = split_q_head_nomask_idx_tensor_list
                     long_seq_metadata.kv_with_q_tail_nomask_idx_tensor = split_q_tail_nomask_idx_tensor_list
