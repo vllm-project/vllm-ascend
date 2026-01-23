@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-22 17:09+0800\n"
+"POT-Creation-Date: 2026-01-23 11:24+0800\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -114,27 +114,6 @@ msgstr ""
 "ascend)。在未来版本中，其稳定性、准确性以及性能改进相关的表现可能会发生变化。"
 
 #: ../../source/tutorials/Qwen3-Next.md:56
-msgid "Install Triton Ascend"
-msgstr "安装 Triton Ascend"
-
-#: ../../source/tutorials/Qwen3-Next.md:58
-msgid ""
-"The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required "
-"when you run Qwen3 Next, please follow the instructions below to install "
-"it and its dependency."
-msgstr ""
-"运行 Qwen3 Next 需要安装 [Triton Ascend](https://gitee.com/ascend/triton-"
-"ascend)，请按照以下说明安装它及其依赖项。"
-
-#: ../../source/tutorials/Qwen3-Next.md:60
-msgid "Install the Ascend BiSheng toolkit, execute the command:"
-msgstr "安装昇腾毕昇（BiSheng）编译器工具链，执行以下命令："
-
-#: ../../source/tutorials/Qwen3-Next.md:69
-msgid "Install Triton Ascend:"
-msgstr "安装 Triton Ascend："
-
-#: ../../source/tutorials/Qwen3-Next.md:75
 msgid "Inference"
 msgstr "推理"
 
@@ -142,11 +121,11 @@ msgstr "推理"
 msgid "Online Inference"
 msgstr "在线推理"
 
-#: ../../source/tutorials/Qwen3-Next.md:81
+#: ../../source/tutorials/Qwen3-Next.md:62
 msgid "Run the following script to start the vLLM server on multi-NPU:"
 msgstr "运行以下脚本以在多 NPU 上启动 vLLM 服务器："
 
-#: ../../source/tutorials/Qwen3-Next.md:87
+#: ../../source/tutorials/Qwen3-Next.md:68
 msgid "Once your server is started, you can query the model with input prompts."
 msgstr "服务器启动后，您可以使用输入提示词查询模型。"
 
@@ -154,30 +133,30 @@ msgstr "服务器启动后，您可以使用输入提示词查询模型。"
 msgid "Offline Inference"
 msgstr "离线推理"
 
-#: ../../source/tutorials/Qwen3-Next.md:106
+#: ../../source/tutorials/Qwen3-Next.md:87
 msgid "Run the following script to execute offline inference on multi-NPU:"
 msgstr "运行以下脚本以在多 NPU 上执行离线推理："
 
-#: ../../source/tutorials/Qwen3-Next.md:144
+#: ../../source/tutorials/Qwen3-Next.md:125
 msgid "If you run this script successfully, you can see the info shown below:"
 msgstr "如果您成功运行此脚本，可以看到如下信息："
 
-#: ../../source/tutorials/Qwen3-Next.md:152
+#: ../../source/tutorials/Qwen3-Next.md:133
 msgid "Accuracy Evaluation"
 msgstr "精度评估"
 
-#: ../../source/tutorials/Qwen3-Next.md:154
-#: ../../source/tutorials/Qwen3-Next.md:166
+#: ../../source/tutorials/Qwen3-Next.md:135
+#: ../../source/tutorials/Qwen3-Next.md:147
 msgid "Using AISBench"
 msgstr "使用 AISBench"
 
-#: ../../source/tutorials/Qwen3-Next.md:156
+#: ../../source/tutorials/Qwen3-Next.md:137
 msgid ""
 "Refer to [Using "
 "AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
 msgstr "详见 [使用 AISBench](../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/Qwen3-Next.md:158
+#: ../../source/tutorials/Qwen3-Next.md:139
 msgid ""
 "After execution, you can get the result, here is the result of `Qwen3"
 "-Next-80B-A3B-Instruct` in `vllm-ascend:0.13.0rc1` for reference only."
@@ -185,51 +164,51 @@ msgstr ""
 "执行后可获取结果，以下为 `vllm-ascend:0.13.0rc1` 下 `Qwen3-Next-80B-A3B-Instruct` "
 "的测试结果，仅供参考。"
 
-#: ../../source/tutorials/Qwen3-Next.md:104
+#: ../../source/tutorials/Qwen3-Next.md:85
 msgid "dataset"
 msgstr "数据集"
 
-#: ../../source/tutorials/Qwen3-Next.md:104
+#: ../../source/tutorials/Qwen3-Next.md:85
 msgid "version"
 msgstr "版本"
 
-#: ../../source/tutorials/Qwen3-Next.md:104
+#: ../../source/tutorials/Qwen3-Next.md:85
 msgid "metric"
 msgstr "指标"
 
-#: ../../source/tutorials/Qwen3-Next.md:104
+#: ../../source/tutorials/Qwen3-Next.md:85
 msgid "mode"
 msgstr "模式"
 
-#: ../../source/tutorials/Qwen3-Next.md:104
+#: ../../source/tutorials/Qwen3-Next.md:85
 msgid "vllm-api-general-chat"
 msgstr "vllm-api-general-chat"
 
-#: ../../source/tutorials/Qwen3-Next.md:104
+#: ../../source/tutorials/Qwen3-Next.md:85
 msgid "gsm8k"
 msgstr "gsm8k"
 
-#: ../../source/tutorials/Qwen3-Next.md:104
+#: ../../source/tutorials/Qwen3-Next.md:85
 msgid "-"
-msgstr ""
+msgstr "-"
 
-#: ../../source/tutorials/Qwen3-Next.md:104
+#: ../../source/tutorials/Qwen3-Next.md:85
 msgid "accuracy"
 msgstr "准确率"
 
-#: ../../source/tutorials/Qwen3-Next.md:104
+#: ../../source/tutorials/Qwen3-Next.md:85
 msgid "gen"
 msgstr "生成"
 
-#: ../../source/tutorials/Qwen3-Next.md:104
+#: ../../source/tutorials/Qwen3-Next.md:85
 msgid "95.53"
-msgstr ""
+msgstr "95.53"
 
-#: ../../source/tutorials/Qwen3-Next.md:164
+#: ../../source/tutorials/Qwen3-Next.md:145
 msgid "Performance"
 msgstr "性能"
 
-#: ../../source/tutorials/Qwen3-Next.md:168
+#: ../../source/tutorials/Qwen3-Next.md:149
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -238,15 +217,15 @@ msgstr ""
 "详见 [使用 AISBench 进行性能评估](../developer_guide/evaluation/using_ais_bench.md"
 "#execute-performance-evaluation)。"
 
-#: ../../source/tutorials/Qwen3-Next.md:170
+#: ../../source/tutorials/Qwen3-Next.md:151
 msgid "Using vLLM Benchmark"
 msgstr "使用 vLLM 基准测试 (Benchmark)"
 
-#: ../../source/tutorials/Qwen3-Next.md:172
+#: ../../source/tutorials/Qwen3-Next.md:153
 msgid "Run performance evaluation of `Qwen3-Next` as an example."
 msgstr "以 `Qwen3-Next` 的性能评估为例。"
 
-#: ../../source/tutorials/Qwen3-Next.md:174
+#: ../../source/tutorials/Qwen3-Next.md:155
 msgid ""
 "Refer to [vllm "
 "benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
@@ -255,53 +234,72 @@ msgstr ""
 "更多细节请参考 [vLLM "
 "Benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
 
-#: ../../source/tutorials/Qwen3-Next.md:176
+#: ../../source/tutorials/Qwen3-Next.md:157
 msgid "There are three `vllm bench` subcommand:"
 msgstr "共有三个 `vllm bench` 子命令："
 
-#: ../../source/tutorials/Qwen3-Next.md:177
+#: ../../source/tutorials/Qwen3-Next.md:158
 msgid "`latency`: Benchmark the latency of a single batch of requests."
 msgstr "`latency`：测试单批次请求的延迟。"
 
-#: ../../source/tutorials/Qwen3-Next.md:178
+#: ../../source/tutorials/Qwen3-Next.md:159
 msgid "`serve`: Benchmark the online serving throughput."
 msgstr "`serve`：测试在线服务的吞吐量。"
 
-#: ../../source/tutorials/Qwen3-Next.md:179
+#: ../../source/tutorials/Qwen3-Next.md:160
 msgid "`throughput`: Benchmark offline inference throughput."
 msgstr "`throughput`：测试离线推理的吞吐量。"
 
-#: ../../source/tutorials/Qwen3-Next.md:181
+#: ../../source/tutorials/Qwen3-Next.md:162
 msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以 `serve` 模式为例，运行如下代码。"
 
-#: ../../source/tutorials/Qwen3-Next.md:188
+#: ../../source/tutorials/Qwen3-Next.md:169
 msgid ""
 "After about several minutes, you can get the performance evaluation "
 "result."
 msgstr "大约几分钟后，您即可获得性能评估结果。"
 
-#: ../../source/tutorials/Qwen3-Next.md:190
+#: ../../source/tutorials/Qwen3-Next.md:171
 msgid "The performance result is:"
 msgstr "性能结果如下："
 
-#: ../../source/tutorials/Qwen3-Next.md:192
+#: ../../source/tutorials/Qwen3-Next.md:173
 msgid "**Hardware**: A3-752T, 2 node"
 msgstr "**硬件**: A3-752T，2 节点"
 
-#: ../../source/tutorials/Qwen3-Next.md:194
+#: ../../source/tutorials/Qwen3-Next.md:175
 msgid "**Deployment**: TP4 + Full Decode Only"
 msgstr "**部署**: TP4 + Full Decode Only"
 
-#: ../../source/tutorials/Qwen3-Next.md:196
+#: ../../source/tutorials/Qwen3-Next.md:177
 msgid "**Input/Output**: 2k/2k"
 msgstr "**输入/输出**: 2k/2k"
 
-#: ../../source/tutorials/Qwen3-Next.md:198
+#: ../../source/tutorials/Qwen3-Next.md:179
 msgid "**Concurrency**: 32"
 msgstr "**并发量**: 32"
 
-#: ../../source/tutorials/Qwen3-Next.md:200
+#: ../../source/tutorials/Qwen3-Next.md:181
 msgid "**Performance**: 580tps, TPOT 54ms"
 msgstr "**性能**: 580tps, TPOT 54ms"
+
+#~ msgid "Install Triton Ascend"
+#~ msgstr "安装 Triton Ascend"
+
+#~ msgid ""
+#~ "The [Triton Ascend](https://gitee.com/ascend/triton-"
+#~ "ascend) is required when you run "
+#~ "Qwen3 Next, please follow the "
+#~ "instructions below to install it and "
+#~ "its dependency."
+#~ msgstr ""
+#~ "运行 Qwen3 Next 需要安装 [Triton "
+#~ "Ascend](https://gitee.com/ascend/triton-ascend)，请按照以下说明安装它及其依赖项。"
+
+#~ msgid "Install the Ascend BiSheng toolkit, execute the command:"
+#~ msgstr "安装昇腾毕昇（BiSheng）编译器工具链，执行以下命令："
+
+#~ msgid "Install Triton Ascend:"
+#~ msgstr "安装 Triton Ascend："
 
