@@ -11,8 +11,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
-from vllm.v1.attention.backend import (  # type: ignore
-    AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MLAAttentionImpl  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend import envs
@@ -46,12 +45,13 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     maybe_trans_nz,
-    vllm_version_is)
+    vllm_version_is,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-if vllm_version_is('0.14.0'):
+if vllm_version_is("0.14.1"):
     from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder  # type: ignore
 else:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder

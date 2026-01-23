@@ -244,7 +244,7 @@ class MtpProposer(EagleProposer):
         # Note(qcs): We may need to refactor these check logics.
         if self.use_cuda_graph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
                 -1]:
-            if vllm_version_is('0.14.0'):
+            if vllm_version_is('0.14.1'):
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(
                     num_scheduled_tokens)
             else:

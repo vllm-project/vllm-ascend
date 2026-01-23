@@ -32,7 +32,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is('0.14.0'):
+if vllm_version_is('0.14.1'):
     from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 else:
     from vllm.v1.attention.backend import AttentionMetadataBuilder

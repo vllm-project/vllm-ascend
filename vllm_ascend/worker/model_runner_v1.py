@@ -588,7 +588,7 @@ class NPUModelRunner(GPUModelRunner):
         if (self.use_aclgraph and total_num_scheduled_tokens
                 <= self.cudagraph_batch_sizes[-1]):
             # Add padding to the batch size.
-            if vllm_version_is('0.14.0'):
+            if vllm_version_is('0.14.1'):
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(
                     total_num_scheduled_tokens)
             else:
