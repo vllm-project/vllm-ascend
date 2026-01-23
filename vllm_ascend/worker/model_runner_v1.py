@@ -1149,7 +1149,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np,
                 )
                 num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-                if self.use_cp:
+                if self.pcp_size > 1:
                     num_tokens_unpadded = self.pcp_manager.total_num_sampled_tokens_pcp
                 cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
@@ -1931,7 +1931,7 @@ class NPUModelRunner(GPUModelRunner):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             maybe_pcp_full_tokens = (
-                    num_tokens if self.pcp_size == 1 else
+                    num_tokens_padded if self.pcp_size == 1 else
                     num_tokens * self.pcp_size -
                     sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs]))
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
@@ -2203,6 +2203,10 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs_padded = (
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
+        if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
+            # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
+            num_tokens_across_dp[:] = num_tokens_padded
+            num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
@@ -2213,11 +2217,11 @@ class NPUModelRunner(GPUModelRunner):
                 raise NotImplementedError("create_mixed_batch is used for warmup deepgemm, vllm-ascend does not need it")
             else:
                 seq_lens = max_query_len  # type: ignore[assignment]
-            self.seq_lens.np[:num_reqs] = seq_lens
-            self.seq_lens.np[num_reqs:] = 0
+            self.seq_lens.np[:num_reqs_padded] = seq_lens
+            self.seq_lens.np[num_reqs_padded:] = 0
             self.seq_lens.copy_to_gpu()
             cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
-            self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+            self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             attn_metadata, _ = self._build_attention_metadata(
@@ -2303,7 +2307,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     in_profile_run=is_profile,
-                    num_actual_tokens=0,
+                    num_actual_tokens=num_tokens_padded,
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     model_instance=self.model):
