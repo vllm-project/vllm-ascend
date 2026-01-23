@@ -5,6 +5,7 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm.distributed.parallel_state import GroupCoordinator
 
 if 'torch_npu._inductor' not in sys.modules:
     sys.modules['torch_npu._inductor'] = MagicMock()
@@ -81,7 +82,13 @@ class TestAscendSFAMetadata(TestBase):
 
 class TestAscendSFAMetadataBuilder(TestBase):
 
-    def setUp(self):
+    @patch('vllm.distributed.parallel_state._TP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    def setUp(self, mock_tp):
+        mock_tp.world_size = 2
+        mock_tp.rank_in_group = MagicMock()
+        mock_tp.device_group = MagicMock()
+
         self.mock_cfg = MagicMock()
 
         self.mock_cfg.parallel_config = MagicMock()
