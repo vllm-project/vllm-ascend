@@ -43,14 +43,11 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import is_vl_model, vllm_version_is
+from vllm_ascend.utils import is_vl_model
 
 # isort: off
 if TYPE_CHECKING:
-    if vllm_version_is('0.13.0'):
-        from vllm.attention.backends.abstract import AttentionMetadata  # type: ignore
-    else:
-        from vllm.attention.backends import AttentionMetadata  # type: ignore
+    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request

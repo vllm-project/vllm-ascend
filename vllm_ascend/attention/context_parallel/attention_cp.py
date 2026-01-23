@@ -29,6 +29,7 @@ from vllm.distributed import (
     get_pcp_group,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import (
@@ -49,12 +50,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
 )
 from vllm_ascend.compilation.acl_graph import get_graph_params, update_graph_params_workspaces
-from vllm_ascend.utils import cp_chunkedprefill_comm_stream, vllm_version_is, weak_ref_tensors
-
-if vllm_version_is("0.13.0"):
-    from vllm.v1.attention.backends.utils import AttentionCGSupport
-else:
-    from vllm.v1.attention.backend import AttentionCGSupport
+from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
