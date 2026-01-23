@@ -24,9 +24,9 @@ from .base import AscendLinearScheme
 from .registry import register_scheme
 
 
-@register_scheme("W4A4_LAOS_DYNAMIC", "linear")
+@register_scheme("W4A4_DYNAMIC", "linear")
 class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
-    """Linear method for Ascend W4A4_LAOS_DYNAMIC.
+    """Linear method for Ascend W4A4_DYNAMIC.
     
     This class implements W4A4 quantization with LAOS approach and dynamic activation quantization.
     - Weight: 4-bit quantization (per-channel) with scale and offset, stored as int8.
