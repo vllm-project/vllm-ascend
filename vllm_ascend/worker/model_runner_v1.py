@@ -362,15 +362,6 @@ class NPUModelRunner(GPUModelRunner):
         # TODO: remove it when flash_common1 is removed
         self.sp_context = _set_sp_context(self)
 
-    def _check_and_update_cudagraph_mode(
-        self,
-        attention_backends: list[set[type[AttentionBackend]]],
-        kv_cache_groups: list[KVCacheGroupSpec],
-    ) -> None:
-        with self.sp_context:
-            super()._check_and_update_cudagraph_mode(attention_backends,
-                                                     kv_cache_groups)
-
     def _init_device_properties(self) -> None:
         self.num_sms = None
 
@@ -3028,8 +3019,9 @@ class NPUModelRunner(GPUModelRunner):
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
-        super()._check_and_update_cudagraph_mode(attention_backends,
-                                                 kv_cache_groups)
+        with self.sp_context:
+            super()._check_and_update_cudagraph_mode(attention_backends,
+                                                    kv_cache_groups)
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
