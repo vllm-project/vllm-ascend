@@ -54,7 +54,7 @@ aisbench_cases = [{
     "max_out_len": 1500,
     "batch_size": 4,
     "request_rate": 11.2,
-    "baseline": 120,
+    "baseline": 134,
     "threshold": 0.97
 }]
 
@@ -72,7 +72,7 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         "HCCL_BUFFSIZE": "1024",
         "VLLM_ASCEND_ENABLE_MLAPO": "1",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "0",
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
     }
 
     server_args = [
@@ -85,6 +85,8 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         '{"cudagraph_capture_sizes":[3, 6, 9, 12], "cudagraph_mode":"FULL_DECODE_ONLY"}',
         "--speculative-config",
         '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}',
+        "--additional-config",
+        '{"layer_sharding": ["q_b_proj", "o_proj"]}',
         "--reasoning-parser", "deepseek_v3", "--tokenizer_mode", "deepseek_v32"
     ]
     request_keyword_args: dict[str, Any] = {
