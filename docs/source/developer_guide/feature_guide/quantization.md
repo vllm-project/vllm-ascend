@@ -10,7 +10,7 @@ The current process for registering and obtaining quantization methods in vLLM A
 
 ![get_quant_method](../../assets/quantization/get_quant_method.png)
 
-vLLM Ascend registers a custom ascend quantization method. By configuring the `--quantization ascend` parameter (or `quantization="ascend"` for offline), the quantization feature is enabled. When constructing the `quant_config`, the registered `AscendQuantConfig` is initialized and `get_quant_method` is called to obtain the quantization method corresponding to each weight part, stored in the `quant_method` attribute.
+vLLM Ascend registers a custom ascend quantization method. By configuring the `--quantization ascend` parameter (or `quantization="ascend"` for offline), the quantization feature is enabled. When constructing the `quant_config`, the registered `AscendModelSlimConfig` is initialized and `get_quant_method` is called to obtain the quantization method corresponding to each weight part, stored in the `quant_method` attribute.
 
 Currently supported quantization methods include `AscendLinearMethod`, `AscendFusedMoEMethod`, `AscendEmbeddingMethod`, and their corresponding non-quantized methods:
 
@@ -51,18 +51,21 @@ Based on the above content, we present a brief description of the adaptation pro
 ### Quantization Algorithm Adaptation
 
 - **Step 1: Algorithm Design**. Define the algorithm ID (e.g., `W4A8_DYNAMIC`), determine supported layers (linear, moe, attention), and design the quantization scheme (static/dynamic, pertensor/perchannel/pergroup).
-- **Step 2: Registration**. Add the algorithm ID to `ASCEND_QUANTIZATION_METHOD_MAP` in `vllm_ascend/quantization/utils.py` and associate it with the corresponding method class.
+- **Step 2: Registration**. Use the `@register_scheme` decorator in `vllm_ascend/quantization/methods/registry.py` to register your quantization scheme class.
 
 ```python
-ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
-    "W4A8_DYNAMIC": {
-        "linear": AscendW4A8DynamicLinearMethod,
-        "moe": AscendW4A8DynamicFusedMoEMethod,
-    },
-}
+from vllm_ascend.quantization.methods import register_scheme, AscendLinearScheme
+
+@register_scheme("W4A8_DYNAMIC", "linear")
+class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
+    ...
+
+@register_scheme("W4A8_DYNAMIC", "moe")
+class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
+    ...
 ```
 
-- **Step 3: Implementation**. Create an algorithm implementation file, such as `vllm_ascend/quantization/w4a8_dynamic.py`, and implement the method class and logic.
+- **Step 3: Implementation**. Create an algorithm implementation file, such as `vllm_ascend/quantization/methods/w4a8.py`, and implement the method class and logic.
 - **Step 4: Testing**. Use your algorithm to generate quantization configurations and verify correctness and performance on target models and hardware.
 
 ### Quantized Model Adaptation
@@ -70,7 +73,7 @@ ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
 Adapting a new quantized model requires ensuring the following three points:
 
 - The original model has been successfully adapted in `vLLM Ascend`.
-- **Fused Module Mapping**: Add the model's `model_type` to `packed_modules_model_mapping` in `vllm_ascend/quantization/quant_config.py` (e.g., `qkv_proj`, `gate_up_proj`, `experts`) to ensure sharding consistency and correct loading.
+- **Fused Module Mapping**: Add the model's `model_type` to `packed_modules_model_mapping` in `vllm_ascend/quantization/modelslim_config.py` (e.g., `qkv_proj`, `gate_up_proj`, `experts`) to ensure sharding consistency and correct loading.
 
 ```python
 packed_modules_model_mapping = {
