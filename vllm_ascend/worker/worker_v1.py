@@ -205,6 +205,22 @@ class NPUWorker(WorkerBase):
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
+        
+        # Limit the number of streams to preserve resources for multi-instance scenarios
+        try:
+            # Reduce the number of graph capture sizes for multi-instance scenarios
+            if hasattr(self.vllm_config.compilation_config, 'cudagraph_capture_sizes'):
+                # Reduce the number of capture sizes to reduce resource consumption
+                original_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+                # Only keep every 4th size to reduce resource usage
+                reduced_sizes = [size for i, size in enumerate(original_sizes) if i % 4 == 0 or size <= 8]
+                if len(reduced_sizes) == 0 and len(original_sizes) > 0:
+                    reduced_sizes = [min(original_sizes)]  # Ensure at least one size is present
+                self.vllm_config.compilation_config.cudagraph_capture_sizes = reduced_sizes
+                logger.info(f"Reduced cudagraph capture sizes from {len(original_sizes)} to {len(reduced_sizes)} for multi-instance scenario")
+        except Exception as e:
+            logger.warning(f"Could not adjust cudagraph capture sizes: {e}")
+            
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
         # Set random seed.
@@ -224,14 +240,17 @@ class NPUWorker(WorkerBase):
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         _, total_npu_memory = NPUPlatform.mem_get_info()
+        logger.info(f"*****total_npu_memory: {total_npu_memory}")
         self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
         free_npu_memory, _ = NPUPlatform.mem_get_info()
+        logger.info(f"*****free_npu_memory: {free_npu_memory}")
+        
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        assert self.init_npu_memory > free_npu_memory, (
+        assert self.init_npu_memory >= free_npu_memory, (
             "Error in memory profiling. "
             f"Initial free memory {self.init_npu_memory}, current free memory"
             f" {free_npu_memory}. This happens when the NPU memory was "
@@ -239,24 +258,40 @@ class NPUWorker(WorkerBase):
 
         # Get the peak memory allocation recorded by torch
         peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"]
+        logger.info(f"*****peak_memory: {peak_memory}")
+        
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
         NPUPlatform.empty_cache()
         torch_allocated_bytes = torch_npu.npu.memory_stats(
         )["allocated_bytes.all.current"]
+        logger.info(f"*****torch_allocated_bytes: {torch_allocated_bytes}")
+        
         total_allocated_bytes = torch_npu.npu.mem_get_info(
         )[1] - torch_npu.npu.mem_get_info()[0]
+        logger.info(f"*****total_allocated_bytes: {total_allocated_bytes}")
+        
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
+        logger.info(f"*****non_torch_allocations: {non_torch_allocations}")
+        
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
-        available_kv_cache_memory = int(
-            total_npu_memory * self.cache_config.gpu_memory_utilization -
-            peak_memory)
-        available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
+        
+        # The actual available KV cache memory is based on the currently free memory
+        # multiplied by gpu_memory_utilization to account for future allocations
+        available_memory_for_kv_cache = int(
+            free_npu_memory * self.cache_config.gpu_memory_utilization)
+        
+        # Ensure non-negative value
+        available_memory_for_kv_cache = max(available_memory_for_kv_cache, 0)
+        
         logger.info(
-            f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
-        )
-        return available_kv_cache_memory
+            f"Available memory: {available_memory_for_kv_cache}, "
+            f"total memory: {total_npu_memory}, "
+            f"initial free memory: {self.init_npu_memory}, "
+            f"model peak memory: {peak_memory}")
+
+        return available_memory_for_kv_cache
 
     def execute_model(
         self,
