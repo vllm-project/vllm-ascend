@@ -200,7 +200,7 @@ class MooncakeLauncher:
         ]
 
         logger.info("Launching mooncake: %s", " ".join(cmd))
-        curr_ld_path = os.environ.get("LD_LIBRARY_PATH")
+        curr_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
         mooncake_ld_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:"
         os.environ["LD_LIBRARY_PATH"] = mooncake_ld_path + curr_ld_path
         env = os.environ.copy()
