@@ -427,7 +427,7 @@ class NPUWorker(WorkerBase):
         return self.model_runner.get_kv_cache_spec()
 
     def update_max_model_len(self, max_model_len: int) -> None:
-        """Update max_model_len after auto-fit to GPU memory.
+        """Update max_model_len after auto-fit to NPU memory.
 
         This is called when max_model_len=-1 is used and the engine
         automatically determines the maximum context length that fits
