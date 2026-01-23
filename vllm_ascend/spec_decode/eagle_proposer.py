@@ -330,6 +330,14 @@ class EagleProposer(VllmEagleProposer):
 
         model_positions = self.positions[:num_tokens]
 
+        (
+            num_tokens,
+            num_tokens_across_dp,
+            _,
+            _,
+        ) = self.runner._sync_metadata_across_dp(num_tokens,
+                                                 is_draft_model=True)
+
         batch_size = num_tokens // (self.num_speculative_tokens + 1)
         with set_ascend_forward_context(
                 multi_steps_attn_metadata[0]
@@ -466,10 +474,18 @@ class EagleProposer(VllmEagleProposer):
         self.last_token_indices[:last_token_indices_len].copy_(
             last_token_indices)
 
+        (
+            num_input_tokens,
+            num_tokens_across_dp,
+            _,
+            _,
+        ) = self.runner._sync_metadata_across_dp(num_input_tokens,
+                                                 is_draft_model=True)
         with set_ascend_forward_context(
                 multi_steps_attn_metadata[0],
                 self.vllm_config,
                 num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
                 num_actual_tokens=num_tokens,
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=aclgraph_runtime_mode,
