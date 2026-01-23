@@ -29,6 +29,14 @@ from vllm.forward_context import ForwardContext, get_forward_context
 
 logger = init_logger(__name__)
 
+def _get_group_ep(ubatch_idx: int, hccl_comm_name: str, hccl_comm_name2: str, hccl_comm_name3: Optional[str]) -> str:
+    groupEp = hccl_comm_name
+    if ubatch_idx == 1:
+        groupEp = hccl_comm_name2
+    elif ubatch_idx == 2:
+        assert hccl_comm_name3 is not None
+        groupEp = hccl_comm_name3
+    return groupEp
 
 class CAMM2NAFDConnector(AFDConnectorBase):
     def __init__(self,
@@ -78,32 +86,27 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         logger.debug(
             f"world_size = {self.ffn_size + self.attn_size}, world_rank = {self.rank}")
         # TODO(jcz) : 这里要根据实际的num_of_stages创建，需要改成list
-        self.afd_pg = init_afd_process_group(
-            backend="hccl",
-            init_method=(
-                f"tcp://{self.config.afd_config.afd_host}"
-                f":{self.config.afd_config.afd_port}"
-            ),
-            world_size=self.ffn_size + self.attn_size,
-            rank=self.rank,
-            group_name="afd"
-        )
-        self.afd_pg2 = init_afd_process_group(
-            backend="hccl",
-            init_method=(
-                f"tcp://{self.config.afd_config.afd_host}"
-                f":{self.config.afd_config.afd_port}"
-            ),
-            world_size=self.ffn_size + self.attn_size,
-            rank=self.rank,
-            group_name="afd2"
-        )
+        self.afd_pg_list = []
+        self.hccl_comm_name_list = []
+        num_ubatches = self.config.parallel_config.num_ubatches if self.config.parallel_config.num_ubatches else 1
+        for i in range(num_ubatches):
+            group_name = "afd" + str(i) if i > 0 else "afd"
+            afd_pg = init_afd_process_group(
+                backend="hccl",
+                init_method=(
+                    f"tcp://{self.config.afd_config.afd_host}"
+                    f":{self.config.afd_config.afd_port}"
+                ),
+                world_size=self.ffn_size + self.attn_size,
+                rank=self.rank,
+                group_name=group_name
+            )
+            self.afd_pg_list.append(afd_pg)
+            self.hccl_comm_name_list.append(afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank))
+        self.hccl_comm_name = self.hccl_comm_name_list[0]
+        self.hccl_comm_name2 = self.hccl_comm_name_list[1] if num_ubatches > 1 else self.hccl_comm_name
+        self.hccl_comm_name3 = self.hccl_comm_name_list[2] if num_ubatches > 2 else None
         
-        self.hccl_comm_name = self.afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank)
-        self.hccl_comm_name2 = self.afd_pg2._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank)
-        ffn_ranks = [i for i in range(0, self.ffn_size)]
-        attn_ranks = [i for i in range(self.ffn_size, self.ffn_size + self.attn_size)]
-
         # 所有FFN和前min_size的Attention参与p2p通信
         # 所有FFN: world_rank in [0, ffn_size), 前min_size个Attention: world_rank in [ffn_size, ffn_size+min_size)
         import datetime
@@ -129,12 +132,8 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             while dst < self.ffn_size:
                 self.dst_list.append(dst)
                 dst += self.min_size
-        print(f"[CAM] world_rank={self.rank}, p2p_rank={self.p2p_rank}, min_size={self.min_size}, "
-                    f"dst_list={self.dst_list}, cam connector initialized")
         logger.debug(f"[CAM] world_rank={self.rank}, p2p_rank={self.p2p_rank}, min_size={self.min_size}, "
                     f"dst_list={self.dst_list}, cam connector initialized")
-        
-       
         logger.info("m2n connector initialized")
 
         self._initialized = True
@@ -219,6 +218,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         return torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
                                                 self.hccl_comm_name,
                                                 self.hccl_comm_name2,
+                                                self.hccl_comm_name3,
                                                 self.rank,
                                                 self.ffn_size,
                                                 self.attn_size,
@@ -234,6 +234,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         return torch.ops.vllm.cam_recv_ffn_output(hidden_states,
                                                 self.hccl_comm_name,
                                                 self.hccl_comm_name2,
+                                                self.hccl_comm_name3,
                                                 self.rank,
                                                 self.ffn_size,
                                                 self.attn_size)
@@ -249,6 +250,8 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         aiv_num = metadata.aiv_num
         handle = metadata.handle
         
+        groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
+
         torch_npu.cam_e2a(expandXOut = ffn_output, simulateExpertIds = handle[0],
                             simulateExpertScales = handle[1],
                             expandIdx = handle[2],
@@ -261,7 +264,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                             sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num,
                             rank = self.rank,
                             loadBalancingRankNum=1, loadBalancingThreshold=0,
-                            groupEp = self.hccl_comm_name2 if ubatch_idx == 1 else self.hccl_comm_name,
+                            groupEp = groupEp,
                             aivNum = aiv_num)
 
         return
@@ -279,6 +282,8 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         aiv_num = metadata.aiv_num
         expandXOutDType = torch.tensor([], dtype=torch.bfloat16 if not quant_mode else torch.int8, device='npu')
 
+        groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
+
         outputs = torch_npu.cam_a2e(expandX=torch.tensor([], dtype=torch.bfloat16, device='npu'),
                                     expertIds=torch.tensor([], dtype=torch.int32, device='npu'),
                                     scales=torch.tensor([], dtype=torch.float, device='npu'),
@@ -289,7 +294,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                                     sharedExpertNum=shared_expert_num,
                                     totalExpertNum=moe_expert_num + shared_expert_num, rank=self.rank,
                                     loadBalancingRankNum=1, loadBalancingThreshold=0, dynamicQuant=quant_mode,
-                                    groupEp=self.hccl_comm_name2 if ubatch_idx == 1 else self.hccl_comm_name,
+                                    groupEp=groupEp,
                                     aivNum=aiv_num)
         
         # [hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize]
@@ -371,11 +376,13 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             recv_output.atten_batch_size
         ]
 
+
 def cam_send_attn_output_impl(hidden_states: torch.Tensor,
                               topk_weights: torch.Tensor,
                               topk_idx: torch.Tensor,
                               hccl_comm_name: str,
                               hccl_comm_name2: str,
+                              hccl_comm_name3: Optional[str],
                               rank: int,
                               ffn_size: int,
                               attn_size: int,
@@ -408,6 +415,8 @@ def cam_send_attn_output_impl(hidden_states: torch.Tensor,
     aiv_num = cam_metadata.aiv_num
     expandXOutDType = torch.tensor([], dtype=torch.bfloat16 if not quant_mode else torch.int8, device='npu')
 
+    groupEp = _get_group_ep(ubatch_idx, hccl_comm_name, hccl_comm_name2, hccl_comm_name3)
+
     handle_out = torch_npu.cam_a2e(expandX = hidden_states, expertIds = topk_idx,
                         scales = topk_weights, commArgs = torch.tensor([], dtype=torch.float16, device='npu'),
                         expandXOutDType = expandXOutDType,
@@ -417,7 +426,7 @@ def cam_send_attn_output_impl(hidden_states: torch.Tensor,
                         totalExpertNum = moe_expert_num + shared_expert_num,
                         rank = rank,
                         loadBalancingRankNum=1, loadBalancingThreshold=0, dynamicQuant = quant_mode,
-                        groupEp = hccl_comm_name2 if ubatch_idx == 1 else hccl_comm_name,
+                        groupEp = groupEp,
                         aivNum = aiv_num)
     hidden_states1, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, \
         simulateExpertIds, simulateExpertScales, attenBatchSize = handle_out[0:8]
@@ -431,6 +440,7 @@ def cam_send_attn_output_fake_impl(hidden_states: torch.Tensor,
                                     topk_idx: torch.Tensor,
                                     hccl_comm_name: str,
                                     hccl_comm_name2: str,
+                                    hccl_comm_name3: Optional[str],
                                     rank: int,
                                     ffn_size: int,
                                     attn_size: int,
@@ -443,6 +453,7 @@ def cam_send_attn_output_fake_impl(hidden_states: torch.Tensor,
 def cam_recv_ffn_output_impl(hidden_states: torch.Tensor,
                               hccl_comm_name: str,
                               hccl_comm_name2: str,
+                              hccl_comm_name3: Optional[str],
                               rank: int,
                               ffn_size: int,
                               attn_size: int) -> torch.Tensor:
@@ -457,6 +468,8 @@ def cam_recv_ffn_output_impl(hidden_states: torch.Tensor,
     aiv_num = cam_metadata.aiv_num
     handle = cam_metadata.handle
     
+    groupEp = _get_group_ep(ubatch_idx, hccl_comm_name, hccl_comm_name2, hccl_comm_name3)
+
     output2 = torch_npu.cam_e2a(expandXOut = hidden_states, simulateExpertIds = handle[0],
                         simulateExpertScales = handle[1], expandIdx = handle[2],
                         epRecvCounts = handle[3],
@@ -468,7 +481,7 @@ def cam_recv_ffn_output_impl(hidden_states: torch.Tensor,
                         sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num,
                         rank = rank,
                         loadBalancingRankNum=1, loadBalancingThreshold=0,
-                        groupEp = hccl_comm_name2 if ubatch_idx == 1 else hccl_comm_name,
+                        groupEp = groupEp,
                         aivNum = aiv_num)
 
     return output2
@@ -478,6 +491,7 @@ def cam_recv_ffn_output_impl(hidden_states: torch.Tensor,
 def cam_recv_ffn_output_fake_impl(hidden_states: torch.Tensor,
                                   hccl_comm_name: str,
                                   hccl_comm_name2: str,
+                                  hccl_comm_name3: Optional[str],
                                   rank: int,
                                   ffn_size: int,
                                   attn_size: int) -> torch.Tensor:

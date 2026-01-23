@@ -482,7 +482,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 get_world_group().rank,
                 get_world_group().local_rank, vllm_config)
             self.afd_connector.init_afd_connector()
-            self.num_stages = self.afd_config.num_afd_stages
         else:
             self.afd_connector = None
         # kv role
@@ -1849,10 +1848,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     # (num_tokens + padding)
     def pad_out_ubatch_slice(self, ubatch_slices: UBatchSlices,
                              num_total_tokens: int):
-        padded_second_ubatch_slice = slice(ubatch_slices[1].token_slice.start,
+        padded_last_ubatch_slice = slice(ubatch_slices[-1].token_slice.start,
                                            num_total_tokens)
-        ubatch_slices[1] = UBatchSlice(padded_second_ubatch_slice,
-                                       padded_second_ubatch_slice)
+        ubatch_slices[-1] = UBatchSlice(padded_last_ubatch_slice,
+                                       padded_last_ubatch_slice)
 
     def _pool(
             self,
