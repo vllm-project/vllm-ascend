@@ -1245,7 +1245,7 @@ at::Tensor npu_apply_top_k_top_p(
     at::Tensor out = at::empty_like(logits);
 
     EXEC_NPU_CMD(
-        aclnnApplyTopKTopP,
+        aclnnApplyTopKTopPCustom,
         logits,
         p,
         k,
