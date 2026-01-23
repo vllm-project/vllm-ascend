@@ -305,7 +305,7 @@ __aicore__ inline void ApplyTopPCustom<inputT, calT, outputT>::ScatterSingleTask
             DataCopyPad(sortedIndicesLocal, mGmSortedIndices_[gmOffset], 
                 {1, static_cast<uint32_t>(curCopyLength * sizeof(float)), 0, 0, 0}, {false, 0, 0, 0});
             DataCopyPad(sortedValueLocal, mGmSortedValue_[gmOffset], 
-                    {1, static_cast<uint32_t>(curCopyLength * sizeof(float)), 0, 0, 0}, {false, 0, 0, 0});
+                    {1, static_cast<uint32_t>(curCopyLength * sizeof(inputT)), 0, 0, 0}, {false, 0, 0, 0});
             MTE2ToSSync();
             
             if (cumsumLocal.GetValue(curCopyLength - 1) <= pValue) {
@@ -364,9 +364,8 @@ __aicore__ inline void ApplyTopPCustom<inputT, calT, outputT>::GetSoftMaxRes(uin
         VToMTE3Sync();
         DataCopyPad(softMaxGm[currentGmIdx], softMaxResLocal,
                     {1, static_cast<uint32_t>(loopDataNum * sizeof(float)), 0, 0, 0});
-        MTE3ToVSync();
+        MTE3ToMTE2Sync();
     }
-    MTE3ToMTE2Sync();
 }
 
 template <typename inputT, typename calT, typename outputT>
