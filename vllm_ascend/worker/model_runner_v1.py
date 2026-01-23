@@ -359,9 +359,6 @@ class NPUModelRunner(GPUModelRunner):
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
 
-        # TODO: remove it when flash_common1 is removed
-        self.sp_context = _set_sp_context(self)
-
     def _init_device_properties(self) -> None:
         self.num_sms = None
 
@@ -3019,9 +3016,9 @@ class NPUModelRunner(GPUModelRunner):
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
-        with self.sp_context:
+        with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends,
-                                                    kv_cache_groups)
+                                                     kv_cache_groups)
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
@@ -3125,12 +3122,14 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
     finally:
         setattr(target_module, "graph_capture", graph_capture)
 
+
 # TODO: remove it when flash_common1 is removed
 @contextmanager
-def _set_sp_context(model_runner):
+def update_pass_config(model_runner):
     try:
         original_pass_config_sp = model_runner.compilation_config.pass_config.enable_sp
-        model_runner.compilation_config.pass_config.enable_sp = enable_sp(model_runner.vllm_config)
+        model_runner.compilation_config.pass_config.enable_sp = enable_sp(
+            model_runner.vllm_config)
         yield
     finally:
         model_runner.compilation_config.pass_config.enable_sp = original_pass_config_sp
