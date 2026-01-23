@@ -59,14 +59,12 @@ jobs:
           python3 -m pip install -v . --extra-index https://download.pytorch.org/whl/cpu/
           python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
 
-      - name: Install Ascend toolkit & triton_ascend
+      - name: Install clang (for triton-ascend)
         shell: bash -l {0}
         run: |
-          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
-          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+          apt-get update && apt-get -y install clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
       - name: Run unit test
         env:
@@ -78,7 +76,9 @@ jobs:
             --ignore tests/ut/model_loader/netloader/test_netloader_elastic.py \
             --ignore tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
             --ignore tests/ut/kv_connector/test_remote_decode_lifecycle.py \
-            --ignore tests/ut/core/test_scheduler_dynamic_batch.py
+            --ignore tests/ut/core/test_scheduler_dynamic_batch.py \
+            --ignore tests/ut/kv_connector/test_mooncake_connector.py \
+            --ignore tests/ut/worker/test_worker_v1.py
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged

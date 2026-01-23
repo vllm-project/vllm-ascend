@@ -1,0 +1,363 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 10:00+0800\n"
+"Last-Translator: Your Name <email@example.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:1
+msgid "Qwen-VL-Dense(Qwen2.5VL-3B/7B, Qwen3-VL-2B/4B/8B/32B)"
+msgstr "Qwen-VL-Dense (Qwen2.5VL-3B/7B, Qwen3-VL-2B/4B/8B/32B)"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:5
+msgid ""
+"The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family "
+"of powerful Large Vision-Language Models (LVLMs) designed for "
+"comprehensive multimodal understanding. They accept images, text, and "
+"bounding boxes as input, and output text and detection boxes, enabling "
+"advanced functions like image detection, multi-modal dialogue, and multi-"
+"image reasoning."
+msgstr "阿里云的 Qwen-VL（视觉语言）系列包含一系列强大的大型视觉语言模型（LVLMs），专为实现全面的多模态理解而设计。它们接受图像、文本和边界框作为输入，并输出文本和检测框，从而实现图像检测、多模态对话和多图像推理等高级功能。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:7
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, NPU deployment, accuracy and performance evaluation."
+msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、NPU 部署、精度和性能评估。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:9
+msgid ""
+"This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for "
+"demonstration, showcasing the `Qwen3-VL-8B-Instruct` model as an example "
+"for single NPU deployment and the `Qwen2.5-VL-32B-Instruct` model as an "
+"example for multi-NPU deployment."
+msgstr "本教程使用 vLLM-Ascend `v0.11.0rc3-a3` 版本进行演示，以 `Qwen3-VL-8B-Instruct` 模型作为单 NPU 部署示例，以 `Qwen2.5-VL-32B-Instruct` 模型作为多 NPU 部署示例。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:11
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:13
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr "请参考[支持的特性](../user_guide/support_matrix/supported_models.md)以获取模型支持的特性矩阵。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:15
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参考[特性指南](../user_guide/feature_guide/index.md)以获取特性的配置信息。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:17
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:19
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:21
+msgid "require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 16) node:"
+msgstr "需要 1 台 Atlas 800I A2 (64G × 8) 节点或 1 台 Atlas 800 A3 (64G × 16) 节点："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:22
+msgid ""
+"`Qwen2.5-VL-3B-Instruct`: [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-3B-Instruct)"
+msgstr "`Qwen2.5-VL-3B-Instruct`: [下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-VL-3B-Instruct)"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:23
+msgid ""
+"`Qwen2.5-VL-7B-Instruct`: [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-7B-Instruct)"
+msgstr "`Qwen2.5-VL-7B-Instruct`: [下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-VL-7B-Instruct)"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:24
+msgid ""
+"`Qwen2.5-VL-32B-Instruct`:[Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-32B-Instruct)"
+msgstr "`Qwen2.5-VL-32B-Instruct`:[下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-VL-32B-Instruct)"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:25
+msgid ""
+"`Qwen2.5-VL-72B-Instruct`:[Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-72B-Instruct)"
+msgstr "`Qwen2.5-VL-72B-Instruct`:[下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-VL-72B-Instruct)"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:26
+msgid ""
+"`Qwen3-VL-2B-Instruct`:   [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)"
+msgstr "`Qwen3-VL-2B-Instruct`:   [下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:27
+msgid ""
+"`Qwen3-VL-4B-Instruct`:   [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)"
+msgstr "`Qwen3-VL-4B-Instruct`:   [下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:28
+msgid ""
+"`Qwen3-VL-8B-Instruct`:   [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)"
+msgstr "`Qwen3-VL-8B-Instruct`:   [下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:29
+msgid ""
+"`Qwen3-VL-32B-Instruct`:  [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)"
+msgstr "`Qwen3-VL-32B-Instruct`:  [下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:31
+msgid ""
+"A sample Qwen2.5-VL quantization script can be found in the modelslim "
+"code repository. [Qwen2.5-VL Quantization Script "
+"Example](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/multimodal_vlm/Qwen2.5-VL/README.md)"
+msgstr "可以在 modelslim 代码仓库中找到 Qwen2.5-VL 量化脚本示例。[Qwen2.5-VL 量化脚本示例](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/multimodal_vlm/Qwen2.5-VL/README.md)"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:33
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多个节点的共享目录中，例如 `/root/.cache/`"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:35
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md
+msgid "single-NPU"
+msgstr "单 NPU"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:44
+#: ../../source/tutorials/Qwen-VL-Dense.md:72
+msgid "Run docker container:"
+msgstr "运行 docker 容器："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md
+msgid "multi-NPU"
+msgstr "多 NPU"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:100
+msgid "Setup environment variables:"
+msgstr "设置环境变量："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:111
+msgid ""
+"`max_split_size_mb` prevents the native allocator from splitting blocks "
+"larger than this size (in MB). This can reduce fragmentation and may "
+"allow some borderline workloads to complete without running out of "
+"memory. You can find more details "
+"[<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)."
+msgstr "`max_split_size_mb` 可防止原生分配器拆分大于此大小（以 MB 为单位）的块。这可以减少碎片，并可能允许一些临界工作负载在不耗尽内存的情况下完成。您可以在[<u>此处</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)找到更多详细信息。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:114
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:116
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md
+msgid "Qwen3-VL-8B-Instruct"
+msgstr "Qwen3-VL-8B-Instruct"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:125
+msgid "Run the following script to execute offline inference on single-NPU:"
+msgstr "运行以下脚本在单 NPU 上执行离线推理："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:190
+#: ../../source/tutorials/Qwen-VL-Dense.md:286
+msgid "If you run this script successfully, you can see the info shown below:"
+msgstr "如果您成功运行此脚本，您可以看到如下信息："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md
+msgid "Qwen2.5-VL-32B-Instruct"
+msgstr "Qwen2.5-VL-32B-Instruct"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:220
+msgid "Run the following script to execute offline inference on multi-NPU:"
+msgstr "运行以下脚本在多 NPU 上执行离线推理："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:311
+msgid "Online Serving"
+msgstr "在线服务"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:320
+msgid "Run docker container to start the vLLM server on single-NPU:"
+msgstr "运行 docker 容器在单 NPU 上启动 vLLM 服务器："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:331
+msgid ""
+"Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-8B-"
+"Instruct model's max seq len (256000) is larger than the maximum number "
+"of tokens that can be stored in KV cache. This will differ with different"
+" NPU series base on the HBM size. Please modify the value according to a "
+"suitable value for your NPU series."
+msgstr "添加 `--max_model_len` 选项以避免 ValueError，即 Qwen3-VL-8B-Instruct 模型的最大序列长度（256000）大于可存储在 KV 缓存中的最大令牌数。这因基于 HBM 大小的不同 NPU 系列而异。请根据适合您 NPU 系列的值修改此值。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:334
+#: ../../source/tutorials/Qwen-VL-Dense.md:421
+msgid "If your service start successfully, you can see the info shown below:"
+msgstr "如果您的服务成功启动，您可以看到如下信息："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:342
+#: ../../source/tutorials/Qwen-VL-Dense.md:429
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "一旦您的服务器启动，您就可以使用输入提示词查询模型："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:359
+#: ../../source/tutorials/Qwen-VL-Dense.md:446
+msgid ""
+"If you query the server successfully, you can see the info shown below "
+"(client):"
+msgstr "如果您成功查询服务器，您可以看到如下信息（客户端）："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:365
+#: ../../source/tutorials/Qwen-VL-Dense.md:452
+msgid "Logs of the vllm server:"
+msgstr "vllm 服务器日志："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:380
+msgid "Run docker container to start the vLLM server on multi-NPU:"
+msgstr "运行 docker 容器在多 NPU 上启动 vLLM 服务器："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:418
+msgid ""
+"Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-32B-"
+"Instruct model's max_model_len (128000) is larger than the maximum number"
+" of tokens that can be stored in KV cache. This will differ with "
+"different NPU series base on the HBM size. Please modify the value "
+"according to a suitable value for your NPU series."
+msgstr "添加 `--max_model_len` 选项以避免 ValueError，即 Qwen2.5-VL-32B-Instruct 模型的最大模型长度（128000）大于可存储在 KV 缓存中的最大令牌数。这因基于 HBM 大小的不同 NPU 系列而异。请根据适合您 NPU 系列的值修改此值。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:467
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:469
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用 Language Model Evaluation Harness"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:471
+msgid ""
+"The accuracy of some models is already within our CI monitoring scope, "
+"including:"
+msgstr "一些模型的精度已经在我们的 CI 监控范围内，包括："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:472
+msgid "`Qwen2.5-VL-7B-Instruct`"
+msgstr "`Qwen2.5-VL-7B-Instruct`"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:473
+msgid "`Qwen3-VL-8B-Instruct`"
+msgstr "`Qwen3-VL-8B-Instruct`"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:475
+msgid ""
+"You can refer to the [monitoring configuration](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/.github/workflows/vllm_ascend_test_nightly_a2.yaml)."
+msgstr "您可以参考[监控配置](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test_nightly_a2.yaml)。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:484
+msgid ""
+"As an example, take the `mmmu_val` dataset as a test dataset, and run "
+"accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode."
+msgstr "以 `mmmu_val` 数据集作为测试数据集为例，离线模式下运行 `Qwen3-VL-8B-Instruct` 的精度评估。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:486
+#: ../../source/tutorials/Qwen-VL-Dense.md:517
+msgid ""
+"Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) "
+"for more details on `lm_eval` installation."
+msgstr "有关 `lm_eval` 安装的更多详细信息，请参考[使用 lm_eval](../developer_guide/evaluation/using_lm_eval.md)。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:492
+#: ../../source/tutorials/Qwen-VL-Dense.md:523
+msgid "Run `lm_eval` to execute the accuracy evaluation."
+msgstr "运行 `lm_eval` 执行精度评估。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:505
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen3-VL-"
+"8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only."
+msgstr "执行后，您可以得到结果，这里是 `vllm-ascend:0.11.0rc3` 中 `Qwen3-VL-8B-Instruct` 的结果，仅供参考。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:515
+msgid ""
+"As an example, take the `mmmu_val` dataset as a test dataset, and run "
+"accuracy evaluation of `Qwen2.5-VL-32B-Instruct` in offline mode."
+msgstr "以 `mmmu_val` 数据集作为测试数据集为例，离线模式下运行 `Qwen2.5-VL-32B-Instruct` 的精度评估。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:535
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen2.5"
+"-VL-32B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only."
+msgstr "执行后，您可以得到结果，这里是 `vllm-ascend:0.11.0rc3` 中 `Qwen2.5-VL-32B-Instruct` 的结果，仅供参考。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:543
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:545
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM Benchmark"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:547
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr "更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:549
+msgid "There are three `vllm bench` subcommand:"
+msgstr "`vllm bench` 有三个子命令："
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:550
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`: 基准测试单批次请求的延迟。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:551
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`: 基准测试在线服务吞吐量。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:552
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`: 基准测试离线推理吞吐量。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:554
+msgid ""
+"The performance evaluation must be conducted in an online mode. Take the "
+"`serve` as an example. Run the code as follows."
+msgstr "性能评估必须在在线模式下进行。以 `serve` 为例。运行以下代码。"
+
+#: ../../source/tutorials/Qwen-VL-Dense.md:577
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，您可以得到性能评估结果。"

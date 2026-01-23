@@ -29,7 +29,7 @@ class AscendConfig:
 
     def __init__(self, vllm_config: "VllmConfig"):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-
+        self.mix_placement = additional_config.get("mix_placement", False)
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
         self.xlite_graph_config = XliteGraphConfig(xlite_graph_config,
                                                    vllm_config)
@@ -72,8 +72,9 @@ class AscendConfig:
         self.gate_eplb = additional_config.get("gate_eplb", False)
         self.num_wait_worker_iterations = additional_config.get(
             "num_wait_worker_iterations", 30)
-        eplb_config = additional_config.get("eplb_config", {})
-        self.refresh_eplb_config(eplb_config)
+        eplb_config = additional_config.get("eplb_config", None)
+        if eplb_config is not None:
+            self.refresh_eplb_config(eplb_config)
 
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp",

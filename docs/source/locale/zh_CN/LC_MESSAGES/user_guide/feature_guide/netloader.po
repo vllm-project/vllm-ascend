@@ -1,0 +1,359 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 16:18+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/netloader.md:1
+msgid "Netloader Guide"
+msgstr "网络加载器"
+
+#: ../../source/user_guide/feature_guide/netloader.md:3
+msgid ""
+"This guide provides instructions for using **Netloader** as a weight-"
+"loader plugin for acceleration in **vLLM Ascend**."
+msgstr "本指南提供了在 **vLLM Ascend** 中使用 **Netloader** 作为权重加载插件以实现加速的操作说明。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:7
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/netloader.md:9
+msgid ""
+"Netloader leverages high-bandwidth peer-to-peer (P2P) transfers between "
+"NPU cards to load model weights. It is implemented as a plugin (via the "
+"`register_model_loader` API added in vLLM 0.10). The workflow is:"
+msgstr ""
+"Netloader 利用 NPU 卡之间的高带宽对等传输（P2P）来加载模型权重。它作为一个插件实现（通过 vLLM 0.10 中添加的 "
+"`register_model_loader` API）。其工作流程为："
+
+#: ../../source/user_guide/feature_guide/netloader.md:11
+msgid "A **server** preloads a model."
+msgstr "一个**服务端（server）**预加载模型。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:12
+msgid "A new **client** instance requests weight transfer."
+msgstr "一个新的**客户端（client）**实例请求权重传输。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:13
+msgid ""
+"After validating that the model and partitioning match, the client uses "
+"HCCL collective communication (send/recv) to receive weights in the same "
+"order as stored in the model."
+msgstr "在验证模型和分片策略匹配后，客户端使用 HCCL 集合通信（send/recv）按照模型存储的相同顺序接收权重。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:15
+msgid ""
+"The server runs alongside normal inference tasks via sub-threads and via "
+"`stateless_init_torch_distributed_process_group` in vLLM. The client thus"
+" takes over weight initialization without needing to load from storage."
+msgstr ""
+"服务端通过子线程以及 vLLM 中的 `stateless_init_torch_distributed_process_group` 与正常的推理任务并行运行。"
+"因此，客户端可以直接接管权重初始化，而无需从外部存储加载。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:17
+msgid "Flowchart"
+msgstr "流程图"
+
+#: ../../source/user_guide/feature_guide/netloader.md:19
+msgid "![netloader flowchart](./images/netloader_flowchart.png)"
+msgstr "![Netloader 流程图](./images/netloader_flowchart.png)"
+
+#: ../../source/user_guide/feature_guide/netloader.md:19
+msgid "netloader flowchart"
+msgstr "Netloader 流程图"
+
+#: ../../source/user_guide/feature_guide/netloader.md:21
+msgid "Timing Diagram"
+msgstr "时序图"
+
+#: ../../source/user_guide/feature_guide/netloader.md:23
+msgid "![netloader timing diagram](./images/netloader_timing_diagram.png)"
+msgstr "![Netloader 时序图](./images/netloader_timing_diagram.png)"
+
+#: ../../source/user_guide/feature_guide/netloader.md:23
+msgid "netloader timing diagram"
+msgstr "Netloader 时序图"
+
+#: ../../source/user_guide/feature_guide/netloader.md:25
+msgid "Application Scenarios"
+msgstr "应用场景"
+
+#: ../../source/user_guide/feature_guide/netloader.md:27
+msgid ""
+"**Reduce startup latency**: By reusing already loaded weights and "
+"transferring them directly between NPU cards, Netloader cuts down model "
+"loading time vs conventional remote/local pull strategies."
+msgstr ""
+"**降低启动延迟**：通过复用已加载的权重并在 NPU 卡之间直接传输，Netloader 相比传统的远程/本地拉取策略，大幅缩短了模型加载时间。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:28
+msgid ""
+"**Relieve network & storage load**: Avoid repeated downloads of weight "
+"files from remote repositories, thus reducing pressure on central storage"
+" and network traffic."
+msgstr "**减轻网络和存储负载**：避免从远程仓库重复下载权重文件，从而减轻中央存储的压力和网络流量。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:29
+msgid ""
+"**Improve resource utilization & lower cost**: Faster loading allows less"
+" reliance on standby compute nodes; resources can be scaled up/down more "
+"flexibly."
+msgstr "**提高资源利用率并降低成本**：更快的加载速度减少了对备用计算节点的依赖；资源扩缩容更加灵活。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:30
+msgid ""
+"**Enhance business continuity & high availability**: In failure recovery,"
+" new instances can quickly take over without long downtime, improving "
+"system reliability and user experience."
+msgstr "**增强业务连续性与高可用性**：在故障恢复中，新实例可以快速接管而无需长时间停机，提升了系统的可靠性和用户体验。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:34
+msgid "Usage"
+msgstr "用法"
+
+#: ../../source/user_guide/feature_guide/netloader.md:36
+msgid ""
+"To enable Netloader, pass `--load-format=netloader` and provide "
+"configuration via `--model-loader-extra-config` (as a JSON string). Below"
+" are the supported configuration fields:"
+msgstr ""
+"要启用 Netloader，请传递 `--load-format=netloader` 并通过 `--model-loader-extra-config`（作为 JSON 字符串）提供配置。"
+"以下是支持的配置字段："
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Field Name"
+msgstr "字段名称"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Allowed Values / Notes"
+msgstr "允许值 / 备注"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**SOURCE**"
+msgstr "**SOURCE**"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "List"
+msgstr "列表 (List)"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+#, python-brace-format
+msgid ""
+"Weighted data sources. Each item is a map with `device_id` and `sources`,"
+" specifying the rank and its endpoints (IP:port). <br>Example: "
+"`{\"SOURCE\": [{\"device_id\": 0, \"sources\": "
+"[\"10.170.22.152:19374\"]}, {\"device_id\": 1, \"sources\": "
+"[\"10.170.22.152:11228\"]}]}` <br>If omitted or empty, fallback to "
+"default loader. The SOURCE here is second priority."
+msgstr ""
+"权重数据源。每一项是一个包含 `device_id` 和 `sources` 的映射，指定 rank 及其端点（IP:端口）。"
+"<br>示例：`{\"SOURCE\": [{\"device_id\": 0, \"sources\": [\"10.170.22.152:19374\"]}, {\"device_id\": 1, \"sources\": [\"10.170.22.152:11228\"]}]}` "
+"<br>如果省略或为空，则回退到默认加载器。此处的 SOURCE 具有第二优先级。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "A list of objects with keys `device_id: int` and `sources: List[str]`"
+msgstr "包含 `device_id: int` 和 `sources: List[str]` 键的对象列表"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**MODEL**"
+msgstr "**MODEL**"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "String"
+msgstr "字符串 (String)"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "The model name, used to verify consistency between client and server."
+msgstr "模型名称，用于验证客户端和服务端之间的一致性。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Defaults to the `--model` argument if not specified."
+msgstr "如果未指定，默认为 `--model` 参数的值。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**LISTEN_PORT**"
+msgstr "**LISTEN_PORT**"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Integer"
+msgstr "整数 (Integer)"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Base port for the server listener."
+msgstr "服务端监听器的基础端口。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid ""
+"The actual port = `LISTEN_PORT + RANK`. If omitted, a random valid port "
+"is chosen. Valid range: 1024–65535. If out of range, that server instance"
+" won’t open a listener."
+msgstr ""
+"实际端口 = `LISTEN_PORT + RANK`。如果省略，将选择一个随机有效端口。有效范围：1024–65535。如果超出范围，该服务端实例将不会开启监听器。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**INT8_CACHE**"
+msgstr "**INT8_CACHE**"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Behavior for handling int8 parameters in quantized models."
+msgstr "量化模型中处理 int8 参数的行为。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid ""
+"One of `[\"hbm\", \"dram\", \"no\"]`. <br> - `hbm`: copy original int8 "
+"parameters to high-bandwidth memory (HBM) (may cost a lot of HBM). <br> -"
+" `dram`: copy to DRAM. <br> - `no`: no special handling (may lead to "
+"divergence or unpredictable behavior). Default: `\"no\"`."
+msgstr ""
+"可选值为 `[\"hbm\", \"dram\", \"no\"]`。<br> - `hbm`: 将原始 int8 参数复制到高带宽内存（HBM）（可能会消耗大量 HBM）。"
+"<br> - `dram`: 复制到 DRAM。<br> - `no`: 不进行特殊处理（可能导致结果偏差或不可预测的行为）。默认值：`\"no\"`。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**INT8_CACHE_NAME**"
+msgstr "**INT8_CACHE_NAME**"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Names of parameters to which `INT8_CACHE` is applied (i.e. filtering)."
+msgstr "应用 `INT8_CACHE` 的参数名称（即过滤）。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Default: `None` (means no filtering—all parameters)."
+msgstr "默认值：`None`（意味着不进行过滤——应用于所有参数）。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**OUTPUT_PREFIX**"
+msgstr "**OUTPUT_PREFIX**"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Prefix for writing per-rank listener address/port files in server mode."
+msgstr "在服务端模式下，写入每个 rank 监听地址/端口文件的前缀。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+#, python-brace-format
+msgid ""
+"If set, each rank writes to `{OUTPUT_PREFIX}{RANK}.txt` (text), content ="
+" `IP:Port`."
+msgstr "如果设置，每个 rank 将写入到 `{OUTPUT_PREFIX}{RANK}.txt`（文本文件），内容为 `IP:端口`。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**CONFIG_FILE**"
+msgstr "**CONFIG_FILE**"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Path to a JSON file specifying the above configuration."
+msgstr "指定上述配置的 JSON 文件路径。"
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid ""
+"If provided, the SOURCE inside this file has **first priority** "
+"(overrides SOURCE in other configs)."
+msgstr "如果提供，此文件内的 SOURCE 具有**第一优先级**（覆盖其他配置中的 SOURCE）。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:50
+msgid "Example Commands & Placeholders"
+msgstr "示例命令与占位符"
+
+#: ../../source/user_guide/feature_guide/netloader.md:52
+msgid "Replace parts in `` `<...>` `` before running."
+msgstr "运行前请替换 `` `<...>` `` 中的部分内容。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:54
+msgid "Server"
+msgstr "服务端 (Server)"
+
+#: ../../source/user_guide/feature_guide/netloader.md:65
+msgid "Client"
+msgstr "客户端 (Client)"
+
+#: ../../source/user_guide/feature_guide/netloader.md:80
+msgid "Placeholder Descriptions"
+msgstr "占位符说明"
+
+#: ../../source/user_guide/feature_guide/netloader.md:82
+msgid "`<model_file>`: Path to the model file"
+msgstr "`<model_file>`: 模型文件路径"
+
+#: ../../source/user_guide/feature_guide/netloader.md:83
+msgid "`<model_name>`: Model name (must match between server & client)"
+msgstr "`<model_name>`: 模型名称（服务端和客户端必须一致）"
+
+#: ../../source/user_guide/feature_guide/netloader.md:84
+msgid "`<port>`: Base listening port on server"
+msgstr "`<port>`: 服务端的基础监听端口"
+
+#: ../../source/user_guide/feature_guide/netloader.md:85
+msgid ""
+"`<server_IP>` + `<server_Port>`: IP and port of the Netloader server "
+"(from server log)"
+msgstr "`<server_IP>` + `<server_Port>`: Netloader 服务端的 IP 和端口（来自服务端日志）"
+
+#: ../../source/user_guide/feature_guide/netloader.md:86
+msgid ""
+"`<device_id_diff_from_server>`: Client device ID (must differ from "
+"server’s)"
+msgstr "`<device_id_diff_from_server>`: 客户端设备 ID（必须与服务端不同）"
+
+#: ../../source/user_guide/feature_guide/netloader.md:87
+msgid "`<client_port>`: Port on which client listens"
+msgstr "`<client_port>`: 客户端监听的端口"
+
+#: ../../source/user_guide/feature_guide/netloader.md:89
+msgid ""
+"After startup, you can test consistency by issuing inference requests "
+"with temperature = 0 and comparing outputs."
+msgstr "启动后，您可以通过发布 `temperature = 0` 的推理请求并比较输出来测试一致性。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:93
+msgid "Note & Caveats"
+msgstr "注意与警告"
+
+#: ../../source/user_guide/feature_guide/netloader.md:95
+msgid ""
+"If Netloader is used, **each worker process** must bind a listening port."
+" That port may be user-specified or assigned randomly. If user-specified,"
+" ensure it is available."
+msgstr "如果使用 Netloader，**每个 worker 进程**都必须绑定一个监听端口。该端口可以由用户指定或随机分配。如果是用户指定的，请确保其可用。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:96
+msgid ""
+"Netloader requires extra HBM memory to establish HCCL connections (i.e. "
+"`HCCL_BUFFERSIZE`, default ~200 MB). Users should reserve sufficient "
+"capacity (e.g. via `--gpu-memory-utilization`)."
+msgstr ""
+"Netloader 需要额外的 HBM 内存来建立 HCCL 连接（即 `HCCL_BUFFERSIZE`，默认约为 200 MB）。"
+"用户应预留足够的容量（例如通过 `--gpu-memory-utilization`）。"
+
+#: ../../source/user_guide/feature_guide/netloader.md:97
+msgid ""
+"It is recommended to set `VLLM_SLEEP_WHEN_IDLE=1` to mitigate unstable or"
+" slow connections/transmissions. Related info: [vLLM Issue "
+"#16660](https://github.com/vllm-project/vllm/issues/16660), [vLLM PR "
+"#16226](https://github.com/vllm-project/vllm/pull/16226)."
+msgstr ""
+"建议设置 `VLLM_SLEEP_WHEN_IDLE=1` 以减轻连接/传输不稳定或缓慢的问题。相关信息请参见：[vLLM Issue "
+"#16660](https://github.com/vllm-project/vllm/issues/16660), [vLLM PR "
+"#16226](https://github.com/vllm-project/vllm/pull/16226)。"

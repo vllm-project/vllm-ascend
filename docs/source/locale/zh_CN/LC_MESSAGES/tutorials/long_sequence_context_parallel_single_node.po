@@ -1,0 +1,387 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 10:00+0800\n"
+"Last-Translator: Your Name <email@example.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:1
+msgid "Long-Sequence Context Parallel (Qwen3-235B-A22B)"
+msgstr "Long-Sequence Context Parallel (Qwen3-235B-A22B)"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:3
+msgid "Getting Start"
+msgstr "开始使用"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:5
+msgid ""
+"vLLM-Ascend now supports long-sequence context parallel. This guide takes"
+" one-by-one steps to verify these features with constrained resources."
+msgstr "vLLM-Ascend 现在支持长序列上下文并行。本指南将逐步介绍如何使用有限资源验证这些功能。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:7
+msgid ""
+"Using the `Qwen3-235B-A22B-w8a8`(Quantized version) model as an example, "
+"use 1 Atlas 800 A3 (64G × 16) server to deploy the single node \"pd co-"
+"locate\" architecture."
+msgstr "以 `Qwen3-235B-A22B-w8a8`（量化版本）模型为例，使用 1 台 Atlas 800 A3 (64G × 16) 服务器部署单节点 \"pd 共置\" 架构。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:9
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:11
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:13
+msgid ""
+"`Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × "
+"16) node. [Download model weight](https://modelscope.cn/models/vllm-"
+"ascend/Qwen3-235B-A22B-W8A8)"
+msgstr "`Qwen3-235B-A22B-w8a8`（量化版本）：需要 1 台 Atlas 800 A3 (64G × 16) 节点。[下载模型权重](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:15
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多个节点的共享目录中，例如 `/root/.cache/`"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:17
+msgid "Run with Docker"
+msgstr "使用 Docker 运行"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:18
+msgid "Start a Docker container on each node."
+msgstr "在每个节点上启动一个 Docker 容器。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:62
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:64
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:66
+msgid ""
+"`Qwen3-235B-A22B-w8a8` can be deployed on 1 Atlas 800 A3（64G*16）. "
+"Quantized version need to start with parameter `--quantization ascend`."
+msgstr "`Qwen3-235B-A22B-w8a8` 可以部署在 1 台 Atlas 800 A3（64G*16）上。量化版本需要使用参数 `--quantization ascend` 启动。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:69
+msgid "Run the following script to execute online 128k inference."
+msgstr "运行以下脚本执行在线 128k 推理。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:105
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:128
+msgid "**Notice:**"
+msgstr "**注意：**"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:106
+#, python-brace-format
+msgid ""
+"for vllm version below `v0.12.0` use parameter: `--rope_scaling "
+"'{\"rope_type\":\"yarn\",\"factor\":4,\"original_max_position_embeddings\":32768}'"
+" \\`"
+msgstr "对于低于 `v0.12.0` 的 vllm 版本，使用参数：`--rope_scaling '{\"rope_type\":\"yarn\",\"factor\":4,\"original_max_position_embeddings\":32768}' \\`"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:107
+#, python-brace-format
+msgid ""
+"for vllm version `v0.12.0` use parameter: `--hf-overrides "
+"'{\"rope_parameters\": "
+"{\"rope_type\":\"yarn\",\"rope_theta\":1000000,\"factor\":4,\"original_max_position_embeddings\":32768}}'"
+" \\`"
+msgstr "对于 vllm 版本 `v0.12.0`，使用参数：`--hf-overrides '{\"rope_parameters\": {\"rope_type\":\"yarn\",\"rope_theta\":1000000,\"factor\":4,\"original_max_position_embeddings\":32768}}' \\`"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:109
+msgid "The parameters are explained as follows:"
+msgstr "参数说明如下："
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:110
+msgid ""
+"`--tensor-parallel-size` 8 are common settings for tensor parallelism "
+"(TP) sizes."
+msgstr "`--tensor-parallel-size` 8 是张量并行（TP）大小的常见设置。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:111
+msgid ""
+"`--prefill-context-parallel-size` 2 are common settings for prefill "
+"context parallelism PCP) sizes."
+msgstr "`--prefill-context-parallel-size` 2 是预填充上下文并行（PCP）大小的常见设置。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:112
+msgid ""
+"`--decode-context-parallel-size` 2 are common settings for decode context"
+" parallelism DCP) sizes."
+msgstr "`--decode-context-parallel-size` 2 是解码上下文并行（DCP）大小的常见设置。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:113
+msgid ""
+"`--max-model-len` represents the context length, which is the maximum "
+"value of the input plus output for a single request."
+msgstr "`--max-model-len` 表示上下文长度，即单个请求输入加输出的最大值。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:114
+msgid ""
+"`--max-num-seqs` indicates the maximum number of requests that each DP "
+"group is allowed to process. If the number of requests sent to the "
+"service exceeds this limit, the excess requests will remain in a waiting "
+"state and will not be scheduled. Note that the time spent in the waiting "
+"state is also counted in metrics such as TTFT and TPOT. Therefore, when "
+"testing performance, it is generally recommended that `--max-num-seqs` * "
+"`--data-parallel-size` >= the actual total concurrency."
+msgstr "`--max-num-seqs` 表示每个 DP 组允许处理的最大请求数。如果发送到服务的请求数超过此限制，超出部分的请求将保持在等待状态而不会被调度。请注意，在等待状态中花费的时间也会计入 TTFT 和 TPOT 等指标。因此，在测试性能时，通常建议 `--max-num-seqs` * `--data-parallel-size` >= 实际总并发数。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:115
+msgid ""
+"`--max-num-batched-tokens` represents the maximum number of tokens that "
+"the model can process in a single step. Currently, vLLM v1 scheduling "
+"enables ChunkPrefill/SplitFuse by default, which means:"
+msgstr "`--max-num-batched-tokens` 表示模型在单个步骤中可以处理的最大令牌数。目前，vLLM v1 调度默认启用 ChunkPrefill/SplitFuse，这意味着："
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:116
+msgid ""
+"(1) If the input length of a request is greater than `--max-num-batched-"
+"tokens`, it will be divided into multiple rounds of computation according"
+" to `--max-num-batched-tokens`;"
+msgstr "(1) 如果请求的输入长度大于 `--max-num-batched-tokens`，它将根据 `--max-num-batched-tokens` 分成多轮计算；"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:117
+msgid ""
+"(2) Decode requests are prioritized for scheduling, and prefill requests "
+"are scheduled only if there is available capacity."
+msgstr "(2) 解码请求优先调度，预填充请求仅在有空闲容量时调度。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:118
+msgid ""
+"Generally, if `--max-num-batched-tokens` is set to a larger value, the "
+"overall latency will be lower, but the pressure on GPU memory (activation"
+" value usage) will be greater."
+msgstr "一般来说，如果将 `--max-num-batched-tokens` 设置为较大的值，整体延迟会更低，但 GPU 内存（激活值使用）的压力会更大。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:119
+msgid ""
+"`--gpu-memory-utilization` represents the proportion of HBM that vLLM "
+"will use for actual inference. Its essential function is to calculate the"
+" available kv_cache size. During the warm-up phase (referred to as "
+"profile run in vLLM), vLLM records the peak GPU memory usage during an "
+"inference process with an input size of `--max-num-batched-tokens`. The "
+"available kv_cache size is then calculated as: `--gpu-memory-utilization`"
+" * HBM size - peak GPU memory usage. Therefore, the larger the value of "
+"`--gpu-memory-utilization`, the more kv_cache can be used. However, since"
+" the GPU memory usage during the warm-up phase may differ from that "
+"during actual inference (e.g., due to uneven EP load), setting `--gpu-"
+"memory-utilization` too high may lead to OOM (Out of Memory) issues "
+"during actual inference. The default value is `0.9`."
+msgstr "`--gpu-memory-utilization` 表示 vLLM 将用于实际推理的 HBM 比例。其本质功能是计算可用的 kv_cache 大小。在预热阶段（vLLM 中称为 profile run），vLLM 记录输入大小为 `--max-num-batched-tokens` 的推理过程中 GPU 内存的峰值使用量。然后可用 kv_cache 大小计算为：`--gpu-memory-utilization` * HBM 大小 - 峰值 GPU 内存使用量。因此，`--gpu-memory-utilization` 的值越大，可使用的 kv_cache 就越多。然而，由于预热阶段的 GPU 内存使用量可能与实际推理时不同（例如，由于 EP 负载不均衡），将 `--gpu-memory-utilization` 设置过高可能导致实际推理时出现 OOM（内存不足）问题。默认值为 `0.9`。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:120
+msgid ""
+"`--enable-expert-parallel` indicates that EP is enabled. Note that vLLM "
+"does not support a mixed approach of ETP and EP; that is, MoE can either "
+"use pure EP or pure TP."
+msgstr "`--enable-expert-parallel` 表示启用了 EP。请注意，vLLM 不支持 ETP 和 EP 的混合方法；也就是说，MoE 只能使用纯 EP 或纯 TP。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:121
+msgid ""
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
+"To enable it, remove this option."
+msgstr "`--no-enable-prefix-caching` 表示前缀缓存被禁用。要启用它，请删除此选项。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:122
+msgid ""
+"`--quantization` \"ascend\" indicates that quantization is used. To "
+"disable quantization, remove this option."
+msgstr "`--quantization` \"ascend\" 表示使用了量化。要禁用量化，请删除此选项。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:123
+msgid ""
+"`--compilation-config` contains configurations related to the aclgraph "
+"graph mode. The most significant configurations are \"cudagraph_mode\" "
+"and \"cudagraph_capture_sizes\", which have the following meanings: "
+"\"cudagraph_mode\": represents the specific graph mode. Currently, "
+"\"PIECEWISE\" and \"FULL_DECODE_ONLY\" are supported. The graph mode is "
+"mainly used to reduce the cost of operator dispatch. Currently, "
+"\"FULL_DECODE_ONLY\" is recommended."
+msgstr "`--compilation-config` 包含与 aclgraph 图模式相关的配置。最重要的配置是 \"cudagraph_mode\" 和 \"cudagraph_capture_sizes\"，其含义如下：\"cudagraph_mode\"：表示具体的图模式。目前支持 \"PIECEWISE\" 和 \"FULL_DECODE_ONLY\"。图模式主要用于降低算子调度的开销。目前推荐使用 \"FULL_DECODE_ONLY\"。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:125
+msgid ""
+"\"cudagraph_capture_sizes\": represents different levels of graph modes. "
+"The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. "
+"In the graph mode, the input for graphs at different levels is fixed, and"
+" inputs between levels are automatically padded to the next level. "
+"Currently, the default setting is recommended. Only in some scenarios is "
+"it necessary to set this separately to achieve optimal performance."
+msgstr "\"cudagraph_capture_sizes\"：表示不同级别的图模式。默认值为 [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]。在图模式下，不同级别图的输入是固定的，级别之间的输入会自动填充到下一级。目前推荐使用默认设置。只有在某些场景下才需要单独设置此参数以达到最佳性能。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:126
+msgid ""
+"`export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 "
+"optimization is enabled. Currently, this optimization is only supported "
+"for MoE in scenarios where tp_size > 1."
+msgstr "`export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` 表示启用了 Flashcomm1 优化。目前，此优化仅支持在 tp_size > 1 的场景中使用 MoE。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:129
+msgid "tp_size needs to be divisible by dcp_size"
+msgstr "tp_size 需要能被 dcp_size 整除"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:130
+msgid ""
+"decode context parallel size must less than or equal to max_dcp_size, "
+"where max_dcp_size = tensor_parallel_size // total_num_kv_heads."
+msgstr "解码上下文并行大小必须小于或等于 max_dcp_size，其中 max_dcp_size = 张量并行大小 // 总 kv_heads 数。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:132
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:134
+msgid "Here are two accuracy evaluation methods."
+msgstr "这里有两种精度评估方法。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:136
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:148
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:138
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr "详情请参考[使用 AISBench](../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:140
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen3"
+"-235B-A22B-w8a8` for reference only."
+msgstr "执行后，您可以得到结果，这里是 `Qwen3-235B-A22B-w8a8` 的结果，仅供参考。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "aime2024"
+msgstr "aime2024"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "-"
+msgstr "-"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "83.33"
+msgstr "83.33"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:146
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:150
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr "详情请参考[使用 AISBench 进行性能评估](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:152
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM Benchmark"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:154
+msgid "Run performance evaluation of `Qwen3-235B-A22B-w8a8` as an example."
+msgstr "以 `Qwen3-235B-A22B-w8a8` 为例运行性能评估。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:156
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr "更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:158
+msgid "There are three `vllm bench` subcommand:"
+msgstr "`vllm bench` 有三个子命令："
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:159
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`: 基准测试单批次请求的延迟。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:160
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`: 基准测试在线服务吞吐量。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:161
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`: 基准测试离线推理吞吐量。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:163
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 为例。运行以下代码。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:170
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，您可以得到性能评估结果。"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "ttft"
+msgstr "ttft"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "random"
+msgstr "随机"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "performance"
+msgstr "性能"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "perf"
+msgstr "性能"
+
+#: ../../source/tutorials/long_sequence_context_parallel_single_node.md:20
+msgid "17.36s"
+msgstr "17.36秒"

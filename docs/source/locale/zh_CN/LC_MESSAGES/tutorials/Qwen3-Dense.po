@@ -1,0 +1,908 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-22 17:09+0800\n"
+"PO-Revision-Date: 2026-01-22 18:30+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen3-Dense.md:1
+msgid "Qwen3-Dense(Qwen3-0.6B/8B/32B)"
+msgstr "Qwen3-Dense (Qwen3-0.6B/8B/32B)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/Qwen3-Dense.md:5
+msgid ""
+"Qwen3 is the latest generation of large language models in Qwen series, "
+"offering a comprehensive suite of dense and mixture-of-experts (MoE) "
+"models. Built upon extensive training, Qwen3 delivers groundbreaking "
+"advancements in reasoning, instruction-following, agent capabilities, and"
+" multilingual support."
+msgstr ""
+"Qwen3 "
+"是通义千问（Qwen）系列的最新一代大语言模型，提供了一系列完整的密集（Dense）和混合专家（MoE）模型。基于大规模训练，Qwen3 "
+"在推理、指令遵循、Agent 能力和多语言支持方面取得了突破性的进展。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:7
+msgid ""
+"Welcome to the tutorial on optimizing Qwen Dense models in the vLLM-"
+"Ascend environment. This guide will help you configure the most effective"
+" settings for your use case, with practical examples that highlight key "
+"optimization points. We will also explore how adjusting service "
+"parameters can maximize throughput performance across various scenarios."
+msgstr ""
+"欢迎阅读在 vLLM-Ascend 环境中优化 Qwen Dense "
+"模型的教程。本指南将通过重点突出关键优化点的实际案例，帮助您为特定的使用场景配置最有效的设置。我们还将探讨如何通过调整服务参数来在各种场景下最大化吞吐量性能。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:9
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, accuracy and performance evaluation."
+msgstr "本文档将展示该模型的主要验证步骤，包括支持的功能、功能配置、环境准备、精度和性能评估。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:11
+msgid ""
+"The Qwen3 Dense models is first supported in "
+"[v0.8.4rc2](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---"
+"20250429)"
+msgstr ""
+"Qwen3 Dense 模型最早在 [v0.8.4rc2](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---"
+"20250429) 版本中得到支持。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:13
+#: ../../source/tutorials/Qwen3-Dense.md:116
+#: ../../source/tutorials/Qwen3-Dense.md:193
+#: ../../source/tutorials/Qwen3-Dense.md:221
+#: ../../source/tutorials/Qwen3-Dense.md:299
+msgid "**Node**"
+msgstr "**注意**"
+
+#: ../../source/tutorials/Qwen3-Dense.md:14
+msgid ""
+"This example requires version **v0.11.0rc2**. Earlier versions may lack "
+"certain features."
+msgstr "本示例需要 **v0.11.0rc2** 版本。早期版本可能缺少某些功能。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:16
+msgid "Supported Features"
+msgstr "支持的功能"
+
+#: ../../source/tutorials/Qwen3-Dense.md:18
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参考 [支持功能列表](../user_guide/support_matrix/supported_models.md) "
+"获取该模型支持的功能矩阵。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:20
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参考 [功能指南](../user_guide/feature_guide/index.md) 获取功能的配置方式。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:22
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/Qwen3-Dense.md:24
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/Qwen3-Dense.md:26
+msgid ""
+"`Qwen3-0.6B`(BF16 version): require 1 Atlas 800 A3 (64G × 2) card or 1 "
+"Atlas 800I A2 (64G × 1) card. [Download model "
+"weight](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)"
+msgstr ""
+"`Qwen3-0.6B` (BF16 版本)：需要 1 张 Atlas 800 A3 (64G × 2) 卡或 1 张 Atlas 800I A2"
+" (64G × 1) "
+"卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:27
+msgid ""
+"`Qwen3-1.7B`(BF16 version): require 1 Atlas 800 A3 (64G × 2) card or 1 "
+"Atlas 800I A2 (64G × 1) card. [Download model "
+"weight](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)"
+msgstr ""
+"`Qwen3-1.7B` (BF16 版本)：需要 1 张 Atlas 800 A3 (64G × 2) 卡或 1 张 Atlas 800I A2"
+" (64G × 1) "
+"卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:28
+msgid ""
+"`Qwen3-4B`(BF16 version): require 1 Atlas 800 A3 (64G × 2) card or 1 "
+"Atlas 800I A2 (64G × 1) card. [Download model "
+"weight](https://modelers.cn/models/Modelers_Park/Qwen3-4B)"
+msgstr ""
+"`Qwen3-4B` (BF16 版本)：需要 1 张 Atlas 800 A3 (64G × 2) 卡或 1 张 Atlas 800I A2 "
+"(64G × 1) 卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-4B)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:29
+msgid ""
+"`Qwen3-8B`(BF16 version): require 1 Atlas 800 A3 (64G × 2) card or 1 "
+"Atlas 800I A2 (64G × 1) card. [Download model "
+"weight](https://modelers.cn/models/Modelers_Park/Qwen3-8B)"
+msgstr ""
+"`Qwen3-8B` (BF16 版本)：需要 1 张 Atlas 800 A3 (64G × 2) 卡或 1 张 Atlas 800I A2 "
+"(64G × 1) 卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-8B)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:30
+msgid ""
+"`Qwen3-14B`(BF16 version): require 1 Atlas 800 A3 (64G × 2) card or 2 "
+"Atlas 800I A2 (64G × 1) cards. [Download model "
+"weight](https://modelers.cn/models/Modelers_Park/Qwen3-14B)"
+msgstr ""
+"`Qwen3-14B` (BF16 版本)：需要 1 张 Atlas 800 A3 (64G × 2) 卡或 2 张 Atlas 800I A2 "
+"(64G × 1) 卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-14B)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:31
+msgid ""
+"`Qwen3-32B`(BF16 version): require 2 Atlas 800 A3 (64G × 4) cards or 4 "
+"Atlas 800I A2 (64G × 4) cards. [Download model "
+"weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)"
+msgstr ""
+"`Qwen3-32B` (BF16 版本)：需要 2 张 Atlas 800 A3 (64G × 4) 卡或 4 张 Atlas 800I A2 "
+"(64G × 4) 卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-32B)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:32
+msgid ""
+"`Qwen3-32B-W8A8`(Quantized version): require 2 Atlas 800 A3 (64G × 4) "
+"cards or 4 Atlas 800I A2 (64G × 4) cards. [Download model "
+"weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)"
+msgstr ""
+"`Qwen3-32B-W8A8` (量化版本)：需要 2 张 Atlas 800 A3 (64G × 4) 卡或 4 张 Atlas 800I "
+"A2 (64G × 4) 卡。[下载模型权重](https://www.modelscope.cn/models/vllm-"
+"ascend/Qwen3-32B-W8A8)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:34
+msgid ""
+"These are the recommended numbers of cards, which can be adjusted "
+"according to the actual situation."
+msgstr "以上为推荐的卡数，可根据实际情况进行调整。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:36
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:38
+msgid "Verify Multi-node Communication(Optional)"
+msgstr "验证多节点通信（可选）"
+
+#: ../../source/tutorials/Qwen3-Dense.md:40
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../installation.md#verify-multi-node-communication)."
+msgstr ""
+"如果您想部署多节点环境，需要根据 [验证多节点通信环境](../installation.md#verify-multi-node-"
+"communication) 来验证多节点间的通信。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:42
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/Qwen3-Dense.md:44
+msgid ""
+"You can using our official docker image for supporting Qwen3 Dense "
+"models. Currently, we provide the all-in-one images.[Download "
+"images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)"
+msgstr ""
+"您可以使用我们的官方 Docker 镜像来支持 Qwen3 Dense 模型。目前，我们提供全功能一体化（all-in-"
+"one）镜像。[下载镜像](https://quay.io/repository/ascend/vllm-ascend?tab=tags)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:47
+msgid "Docker Pull (by tag)"
+msgstr "Docker 拉取（按标签）"
+
+#: ../../source/tutorials/Qwen3-Dense.md:56
+msgid "Docker run"
+msgstr "Docker 运行"
+
+#: ../../source/tutorials/Qwen3-Dense.md:93
+msgid ""
+"The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed"
+" in `/vllm-workspace` and installed in [development "
+"mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)"
+" (`pip install -e`) to help developer immediately take place changes "
+"without requiring a new installation."
+msgstr ""
+"默认工作目录为 `/workspace`，vLLM 和 vLLM Ascend 的代码位于 `/vllm-workspace` 中，并以 "
+"[开发模式](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)"
+" (`pip install -e`) 安装，方便开发者在无需重新安装的情况下立即使代码更改生效。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:95
+msgid ""
+"In the [Run docker container](./Qwen3-Dense.md#run-docker-container), "
+"detailed explanations are provided through specific examples."
+msgstr "在 [运行 Docker 容器](./Qwen3-Dense.md#run-docker-container) 章节中，通过具体示例提供了详细说明。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:97
+msgid ""
+"In addition, if you don't want to use the docker image as above, you can "
+"also build all from source:"
+msgstr "此外，如果您不想使用上述 Docker 镜像，也可以从源码构建："
+
+#: ../../source/tutorials/Qwen3-Dense.md:99
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../installation.md)."
+msgstr "从源码安装 `vllm-ascend`，请参考 [安装指南](../installation.md)。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:101
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr "如果您想部署多节点环境，需要在每个节点上分别搭建环境。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:103
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/Qwen3-Dense.md:105
+msgid ""
+"In this section, we will demonstrate best practices for adjusting "
+"hyperparameters in vLLM-Ascend to maximize inference throughput "
+"performance. By tailoring service-level configurations to fit different "
+"use cases, you can ensure that your system performs optimally across "
+"various scenarios. We will guide you through how to fine-tune "
+"hyperparameters based on observed phenomena, such as max_model_len, "
+"max_num_batched_tokens, and cudagraph_capture_sizes, to achieve the best "
+"performance."
+msgstr ""
+"在本节中，我们将演示在 vLLM-Ascend "
+"中调整超参数以最大化推理吞吐量性能的最佳实践。通过针对不同用例定制服务级配置，您可以确保系统在各种场景下都能以最佳状态运行。我们将指导您如何根据观察到的现象微调超参数（如"
+" max_model_len、max_num_batched_tokens 和 "
+"cudagraph_capture_sizes），从而获得最佳性能。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:107
+msgid "The specific example scenario is as follows:"
+msgstr "具体示例场景如下："
+
+#: ../../source/tutorials/Qwen3-Dense.md:108
+msgid "The machine environment is an Atlas 800 A3 (64G*16)"
+msgstr "机器环境为 Atlas 800 A3 (64G*16)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:109
+msgid "The LLM is Qwen3-32B-W8A8"
+msgstr "大语言模型为 Qwen3-32B-W8A8"
+
+#: ../../source/tutorials/Qwen3-Dense.md:110
+msgid "The data scenario is a fixed-length input of 3.5K and an output of 1.5K."
+msgstr "数据场景为固定长度输入 3.5K，输出 1.5K。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:111
+msgid "The parallel configuration requirement is DP=1&TP=4"
+msgstr "并行配置要求为 DP=1 & TP=4"
+
+#: ../../source/tutorials/Qwen3-Dense.md:112
+msgid ""
+"If the machine environment is an **Atlas 800I A2(64G*8)**, the deployment"
+" approach stays identical."
+msgstr "如果机器环境是 **Atlas 800I A2 (64G*8)**，部署方法完全相同。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:114
+msgid "Run docker container:"
+msgstr "运行 Docker 容器："
+
+#: ../../source/tutorials/Qwen3-Dense.md:117
+#: ../../source/tutorials/Qwen3-Dense.md:194
+#: ../../source/tutorials/Qwen3-Dense.md:222
+#: ../../source/tutorials/Qwen3-Dense.md:300
+msgid ""
+"/model/Qwen3-32B-W8A8 is the model path, replace this with your actual "
+"path."
+msgstr "`/model/Qwen3-32B-W8A8` 是模型路径，请替换为您实际的路径。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:118
+msgid "v0.11.0rc2-a3 is image tag, replace this with your actual tag."
+msgstr "`v0.11.0rc2-a3` 是镜像标签，请替换为您实际的标签。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:119
+msgid "replace this with your actual port: '-p 8113:8113'."
+msgstr "请替换为您实际的端口，例如：`-p 8113:8113`。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:120
+msgid "replace this with your actual card: '--device /dev/davinci0'."
+msgstr "请替换为您实际使用的卡，例如：`--device /dev/davinci0`。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:147
+msgid "Online Inference on Multi-NPU"
+msgstr "多 NPU 在线推理"
+
+#: ../../source/tutorials/Qwen3-Dense.md:149
+msgid "Run the following script to start the vLLM server on Multi-NPU."
+msgstr "运行以下脚本以在多 NPU 上启动 vLLM 服务器。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:151
+msgid ""
+"This script is configured to achieve optimal performance under the above "
+"specific example scenarios,with batchsize = 72 on two A3 cards."
+msgstr "该脚本经过配置，可在上述特定示例场景下（两张 A3 卡，Batch Size = 72）实现最佳性能。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:196
+msgid ""
+"If the model is not a quantized model, remove the `--quantization ascend`"
+" parameter."
+msgstr "如果模型不是量化模型，请移除 `--quantization ascend` 参数。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:198
+#, python-brace-format
+msgid ""
+"**[Optional]** `--additional-config '{\"pa_shape_list\":[48,64,72,80]}'`:"
+" `pa_shape_list` specifies the batch sizes where you want to switch to "
+"the PA operator. This is a temporary tuning knob. Currently, the "
+"attention operator dispatch defaults to the FIA operator. In some batch-"
+"size (concurrency) settings, FIA may have suboptimal performance. By "
+"setting `pa_shape_list`, when the runtime batch size matches one of the "
+"listed values, vLLM-Ascend will replace FIA with the PA operator to "
+"prevent performance degradation. In the future, FIA will be optimized for"
+" these scenarios and this parameter will be removed."
+msgstr ""
+"**[可选]** `--additional-config "
+"'{\"pa_shape_list\":[48,64,72,80]}'`：`pa_shape_list` 指定了您希望切换到 PA 算子的 "
+"Batch Size 列表。这是一个临时的调优参数。目前，Attention 算子默认调度为 FIA 算子。在某些 Batch "
+"Size（并发）设置下，FIA 的性能可能不是最优。通过设置 `pa_shape_list`，当运行时 Batch Size 匹配列表中任意值时"
+"，vLLM-Ascend 将使用 PA 算子替换 FIA，以防止性能下降。未来 FIA 将针对这些场景进行优化，届时此参数将被移除。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:200
+#, python-brace-format
+msgid ""
+"If the ultimate performance is desired, the cudagraph_capture_sizes "
+"parameter can be enabled, reference: [key-optimization-"
+"points](./Qwen3-Dense.md#key-optimization-points)、[optimization-"
+"highlights](./Qwen3-Dense.md#optimization-highlights). Here is an example"
+" of batchsize of 72: `--compilation-config '{\"cudagraph_mode\": "
+"\"FULL_DECODE_ONLY\", "
+"\"cudagraph_capture_sizes\":[1,8,24,48,60,64,72,76]}'`."
+msgstr ""
+"如果追求极致性能，可以启用 `cudagraph_capture_sizes` 参数，参考：[关键优化点](./Qwen3-Dense.md"
+"#key-optimization-points)、[优化亮点](./Qwen3-Dense.md#optimization-"
+"highlights)。以下是 Batch Size 为 72 时的示例：`--compilation-config "
+"'{\"cudagraph_mode\": \"FULL_DECODE_ONLY\", "
+"\"cudagraph_capture_sizes\":[1,8,24,48,60,64,72,76]}'`。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:202
+msgid "Once your server is started, you can query the model with input prompts"
+msgstr "服务器启动后，您可以使用输入提示词查询模型。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:217
+msgid "Offline Inference on Multi-NPU"
+msgstr "多 NPU 离线推理"
+
+#: ../../source/tutorials/Qwen3-Dense.md:219
+msgid "Run the following script to execute offline inference on multi-NPU."
+msgstr "运行以下脚本以在多 NPU 上执行离线推理。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:224
+msgid ""
+"If the model is not a quantized model,remove the "
+"`quantization=\"ascend\"` parameter."
+msgstr "如果模型不是量化模型，请移除 `quantization=\"ascend\"` 参数。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:264
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/Qwen3-Dense.md:266
+msgid "Here is one accuracy evaluation methods."
+msgstr "以下是一种精度评估方法。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:268
+#: ../../source/tutorials/Qwen3-Dense.md:282
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/Qwen3-Dense.md:270
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr "详见 [使用 AISBench](../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:272
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen3"
+"-32B-W8A8` in `vllm-ascend:0.11.0rc2` for reference only."
+msgstr "执行后可获取结果，以下为 `vllm-ascend:0.11.0rc2` 下 `Qwen3-32B-W8A8` 的测试结果，仅供参考。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "task name"
+msgstr "任务名称"
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "gsm8k"
+msgstr "gsm8k"
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "-"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "gsm8k_gen_0_shot_noncot_chat_prompt"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "96.44"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "math500"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "math500_gen_0_shot_cot_chat_prompt"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "97.60"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "aime"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "aime2024_gen_0_shot_chat_prompt"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Dense.md:122
+msgid "76.67"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Dense.md:280
+msgid "Performance"
+msgstr "性能指标"
+
+#: ../../source/tutorials/Qwen3-Dense.md:284
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详见 [使用 AISBench 进行性能评估](../developer_guide/evaluation/using_ais_bench.md"
+"#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:286
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM 基准测试 (Benchmark)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:288
+msgid "Run performance evaluation of `Qwen3-32B-W8A8` as an example."
+msgstr "以 `Qwen3-32B-W8A8` 的性能评估为例。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:290
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+"更多细节请参考 [vLLM "
+"Benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:292
+msgid "There are three `vllm bench` subcommand:"
+msgstr "共有三个 `vllm bench` 子命令："
+
+#: ../../source/tutorials/Qwen3-Dense.md:293
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`：测试单批次请求的延迟。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:294
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`：测试在线服务的吞吐量。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:295
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`：测试离线推理的吞吐量。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:297
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 模式为例，运行如下代码。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:306
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，您即可获得性能评估结果。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:308
+msgid "Key Optimization Points"
+msgstr "关键优化点"
+
+#: ../../source/tutorials/Qwen3-Dense.md:309
+msgid ""
+"In this section, we will cover the key optimization points that can "
+"significantly improve the performance of Qwen Dense models. These "
+"techniques are designed to enhance throughput and efficiency across "
+"various scenarios."
+msgstr "在本节中，我们将介绍可以显著提高 Qwen Dense 模型性能的关键优化点。这些技术旨在增强各种场景下的吞吐量和效率。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:311
+msgid "1. Rope Optimization"
+msgstr "1.RoPE 优化"
+
+#: ../../source/tutorials/Qwen3-Dense.md:312
+msgid ""
+"Rope optimization enhances the model's efficiency by modifying the "
+"position encoding process. Specifically, it ensures that the "
+"cos_sin_cache and the associated index selection operation are only "
+"performed during the first layer of the forward pass. For subsequent "
+"layers, the position encoding is directly reused, eliminating redundant "
+"calculations and significantly speeding up inference in decode phase."
+msgstr ""
+"RoPE（旋转位置编码）优化通过改进位置编码过程来提高模型效率。具体而言，它确保 cos_sin_cache "
+"及其相关的索引选择操作仅在正向传播的第一层执行。对于后续层，直接复用该位置编码，从而消除了冗余计算，显著加快了解码阶段的推理速度。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:314
+#: ../../source/tutorials/Qwen3-Dense.md:319
+#: ../../source/tutorials/Qwen3-Dense.md:345
+msgid ""
+"This optimization is enabled by default and does not require any "
+"additional environment variables to be set."
+msgstr "此优化默认启用，不需要设置任何额外的环境变量。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:316
+msgid "2. AddRMSNormQuant Fusion"
+msgstr "2.AddRMSNormQuant 融合算子"
+
+#: ../../source/tutorials/Qwen3-Dense.md:317
+msgid ""
+"AddRMSNormQuant fusion merges the Address-wise Multi-Scale Normalization "
+"and Quantization operations, allowing for more efficient memory access "
+"and computation, thereby enhancing throughput."
+msgstr "AddRMSNormQuant 融合算子合并了加法、RMSNorm 归一化和量化操作，实现了更高效的内存访问和计算，从而提升了吞吐量。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:321
+msgid "3. FlashComm_v1"
+msgstr "3.FlashComm_v1（闪速通信）"
+
+#: ../../source/tutorials/Qwen3-Dense.md:322
+msgid ""
+"FlashComm_v1 significantly improves performance in large-batch scenarios "
+"by decomposing the traditional allreduce collective communication into "
+"reduce-scatter and all-gather. This breakdown helps reduce the "
+"computation of the RMSNorm token dimensions, leading to more efficient "
+"processing. In quantization scenarios, FlashComm_v1 also reduces the "
+"communication overhead by decreasing the bit-level data transfer, which "
+"further minimizes the end-to-end latency during the prefill phase."
+msgstr ""
+"FlashComm_v1 通过将传统的 AllReduce 集合通信分解为 ReduceScatter 和 AllGather，显著提高了大 "
+"Batch 场景下的性能。这种分解有助于减少 RMSNorm 在 Token "
+"维度上的计算量，从而实现更高效的处理。在量化场景中，FlashComm_v1 还通过减少位级数据传输来降低通信开销，进一步缩短了 Prefill "
+"阶段的端到端延迟。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:324
+msgid ""
+"It is important to note that the decomposition of the allreduce "
+"communication into reduce-scatter and all-gather operations only provides"
+" benefits in high-concurrency scenarios, where there is no significant "
+"communication degradation. In other cases, this decomposition may result "
+"in noticeable performance degradation. To mitigate this, the current "
+"implementation uses a threshold-based approach, where FlashComm_v1 is "
+"only enabled if the actual token count for each inference schedule "
+"exceeds the threshold. This ensures that the feature is only activated in"
+" scenarios where it improves performance, avoiding potential degradation "
+"in lower-concurrency situations."
+msgstr ""
+"需要注意的是，将 AllReduce 通信分解为 ReduceScatter 和 AllGather "
+"仅在没有显著通信退化的高并发场景下才有收益。在其他情况下，这种分解可能会导致明显的性能下降。为了缓解这一问题，目前的实现采用了基于阈值的方法：仅当每次推理调度的实际"
+" Token 数量超过阈值时，才会启用 FlashComm_v1。这确保了该功能仅在能提升性能的场景下激活，避免了低并发情况下的潜在性能退化。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:326
+msgid ""
+"This optimization requires setting the environment variable "
+"`VLLM_ASCEND_ENABLE_FLASHCOMM1 = 1` to be enabled."
+msgstr "此优化需要设置环境变量 `VLLM_ASCEND_ENABLE_FLASHCOMM1 = 1` 才能启用。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:328
+msgid "4. Matmul and ReduceScatter Fusion"
+msgstr "4.Matmul 与 ReduceScatter 融合"
+
+#: ../../source/tutorials/Qwen3-Dense.md:329
+msgid ""
+"Once FlashComm_v1 is enabled, an additional optimization can be applied. "
+"This optimization fuses matrix multiplication and ReduceScatter "
+"operations, along with tiling optimization. The Matmul computation is "
+"treated as one pipeline, while the ReduceScatter and dequant operations "
+"are handled in a separate pipeline. This approach significantly reduces "
+"communication steps, improves computational efficiency, and allows for "
+"better resource utilization, resulting in enhanced throughput, especially"
+" in large-scale distributed environments."
+msgstr ""
+"启用 FlashComm_v1 后，可以应用进一步的优化。该优化融合了矩阵乘法（Matmul）和 ReduceScatter 操作，并结合了 "
+"Tiling 优化。Matmul 计算被视为一个流水线，而 ReduceScatter "
+"和反量化（Dequant）操作则在另一个独立的流水线中处理。这种方法显著减少了通信步骤，提高了计算效率，并实现了更好的资源利用率，从而提升了吞吐量，尤其是在大规模分布式环境中。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:331
+msgid ""
+"This optimization is automatically enabled once FlashComm_v1 is "
+"activated. However, due to an issue with performance degradation in "
+"small-concurrency scenarios after this fusion, a threshold-based approach"
+" is currently used to mitigate this problem. The optimization is only "
+"applied when the token count exceeds the threshold, ensuring that it is "
+"not enabled in cases where it could negatively impact performance."
+msgstr ""
+"一旦激活 FlashComm_v1，此优化将自动开启。然而，由于该融合在小并发场景下存在性能下降的问题，目前采用基于阈值的方法来缓解。仅当 "
+"Token 数量超过阈值时才应用该优化，以确保不会在可能产生负面影响的情况下启用。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:333
+msgid "5. Weight Prefetching"
+msgstr "5.权重预取"
+
+#: ../../source/tutorials/Qwen3-Dense.md:334
+msgid ""
+"Weight prefetching optimizes memory usage by preloading weights into the "
+"cache before they are needed, minimizing delays caused by memory access "
+"during model execution."
+msgstr "权重预取通过在需要之前将权重预加载到缓存中来优化内存使用，从而最大限度地减少模型执行期间由内存访问引起的延迟。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:336
+msgid ""
+"In dense model scenarios, the MLP's gate_up_proj and down_proj linear "
+"layers often exhibit relatively high MTE utilization. To address this, we"
+" create a separate pipeline specifically for weight prefetching, which "
+"runs in parallel with the original vector computation pipeline, such as "
+"RMSNorm and SiLU, before the MLP. This approach allows the weights to be "
+"preloaded to L2 cache ahead of time, reducing MTE utilization during the "
+"MLP computations and indirectly improving Cube computation efficiency by "
+"minimizing resource contention and optimizing data flow."
+msgstr ""
+"在密集模型场景中，MLP 的 gate_up_proj 和 down_proj 线性层通常表现出较高的 "
+"MTE（内存传输引擎）利用率。为了解决这个问题，我们创建了一个专门用于权重预取的独立流水线，它与 MLP 之前的原始向量计算流水线（如 "
+"RMSNorm 和 SiLU）并行运行。这种方法允许权重提前预加载到 L2 缓存中，降低了 MLP 计算期间的 MTE "
+"利用率，并通过减少资源竞争和优化数据流间接提高了 Cube 计算效率。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:338
+msgid ""
+"It is important to emphasize that, since we use vector computations to "
+"hide the weight prefetching pipeline, the setting of the prefetch buffer "
+"size is crucial. If the buffer size is too small, the optimization "
+"benefits will not be fully realized, while a larger buffer size may lead "
+"to resource contention, resulting in performance degradation. To "
+"accommodate different scenarios, we have exposed two environment "
+"variables `VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE` and "
+"`VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE` to allow for flexible buffer size "
+"configuration based on the specific workload."
+msgstr ""
+"需要强调的是，由于我们利用向量计算来隐藏权重预取流水线的时间，预取缓冲区大小（prefetch buffer "
+"size）的设置至关重要。如果缓冲区太小，优化收益无法充分体现；如果太大，则可能导致资源竞争，导致性能下降。为了适应不同场景，我们暴露了两个环境变量"
+" `VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE` 和 "
+"`VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE`，以便根据具体工作负载灵活配置缓冲区大小。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:340
+msgid ""
+"This optimization requires setting the environment variable "
+"`VLLM_ASCEND_ENABLE_PREFETCH_MLP = 1` to be enabled."
+msgstr "此优化需要设置环境变量 `VLLM_ASCEND_ENABLE_PREFETCH_MLP = 1` 才能启用。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:342
+msgid "6. Zerolike Elimination"
+msgstr "6.Zerolike 消除"
+
+#: ../../source/tutorials/Qwen3-Dense.md:343
+msgid ""
+"This elimination removes unnecessary operations related to zero-like "
+"tensors in Attention forward, improving the efficiency of matrix "
+"operations and reducing memory usage."
+msgstr "该优化消除了 Attention 正向传播中与类零张量（zero-like tensors）相关的非必要操作，提高了矩阵运算效率并减少了内存使用。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:347
+msgid "7. FullGraph Optimization"
+msgstr "7.全图（FullGraph）优化"
+
+#: ../../source/tutorials/Qwen3-Dense.md:348
+msgid ""
+"ACLGraph offers several key optimizations to improve model execution "
+"efficiency. By replaying the entire model execution graph at once, we "
+"significantly reduce dispatch latency compared to multiple smaller "
+"replays. This approach also stabilizes multi-device performance, as "
+"capturing the model as a single static graph mitigates dispatch "
+"fluctuations across devices. Additionally, consolidating graph captures "
+"frees up streams, allowing for the capture of more graphs and optimizing "
+"resource usage, ultimately leading to improved system efficiency and "
+"reduced overhead."
+msgstr ""
+"ACLGraph "
+"提供了多项关键优化以提升模型执行效率。通过一次性回放整个模型执行图，与多次回放零散的小图相比，我们显著降低了调度（dispatch）延迟。由于将模型捕获为单个静态图可以缓解跨设备的调度波动，这种方法还稳定了多设备性能。此外，整合图捕获释放了"
+" Stream 资源，允许捕获更多图并优化资源利用，最终提高系统效率并减少开销。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:350
+#, python-brace-format
+msgid ""
+"The configuration compilation_config = { \"cudagraph_mode\": "
+"\"FULL_DECODE_ONLY\"} is used when starting the service. This setup is "
+"necessary to enable the aclgraph's full decode-only mode."
+msgstr ""
+"启动服务时使用配置 `compilation_config = { \"cudagraph_mode\": "
+"\"FULL_DECODE_ONLY\"}`。此设置对于启用 ACLGraph 的 Full Decode-only 模式是必需的。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:352
+msgid "8. Asynchronous Scheduling"
+msgstr "8.异步调度"
+
+#: ../../source/tutorials/Qwen3-Dense.md:353
+msgid ""
+"Asynchronous scheduling is a technique used to optimize inference "
+"efficiency. It allows non-blocking task scheduling to improve concurrency"
+" and throughput, especially when processing large-scale models."
+msgstr "异步调度是一种优化推理效率的技术。它允许非阻塞的任务调度，从而提高并发量和吞吐量，尤其是在处理大规模模型时。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:355
+msgid "This optimization is enabled by setting `--async-scheduling`."
+msgstr "通过设置 `--async-scheduling` 参数来启用此优化。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:357
+msgid "Optimization Highlights"
+msgstr "调优亮点"
+
+#: ../../source/tutorials/Qwen3-Dense.md:359
+msgid ""
+"Building on the specific example scenarios outlined earlier, this section"
+" highlights the key tuning points that played a crucial role in achieving"
+" optimal performance. By focusing on the most impactful adjustments to "
+"hyperparameters and optimizations, we’ll emphasize the strategies that "
+"can be leveraged to maximize throughput, minimize latency, and ensure "
+"efficient resource utilization in various environments. These insights "
+"will help guide you in fine-tuning your own configurations for the best "
+"possible results."
+msgstr "基于前文概述的特定示例场景，本节重点介绍了对实现最佳性能起关键作用的调优要点。通过关注对超参数和优化最具影响力的调整，我们将强调那些可用于最大化吞吐量、最小化延迟并确保在各种环境中高效利用资源的策略。这些见解将指导您微调自己的配置，以获得最佳结果。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:361
+msgid "1.Prefetch Buffer Size"
+msgstr "1.预取缓冲区大小 (Prefetch Buffer Size)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:362
+msgid ""
+"Setting the right prefetch buffer size is essential for optimizing weight"
+" loading and the size of this prefetch buffer is directly related to the "
+"time that can be hidden by vector computations. To achieve a near-perfect"
+" overlap between the prefetch and computation streams, you can flexibly "
+"adjust the buffer size by profiling and observing the degree of overlap "
+"at different buffer sizes."
+msgstr ""
+"设置正确的预取缓冲区大小对于优化权重加载至关重要，且该缓冲区的大小直接关系到能被向量计算“隐藏”的时间。为了实现预取流和计算流之间近乎完美的重叠（overlap），您可以通过"
+" Profiling（性能分析）并观察不同缓冲区大小下的重叠程度，灵活调整缓冲区大小。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:364
+msgid ""
+"For example, in the real-world scenario mentioned above, I set the "
+"prefetch buffer size for the gate_up_proj and down_proj in the MLP to "
+"18MB. The reason for this is that, at this value, the vector computations"
+" of RMSNorm and SiLU can effectively hide the prefetch stream, thereby "
+"accelerating the Matmul computations of the two linear layers."
+msgstr ""
+"例如，在上述实际场景中，我将 MLP 的 gate_up_proj 和 down_proj 的预取缓冲区大小设置为 "
+"18MB。原因是，在此取值下，RMSNorm 和 SiLU 的向量计算可以有效地隐藏预取流，从而加速这两个线性层的 Matmul 计算。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:366
+msgid "2.Max-num-batched-tokens"
+msgstr "2.最大批处理 Token 数 (Max-num-batched-tokens)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:367
+msgid ""
+"The max-num-batched-tokens parameter determines the maximum number of "
+"tokens that can be processed in a single batch. Adjusting this value "
+"helps to balance throughput and memory usage. Setting this value too "
+"small can negatively impact end-to-end performance, as fewer tokens are "
+"processed per batch, potentially leading to inefficiencies. Conversely, "
+"setting it too large increases the risk of Out of Memory (OOM) errors due"
+" to excessive memory consumption."
+msgstr ""
+"`max-num-batched-tokens` 参数决定了单次批处理中处理的最大 Token "
+"数量。调整此值有助于平衡吞吐量和内存使用。设置过小可能会对端到端性能产生负面影响，因为每批处理的 Token "
+"较少，可能导致效率低下。相反，设置过大则会因为内存消耗过多而增加显存溢出（OOM）的风险。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:369
+msgid ""
+"In the above real-world scenario, we not only conducted extensive testing"
+" to determine the most cost-effective value, but also took into account "
+"the accumulation of decode tokens when enabling chunked prefill. If the "
+"value is set too small, a single request may be chunked multiple times, "
+"and during the early stages of inference, a batch may contain only a "
+"small number of decode tokens. This can result in the end-to-end "
+"throughput falling short of expectations."
+msgstr ""
+"在上述实际场景中，我们不仅通过大量测试确定了最具性价比的取值，还考虑了启用分块预填充（Chunked Prefill）时解码 Token "
+"的累积情况。如果设置得太小，单个请求可能会被多次分块，且在推理初期，一个 Batch 可能仅包含极少量的解码 "
+"Token，这会导致端到端吞吐量低于预期。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:371
+msgid "3.Cudagraph_capture_sizes"
+msgstr "3.Cudagraph 捕获尺寸 (Cudagraph_capture_sizes)"
+
+#: ../../source/tutorials/Qwen3-Dense.md:372
+msgid ""
+"The cudagraph_capture_sizes parameter controls the granularity of graph "
+"captures during the inference process. Adjusting this value determines "
+"how much of the computation graph is captured at once, which can "
+"significantly impact both performance and memory usage."
+msgstr ""
+"`cudagraph_capture_sizes` "
+"参数控制推理过程中图捕获的粒度。调整此值决定了一次性捕获多少计算图，这会对性能和内存使用产生显著影响。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:374
+msgid ""
+"If this list is not manually specified, it will be filled with a series "
+"of evenly distributed values, which typically ensures good performance. "
+"However, if you want to fine-tune it further, manually specifying the "
+"values will yield better results. This is because if the batch size falls"
+" between two sizes, the framework will automatically pad the token count "
+"to the larger size. This often leads to actual performance deviating from"
+" the expected or even degrading."
+msgstr ""
+"如果未手动指定此列表，系统将使用一系列均匀分布的值填充，通常能保证较好的性能。但是，如果您想进一步微调，手动指定取值将获得更好的效果。这是因为如果"
+" Batch Size 落在两个捕获尺寸之间，框架会自动将 Token 数量补齐（Pad）到较大的尺寸，这往往会导致实际性能偏离预期甚至下降。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:376
+msgid ""
+"Therefore, like the above real-world scenario, when adjusting the "
+"benchmark request concurrency, we always ensure that the concurrency is "
+"actually included in the cudagraph_capture_sizes list. This way, during "
+"the decode phase, padding operations are essentially avoided, ensuring "
+"the reliability of the experimental data."
+msgstr ""
+"因此，在上述实际场景中，在调整基准测试请求并发量时，我们始终确保该并发量包含在 `cudagraph_capture_sizes` "
+"列表中。这样在解码阶段，补齐操作基本上被避免了，确保了实验数据的可靠性。"
+
+#: ../../source/tutorials/Qwen3-Dense.md:378
+msgid ""
+"It’s important to note that if you enable FlashComm_v1, the values in "
+"this list must be integer multiples of the TP size. Any values that do "
+"not meet this condition will be automatically filtered out. Therefore, I "
+"recommend incrementally adding concurrency based on the TP size after "
+"enabling FlashComm_v1."
+msgstr ""
+"需要特别注意的是，如果您启用了 FlashComm_v1，此列表中的值必须是 "
+"TP（张量并行）大小的整数倍。任何不满足此条件的数值都将被自动过滤。因此，我建议在启用 FlashComm_v1 后，基于 TP "
+"大小来递增添加并发量。"
+

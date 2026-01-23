@@ -1,0 +1,369 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:1
+msgid "Context Parallel (CP)"
+msgstr "上下文并行 (CP)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:3
+msgid ""
+"TL;DR PCP accelerates prefill via sequence splitting. DCP eliminates KV "
+"cache redundancy."
+msgstr "摘要：PCP通过序列分割加速预填充阶段。DCP消除KV缓存的冗余存储。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:5
+msgid "![ContextParallel](../../assets/cp/overview.png)"
+msgstr "![ContextParallel](../../assets/cp/overview.png)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:5
+msgid "ContextParallel"
+msgstr "上下文并行"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:7
+msgid ""
+"For the main discussions during the development process, please refer to "
+"the [RFC](https://github.com/vllm-project/vllm/issues/25749) and the "
+"relevant links referenced by or referencing this RFC."
+msgstr "关于开发过程中的主要讨论，请参阅[RFC](https://github.com/vllm-project/vllm/issues/25749)以及被该RFC引用或引用该RFC的相关链接。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:9
+msgid "What is CP?"
+msgstr "什么是CP？"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:11
+msgid ""
+"**Context Parallel (CP)** is a strategy for parallelizing computation "
+"along the sequence dimension across multiple devices."
+msgstr "上下文并行 (CP) 是一种将计算沿着序列维度在多个设备上并行化的策略。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:13
+msgid ""
+"**Prefill Context Parallel (PCP)** expands the world size of devices and "
+"uses dedicated communication domains. Its primary goal is to partition "
+"the sequence dimension during the prefill phase, enabling different "
+"devices to compute distinct chunks of the sequence simultaneously. The KV"
+" cache is sharded along the sequence dimension across devices. This "
+"approach impacts the computational logic of both the Prefill and Decode "
+"stages to varying degrees."
+msgstr "预填充上下文并行 (PCP) 扩展了设备的世界大小并使用专用的通信域。其主要目标是在预填充阶段划分序列维度，使不同的设备能够同时计算序列的不同片段。KV缓存沿着序列维度在设备间分片存储。这种方法在不同程度上影响了预填充和解码两个阶段的计算逻辑。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:18
+msgid ""
+"**Decode Context Parallel (DCP)** reuses the communication domain of "
+"Tensor Parallelism (TP) and does not require additional devices. Its main"
+" objective is to eliminate duplicated storage of the KV cache by sharding"
+" it along the sequence dimension across devices within the TP domain that"
+" would otherwise hold redundant copies. DCP primarily influences the "
+"Decode logic, as well as the logic for chunked prefill and cached "
+"prefill."
+msgstr "解码上下文并行 (DCP) 复用张量并行 (TP) 的通信域，不需要额外的设备。其主要目标是通过在TP域内沿着序列维度分片存储KV缓存，消除原本会存储冗余副本的设备上的重复存储。DCP主要影响解码阶段的逻辑，以及分块预填充和缓存预填充的逻辑。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:22
+msgid "How to Use CP?"
+msgstr "如何使用CP？"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:23
+msgid ""
+"Please refer to the [context parallel user "
+"guide](../../user_guide/feature_guide/context_parallel.md) for detailed "
+"information."
+msgstr "请参考[上下文并行用户指南](../../user_guide/feature_guide/context_parallel.md)获取详细信息"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:25
+msgid "How It Works?"
+msgstr "工作原理"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:27
+msgid "Block Table"
+msgstr "块表"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:29
+msgid ""
+"CP performs sequence sharding on the KV cache storage. To facilitate "
+"efficient storage and access, tokens are stored in an interleaved manner "
+"across devices, with the interleaving granularity determined by "
+"`cp_kv_cache_interleave_size`."
+msgstr "CP对KV缓存存储执行序列分片。为了便于高效存储和访问，token以交错的方式跨设备存储，交错粒度由cp_kv_cache_interleave_size决定。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:31
+msgid ""
+"As illustrated, a virtual block is defined in the block table, where "
+"blocks within the same CP device group form a virtual block. The virtual "
+"block size is `virtual_block_size = block_size * pcp_size * dcp_size`."
+msgstr "如图所示，块表中定义了一个虚拟块，其中同一CP设备组内的块组成一个虚拟块。虚拟块的大小为virtual_block_size = block_size * pcp_size * dcp_size。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:33
+#, python-format
+msgid ""
+"For any token `x`, its (virtual) block index is `x // "
+"virtual_block_size`, and the offset within the virtual block is `x % "
+"virtual_block_size`. The local block index is "
+"`offset_within_virtual_block // cp_kv_cache_interleave_size`, and the "
+"device number is `local_block_index % (pcp_size * dcp_size)`. The offset "
+"within the local block is `(local_block_index // (pcp_size * dcp_size)) *"
+" cp_kv_cache_interleave_size + offset_within_virtual_block % "
+"cp_kv_cache_interleave_size`."
+msgstr "对于任意token x，其（虚拟）块索引为x // virtual_block_size，在虚拟块内的偏移量为x % virtual_block_size。本地块索引为offset_within_virtual_block // cp_kv_cache_interleave_size，设备编号为local_block_index % (pcp_size * dcp_size)。在本地块内的偏移量为(local_block_index // (pcp_size * dcp_size)) * cp_kv_cache_interleave_size + offset_within_virtual_block % cp_kv_cache_interleave_size。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:35
+msgid ""
+"Based on the logic above, the `slot_mapping` calculation process is "
+"adjusted, and the `slot_mapping` values on each device are modified to "
+"ensure the KV cache is sharded along the sequence dimension and stored "
+"across different devices as expected."
+msgstr "基于上述逻辑，调整了slot_mapping的计算过程，并修改了每个设备上的slot_mapping值，以确保KV缓存按预期沿着序列维度分片并存储在不同的设备上。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:37
+#, python-format
+msgid ""
+"The current implementation requires that `block_size % "
+"cp_kv_cache_interleave_size == 0`."
+msgstr "当前实现要求block_size % cp_kv_cache_interleave_size == 0。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:39
+msgid "![BlockTable](../../assets/cp/blocktable.png)"
+msgstr "![BlockTable](../../assets/cp/blocktable.png)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:39
+msgid "BlockTable"
+msgstr "块表"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:41
+msgid "Decode Context Parallel (DCP)"
+msgstr "解码上下文并行 (DCP)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:43
+msgid ""
+"As mentioned above, the primary function of DCP is to shard the KV cache "
+"along the sequence dimension for storage. Its impact lies in the logic of"
+" the decode and chunked prefill phases."
+msgstr "如前所述，DCP的主要功能是沿着序列维度分片KV缓存以进行存储。其影响在于解码和分块预填充阶段的逻辑。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:45
+msgid ""
+"**Prefill Phase:**   As illustrated, during the Chunked Prefill "
+"computation, two distinct logic implementations are employed for MLA and "
+"GQA backends."
+msgstr "预填充阶段： 如图所示，在分块预填充计算期间，MLA和GQA后端采用了两种不同的逻辑实现。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:48
+msgid ""
+"In the **MLA backend**, a Context KV Cache `all_gather` operation is "
+"performed to aggregate the full KV values. These are then used for "
+"attention computation with the Q values of the current chunk. Note that "
+"in multi-request scenarios, the directly gathered KV results are "
+"interleaved across requests. The `reorg_kvcache` function is used to "
+"reorganize the KV cache, ensuring that the KV cache of the same request "
+"is stored contiguously."
+msgstr "在MLA后端中，执行上下文KV缓存all_gather操作以聚合完整的KV值。然后这些值用于与当前块的Q值进行注意力计算。请注意，在多请求场景中，直接收集的KV结果在请求间是交错的。reorg_kvcache函数用于重新组织KV缓存，确保同一请求的KV缓存被连续存储。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:53
+msgid ""
+"In the **GQA backend**, an `all_gather` is performed along the head "
+"dimension for Q. This is because DCP overlaps with the TP communication "
+"domain, and the Q heads within a DCP group differ. However, they need to "
+"exchange results with the locally computed KV cache for online Softmax "
+"updates. To ensure correctness during result updates, the Q values are "
+"synchronized across the DCP group via head-dimension `all_gather`. During"
+" the result update process, `cp_lse_ag_out_rs` is invoked to aggregate "
+"`attn_output` and `attn_lse`, update the results, and perform a reduce-"
+"scatter operation on the outputs. Alternatively, we can use an all-to-all"
+" communication to exchange the output and LSE results, followed by direct"
+" local updates. This approach aligns with the logic adapted for PCP "
+"compatibility."
+msgstr "在GQA后端中，沿着头维度对Q执行all_gather。这是因为DCP与TP通信域重叠，并且DCP组内的Q头不同。然而，它们需要与本地计算的KV缓存交换结果以进行在线Softmax更新。为了确保结果更新过程中的正确性，Q值通过头维度的all_gather在DCP组内同步。在结果更新过程中，调用cp_lse_ag_out_rs来聚合attn_output和attn_lse，更新结果，并对输出执行归约-分散操作。或者，我们可以使用all-to-all通信来交换输出和LSE结果，然后直接进行本地更新。这种方法与为PCP兼容性而调整的逻辑保持一致。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:60
+msgid "![DCP-Prefill](../../assets/cp/dcp-prefill.png)"
+msgstr "![DCP-Prefill](../../assets/cp/dcp-prefill.png)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:60
+msgid "DCP-Prefill"
+msgstr "DCP-预填充"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:62
+msgid ""
+"**Decode Phase:** The logic during the decode phase is consistent with "
+"that of GQA's chunked prefill: an all-gather operation is first performed"
+" along the Q head dimension to ensure consistency within the DCP group. "
+"After computing the results with the local KV cache, the results are "
+"updated via the `cp_lse_ag_out_rs` function."
+msgstr msgstr "解码阶段： 解码阶段的逻辑与GQA的分块预填充一致：首先沿着Q头维度执行all-gather操作，以确保DCP组内的一致性。使用本地KV缓存计算结果后，通过cp_lse_ag_out_rs函数更新结果。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:66
+msgid "![DCP-Decode](../../assets/cp/dcp-decode.png)"
+msgstr "![DCP-Decode](../../assets/cp/dcp-decode.png)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:66
+msgid "DCP-Decode"
+msgstr "DCP-解码"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:68
+msgid "Prefill Context Parallel (PCP)"
+msgstr "预填充上下文并行 (PCP)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:70
+msgid "**Tokens Partition in Head-Tail Style**"
+msgstr msgstr "头尾风格的分词分区"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:72
+msgid ""
+"PCP requires splitting the input sequence and ensure balanced "
+"computational load across devices during the prefill phase. We employ a "
+"head-tail style for splitting and concatenation: specifically, the "
+"sequence is first padded to a length of `2*pcp_size`, then divided into "
+"`2*pcp_size` equal parts. The first part is merged with the last part, "
+"the second part with the second last part, and so on, thereby assigning "
+"computationally balanced chunks to each devices. Additionally, since "
+"allgather aggregation of KV or Q results in interleaved chunks from "
+"different requests, we compute `pcp_allgather_restore_idx` to quickly "
+"restore the original order."
+msgstr "PCP需要在预填充阶段分割输入序列并确保跨设备的计算负载均衡。我们采用头尾风格进行分割和连接：具体来说，序列首先填充到长度为2*pcp_size，然后分成2*pcp_size等份。第一部分与最后一部分合并，第二部分与倒数第二部分合并，依此类推，从而将计算平衡的块分配给每个设备。此外，由于KV或Q的allgather聚合会导致来自不同请求的交错块，我们计算pcp_allgather_restore_idx以快速恢复原始顺序。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:77
+msgid "These logics are implemented in the function `_update_tokens_for_pcp`."
+msgstr "这些逻辑在函数_update_tokens_for_pcp中实现。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:79
+msgid "![PCP-Partition](../../assets/cp/head-tail-style.png)"
+msgstr "![PCP-Partition](../../assets/cp/head-tail-style.png)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:79
+msgid "PCP-Partition"
+msgstr "PCP-分区"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:81
+msgid "**Prefill Phase:**"
+msgstr "预填充阶段："
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:83
+msgid ""
+"During the Prefill phase (excluding chunked prefill), we employ an all-"
+"gather KV approach to address the issue of incomplete sequences on "
+"individual GPUs. It is important to note that we only aggregate the KV "
+"values for the current layer at a time, and these are discarded "
+"immediately after use, avoiding excessive peak memory usage. This method "
+"can also be directly applied to KV cache storage (since the KV cache "
+"partitioning method differs from PCP sequence partitioning, it is "
+"inevitable that each GPU requires a complete copy of the KV values). All "
+"attention backends maintain consistency in this logic."
+msgstr "在预填充阶段（不包括分块预填充），我们采用all-gather KV的方法来解决单个GPU上序列不完整的问题。需要注意的是，我们一次只聚合当前层的KV值，并且在使用后立即丢弃，避免过高的峰值内存使用量。这种方法也可以直接应用于KV缓存存储（由于KV缓存的分区方法与PCP序列分区方法不同，每个GPU需要一份完整的KV值副本是不可避免的）。所有注意力后端在此逻辑上保持一致。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:88
+msgid ""
+"Note: While a Ring Attention approach could also facilitate information "
+"exchange with lower peak memory and enable computation-communication "
+"overlap, we prioritized the all-gather KV implementation after evaluating"
+" that the development complexity was high and the benefits of overlap "
+"were limited."
+msgstr "注意：虽然Ring Attention方法也可以促进信息交换，具有更低的峰值内存并支持计算-通信重叠，但我们在评估后优先实施了all-gather KV方法，因为其开发复杂度高且重叠的收益有限。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:90
+msgid "![PCP-Prefill](../../assets/cp/pcp-prefill.png)"
+msgstr "![PCP-Prefill](../../assets/cp/pcp-prefill.png)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:90
+msgid "PCP-Prefill"
+msgstr "PCP-预填充"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:92
+msgid "**Decode Phase:**"
+msgstr "解码阶段："
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:94
+msgid ""
+"During the decode phase, we only need to add an allgather within the PCP "
+"group after the DCP all-to-all communication exchanges the output and "
+"LSE, before proceeding with the output update."
+msgstr "在解码阶段，我们只需要在DCP的all-to-all通信交换输出和LSE之后、进行输出更新之前，在PCP组内添加一个allgather操作。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:96
+msgid "![PCP-Decode](../../assets/cp/pcp-decode.png)"
+msgstr "![PCP-Decode](../../assets/cp/pcp-decode.png)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:96
+msgid "PCP-Decode"
+msgstr "PCP-解码"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:98
+msgid "**Chunked Prefill:**"
+msgstr msgstr "分块预填充："
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:100
+msgid ""
+"Currently, there are three viable approaches for Chunked Prefill "
+"compatibility: **AllGatherQ**, **AllGatherKV**, and **Ring-Attn**. Since "
+"PCP performs sequence sharding on both the query sequence and the KV "
+"cache, we need to ensure that one side has complete information or employ"
+" a method like Ring-Attn to perform computations sequentially. The "
+"advantages and disadvantages of Ring-Attn will not be elaborated here."
+msgstr "目前，有三种可行的分块预填充兼容性方法：AllGatherQ、AllGatherKV和Ring-Attn。由于PCP对查询序列和KV缓存都执行序列分片，我们需要确保其中一方拥有完整的信息，或者采用Ring-Attn等方法顺序执行计算。此处不详细阐述Ring-Attn的优缺点。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:104
+msgid ""
+"We have implemented the **AllGatherQ** approach in the GQA attention "
+"backend and the **AllGatherKV** approach in the MLA attention backend. "
+"The workflow after **AllGatherQ** is identical to the decode phase, while"
+" the workflow after **AllGatherKV** is the same as the standard prefill "
+"phase. For details, please refer to the diagram below; specific steps "
+"will not be repeated."
+msgstr "我们已经在GQA注意力后端实现了AllGatherQ方法，在MLA注意力后端实现了AllGatherKV方法。AllGatherQ之后的工作流程与解码阶段相同，而AllGatherKV之后的工作流程与标准预填充阶段相同。详细信息请参考下图；具体步骤不再赘述。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:108
+msgid ""
+"One important note: **AllGatherKV** may lead to significant peak memory "
+"usage when the context length becomes excessively long. To mitigate this,"
+" we adopt a segmented processing strategy. By predefining the maximum "
+"amount of KV cache processed per round, we sequentially complete the "
+"attention computation and online softmax updates for each segment."
+msgstr "一个重要注意事项：当上下文长度过长时，AllGatherKV可能导致显著的峰值内存使用量。为了缓解这个问题，我们采用了分段处理策略。通过预定义每轮处理的最大KV缓存量，我们依次完成每个段的注意力计算和在线softmax更新。"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:112
+msgid "![PCP-ChunkedPrefill](../../assets/cp/chunkedprefill.png)"
+msgstr "![PCP-ChunkedPrefill](../../assets/cp/chunkedprefill.png)"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:112
+msgid "PCP-ChunkedPrefill"
+msgstr "PCP-分块预填充"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:114
+msgid "Related Files"
+msgstr "相关文件"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:116
+msgid "slot_mapping computation: `vllm_ascend/worker/block_table.py`"
+msgstr "slot_mapping计算：`vllm_ascend/worker/block_table.py`"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:117
+msgid ""
+"sequences splitting and metadata prepare: "
+"`vllm_ascend/worker/model_runner_v1.py`"
+msgstr "序列分割和元数据准备：`vllm_ascend/worker/model_runner_v1.py`"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:118
+msgid "GQA backend: `vllm_ascend/attention/attention_cp.py`"
+msgstr "GQA后端：`vllm_ascend/attention/attention_cp.py`"
+
+#: ../../source/developer_guide/feature_guide/context_parallel.md:119
+msgid "MLA backend: `vllm_ascend/attention/mla_cp.py`"
+msgstr "MLA后端：`vllm_ascend/attention/mla_cp.py`"
+

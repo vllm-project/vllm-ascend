@@ -2,7 +2,7 @@
 
 ## Getting Start
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large scale **Expert  Parallelism (EP)** scenario. To achieve better performance，the distributed DP server is applied in vLLM-Ascend. In the PD separation scenario, different optimization strategies can be implemented based on the distinct characteristics of PD nodes, thereby enabling more flexible model deployment. \
+vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large scale **Expert  Parallelism (EP)** scenario. To achieve better performance, the distributed DP server is applied in vLLM-Ascend. In the PD separation scenario, different optimization strategies can be implemented based on the distinct characteristics of PD nodes, thereby enabling more flexible model deployment. \
 Take the deepseek model as an example, use 8 Atlas 800T A3 servers to deploy the model. Assume the ip of the servers start from 192.0.0.1, and end by 192.0.0.8. Use the first 4 servers as prefiller nodes and the last 4 servers as decoder nodes. And the prefiller nodes deployed as master node independently, the decoder nodes set 192.0.0.5 node to be the master node.
 
 ## Verify Multi-Node Communication Environment

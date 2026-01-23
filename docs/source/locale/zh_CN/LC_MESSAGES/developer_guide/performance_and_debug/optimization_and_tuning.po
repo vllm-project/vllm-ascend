@@ -1,0 +1,349 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:1
+msgid "Optimization and Tuning"
+msgstr "优化与调优"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:3
+msgid ""
+"This guide aims to help users to improve vllm-ascend performance on "
+"system level. It includes OS configuration, library optimization, "
+"deployment guide and so on. Any feedback is welcome."
+msgstr "本指南旨在帮助用户在系统层面提升 vllm-ascend 的性能，涵盖操作系统配置、库优化、部署指南等内容。欢迎提供任何反馈意见。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:5
+msgid "Preparation"
+msgstr "准备工作"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:7
+msgid "Run the container:"
+msgstr "运行容器："
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:31
+msgid "Configure your environment:"
+msgstr "配置环境："
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:49
+msgid "Install vllm and vllm-ascend:"
+msgstr "安装 vllm 和 vllm-ascend："
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:61
+msgid ""
+"Please follow the [Installation "
+"Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) "
+"to make sure vLLM and vllm-ascend are installed correctly."
+msgstr "请按照[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)确保正确安装 vLLM 和 vllm-ascend。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:64
+msgid ""
+"Make sure your vLLM and vllm-ascend are installed after your python "
+"configuration is completed, because these packages will build binary "
+"files using python in current environment. If you install vLLM and vllm-"
+"ascend before completing section 1.1, the binary files will not use the "
+"optimized python."
+msgstr "请确保在完成 Python 配置后再安装 vLLM 和 vllm-ascend，因为这些软件包会使用当前环境中的 Python 构建二进制文件。如果在完成第 1.1 节之前安装 vLLM 和 vllm-ascend，二进制文件将不会使用经过优化的 Python。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:67
+msgid "Optimizations"
+msgstr "优化措施"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:69
+msgid "1. Compilation Optimization"
+msgstr "1.编译优化"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:71
+msgid "1.1. Install optimized `python`"
+msgstr "1.1.安装优化版 `python`"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:73
+msgid ""
+"Python supports **LTO** and **PGO** optimization starting from version "
+"`3.6` and above, which can be enabled at compile time. And we have "
+"offered optimized `python` packages directly to users for the sake of "
+"convenience. You can also reproduce the `python` build following this "
+"[tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html)"
+" according to your specific scenarios."
+msgstr "Python 从 `3.6` 及以上版本开始支持 **LTO**（链接时优化）和 **PGO**（基于性能分析的优化），这些优化可在编译时启用。为方便起见，我们已直接为用户提供了优化版的 `python` 软件包。您也可以根据具体场景，按照此[教程](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html)重新构建 `python`。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:101
+msgid "2. OS Optimization"
+msgstr "2.操作系统优化"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:103
+msgid "2.1. jemalloc"
+msgstr "2.1.jemalloc"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:105
+msgid ""
+"**jemalloc** is a memory allocator that improves performance for multi-"
+"thread scenarios and can reduce memory fragmentation. jemalloc uses local"
+" thread memory manager to allocate variables, which can avoid lock "
+"competition between threads and can hugely optimize performance."
+msgstr "**jemalloc** 是一种内存分配器，可提升多线程场景下的性能并减少内存碎片。jemalloc 使用本地线程内存管理器来分配变量，这可以避免线程间的锁竞争，从而大幅优化性能。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:117
+msgid "2.2. Tcmalloc"
+msgstr "2.2.Tcmalloc"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:119
+msgid ""
+"**Tcmalloc (Thread Caching Malloc)** is a universal memory allocator that"
+" improves overall performance while ensuring low latency by introducing a"
+" multi-level cache structure, reducing mutex competition and optimizing "
+"large object processing flow. Find more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html)."
+msgstr "**Tcmalloc（线程缓存分配器）**是一种通用内存分配器，通过引入多级缓存结构、减少互斥锁竞争并优化大对象处理流程，在确保低延迟的同时提升整体性能。更多详细信息请参见[此处](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html)。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:140
+msgid "3. `torch_npu` Optimization"
+msgstr "3.`torch_npu` 优化"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:142
+msgid ""
+"Some performance tuning features in `torch_npu` are controlled by "
+"environment variables. Some features and their related environment "
+"variables are shown below."
+msgstr "`torch_npu` 中的部分性能调优功能由环境变量控制。以下展示了一些功能及其相关的环境变量。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:144
+msgid "Memory optimization:"
+msgstr "内存优化："
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:155
+msgid "Scheduling optimization:"
+msgstr "调度优化："
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:166
+msgid "4. CANN Optimization"
+msgstr "4.CANN 优化"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:168
+msgid "4.1. HCCL Optimization"
+msgstr "4.1.HCCL 优化"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:170
+msgid ""
+"There are some performance tuning features in HCCL, which are controlled "
+"by environment variables."
+msgstr "HCCL 中包含一些由环境变量控制的性能调优功能。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:172
+msgid ""
+"You can configure HCCL to use \"AIV\" mode to optimize performance by "
+"setting the environment variable shown below. In \"AIV\" mode, the "
+"communication is scheduled by AI vector core directly with RoCE, instead "
+"of being scheduled by AI CPU."
+msgstr "您可以通过设置如下所示的环境变量，将 HCCL 配置为使用 \"AIV\" 模式以优化性能。在 \"AIV\" 模式下，通信由 AI 向量核心直接通过 RoCE 进行调度，而非由 AI CPU 调度。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:179
+msgid ""
+"Plus, there are more features for performance optimization in specific "
+"scenarios, which are shown below."
+msgstr "此外，在特定场景下还有更多用于性能优化的功能，如下所示。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:181
+msgid ""
+"`HCCL_INTRA_ROCE_ENABLE`: Use RDMA link instead of SDMA link between two "
+"8Ps as the mesh interconnect link. Find more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0044.html)."
+msgstr "`HCCL_INTRA_ROCE_ENABLE`：在两个 8P 之间使用 RDMA 链路而非 SDMA 链路作为网状互连链路。更多详细信息请参见[此处](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0044.html)。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:182
+msgid ""
+"`HCCL_RDMA_TC`: Use this var to configure traffic class of RDMA NIC. Find"
+" more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0045.html)."
+msgstr "`HCCL_RDMA_TC`：使用此变量配置 RDMA NIC 的流量等级。更多详细信息请参见[此处](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0045.html)。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:183
+msgid ""
+"`HCCL_RDMA_SL`: Use this var to configure service level of RDMA NIC. Find"
+" more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0046.html)."
+msgstr "`HCCL_RDMA_SL`：使用此变量配置 RDMA NIC 的服务级别。更多详细信息请参见[此处](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0046.html)。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:184
+msgid ""
+"`HCCL_BUFFSIZE`: Use this var to control the cache size for sharing data "
+"between two NPUs. Find more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html)."
+msgstr "`HCCL_BUFFSIZE`：使用此变量控制两个 NPU 之间共享数据的缓存大小。更多详细信息请参见[此处](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html)。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:186
+msgid "5. OS Optimization"
+msgstr "5.操作系统优化"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:188
+msgid ""
+"This section describes operating system–level optimizations applied on "
+"the host machine (bare metal or Kubernetes node) to improve performance "
+"stability, latency, and throughput for inference workloads."
+msgstr "本节介绍在主机（裸金属或 Kubernetes 节点）上应用的操作系统级优化，旨在提升推理工作负载的性能稳定性、延迟和吞吐量。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:191
+msgid ""
+"These settings must be applied on the host OS and with root privileges. "
+"not inside containers."
+msgstr "这些设置必须在主机操作系统上以 root 权限应用，而非在容器内部。"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:194
+msgid "5.1"
+msgstr "5.1"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:196
+msgid "Set CPU Frequency Governor to `performance`"
+msgstr "将 CPU 频率调控器设置为 `performance`"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:202
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:217
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:236
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:257
+msgid "Purpose"
+msgstr "目的"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:203
+msgid "Forces all CPU cores to run under the `performance` governor"
+msgstr "强制所有 CPU 核心在 `performance` 调控器下运行"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:204
+msgid "Disables dynamic frequency scaling (e.g., `ondemand`, `powersave`)"
+msgstr "禁用动态频率调节（例如 `ondemand`、`powersave`）"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:206
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:221
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:240
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:260
+msgid "Benefits"
+msgstr "优势"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:207
+msgid "Keeps CPU cores at maximum frequency"
+msgstr "保持 CPU 核心处于最高频率"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:208
+msgid "Reduces latency jitter"
+msgstr "减少延迟抖动"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:209
+msgid "Improves predictability for inference workloads"
+msgstr "提升推理工作负载的可预测性"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:211
+msgid "5.2 Disable Swap Usage"
+msgstr "5.2禁用交换空间使用"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:219
+msgid "Minimizes the kernel’s tendency to swap memory pages to disk"
+msgstr "最小化内核将内存页交换到磁盘的倾向"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:223
+msgid "Prevents severe latency spikes caused by swapping"
+msgstr "防止因交换操作导致的严重延迟峰值"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:224
+msgid "Improves stability for large in-memory models"
+msgstr "提升大型内存驻留模型的稳定性"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:226
+msgid "Notes"
+msgstr "备注"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:227
+msgid "For inference workloads, swap can introduce second-level latency"
+msgstr "对于推理工作负载，交换操作可能引入秒级延迟"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:228
+msgid "Recommended values are `0` or `1`"
+msgstr "推荐值为 `0` 或 `1`"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:230
+msgid "5.3 Disable Automatic NUMA Balancing"
+msgstr "5.3禁用自动 NUMA 平衡"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:238
+msgid "Disables the kernel’s automatic NUMA page migration mechanism"
+msgstr "禁用内核的自动 NUMA 页迁移机制"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:242
+msgid "Prevents background memory page migrations"
+msgstr "防止后台内存页迁移"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:243
+msgid "Reduces unpredictable memory access latency"
+msgstr "减少不可预测的内存访问延迟"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:244
+msgid "Improves performance stability on NUMA systems"
+msgstr "提升 NUMA 系统上的性能稳定性"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:246
+msgid "Recommended For"
+msgstr "推荐用于"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:247
+msgid "Multi-socket servers"
+msgstr "多插槽服务器"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:248
+msgid "Ascend / NPU deployments with explicit NUMA binding"
+msgstr "具有显式 NUMA 绑定的 Ascend / NPU 部署"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:249
+msgid "Systems with manually managed CPU and memory affinity"
+msgstr "手动管理 CPU 和内存亲和性的系统"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:251
+msgid "5.4 Increase Scheduler Migration Cost"
+msgstr "5.4增加调度器迁移成本"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:258
+msgid "Increases the cost for the scheduler to migrate tasks between CPU cores"
+msgstr "增加调度器在 CPU 核心间迁移任务的成本"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:261
+msgid "Reduces frequent thread migration"
+msgstr "减少频繁的线程迁移"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:262
+msgid "Improves CPU cache locality"
+msgstr "提升 CPU 缓存局部性"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:263
+msgid "Lowers latency jitter for inference workloads"
+msgstr "降低推理工作负载的延迟抖动"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:265
+msgid "Parameter Details"
+msgstr "参数详情"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:266
+msgid "Unit: nanoseconds (ns)"
+msgstr "单位：纳秒（ns）"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:267
+msgid "Typical recommended range: 50000–100000"
+msgstr "典型推荐范围：50000–100000"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:268
+msgid "Higher values encourage threads to stay on the same CPU core"
+msgstr "较高的值有助于线程保持在同一个 CPU 核心上运行"

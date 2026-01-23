@@ -113,8 +113,6 @@ class TestAscendAttentionCPImpl(TestBase):
 
         attn_metadata = MagicMock()
         attn_metadata.decode_meta = MagicMock()
-        attn_metadata.decode_meta.batch_seq_mask = torch.tensor(
-            [1, 0], dtype=torch.bool)
         output = self.impl._forward_decode_pcp_dcp(query, attn_metadata)
 
         self.assertEqual(output.shape[0], 2)

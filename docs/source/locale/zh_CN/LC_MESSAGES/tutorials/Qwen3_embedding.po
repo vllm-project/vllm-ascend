@@ -1,0 +1,164 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 19:10+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen3_embedding.md:1
+msgid "Qwen3-Embedding"
+msgstr "Qwen3-Embedding"
+
+#: ../../source/tutorials/Qwen3_embedding.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/Qwen3_embedding.md:4
+msgid ""
+"The Qwen3 Embedding model series is the latest proprietary model of the "
+"Qwen family, specifically designed for text embedding and ranking tasks. "
+"Building upon the dense foundational models of the Qwen3 series, it "
+"provides a comprehensive range of text embeddings and reranking models in"
+" various sizes (0.6B, 4B, and 8B). This guide describes how to run the "
+"model with vLLM Ascend. Note that only 0.9.2rc1 and higher versions of "
+"vLLM Ascend support the model."
+msgstr ""
+"Qwen3 Embedding 模型系列是通义千问家族最新的闭源模型，专为文本嵌入（Embedding）和排序任务设计。"
+"该系列基于 Qwen3 密集基础模型构建，提供了涵盖不同尺寸（0.6B、4B 和 8B）的全面文本嵌入和重排序模型。"
+"本指南介绍如何使用 vLLM Ascend 运行该模型。请注意，只有 0.9.2rc1 及更高版本的 vLLM Ascend 平台支持该模型。"
+
+#: ../../source/tutorials/Qwen3_embedding.md:6
+msgid "Supported Features"
+msgstr "支持的功能"
+
+#: ../../source/tutorials/Qwen3_embedding.md:8
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参考 [支持功能列表](../user_guide/support_matrix/supported_models.md) 以获取该模型支持的功能矩阵。"
+
+#: ../../source/tutorials/Qwen3_embedding.md:10
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/Qwen3_embedding.md:12
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/Qwen3_embedding.md:14
+msgid ""
+"`Qwen3-Embedding-8B` [Download model "
+"weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B)"
+msgstr ""
+"`Qwen3-Embedding-8B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B)"
+
+#: ../../source/tutorials/Qwen3_embedding.md:15
+msgid ""
+"`Qwen3-Embedding-4B` [Download model "
+"weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B)"
+msgstr ""
+"`Qwen3-Embedding-4B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B)"
+
+#: ../../source/tutorials/Qwen3_embedding.md:16
+msgid ""
+"`Qwen3-Embedding-0.6B` [Download model "
+"weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)"
+msgstr ""
+"`Qwen3-Embedding-0.6B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)"
+
+#: ../../source/tutorials/Qwen3_embedding.md:18
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多节点共享目录中，例如 `/root/.cache/`。"
+
+#: ../../source/tutorials/Qwen3_embedding.md:19
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/Qwen3_embedding.md:20
+msgid ""
+"You can use our official docker image to run `Qwen3-Embedding` series "
+"models."
+msgstr "您可以使用我们的官方 Docker 镜像来运行 `Qwen3-Embedding` 系列模型。"
+
+#: ../../source/tutorials/Qwen3_embedding.md:21
+msgid ""
+"Start the docker image on your node, refer to [using "
+"docker](../installation.md#set-up-using-docker)."
+msgstr "在您的节点上启动 Docker 镜像，请参考 [使用 Docker](../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/Qwen3_embedding.md:23
+msgid ""
+"if you don't want to use the docker image as above, you can also build "
+"all from source:"
+msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
+
+#: ../../source/tutorials/Qwen3_embedding.md:24
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../installation.md)."
+msgstr "从源码安装 `vllm-ascend`，请参考 [安装指南](../installation.md)。"
+
+#: ../../source/tutorials/Qwen3_embedding.md:26
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/Qwen3_embedding.md:28
+msgid ""
+"Using the Qwen3-Embedding-8B model as an example, first run the docker "
+"container with the following command:"
+msgstr "以 Qwen3-Embedding-8B 模型为例，首先使用以下命令运行 Docker 容器："
+
+#: ../../source/tutorials/Qwen3_embedding.md:30
+msgid "Online Inference"
+msgstr "在线推理"
+
+#: ../../source/tutorials/Qwen3_embedding.md:36
+msgid "Once your server is started, you can query the model with input prompts."
+msgstr "服务器启动后，您可以使用输入提示词查询模型。"
+
+#: ../../source/tutorials/Qwen3_embedding.md:47
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/tutorials/Qwen3_embedding.md:82
+msgid "If you run this script successfully, you can see the info shown below:"
+msgstr "如果您成功运行此脚本，可以看到如下所示的信息："
+
+#: ../../source/tutorials/Qwen3_embedding.md:91
+msgid "Performance"
+msgstr "性能指标"
+
+#: ../../source/tutorials/Qwen3_embedding.md:93
+msgid ""
+"Run performance of `Qwen3-Reranker-8B` as an example. Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/) for more "
+"details."
+msgstr "以 `Qwen3-Embedding-8B` 的运行性能为例。有关更多详细信息，请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/contributing/)。"
+
+#: ../../source/tutorials/Qwen3_embedding.md:96
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 模式为例。运行如下代码。"
+
+#: ../../source/tutorials/Qwen3_embedding.md:102
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result. With this tutorial, the performance result is:"
+msgstr "大约几分钟后，您将获得性能评估结果。根据本教程，性能结果为："
