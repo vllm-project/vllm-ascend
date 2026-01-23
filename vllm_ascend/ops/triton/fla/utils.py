@@ -9,7 +9,7 @@
 # ruff: noqa: E501
 import contextlib
 import functools
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -19,38 +19,24 @@ def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return cu_seqlens[1:] - cu_seqlens[:-1]
 
 
-def prepare_chunk_indices(cu_seqlens: torch.LongTensor,
-                          chunk_size: int) -> torch.LongTensor:
-    indices = torch.cat([
-        torch.arange(n)
-        for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
-    ])
-    return torch.stack([indices.eq(0).cumsum(0) - 1, indices],
-                       1).to(cu_seqlens)
+def prepare_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+    indices = torch.cat([torch.arange(n) for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()])
+    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
 
 
-def prepare_chunk_offsets(cu_seqlens: torch.LongTensor,
-                          chunk_size: int) -> torch.LongTensor:
-    return torch.cat([
-        cu_seqlens.new_tensor([0]),
-        triton.cdiv(prepare_lens(cu_seqlens), chunk_size)
-    ]).cumsum(-1)
+def prepare_chunk_offsets(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+    return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]).cumsum(-1)
 
 
-def input_guard(
-        fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
+def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
     """
     A decorator to make sure all input tensors are contiguous and set the device based on input tensors.
     """
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        contiguous_args = (i if not isinstance(i, torch.Tensor) else
-                           i.contiguous() for i in args)
-        contiguous_kwargs = {
-            k: (v if not isinstance(v, torch.Tensor) else v.contiguous())
-            for k, v in kwargs.items()
-        }
+        contiguous_args = (i if not isinstance(i, torch.Tensor) else i.contiguous() for i in args)
+        contiguous_kwargs = {k: (v if not isinstance(v, torch.Tensor) else v.contiguous()) for k, v in kwargs.items()}
 
         tensor = None
         for arg in args:
