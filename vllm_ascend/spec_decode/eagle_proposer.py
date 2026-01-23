@@ -386,7 +386,6 @@ class EagleProposer(VllmEagleProposer):
             num_tokens,
             num_tokens_across_dp,
             _,
-            _,
         ) = self.runner._sync_metadata_across_dp(num_tokens,
                                                  is_draft_model=True)
         with set_ascend_forward_context(
@@ -542,7 +541,6 @@ class EagleProposer(VllmEagleProposer):
         (
             num_input_tokens,
             num_tokens_across_dp,
-            _,
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens,
                                                  is_draft_model=True)

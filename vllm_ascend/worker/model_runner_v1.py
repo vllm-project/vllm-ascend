@@ -443,7 +443,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens: int,
         with_prefill: bool = False,
         is_draft_model: bool = False
-    ) -> tuple[int, Optional[torch.Tensor], bool, int]:
+    ) -> tuple[int, Optional[torch.Tensor], bool]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
         # include them in the all_reduce operation, and more over, we CANNOT skip it
