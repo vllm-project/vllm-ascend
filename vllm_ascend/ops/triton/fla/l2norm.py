@@ -15,8 +15,7 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
 @triton.jit
-def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr,
-                            MBLOCK: tl.constexpr, NUM_CHUNKS: tl.constexpr):
+def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr, NUM_CHUNKS: tl.constexpr):
     base_row = tl.program_id(0) * (NUM_CHUNKS * MBLOCK)
     rindex = tl.arange(0, N)[None, :]
 
@@ -24,8 +23,7 @@ def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr,
         row_idx = base_row + chunk * MBLOCK + tl.arange(0, MBLOCK)[:, None]
         xmask = row_idx < M
 
-        xs = tl.load(X + (rindex + N * row_idx), mask=xmask,
-                     other=0.0).to(tl.float32)
+        xs = tl.load(X + (rindex + N * row_idx), mask=xmask, other=0.0).to(tl.float32)
         square = xs * xs
         square_sum = tl.sum(square, 1)[:, None]
         rsqrt = tl.rsqrt(square_sum + eps)
@@ -33,9 +31,7 @@ def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr,
         tl.store(Y + (rindex + N * row_idx), xs * rsqrt, xmask)
 
 
-def l2norm_fwd(x: torch.Tensor,
-               eps: float = 1e-6,
-               output_dtype: torch.dtype | None = None):
+def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
     x_shape_og = x.shape
     x = x.reshape(-1, x.shape[-1])
     # allocate output
@@ -56,7 +52,7 @@ def l2norm_fwd(x: torch.Tensor,
     num_core = get_vectorcore_num()
     main_bs = triton.cdiv(T, num_core)
     num_sub_blocks = triton.cdiv(main_bs, MBLOCK)
-    grid = (num_core, )
+    grid = (num_core,)
     l2norm_fwd_kernel2_loop[grid](
         X=x,
         Y=y,
