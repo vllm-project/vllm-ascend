@@ -31,16 +31,9 @@ from vllm.model_executor.layers.mla import (MLAModules,
                                             MultiHeadLatentAttentionWrapper)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import vllm_version_is
-
-# isort: off
-if vllm_version_is('0.13.0'):
-    from vllm.attention.backends.abstract import AttentionMetadata  # type: ignore
-else:
-    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
-# isort: on
 
 
 class IndexerWrapper(nn.Module):

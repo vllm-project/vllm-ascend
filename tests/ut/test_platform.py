@@ -5,17 +5,11 @@ import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
+from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType, vllm_version_is
-
-# isort: off
-if vllm_version_is("0.13.0"):
-    from vllm.attention.selector import AttentionSelectorConfig  # type: ignore
-else:
-    from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
-# isort: on
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType 
 
 
 class TestNPUPlatform(TestBase):
