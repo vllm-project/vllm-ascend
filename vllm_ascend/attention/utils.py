@@ -69,6 +69,8 @@ class AscendPrefillContextParallelMetadata:
     Contains index tensors and sequence lengths for PCP operations.
     """
 
+    pcp_use_hybrid_attn: bool
+
     pcp_allgather_restore_idx: torch.Tensor = None
 
     num_actual_tokens_pcp_padded: int = 0
@@ -100,6 +102,14 @@ class AscendPrefillContextParallelMetadata:
 
     # original max_query_len before pcp split
     max_query_len_pcp_full: int = 0
+
+    pcp_unpad_mask: torch.Tensor = None
+
+    pcp_fa_query_idx: torch.Tensor = None
+
+    pcp_enter_fa_restore_idx: torch.Tensor = None
+
+    pcp_padded_tokens_fla: int = 0
 
 
 @dataclass

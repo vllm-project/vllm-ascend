@@ -1,7 +1,7 @@
 import math
 from contextlib import contextmanager
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -31,18 +31,21 @@ class MoECommType(Enum):
 
 @contextmanager
 def set_ascend_forward_context(
-    attn_metadata: Any,
-    vllm_config: VllmConfig,
-    virtual_engine: int = 0,
-    num_tokens: int = 0,
-    num_tokens_across_dp: torch.Tensor | None = None,
-    in_profile_run: bool = False,
-    num_actual_tokens: int | None = None,
-    aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    batch_descriptor: BatchDescriptor | None = None,
-    model_instance: torch.nn.Module = None,
-    is_draft_model=False,
-):
+        attn_metadata: Any,
+        vllm_config: VllmConfig,
+        virtual_engine: int = 0,
+        num_tokens: Optional[int] = None,
+        num_tokens_across_dp: Optional[torch.Tensor] = None,
+        with_prefill: bool = True,
+        in_profile_run: bool = False,
+        reserved_mc2_mask: Optional[torch.Tensor] = None,
+        moe_comm_type: Optional[MoECommType] = None,
+        num_actual_tokens: Optional[int] = None,
+        aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        model_instance: torch.nn.Module = None,
+        max_tokens_across_pcp: int = 0,
+        is_draft_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -135,6 +138,7 @@ def set_ascend_forward_context(
             max_tokens_across_dp = num_tokens
 
         forward_context.max_tokens_across_dp = max_tokens_across_dp
+        forward_context.max_tokens_across_pcp = max_tokens_across_pcp
 
         if num_tokens is not None:
             if num_actual_tokens is None:

@@ -50,7 +50,8 @@ from vllm_ascend.quantization.w8a8_dynamic import \
 from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                get_ascend_device_type, maybe_trans_nz,
                                npu_stream_switch, shared_expert_dp_enabled,
-                               shared_experts_calculation_stream, vllm_version_is)
+                               shared_experts_calculation_stream, vllm_version_is,)
+
 
 @dataclass
 class FusedMoEResult:

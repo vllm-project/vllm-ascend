@@ -24,6 +24,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
@@ -44,7 +45,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import vllm_version_is, weak_ref_tensors, prefill_context_parallel_enable
 
 if vllm_version_is("0.13.0"):
     from vllm.attention.backends.abstract import (  # type: ignore
@@ -214,6 +215,10 @@ class AscendMetadata:
 
     # sliding window attention mask
     swa_mask: torch.Tensor | None = None
+
+    use_hybrid_attn: bool = False
+
+    pcp_unpad_mask: torch.Tensor = None
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
