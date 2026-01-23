@@ -18,7 +18,7 @@
 FROM quay.io/ascend/cann:8.5.0-910b-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-ARG MOONCAKE_TAG="v0.3.8.post1"
+ARG MOONCAKE_TAG="v0.3.7.post2"
 ARG SOC_VERSION="ascend910b1"
 
 # Define environments

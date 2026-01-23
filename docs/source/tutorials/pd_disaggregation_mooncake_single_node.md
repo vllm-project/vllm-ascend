@@ -98,7 +98,7 @@ Mooncake is the serving platform for Kimi, a leading LLM service provided by Moo
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
-git clone -b v0.3.8.post1 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 ```
 
 (Optional) Replace go install url if the network is poor
