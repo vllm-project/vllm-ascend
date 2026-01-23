@@ -48,6 +48,10 @@ DEEPSEEK_W4A8_MODELS = [
     "vllm-ascend/DeepSeek-V3.1-W4A8-puring",
 ]
 
+GPT_OSS_MODELS = [
+    "unsloth/gpt-oss-20b-BF16",
+]
+
 
 def test_deepseek_multistream_moe_tp2():
     example_prompts = [
@@ -287,5 +291,19 @@ def test_qwen3_w4a4_distributed_tp2(model):
             tensor_parallel_size=2,
             cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.parametrize("model", GPT_OSS_MODELS)
+def test_gpt_oss_distributed_tp2(model):
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+            snapshot_download(model),
+            tensor_parallel_size=2,
+            enforce_eager=True,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
