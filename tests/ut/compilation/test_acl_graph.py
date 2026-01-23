@@ -295,6 +295,7 @@ class TestACLGraphWrapper(TestBase):
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        self.mock_forward_context.is_draft_model = False
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
@@ -366,6 +367,7 @@ class TestACLGraphWrapper(TestBase):
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        self.mock_forward_context.is_draft_model = False
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
