@@ -40,8 +40,6 @@ class AscendMMEncoderAttention310(_Base):
 
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
 
-        origin_dim = q.shape[-1]
-
         if cu_seqlens is None:
             cu_seqlens = torch.arange(
                 0,
