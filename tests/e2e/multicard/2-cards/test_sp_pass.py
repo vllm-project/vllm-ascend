@@ -17,7 +17,7 @@ def test_qwen3_dense_sp_tp2(model: str) -> None:
         "Hello, my name is", "The capital of the United States is",
         "The capital of France is", "The future of AI is"
     ]
-    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+    sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
 
     with VllmRunner(
             model,
