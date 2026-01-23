@@ -84,20 +84,13 @@ class AscendMetadataForDecode:
     """Decode-specific metadata for Ascend attention with Context Parallelism."""
 
     num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None
-    batch_seq_mask: torch.Tensor = None
     block_tables: torch.Tensor = None
 
 
-def _process_attn_out_lse(
-    attn_output: torch.Tensor, softmax_lse: torch.Tensor, batch_seq_mask: torch.Tensor
-) -> torch.Tensor:
+def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) -> torch.Tensor:
     pcp_size = get_pcp_group().world_size
     dcp_size = get_decode_context_model_parallel_world_size()
     dcp_group = get_dcp_group().device_group if dcp_size > 1 else None
-    out_mask = batch_seq_mask[:, None, None].expand_as(attn_output)
-    attn_output = torch.where(out_mask, 0, attn_output)
-    lse_mask = batch_seq_mask[:, None, None].expand_as(softmax_lse)
-    softmax_lse = torch.where(lse_mask, -torch.inf, softmax_lse)
     softmax_lse = softmax_lse.to(torch.float32)
     attn_output = attn_output.to(torch.float32)
     # Concat out&lse: [bs,num_heads,v_head_dim] + [bs,num_heads,1] -> [bs,num_heads,v_head_dim+1]
