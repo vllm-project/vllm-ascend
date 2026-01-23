@@ -38,14 +38,11 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import \
     global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     align_memory, get_transfer_timeout_value, kv_alltoall_and_rearrange)
-from vllm_ascend.utils import npu_stream_switch, vllm_version_is
+from vllm_ascend.utils import npu_stream_switch
 
 # isort: off
 if TYPE_CHECKING:
-    if vllm_version_is('0.13.0'):
-        from vllm.attention.backends.abstract import AttentionMetadata  # type: ignore
-    else:
-        from vllm.attention.backends import AttentionMetadata  # type: ignore
+    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request

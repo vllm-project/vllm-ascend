@@ -50,8 +50,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler
+from vllm.v1.attention.backend import AttentionBackend, AttentionType  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         EncoderOnlyAttentionSpec,
@@ -102,7 +104,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
-                               set_weight_prefetch_method, vllm_version_is)
+                               set_weight_prefetch_method)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
@@ -115,15 +117,6 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
-# isort: off
-if vllm_version_is('0.13.0'):
-    from vllm.attention.backends.abstract import (  # type: ignore
-        AttentionBackend, AttentionType)
-    from vllm.attention.selector import get_attn_backend  # type: ignore
-else:
-    from vllm.v1.attention.selector import get_attn_backend  # type: ignore
-    from vllm.v1.attention.backend import AttentionBackend, AttentionType  # type: ignore
-# isort: on
 import torch_npu
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -746,10 +739,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # _prepare_inputs may reorder the batch, so we must gather
         # multi-modal outputs after that to ensure the correct order
-        if vllm_version_is('0.13.0'):
-            model_kwargs = self._init_model_kwargs(num_input_tokens)
-        else:
-            model_kwargs = self._init_model_kwargs()
+        model_kwargs = self._init_model_kwargs()
         if self.is_multimodal_model and not self.model_config.is_encoder_decoder:
             self.multimodal_cpu_fields = ["grid_thw"]
             self._prepare_multimodal_fields()
@@ -1575,16 +1565,10 @@ class NPUModelRunner(GPUModelRunner):
                 logits = None
             else:
                 if self.input_batch.pooling_params:
-                    if vllm_version_is('0.13.0'):
-                        pool_output = self._pool(
-                            hidden_states,
-                            scheduler_output.total_num_scheduled_tokens,
-                            num_scheduled_tokens_np)
-                    else:
-                        pool_output = self._pool(
-                            hidden_states,
-                            scheduler_output.total_num_scheduled_tokens,
-                            num_scheduled_tokens_np, kv_connector_output)
+                    pool_output = self._pool(
+                        hidden_states,
+                        scheduler_output.total_num_scheduled_tokens,
+                        num_scheduled_tokens_np, kv_connector_output)
                     if self.debugger is not None:
                         self.debugger.stop()
                         self.debugger.step()
@@ -1675,8 +1659,7 @@ class NPUModelRunner(GPUModelRunner):
                 attn_metadata,
                 aux_hidden_states,
             )
-            if not vllm_version_is('0.13.0'):
-                self._copy_draft_token_ids_to_cpu(scheduler_output)
+            self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         (
             logprobs_lists,
@@ -1826,20 +1809,12 @@ class NPUModelRunner(GPUModelRunner):
                     valid_sampled_token_ids[int(i)].clear()
             else:
                 # Includes spec decode tokens.
-                if vllm_version_is('0.13.0'):
-                    valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
-                        sampled_token_ids,
-                        self.input_batch.vocab_size,
-                        discard_sampled_tokens_req_indices,
-                        return_cu_num_tokens=logprobs_tensors is not None,
-                    )
-                else:
-                    valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
-                        sampled_token_ids,
-                        self.input_batch.vocab_size,
-                        discard_sampled_tokens_req_indices,
-                        logprobs_tensors=logprobs_tensors,
-                    )
+                valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
+                    sampled_token_ids,
+                    self.input_batch.vocab_size,
+                    discard_sampled_tokens_req_indices,
+                    logprobs_tensors=logprobs_tensors,
+                )
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
