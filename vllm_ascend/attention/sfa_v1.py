@@ -5,15 +5,13 @@ import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from torch import nn
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
-from vllm.v1.attention.backend import (  # type: ignore
-    AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MLAAttentionImpl  # type: ignore
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -22,11 +20,14 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
-from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         ascend_chunked_prefill_workspace_size,
-                                         maybe_save_kv_layer_to_connector,
-                                         trans_rope_weight, transdata,
-                                         wait_for_kv_layer_from_connector)
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    ascend_chunked_prefill_workspace_size,
+    maybe_save_kv_layer_to_connector,
+    trans_rope_weight,
+    transdata,
+    wait_for_kv_layer_from_connector,
+)
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
@@ -38,8 +39,14 @@ from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
-                               enable_dsa_cp, enable_dsa_cp_with_layer_shard, maybe_trans_nz)
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_ND,
+    _round_up,
+    dispose_layer,
+    enable_dsa_cp,
+    enable_dsa_cp_with_layer_shard,
+    maybe_trans_nz,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -114,7 +121,7 @@ class AscendSFAMetadata:
     attn_mask: torch.Tensor = None
     # chunked prefill by default if no attn_states passed
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
-    dsa_cp_context: Optional[DSACPContext] = None
+    dsa_cp_context: DSACPContext | None = None
     reshape_cache_event: torch.npu.Event = None
 
 
@@ -137,9 +144,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         supports_dcp_with_varlen: bool = False,
     ):
         super().__init__(
-            kv_cache_spec, layer_names, vllm_config, device,
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
             metadata_cls if metadata_cls is not None else AscendSFAMetadata,
-            supports_dcp_with_varlen)
+            supports_dcp_with_varlen,
+        )
 
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
@@ -160,15 +171,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.enable_dsa_cp = enable_dsa_cp()
 
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1,
-                                                    dtype=torch.int32,
-                                                    device=device)
-        self.actual_seq_lengths_key = torch.empty_like(
-            self.actual_seq_lengths_query)
+        self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
+        self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
 
     @staticmethod
-    def determine_chunked_prefill_workspace_size(
-            vllm_config: VllmConfig) -> int:
+    def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         return ascend_chunked_prefill_workspace_size(vllm_config)
 
     @classmethod
@@ -231,9 +238,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             cos = cos[local_start:local_end_with_pad]
             sin = sin[local_start:local_end_with_pad]
 
-            assert cos.shape[0] == num_tokens_per_device, \
+            assert cos.shape[0] == num_tokens_per_device, (
                 f"cos.shape[0] must be equal to num_tokens_per_device, \
                     got {cos.shape[0]} and {num_tokens_per_device}"
+            )
             assert slot_mapping_cp.shape[0] == num_tokens_per_device, (
                 f"slot_mapping_cp.shape[0] must be equal to num_tokens_per_device, \
                     got {slot_mapping_cp.shape[0]} and {num_tokens_per_device}"
@@ -294,7 +302,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             block_tables=block_table,
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
-            dsa_cp_context=dsa_cp_context)
+            dsa_cp_context=dsa_cp_context,
+        )
 
     def build_for_graph_capture(
         self,
@@ -318,8 +327,9 @@ class AscendSFAImpl(MLAAttentionImpl):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
     # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
-    o_proj_full_pool: Optional[torch.Tensor] = None
+    o_proj_full_pool: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -374,7 +384,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         self.local_num_heads = self.num_heads
         self.vllm_config = get_current_vllm_config()
-        self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
+        self.is_kv_producer = (
+            self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
+        )
 
         # indexer param
         self.n_head: int = self.indexer.n_head  # 64
@@ -391,15 +403,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.local_num_heads = self.num_heads * self.tp_size
         if self.enable_dsa_cp_prefill_only:
             self.layer_sharding_kwargs = []
-            for layer_name in (get_ascend_config().layer_sharding or []):
+            for layer_name in get_ascend_config().layer_sharding or []:
                 if layer_name in kwargs:
                     self.layer_sharding_kwargs.append(kwargs[layer_name])
                 else:
                     logger.warning_once(
-                        f"[SFAImpl init] Layer '{layer_name}' not found in kwargs for layer sharding, skipping sharding configuration"
+                        f"[SFAImpl init] Layer '{layer_name}' not found in kwargs for layer sharding, "
+                        "skipping sharding configuration"
                     )
-            register_all_layers_to_shard_weight_series(
-                self.layer_sharding_kwargs)
+            register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
@@ -436,10 +448,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         dispose_layer(self.kv_b_proj)
         if self.enable_dsa_cp:
             if self.enable_dsa_cp_prefill_only:
-                for layer in (self.layer_sharding_kwargs or []):
+                for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
-                        post_process_after_loading_for_shard_weight_series(
-                            layer)
+                        post_process_after_loading_for_shard_weight_series(layer)
             else:
                 self._init_o_proj_tp_full_params()
 
@@ -454,10 +465,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 reasons.append(
                     "Currently mlapo only supports W8A8 quantization in SFA scenario."
                     "Some layers in your model are not quantized with W8A8,"
-                    "thus mlapo is disabled for these layers.")
+                    "thus mlapo is disabled for these layers."
+                )
             if self.enable_dsa_cp:
-                reasons.append("Currently mlapo does not support SFA with CP,"
-                               "thus mlapo is disabled for these layers.")
+                reasons.append("Currently mlapo does not support SFA with CP,thus mlapo is disabled for these layers.")
             if reasons:
                 self.enable_mlapo = False
                 for msg in reasons:
@@ -708,7 +719,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             if self.enable_dsa_cp_prefill_only and not forward_context.in_profile_run:
-                for layer in (self.layer_sharding_kwargs or []):
+                for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
@@ -725,11 +736,12 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # all-gather o_proj weight for prefill stage of PD mix node
         o_proj_full_handle = None
-        # if is PD mix stage, using original TP o_proj weight, and also need to full gather for o_proj weight for prefill stage.
+        # if is PD mix stage, using original TP o_proj weight, and also need to full gather for o_proj
+        # weight for prefill stage.
         should_shard_weight = self.enable_dsa_cp_prefill_only or attn_metadata.attn_state not in {
-            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.SpecDecoding,
         }
-
 
         if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode(
@@ -781,14 +793,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                 assert k_nope is not None
                 # support all_gather kv async for communication calculation overlap
                 fused_kv_no_split, kv_ag_handle = all_gather_async(
-                    torch.cat([
-                        k_pe.view(-1, k_pe.shape[-1]),
-                        k_nope.view(-1, k_nope.shape[-1]),
-                        k.view(-1, k.shape[-1])
-                    ],
-                              dim=1),
+                    torch.cat(
+                        [k_pe.view(-1, k_pe.shape[-1]), k_nope.view(-1, k_nope.shape[-1]), k.view(-1, k.shape[-1])],
+                        dim=1,
+                    ),
                     get_tp_group(),
-                    async_op=should_shard_weight)
+                    async_op=should_shard_weight,
+                )
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             q_pe = self.rope_single(q_pe, cos, sin)
@@ -798,14 +809,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_ag_handle.wait()
 
                 if self.enable_dsa_cp_prefill_only:
-                    for layer in (self.layer_sharding_kwargs or []):
+                    for layer in self.layer_sharding_kwargs or []:
                         if is_hidden_layer(layer):
                             reach_layer_for_shard_weight_series(layer)
                 elif should_shard_weight:
                     _, o_proj_full_handle = all_gather_async(
-                        self.o_proj_tp_weight,
-                        get_tp_group(),
-                        output=AscendSFAImpl.o_proj_full_pool)
+                        self.o_proj_tp_weight, get_tp_group(), output=AscendSFAImpl.o_proj_full_pool
+                    )
 
                 if kv_cache is not None:
                     assert fused_kv_no_split is not None
@@ -818,9 +828,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             if kv_cache is not None:
                 torch_npu.npu_scatter_nd_update_(
-                    kv_cache[2].view(-1, k.shape[-1]),
-                    attn_metadata.slot_mapping.view(-1, 1),
-                    k.view(-1, k.shape[-1]))  # b, s, n, d
+                    kv_cache[2].view(-1, k.shape[-1]), attn_metadata.slot_mapping.view(-1, 1), k.view(-1, k.shape[-1])
+                )  # b, s, n, d
 
         topk_indices = self.indexer_select_post_process(
             x=hidden_states,
@@ -854,10 +863,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
 
         attn_output = self._v_up_proj(attn_output)
-        maybe_npu_prefetch(inputs=self.o_proj.weight,
-                           dependency=attn_output,
-                           max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                           enabled=self.enable_prefetch)
+        maybe_npu_prefetch(
+            inputs=self.o_proj.weight,
+            dependency=attn_output,
+            max_size=MAX_O_PROJ_PREFETCH_SIZE,
+            enabled=self.enable_prefetch,
+        )
 
         if self.enable_dsa_cp and not self.enable_dsa_cp_prefill_only:
             # When using SFA-CP with pd mixed, o_proj has two cases:
@@ -867,7 +878,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 attn_output=attn_output,
                 output=output,
                 o_proj_full_handle=o_proj_full_handle,
-                should_shard_weight=should_shard_weight)
+                should_shard_weight=should_shard_weight,
+            )
             if not require_o_proj_forward:
                 return result
             attn_output = result
@@ -899,10 +911,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             sin = sin.view(-1, self.qk_rope_head_dim)
             q, k = rope_forward_triton(q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=True)
         else:
-            k_pe, k_nope = torch.split(
-                k,
-                [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
-                dim=-1)
+            k_pe, k_nope = torch.split(k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
 
             cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
             sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
@@ -974,9 +983,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _init_o_proj_tp_full_params(self):
         """
-        Initialize TP-mode and Full-mode parameters for o_proj weight, 
+        Initialize TP-mode and Full-mode parameters for o_proj weight,
         preparing for weight switching in PD mix stage.
-        
+
         For PD mix stage:
         - Use original TP o_proj weight for decode phase
         - Need full-gather o_proj weight from all TP ranks for prefill phase
@@ -984,38 +993,33 @@ class AscendSFAImpl(MLAAttentionImpl):
         if AscendSFAImpl.o_proj_full_pool is None:
             sample = self.o_proj.weight
             AscendSFAImpl.o_proj_full_pool = torch.empty(
-                (sample.shape[0] * self.tp_size, sample.shape[1]),
-                dtype=sample.dtype,
-                device=sample.device)
+                (sample.shape[0] * self.tp_size, sample.shape[1]), dtype=sample.dtype, device=sample.device
+            )
 
         # Save TP-mode parameters (original sharded weights)
         self.o_proj_tp_weight = self.o_proj.weight.clone().detach()
-        self.o_proj_tp_aclnn_input_scale = self.o_proj.aclnn_input_scale.clone(
-        ).detach()
-        self.o_proj_tp_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.clone(
-        ).detach()
-        self.o_proj_tp_aclnn_input_offset = self.o_proj.aclnn_input_offset.clone(
-        ).detach()
+        self.o_proj_tp_aclnn_input_scale = self.o_proj.aclnn_input_scale.clone().detach()
+        self.o_proj_tp_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.clone().detach()
+        self.o_proj_tp_aclnn_input_offset = self.o_proj.aclnn_input_offset.clone().detach()
 
         # Initially switch to TP mode for graph capture
         self.o_proj.weight.set_(self.o_proj_tp_weight)
         self.o_proj.aclnn_input_scale.set_(self.o_proj_tp_aclnn_input_scale)
-        self.o_proj.aclnn_input_scale_reciprocal.set_(
-            self.o_proj_tp_aclnn_input_scale_reciprocal)
+        self.o_proj.aclnn_input_scale_reciprocal.set_(self.o_proj_tp_aclnn_input_scale_reciprocal)
         self.o_proj.aclnn_input_offset.set_(self.o_proj_tp_aclnn_input_offset)
 
         # Precompute Full-mode quantization parameters by repeating TP parameters across all TP ranks
-        self.o_proj_full_aclnn_input_scale = self.o_proj.aclnn_input_scale.repeat(
-            self.tp_size)
-        self.o_proj_full_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.repeat(
-            self.tp_size)
-        self.o_proj_full_aclnn_input_offset = self.o_proj.aclnn_input_offset.repeat(
-            self.tp_size)
+        self.o_proj_full_aclnn_input_scale = self.o_proj.aclnn_input_scale.repeat(self.tp_size)
+        self.o_proj_full_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.repeat(self.tp_size)
+        self.o_proj_full_aclnn_input_offset = self.o_proj.aclnn_input_offset.repeat(self.tp_size)
 
     def _handle_o_proj_weight_switch_and_forward(
-            self, attn_output: torch.Tensor, output: torch.Tensor,
-            o_proj_full_handle: Optional[torch.distributed.Work],
-            should_shard_weight: bool) -> Tuple[torch.Tensor, bool]:
+        self,
+        attn_output: torch.Tensor,
+        output: torch.Tensor,
+        o_proj_full_handle: torch.distributed.Work | None,
+        should_shard_weight: bool,
+    ) -> tuple[torch.Tensor, bool]:
         """
         Handle o_proj weight switching between TP-mode and Full-mode, and execute forward computation.
         """
@@ -1027,36 +1031,30 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             # Switch o_proj to Full-mode (gathered weight from all TP ranks)
             self.o_proj.weight.set_(AscendSFAImpl.o_proj_full_pool)
-            self.o_proj.aclnn_input_scale.set_(
-                self.o_proj_full_aclnn_input_scale)
-            self.o_proj.aclnn_input_scale_reciprocal.set_(
-                self.o_proj_full_aclnn_input_scale_reciprocal)
-            self.o_proj.aclnn_input_offset.set_(
-                self.o_proj_full_aclnn_input_offset)
+            self.o_proj.aclnn_input_scale.set_(self.o_proj_full_aclnn_input_scale)
+            self.o_proj.aclnn_input_scale_reciprocal.set_(self.o_proj_full_aclnn_input_scale_reciprocal)
+            self.o_proj.aclnn_input_offset.set_(self.o_proj_full_aclnn_input_offset)
 
             # Apply quantization method and execute forward computation
-            output[...] = self.o_proj.quant_method.quant_method.apply(
-                self.o_proj, attn_output)
+            output[...] = self.o_proj.quant_method.quant_method.apply(self.o_proj, attn_output)
 
             # Switch o_proj back to TP-mode for subsequent decode operations
             self.o_proj.weight.set_(self.o_proj_tp_weight)
-            self.o_proj.aclnn_input_scale.set_(
-                self.o_proj_tp_aclnn_input_scale)
-            self.o_proj.aclnn_input_scale_reciprocal.set_(
-                self.o_proj_tp_aclnn_input_scale_reciprocal)
-            self.o_proj.aclnn_input_offset.set_(
-                self.o_proj_tp_aclnn_input_offset)
+            self.o_proj.aclnn_input_scale.set_(self.o_proj_tp_aclnn_input_scale)
+            self.o_proj.aclnn_input_scale_reciprocal.set_(self.o_proj_tp_aclnn_input_scale_reciprocal)
+            self.o_proj.aclnn_input_offset.set_(self.o_proj_tp_aclnn_input_offset)
 
             return output, False
         else:
             # For decode scenario: perform all-to-all communication on o_proj input activations
             # Reshape for all-to-all: [batch * seq, tp_size, head_dim] -> [tp_size, batch * seq, head_dim]
-            send = attn_output.view(-1, self.tp_size, self.num_heads *
-                                    self.v_head_dim).permute(1, 0, 2).reshape(
-                                        -1, self.num_heads * self.v_head_dim)
+            send = (
+                attn_output.view(-1, self.tp_size, self.num_heads * self.v_head_dim)
+                .permute(1, 0, 2)
+                .reshape(-1, self.num_heads * self.v_head_dim)
+            )
 
             attn_output = torch.empty_like(send)
-            torch.distributed.all_to_all_single(
-                attn_output, send, group=get_tp_group().device_group)
+            torch.distributed.all_to_all_single(attn_output, send, group=get_tp_group().device_group)
 
             return attn_output, True

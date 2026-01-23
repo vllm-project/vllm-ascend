@@ -42,17 +42,6 @@ def all_gather_async(
         return input, None
     if output is None:
         input_size = input.size()
-<<<<<<< HEAD
-        output_size = (input_size[0] * group.world_size, ) + input_size[1:]
-        output = torch.empty(output_size,
-                             dtype=input.dtype,
-                             device=input.device)
-    return output, dist.all_gather_into_tensor(output,
-                                               input,
-                                               group=group.device_group,
-                                               async_op=async_op)
-=======
         output_size = (input_size[0] * group.world_size,) + input_size[1:]
         output = torch.empty(output_size, dtype=input.dtype, device=input.device)
     return output, dist.all_gather_into_tensor(output, input, group=group.device_group, async_op=async_op)
->>>>>>> 7924c14f (auto)

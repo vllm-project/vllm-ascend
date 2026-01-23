@@ -10,23 +10,26 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.v1.attention.backend import (  # type: ignore
-    AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MLAAttentionImpl  # type: ignore
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
-from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.common_cp import (
-    AscendPCPMetadata, CPChunkedContextMetadata)
+from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
 from vllm_ascend.attention.utils import (
-    AscendCommonAttentionMetadata, ascend_chunked_prefill_workspace_size,
-    enable_cp, maybe_save_kv_layer_to_connector, split_decodes_and_prefills,
-    trans_rope_weight, transdata, wait_for_kv_layer_from_connector,
-    enabling_malpo)
+    AscendCommonAttentionMetadata,
+    ascend_chunked_prefill_workspace_size,
+    enable_cp,
+    enabling_malpo,
+    maybe_save_kv_layer_to_connector,
+    split_decodes_and_prefills,
+    trans_rope_weight,
+    transdata,
+    wait_for_kv_layer_from_connector,
+)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_graph_params,
@@ -42,8 +45,7 @@ from vllm_ascend.ops.layer_shard_linear import (
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, maybe_trans_nz,
-                               weak_ref_tensors)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, maybe_trans_nz, weak_ref_tensors
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -213,9 +215,13 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         supports_dcp_with_varlen: bool = False,
     ):
         super().__init__(
-            kv_cache_spec, layer_names, vllm_config, device,
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
             metadata_cls if metadata_cls is not None else AscendMLAMetadata,
-            supports_dcp_with_varlen)
+            supports_dcp_with_varlen,
+        )
 
         scheduler_config = vllm_config.scheduler_config
         self.block_size = vllm_config.cache_config.block_size
@@ -256,8 +262,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
     @staticmethod
-    def determine_chunked_prefill_workspace_size(
-            vllm_config: VllmConfig) -> int:
+    def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         return ascend_chunked_prefill_workspace_size(vllm_config)
 
     @classmethod
@@ -606,9 +611,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             max_seq_lens=max_seq_lens,
             attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             actual_seq_lengths_q=actual_seq_lengths_q,
-            sin=sin[:self.num_decode_tokens, ...],
-            cos=cos[:self.num_decode_tokens, ...],
-            cp_seq_len=cp_seq_len)
+            sin=sin[: self.num_decode_tokens, ...],
+            cos=cos[: self.num_decode_tokens, ...],
+            cp_seq_len=cp_seq_len,
+        )
         return decode_metadata
 
     def build_for_graph_capture(
@@ -1409,12 +1415,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q_c)
+            q_c = self.q_a_layernorm(q_c)  # type: ignore[misc]
             # allgather need contiguous data
             kv_no_split = kv_no_split.contiguous()
         else:
             q_c = hidden_states
-            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
+            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]  # type: ignore[misc]
 
         # Process for Flash Comm V1
         q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c.contiguous(), need_gather_q_kv)
@@ -1472,8 +1478,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess
-        if self.enable_mlapo and \
-            attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
+        if self.enable_mlapo and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
             )
