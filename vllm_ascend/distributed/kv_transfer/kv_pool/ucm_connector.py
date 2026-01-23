@@ -9,16 +9,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
-from vllm_ascend.utils import vllm_version_is
 
 logger = init_logger(__name__)
 
 # isort: off
 if TYPE_CHECKING:
-    if vllm_version_is('0.13.0'):
-        from vllm.attention.backends.abstract import AttentionMetadata  # type: ignore
-    else:
-        from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
+    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics, KVConnectorStats, PromMetric, PromMetricT)
     from vllm.forward_context import ForwardContext
