@@ -79,14 +79,7 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
 
 def _extract_step_logprobs(generate_output):
     """
-    从 generate_w_logprobs 的输出中提取 logprobs 和 token IDs。
-
-    参数:
-        generate_output: 一个元组，格式为 (output_ids, output_str, output_logprobs, prompt_logprobs)
-                         或者是 (output_ids, output_str, output_logprobs)
-
-    返回:
-        tuple: (logprobs_tensor, token_ids)
+    extract logprobs from token IDs from VllmRunner.generate_w_logprobs()
     """
     if not isinstance(generate_output, tuple) or len(generate_output) < 3:
         return None, None
@@ -96,22 +89,18 @@ def _extract_step_logprobs(generate_output):
     if output_logprobs is None:
         return None, None
 
-    # 提取每个 token 的 logprob
     logprobs_list = []
     for i, logprob_dict in enumerate(output_logprobs):
         if logprob_dict is not None:
-            # logprob_dict 是一个字典，key 是 token_id，value 是 Logprob 对象
-            # 我们假设只取第一个 token 的 logprob（即 logprob_dict[token_id].logprob）
-            # 实际上，logprob_dict 是一个字典，key 是 token_id，value 是 Logprob 对象
-            # 所以我们取 token_id 对应的 logprob
+            # logprob_dict is a dictionary where the keys are token_ids and the values are Logprob objects.
             token_id = output_ids[i]
             logprob = logprob_dict.get(token_id)
             if logprob is not None:
                 logprobs_list.append(logprob.logprob)
             else:
-                logprobs_list.append(0.0)  # 或者使用默认值
+                logprobs_list.append(0.0)
         else:
-            logprobs_list.append(0.0)  # 或者使用默认值
+            logprobs_list.append(0.0)
 
     logprobs_tensor = torch.tensor(logprobs_list, dtype=torch.float32)
     return logprobs_tensor, output_ids
