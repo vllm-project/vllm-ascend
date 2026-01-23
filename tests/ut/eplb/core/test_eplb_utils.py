@@ -21,7 +21,7 @@ class TestAscendConfig(unittest.TestCase):
             "refresh": True,
             "eplb_config": {"dynamic_eplb": True, "num_redundant_experts": 2},
         }
-        if vllm_version_is('0.14.0'):
+        if vllm_version_is('0.14.1'):
             moe_parallel_config = FusedMoEParallelConfig(2, 0, 1, 2, 1, 1, 1, 1, True, "hccl")
             moe_config = FusedMoEConfig(8, 8, 8192, 5, moe_parallel_config, torch.float16)
         else:

@@ -59,7 +59,7 @@ def set_ascend_forward_context(
         "batch_descriptor": batch_descriptor,
     }
 
-    if not vllm_version_is("0.14.0"):
+    if not vllm_version_is("0.14.1"):
         forward_context_kwargs["skip_compiled"] = skip_compiled
 
     with set_forward_context(**forward_context_kwargs):

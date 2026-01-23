@@ -455,7 +455,7 @@ class EagleProposer(VllmEagleProposer):
         self.input_ids[last_token_indices] = next_token_ids
         if self.use_cuda_graph and \
             num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
-            if vllm_version_is('0.14.0'):
+            if vllm_version_is('0.14.1'):
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
             else:
                 num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[

@@ -125,7 +125,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         self.parent_init_patcher = patch(
             ("vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__"
- if vllm_version_is('0.14.0') else
+ if vllm_version_is('0.14.1') else
  "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__"),
             mock_parent_init)
         self.parent_init_patcher.start()

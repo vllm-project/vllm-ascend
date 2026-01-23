@@ -18,7 +18,9 @@ from vllm.v1.executor.multiproc_executor import (
     WorkerProc,
     set_multiprocessing_worker_envs,
 )
+
 from vllm_ascend.utils import vllm_version_is
+
 
 class AscendMultiprocExecutor(MultiprocExecutor):
     def _init_executor(self) -> None:
@@ -78,7 +80,8 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
                         is_driver_worker=is_driver_worker,
-                    ))
+                    )
+                )
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -114,7 +117,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 response_mq.wait_until_ready()
             self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
             self._post_init_executor()
-    
+
             success = True
         finally:
             if not success:
@@ -146,6 +149,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
     def _is_driver_worker(self, rank: int) -> bool:
         return rank % self.parallel_config.tensor_parallel_size == 0
 
+
 class AscendWorkerProc(WorkerProc):
     @staticmethod
     def make_worker_process(
@@ -174,7 +178,7 @@ class AscendWorkerProc(WorkerProc):
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
         }
-        if not vllm_version_is('0.14.0'):
+        if not vllm_version_is("0.14.1"):
             process_kwargs["is_driver_worker"] = is_driver_worker
         # Run EngineCore busy loop in background process.
         proc = context.Process(
