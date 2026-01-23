@@ -135,6 +135,9 @@ static ge::graphStatus CheckGmm1Shape(gert::TilingContext *context, DispatchGmmC
 static ge::graphStatus CheckGmm1ScaleShape(gert::TilingContext *context,
                                                 DispatchGmmCombineDecodeTilingData *tilingData)
 {
+    if (tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W) {
+        return ge::GRAPH_SUCCESS;
+    }
     const char *nodeName = context->GetNodeName();
     uint32_t moeExpertNumPerRank = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.moeExpertNumPerRank;
     uint32_t n = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.gmm1HLen;
@@ -204,6 +207,9 @@ static ge::graphStatus CheckGmm2Shape(gert::TilingContext *context, DispatchGmmC
 static ge::graphStatus CheckGmm2ScaleShape(gert::TilingContext *context,
                                                 DispatchGmmCombineDecodeTilingData *tilingData)
 {
+    if (tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W) {
+        return ge::GRAPH_SUCCESS;
+    }
     const char *nodeName = context->GetNodeName();
     uint32_t moeExpertNumPerRank = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.moeExpertNumPerRank;
     uint32_t h = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.h;
@@ -481,6 +487,7 @@ static ge::graphStatus DispatchGmmCombineDecodeTilingFuncImpl(gert::TilingContex
     if (tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W) {
         tilingKey |= EXEC_FLAG_BF16_FP16_W;
     }
+    printf("compile time is %s:%s tilingKey = %lu\n", __DATE__, __TIME__, tilingKey);
     context->SetTilingKey(tilingKey);
     context->SetBlockDim(aicNum);
     return ge::GRAPH_SUCCESS;

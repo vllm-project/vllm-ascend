@@ -314,7 +314,7 @@ __aicore__ inline void DispatchGmmCombineDecodeBf16Fp16<TemplateMC2TypeFunc>::In
     gmScale2_ = nullptr;
     gmOutput_ = output;
     gmExpertTokenNums_ = expertTokenNums;
-    workspaceGM_ = workspaceGM;
+    workspaceGM_ = expert_smooth_scales; // for debug
     gmexpertScales_ = expert_scales;
     xActiveMask_ = x_active_mask;
     tilingData_ = tilingData;
@@ -425,6 +425,7 @@ __aicore__ inline void DispatchGmmCombineDecodeBf16Fp16<TemplateMC2TypeFunc>::Pr
     } else {
         Arch::CrossCoreWaitFlag(gmm1AivFinished);
     }
+    return; // for debug
 
     MoeDistributeCombineImpl::CamMoeDistributeCombine<TemplateMC2TypeFunc> combiner;
     if (g_coreType == AscendC::AIV) {

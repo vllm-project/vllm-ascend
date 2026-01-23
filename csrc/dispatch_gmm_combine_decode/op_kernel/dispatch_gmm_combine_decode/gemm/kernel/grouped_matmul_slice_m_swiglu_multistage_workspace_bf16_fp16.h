@@ -784,7 +784,7 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(eventId);
             xInt32Tensor[index](hOutSize / sizeof(int32_t)) = tokenFlag;
             AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(eventId);
-            AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(0);
+            AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(eventId);
 
             if (isShareExpert) {
                 AscendC::DataCopy(expandXOutGlobal[tokenIndex * tokenLength], xInTensor[index], tokenLength);
@@ -793,7 +793,7 @@ public:
                                     tokenLength);
                 AscendC::PipeBarrier<PIPE_MTE3>();
                 AscendC::DataCopy(dstWinGMTensor[(tokenIndex - preCnt) * axisHCommuBf16Fp16 + tokenLength],
-                                    xInTensor[index][hOutSize / sizeof(XType)], 8);
+                                    xInTensor[index][hOutSize / sizeof(XType)], 16);
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
         }
@@ -869,11 +869,11 @@ public:
                 xInt32Tensor[index](hOutSize / sizeof(int32_t)) = tokenFlag;
                 AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(eventId);
 
-                AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(0);
+                AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(eventId);
 
                 AscendC::DataCopy(dstWinGMTensor, xInTensor[index], tokenLength);
                 AscendC::PipeBarrier<PIPE_MTE3>();
-                AscendC::DataCopy(dstWinGMTensor[tokenLength], xInTensor[index][hOutSize / sizeof(XType)], 8);
+                AscendC::DataCopy(dstWinGMTensor[tokenLength], xInTensor[index][hOutSize / sizeof(XType)], 16);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
             }
         }
@@ -1312,7 +1312,7 @@ public:
         uint32_t maxAxisBs = params.globalBs / epRankSize;
 
         stateOffset = STATE_OFFSET;
-        expertPerSizeOnWin = maxAxisBs * tokenLength * sizeof(XType);
+        expertPerSizeOnWin = maxAxisBs * hCommuSize;
         winContext_ = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<AscendC::HCCL_GROUP_ID_0>();
         statusDataSpaceGm = (GM_ADDR)(winContext_->localWindowsExp);
     }
