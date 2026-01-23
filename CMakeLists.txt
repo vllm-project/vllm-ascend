@@ -64,6 +64,7 @@ include_directories(
   ${ASCEND_HOME_PATH}/include
   ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
   ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
+  /usr/local/lib/python3.11/site-packages/torch_npu/include
 )
 
 set(
@@ -81,6 +82,7 @@ target_link_directories(
   PRIVATE
   ${TORCH_NPU_PATH}/lib/
   ${ASCEND_HOME_PATH}/lib64
+  /usr/local/lib/python3.11/site-packages/torch_npu/lib
 )
 
 target_link_libraries(
