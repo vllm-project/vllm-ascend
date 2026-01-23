@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/sleep_mode.md:1
 msgid "Sleep Mode Guide"
-msgstr "睡眠模式指南"
+msgstr "睡眠模式"
 
 #: ../../source/user_guide/feature_guide/sleep_mode.md:3
 msgid "Overview"

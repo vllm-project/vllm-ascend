@@ -32,7 +32,7 @@ msgstr "vLLM Ascend 的特性支持原则是：**与 vLLM 保持一致**。我�
 
 #: ../../source/user_guide/support_matrix/supported_features.md:5
 msgid "Functional call: https://docs.vllm.ai/en/latest/features/tool_calling/"
-msgstr "函数调用 (Functional call): https://docs.vllm.ai/en/latest/features/tool_calling/"
+msgstr "函数调用 (Functional call): <https://docs.vllm.ai/en/latest/features/tool_calling/>"
 
 #: ../../source/user_guide/support_matrix/supported_features.md:7
 msgid ""

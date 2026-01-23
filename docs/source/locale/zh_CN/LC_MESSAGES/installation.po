@@ -430,11 +430,11 @@ msgstr "互联验证："
 
 #: ../../source/installation.md:366
 msgid "1. Get NPU IP Addresses"
-msgstr "1. 获取 NPU IP 地址"
+msgstr "1.获取 NPU IP 地址"
 
 #: ../../source/installation.md:388
 msgid "2. Cross-Node PING Test"
-msgstr "2. 跨节点 PING 测试"
+msgstr "2.跨节点 PING 测试"
 
 #: ../../source/installation.md:395
 msgid "Run Container In Each Node"

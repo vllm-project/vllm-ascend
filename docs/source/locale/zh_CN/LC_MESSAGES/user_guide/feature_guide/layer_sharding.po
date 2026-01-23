@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:1
 msgid "Layer Sharding Linear Guide"
-msgstr "层间线性层分片指南"
+msgstr "层间线性层分片"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:3
 msgid "Overview"

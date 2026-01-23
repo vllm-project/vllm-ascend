@@ -67,7 +67,7 @@ msgstr "本教程将介绍它们的使用方法。"
 
 #: ../../source/user_guide/feature_guide/external_dp.md:16
 msgid "Prerequisites:"
-msgstr "先决条件："
+msgstr "前提条件："
 
 #: ../../source/user_guide/feature_guide/external_dp.md:17
 msgid "Python 3.10+"

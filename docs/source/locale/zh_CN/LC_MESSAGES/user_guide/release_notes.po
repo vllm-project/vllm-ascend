@@ -3710,20 +3710,20 @@ msgstr "新贡献者"
 msgid ""
 "@xleoken made their first contribution in https://github.com/vllm-project"
 "/vllm-ascend/pull/1357"
-msgstr "@xleoken 在 https://github.com/vllm-project/vllm-ascend/pull/1357 中做出了首次贡献"
+msgstr "@xleoken 在 [#1357](https://github.com/vllm-project/vllm-ascend/pull/1357) 中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:588
 msgid ""
 "@lyj-jjj made their first contribution in https://github.com/vllm-project"
 "/vllm-ascend/pull/1335"
-msgstr "@lyj-jjj 在 https://github.com/vllm-project/vllm-ascend/pull/1335 中做出了首次贡献"
+msgstr "@lyj-jjj 在 [#1335](https://github.com/vllm-project/vllm-ascend/pull/1335) 中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:589
 msgid ""
 "@sharonyunyun made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1194"
 msgstr ""
-"@sharonyunyun 在 https://github.com/vllm-project/vllm-ascend/pull/1194 "
+"@sharonyunyun 在 [#1194](https://github.com/vllm-project/vllm-ascend/pull/1194) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:590
@@ -3731,35 +3731,35 @@ msgid ""
 "@Pr0Wh1teGivee made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1308"
 msgstr ""
-"@Pr0Wh1teGivee 在 https://github.com/vllm-project/vllm-ascend/pull/1308 "
+"@Pr0Wh1teGivee 在 [#1308](https://github.com/vllm-project/vllm-ascend/pull/1308) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:591
 msgid ""
 "@leo-pony made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1374"
-msgstr "@leo-pony 在 https://github.com/vllm-project/vllm-ascend/pull/1374 中做出了首次贡献"
+msgstr "@leo-pony 在 [#1374](https://github.com/vllm-project/vllm-ascend/pull/1374) 中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:592
 msgid ""
 "@zeshengzong made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1452"
 msgstr ""
-"@zeshengzong 在 https://github.com/vllm-project/vllm-ascend/pull/1452 "
+"@zeshengzong 在 [#1452](https://github.com/vllm-project/vllm-ascend/pull/1452) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:593
 msgid ""
 "@GDzhu01 made their first contribution in https://github.com/vllm-project"
 "/vllm-ascend/pull/1477"
-msgstr "@GDzhu01 在 https://github.com/vllm-project/vllm-ascend/pull/1477 中做出了首次贡献"
+msgstr "@GDzhu01 在 [#1477](https://github.com/vllm-project/vllm-ascend/pull/1477) 中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:594
 msgid ""
 "@Agonixiaoxiao made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1531"
 msgstr ""
-"@Agonixiaoxiao 在 https://github.com/vllm-project/vllm-ascend/pull/1531 "
+"@Agonixiaoxiao 在 [#1531](https://github.com/vllm-project/vllm-ascend/pull/1531) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:595
@@ -3767,7 +3767,7 @@ msgid ""
 "@zhanghw0354 made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1476"
 msgstr ""
-"@zhanghw0354 在 https://github.com/vllm-project/vllm-ascend/pull/1476 "
+"@zhanghw0354 在 [#1476](https://github.com/vllm-project/vllm-ascend/pull/1476) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:596
@@ -3775,7 +3775,7 @@ msgid ""
 "@farawayboat made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1591"
 msgstr ""
-"@farawayboat 在 https://github.com/vllm-project/vllm-ascend/pull/1591 "
+"@farawayboat 在 [#1591](https://github.com/vllm-project/vllm-ascend/pull/1591) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:597
@@ -3783,7 +3783,7 @@ msgid ""
 "@ZhengWG made their first contribution in https://github.com/vllm-project"
 "/vllm-ascend/pull/1196"
 msgstr ""
-"@ZhengWG 在 https://github.com/vllm-project/vllm-ascend/pull/1196 "
+"@ZhengWG 在 [#1196](https://github.com/vllm-project/vllm-ascend/pull/1196) "
 "中做出了首次贡献增加了 DeepSeek 大规模专家并行（EP）的文档。[#2339](https://github.com/vllm-"
 "project/vllm-ascend/pull/2339)"
 
@@ -3792,7 +3792,7 @@ msgid ""
 "@wm901115nwpu made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1654"
 msgstr ""
-"@wm901115nwpu 在 https://github.com/vllm-project/vllm-ascend/pull/1654 "
+"@wm901115nwpu 在 [#1654](https://github.com/vllm-project/vllm-ascend/pull/1654) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:600
@@ -3800,8 +3800,7 @@ msgid ""
 "**Full Changelog**: https://github.com/vllm-project/vllm-"
 "ascend/compare/v0.9.1rc1...v0.9.2rc1"
 msgstr ""
-"**完整更新日志**: https://github.com/vllm-project/vllm-"
-"ascend/compare/v0.9.1rc1...v0.9.2rc1"
+"**完整更新日志**: [v0.9.1rc1...1.9.2rc1](https://github.com/vllm-project/vllm-ascend/compare/v0.9.1rc1...v0.9.2rc1)"
 
 #: ../../source/user_guide/release_notes.md:602
 msgid "v0.9.1rc1 - 2025.06.22"
@@ -4019,28 +4018,28 @@ msgstr "完整更新日志"
 
 #: ../../source/user_guide/release_notes.md:638
 msgid "https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1"
-msgstr "https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1"
+msgstr "[v0.9.0rc2...v0.9.1rc1](https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1)"
 
 #: ../../source/user_guide/release_notes.md:641
 msgid ""
 "@farawayboat made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1333"
 msgstr ""
-"@farawayboat 在 https://github.com/vllm-project/vllm-ascend/pull/1333 "
+"@farawayboat 在 [#1333](https://github.com/vllm-project/vllm-ascend/pull/1333) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:642
 msgid ""
 "@yzim made their first contribution in https://github.com/vllm-project"
 "/vllm-ascend/pull/1159"
-msgstr "@yzim 在 https://github.com/vllm-project/vllm-ascend/pull/1159 中做出了首次贡献"
+msgstr "@yzim 在 [#1159](https://github.com/vllm-project/vllm-ascend/pull/1159) 中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:643
 msgid ""
 "@chenwaner made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1098"
 msgstr ""
-"@chenwaner 在 https://github.com/vllm-project/vllm-ascend/pull/1098 "
+"@chenwaner 在 [1098](https://github.com/vllm-project/vllm-ascend/pull/1098) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:644
@@ -4048,7 +4047,7 @@ msgid ""
 "@wangyanhui-cmss made their first contribution in https://github.com"
 "/vllm-project/vllm-ascend/pull/1184"
 msgstr ""
-"@wangyanhui-cmss 在 https://github.com/vllm-project/vllm-ascend/pull/1184 "
+"@wangyanhui-cmss 在 [#1184](https://github.com/vllm-project/vllm-ascend/pull/1184) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:645
@@ -4056,7 +4055,7 @@ msgid ""
 "@songshanhu07 made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1186"
 msgstr ""
-"@songshanhu07 在 https://github.com/vllm-project/vllm-ascend/pull/1186 "
+"@songshanhu07 在 [#1186](https://github.com/vllm-project/vllm-ascend/pull/1186) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:646
@@ -4064,7 +4063,7 @@ msgid ""
 "@yuancaoyaoHW made their first contribution in https://github.com/vllm-"
 "project/vllm-ascend/pull/1032"
 msgstr ""
-"@yuancaoyaoHW 在 https://github.com/vllm-project/vllm-ascend/pull/1032 "
+"@yuancaoyaoHW 在 [#1032](https://github.com/vllm-project/vllm-ascend/pull/1032) "
 "中做出了首次贡献"
 
 #: ../../source/user_guide/release_notes.md:648
@@ -4072,8 +4071,7 @@ msgid ""
 "**Full Changelog**: https://github.com/vllm-project/vllm-"
 "ascend/compare/v0.9.0rc2...v0.9.1rc1"
 msgstr ""
-"**完整更新日志**: https://github.com/vllm-project/vllm-"
-"ascend/compare/v0.9.0rc2...v0.9.1rc1"
+"**完整更新日志**: [v0.9.0rc2...v0.9.1rc1](https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1)"
 
 #: ../../source/user_guide/release_notes.md:650
 msgid "v0.9.0rc2 - 2025.06.10"

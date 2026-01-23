@@ -69,11 +69,11 @@ msgstr "优化措施"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:69
 msgid "1. Compilation Optimization"
-msgstr "1. 编译优化"
+msgstr "1.编译优化"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:71
 msgid "1.1. Install optimized `python`"
-msgstr "1.1. 安装优化版 `python`"
+msgstr "1.1.安装优化版 `python`"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:73
 msgid ""
@@ -87,11 +87,11 @@ msgstr "Python 从 `3.6` 及以上版本开始支持 **LTO**（链接时优化�
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:101
 msgid "2. OS Optimization"
-msgstr "2. 操作系统优化"
+msgstr "2.操作系统优化"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:103
 msgid "2.1. jemalloc"
-msgstr "2.1. jemalloc"
+msgstr "2.1.jemalloc"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:105
 msgid ""
@@ -103,7 +103,7 @@ msgstr "**jemalloc** 是一种内存分配器，可提升多线程场景下的�
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:117
 msgid "2.2. Tcmalloc"
-msgstr "2.2. Tcmalloc"
+msgstr "2.2.Tcmalloc"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:119
 msgid ""
@@ -116,7 +116,7 @@ msgstr "**Tcmalloc（线程缓存分配器）**是一种通用内存分配器，
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:140
 msgid "3. `torch_npu` Optimization"
-msgstr "3. `torch_npu` 优化"
+msgstr "3.`torch_npu` 优化"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:142
 msgid ""
@@ -135,11 +135,11 @@ msgstr "调度优化："
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:166
 msgid "4. CANN Optimization"
-msgstr "4. CANN 优化"
+msgstr "4.CANN 优化"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:168
 msgid "4.1. HCCL Optimization"
-msgstr "4.1. HCCL 优化"
+msgstr "4.1.HCCL 优化"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:170
 msgid ""
@@ -191,7 +191,7 @@ msgstr "`HCCL_BUFFSIZE`：使用此变量控制两个 NPU 之间共享数据的�
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:186
 msgid "5. OS Optimization"
-msgstr "5. 操作系统优化"
+msgstr "5.操作系统优化"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:188
 msgid ""
@@ -250,7 +250,7 @@ msgstr "提升推理工作负载的可预测性"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:211
 msgid "5.2 Disable Swap Usage"
-msgstr "5.2 禁用交换空间使用"
+msgstr "5.2禁用交换空间使用"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:219
 msgid "Minimizes the kernel’s tendency to swap memory pages to disk"
@@ -278,7 +278,7 @@ msgstr "推荐值为 `0` 或 `1`"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:230
 msgid "5.3 Disable Automatic NUMA Balancing"
-msgstr "5.3 禁用自动 NUMA 平衡"
+msgstr "5.3禁用自动 NUMA 平衡"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:238
 msgid "Disables the kernel’s automatic NUMA page migration mechanism"
@@ -314,7 +314,7 @@ msgstr "手动管理 CPU 和内存亲和性的系统"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:251
 msgid "5.4 Increase Scheduler Migration Cost"
-msgstr "5.4 增加调度器迁移成本"
+msgstr "5.4增加调度器迁移成本"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:258
 msgid "Increases the cost for the scheduler to migrate tasks between CPU cores"

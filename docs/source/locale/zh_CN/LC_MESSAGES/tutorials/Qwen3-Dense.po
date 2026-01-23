@@ -569,7 +569,7 @@ msgstr "在本节中，我们将介绍可以显著提高 Qwen Dense 模型性能
 
 #: ../../source/tutorials/Qwen3-Dense.md:311
 msgid "1. Rope Optimization"
-msgstr "1. RoPE 优化"
+msgstr "1.RoPE 优化"
 
 #: ../../source/tutorials/Qwen3-Dense.md:312
 msgid ""
@@ -593,7 +593,7 @@ msgstr "此优化默认启用，不需要设置任何额外的环境变量。"
 
 #: ../../source/tutorials/Qwen3-Dense.md:316
 msgid "2. AddRMSNormQuant Fusion"
-msgstr "2. AddRMSNormQuant 融合算子"
+msgstr "2.AddRMSNormQuant 融合算子"
 
 #: ../../source/tutorials/Qwen3-Dense.md:317
 msgid ""
@@ -604,7 +604,7 @@ msgstr "AddRMSNormQuant 融合算子合并了加法、RMSNorm 归一化和量化
 
 #: ../../source/tutorials/Qwen3-Dense.md:321
 msgid "3. FlashComm_v1"
-msgstr "3. FlashComm_v1（闪速通信）"
+msgstr "3.FlashComm_v1（闪速通信）"
 
 #: ../../source/tutorials/Qwen3-Dense.md:322
 msgid ""
@@ -646,7 +646,7 @@ msgstr "此优化需要设置环境变量 `VLLM_ASCEND_ENABLE_FLASHCOMM1 = 1` �
 
 #: ../../source/tutorials/Qwen3-Dense.md:328
 msgid "4. Matmul and ReduceScatter Fusion"
-msgstr "4. Matmul 与 ReduceScatter 融合"
+msgstr "4.Matmul 与 ReduceScatter 融合"
 
 #: ../../source/tutorials/Qwen3-Dense.md:329
 msgid ""
@@ -677,7 +677,7 @@ msgstr ""
 
 #: ../../source/tutorials/Qwen3-Dense.md:333
 msgid "5. Weight Prefetching"
-msgstr "5. 权重预取"
+msgstr "5.权重预取"
 
 #: ../../source/tutorials/Qwen3-Dense.md:334
 msgid ""
@@ -727,7 +727,7 @@ msgstr "此优化需要设置环境变量 `VLLM_ASCEND_ENABLE_PREFETCH_MLP = 1` 
 
 #: ../../source/tutorials/Qwen3-Dense.md:342
 msgid "6. Zerolike Elimination"
-msgstr "6. Zerolike 消除"
+msgstr "6.Zerolike 消除"
 
 #: ../../source/tutorials/Qwen3-Dense.md:343
 msgid ""
@@ -738,7 +738,7 @@ msgstr "该优化消除了 Attention 正向传播中与类零张量（zero-like 
 
 #: ../../source/tutorials/Qwen3-Dense.md:347
 msgid "7. FullGraph Optimization"
-msgstr "7. 全图（FullGraph）优化"
+msgstr "7.全图（FullGraph）优化"
 
 #: ../../source/tutorials/Qwen3-Dense.md:348
 msgid ""
@@ -768,7 +768,7 @@ msgstr ""
 
 #: ../../source/tutorials/Qwen3-Dense.md:352
 msgid "8. Asynchronous Scheduling"
-msgstr "8. 异步调度"
+msgstr "8.异步调度"
 
 #: ../../source/tutorials/Qwen3-Dense.md:353
 msgid ""
@@ -799,7 +799,7 @@ msgstr "基于前文概述的特定示例场景，本节重点介绍了对实现
 
 #: ../../source/tutorials/Qwen3-Dense.md:361
 msgid "1.Prefetch Buffer Size"
-msgstr "1. 预取缓冲区大小 (Prefetch Buffer Size)"
+msgstr "1.预取缓冲区大小 (Prefetch Buffer Size)"
 
 #: ../../source/tutorials/Qwen3-Dense.md:362
 msgid ""
@@ -826,7 +826,7 @@ msgstr ""
 
 #: ../../source/tutorials/Qwen3-Dense.md:366
 msgid "2.Max-num-batched-tokens"
-msgstr "2. 最大批处理 Token 数 (Max-num-batched-tokens)"
+msgstr "2.最大批处理 Token 数 (Max-num-batched-tokens)"
 
 #: ../../source/tutorials/Qwen3-Dense.md:367
 msgid ""
@@ -858,7 +858,7 @@ msgstr ""
 
 #: ../../source/tutorials/Qwen3-Dense.md:371
 msgid "3.Cudagraph_capture_sizes"
-msgstr "3. Cudagraph 捕获尺寸 (Cudagraph_capture_sizes)"
+msgstr "3.Cudagraph 捕获尺寸 (Cudagraph_capture_sizes)"
 
 #: ../../source/tutorials/Qwen3-Dense.md:372
 msgid ""

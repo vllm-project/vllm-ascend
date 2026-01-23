@@ -63,7 +63,7 @@ msgstr "vLLM Ascend 支持由两种主要工具量化的模型：`ModelSlim` 和
 
 #: ../../source/user_guide/feature_guide/quantization.md:17
 msgid "1. ModelSlim (Recommended)"
-msgstr "1. ModelSlim（推荐）"
+msgstr "1.ModelSlim（推荐）"
 
 #: ../../source/user_guide/feature_guide/quantization.md:19
 msgid ""
@@ -120,7 +120,7 @@ msgstr "更多示例请参考 [官方示例](https://gitcode.com/Ascend/msit/tre
 
 #: ../../source/user_guide/feature_guide/quantization.md:63
 msgid "2. LLM-Compressor"
-msgstr "2. LLM-Compressor"
+msgstr "2.LLM-Compressor"
 
 #: ../../source/user_guide/feature_guide/quantization.md:65
 msgid ""

@@ -92,7 +92,7 @@ msgstr "工作原理"
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:28
 msgid "1. Design Approach"
-msgstr "1. 设计思路"
+msgstr "1.设计思路"
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:30
 msgid ""
@@ -104,7 +104,7 @@ msgstr "在解耦式预填充架构下，一个全局代理接收外部请求，
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:32
 msgid "2. Implementation Design"
-msgstr "2. 实现设计"
+msgstr "2.实现设计"
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:34
 msgid ""
@@ -196,7 +196,7 @@ msgstr "D节点执行解码并返回结果。"
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:55
 msgid "3. Interface Design"
-msgstr "3. 接口设计"
+msgstr "3.接口设计"
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:57
 msgid ""
@@ -223,7 +223,7 @@ msgstr "**MooncakeConnectorWorker**：在工作进程中管理KV缓存注册与�
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:62
 msgid "4. Specifications Design"
-msgstr "4. 规格设计"
+msgstr "4.规格设计"
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:64
 msgid ""
@@ -297,7 +297,7 @@ msgstr "可维护性（DFX）分析"
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:85
 msgid "1. Config Parameter Validation"
-msgstr "1. 配置参数验证"
+msgstr "1.配置参数验证"
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:87
 msgid ""
@@ -308,7 +308,7 @@ msgstr "通过检查 kv_connector 类型是否受支持、kv_connector_module_pa
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:89
 msgid "2. Port Conflict Detection"
-msgstr "2. 端口冲突检测"
+msgstr "2.端口冲突检测"
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:91
 msgid ""
@@ -319,7 +319,7 @@ msgstr "启动前，通过尝试绑定方式对配置的端口（如 rpc_port、
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:93
 msgid "3. PD Ratio Validation"
-msgstr "3. PD比例验证"
+msgstr "3.PD比例验证"
 
 #: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:95
 msgid ""

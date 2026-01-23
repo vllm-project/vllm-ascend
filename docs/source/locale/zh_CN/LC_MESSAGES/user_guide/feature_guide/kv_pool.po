@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:1
 msgid "Ascend Store Deployment Guide"
-msgstr "Ascend Store部署指南"
+msgstr "Ascend Store部署"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:3
 msgid "Environmental Dependencies"
@@ -150,7 +150,7 @@ msgstr "运行 Mooncake Master"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:87
 msgid "1.Configure mooncake.json"
-msgstr "1. 配置 mooncake.json"
+msgstr "1.配置 mooncake.json"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:89
 msgid ""
@@ -174,7 +174,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:107
 msgid "2.Start mooncake_master"
-msgstr "2. 启动 mooncake_master"
+msgstr "2.启动 mooncake_master"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:109
 msgid "Under the mooncake folder:"
@@ -195,7 +195,7 @@ msgstr "PD 分离（Prefill-Decode Disaggregation）场景"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:119
 msgid "1.Run `prefill` Node and `decode` Node"
-msgstr "1. 运行 `prefill` 节点和 `decode` 节点"
+msgstr "1.运行 `prefill` 节点和 `decode` 节点"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:121
 msgid ""
@@ -239,7 +239,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:276
 msgid "2、Start proxy_server."
-msgstr "2. 启动代理服务器 (proxy_server)。"
+msgstr "2.启动代理服务器 (proxy_server)。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:287
 msgid "Change localhost to your actual IP address."
@@ -247,7 +247,7 @@ msgstr "将 localhost 更改为您的实际 IP 地址。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:289
 msgid "3.Run Inference"
-msgstr "3. 运行推理"
+msgstr "3.运行推理"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:291
 msgid ""

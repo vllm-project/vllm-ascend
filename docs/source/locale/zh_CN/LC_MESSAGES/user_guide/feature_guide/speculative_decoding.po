@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/speculative_decoding.md:1
 msgid "Speculative Decoding Guide"
-msgstr "推测解码指南"
+msgstr "推测解码"
 
 #: ../../source/user_guide/feature_guide/speculative_decoding.md:3
 msgid ""

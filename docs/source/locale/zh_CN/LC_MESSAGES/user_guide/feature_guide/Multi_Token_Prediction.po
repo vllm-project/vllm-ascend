@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:1
 msgid "Multi Token Prediction (MTP)"
-msgstr "MTP指南"
+msgstr "多Token预测(MTP)"
 
 #: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:3
 msgid "Why We Need MTP"

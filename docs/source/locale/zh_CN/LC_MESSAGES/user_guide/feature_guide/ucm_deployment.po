@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:1
 msgid "UCM-Enhanced Prefix Caching Deployment Guide"
-msgstr "UCM增强的前缀缓存部署指南"
+msgstr "UCM增强的前缀缓存部署"
 
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:3
 msgid "Overview"

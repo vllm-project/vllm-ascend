@@ -42,15 +42,15 @@ msgstr "**基准测试覆盖范围**：我们测量离线端到端延迟与吞�
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:6
 msgid "1. Run docker container"
-msgstr "1. 运行 Docker 容器"
+msgstr "1.运行 Docker 容器"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:32
 msgid "2. Install dependencies"
-msgstr "2. 安装依赖项"
+msgstr "2.安装依赖项"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:40
 msgid "3. Run basic benchmarks"
-msgstr "3. 运行基础基准测试"
+msgstr "3.运行基础基准测试"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:41
 msgid ""
@@ -60,7 +60,7 @@ msgstr "本节介绍如何使用 VLLM 内置的基准测试套件进行性能测
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:43
 msgid "3.1 Dataset"
-msgstr "3.1 数据集"
+msgstr "3.1数据集"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:44
 msgid ""
@@ -252,11 +252,11 @@ msgstr "上述数据集均为 Hugging Face 上数据集的链接。数据集的 
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:84
 msgid "3.2 Run basic benchmark"
-msgstr "3.2 运行基础基准测试"
+msgstr "3.2运行基础基准测试"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:86
 msgid "3.2.1 Online serving"
-msgstr "3.2.1 在线服务"
+msgstr "3.2.1在线服务"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:88
 msgid "First start serving your model:"
@@ -272,7 +272,7 @@ msgstr "如果成功，您将看到以下输出："
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:138
 msgid "3.2.2 Offline Throughput Benchmark"
-msgstr "3.2.2 离线吞吐量基准测试"
+msgstr "3.2.2离线吞吐量基准测试"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:149
 msgid "If successful, you will see the following output"
@@ -280,14 +280,14 @@ msgstr "如果成功，您将看到以下输出："
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:158
 msgid "3.2.4 Multi-Modal Benchmark"
-msgstr "3.2.4 多模态基准测试"
+msgstr "3.2.4多模态基准测试"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:207
 msgid "3.2.5 Embedding Benchmark"
-msgstr "3.2.5 嵌入基准测试"
+msgstr "3.2.5嵌入基准测试"
 
 #~ msgid "3. (Optional)Prepare model weights"
-#~ msgstr "3. （可选）准备模型权重"
+#~ msgstr "3.（可选）准备模型权重"
 
 #~ msgid ""
 #~ "For faster running speed, we recommend"

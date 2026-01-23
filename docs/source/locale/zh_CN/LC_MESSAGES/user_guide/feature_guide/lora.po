@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/lora.md:1
 msgid "LoRA Adapters Guide"
-msgstr "LoRA 适配器指南"
+msgstr "LoRA适配器"
 
 #: ../../source/user_guide/feature_guide/lora.md:3
 msgid "Overview"

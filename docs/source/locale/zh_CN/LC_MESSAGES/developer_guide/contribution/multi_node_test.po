@@ -136,7 +136,7 @@ msgstr "本地运行多节点测试"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:113
 msgid "1. Use kubernetes"
-msgstr "1. 使用 Kubernetes"
+msgstr "1.使用 Kubernetes"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:115
 msgid ""
@@ -147,7 +147,7 @@ msgstr "本节假定您本地已有一个 [Kubernetes](https://kubernetes.io/doc
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:117
 msgid "Step 1. Install LWS CRD resources"
-msgstr "步骤 1. 安装 LWS CRD 资源"
+msgstr "步骤 1.安装 LWS CRD 资源"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:119
 msgid ""
@@ -157,7 +157,7 @@ msgstr "参考 https://lws.sigs.k8s.io/docs/installation/"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:121
 msgid "Step 2. Deploy the following yaml file `lws.yaml` as what you want"
-msgstr "步骤 2. 按需部署以下 `lws.yaml` 文件"
+msgstr "步骤 2.按需部署以下 `lws.yaml` 文件"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:257
 msgid "Verify the status of the pods:"
@@ -177,7 +177,7 @@ msgstr "应该会得到类似以下的结果："
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:311
 msgid "2. Test without kubernetes"
-msgstr "2. 不使用 Kubernetes 进行测试"
+msgstr "2.不使用 Kubernetes 进行测试"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:313
 msgid ""
@@ -187,7 +187,7 @@ msgstr "由于我们的脚本是 Kubernetes 友好的，如果您没有 Kubernet
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:315
 msgid "Step 1. Add cluster_hosts to config yamls"
-msgstr "步骤 1. 在配置文件中添加 cluster_hosts"
+msgstr "步骤 1.在配置文件中添加 cluster_hosts"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:317
 msgid ""
@@ -200,7 +200,7 @@ msgstr "在每个集群节点上进行修改，参照 [DeepSeek-V3.yaml](https:/
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:320
 msgid "Step 2. Install develop environment"
-msgstr "步骤 2. 安装开发环境"
+msgstr "步骤 2.安装开发环境"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:321
 msgid "Install vllm-ascend develop packages on every cluster host"
@@ -212,7 +212,7 @@ msgstr "在 cluster_hosts 列表中的第一个主机（主节点）上安装 AI
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:340
 msgid "Step 3. Running test locally"
-msgstr "步骤 3. 本地运行测试"
+msgstr "步骤 3.本地运行测试"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:342
 msgid "Run the script on **each node separately**"

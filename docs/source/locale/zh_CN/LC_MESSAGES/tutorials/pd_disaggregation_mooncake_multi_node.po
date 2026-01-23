@@ -387,7 +387,7 @@ msgstr "常见问题"
 
 #: ../../source/tutorials/pd_disaggregation_mooncake_multi_node.md:930
 msgid "1. Prefiller nodes need to warmup"
-msgstr "1. 预填充器节点需要预热"
+msgstr "1.预填充器节点需要预热"
 
 #: ../../source/tutorials/pd_disaggregation_mooncake_multi_node.md:932
 msgid ""

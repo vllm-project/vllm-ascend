@@ -32,7 +32,7 @@ msgstr "本文档指导您如何使用 [OpenCompass](https://github.com/open-com
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:4
 msgid "1. Online Server"
-msgstr "1. 在线服务器模式"
+msgstr "1.在线服务器模式"
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:6
 msgid "You can run docker container to start the vLLM server on a single NPU:"
@@ -50,7 +50,7 @@ msgstr "服务器启动后，您可以在新的终端中使用输入提示词（
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:55
 msgid "2. Run C-Eval using OpenCompass for accuracy testing"
-msgstr "2. 使用 OpenCompass 运行 C-Eval 准确率测试"
+msgstr "2.使用 OpenCompass 运行 C-Eval 准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:56
 msgid ""

@@ -19,7 +19,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:1
 msgid "Graph Mode Guide"
-msgstr "图模式指南"
+msgstr "图模式"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:4
 msgid ""

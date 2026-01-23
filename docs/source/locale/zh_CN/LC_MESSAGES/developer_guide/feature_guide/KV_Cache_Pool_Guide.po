@@ -119,7 +119,7 @@ msgstr "当与vLLM的前缀缓存机制结合时，该缓存池支持在本地�
 
 #: ../../source/developer_guide/feature_guide/KV_Cache_Pool_Guide.md:30
 msgid "1. Combining KV Cache Pool with HBM Prefix Caching"
-msgstr "1. 将KV缓存池与HBM前缀缓存结合"
+msgstr "1.将KV缓存池与HBM前缀缓存结合"
 
 #: ../../source/developer_guide/feature_guide/KV_Cache_Pool_Guide.md:31
 msgid ""
@@ -160,7 +160,7 @@ msgstr "将KV缓存池中的KV缓存加载到HBM后，其余处理过程与使�
 
 #: ../../source/developer_guide/feature_guide/KV_Cache_Pool_Guide.md:44
 msgid "2. Combining KV Cache Pool with Mooncake PD Disaggregation"
-msgstr "2. 将KV缓存池与Mooncake PD解耦结合"
+msgstr "2.将KV缓存池与Mooncake PD解耦结合"
 
 #: ../../source/developer_guide/feature_guide/KV_Cache_Pool_Guide.md:46
 msgid ""

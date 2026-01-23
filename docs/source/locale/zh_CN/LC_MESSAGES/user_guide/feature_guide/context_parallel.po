@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:1
 msgid "Context Parallel Guide"
-msgstr "上下文并行指南"
+msgstr "上下文并行"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:3
 msgid "Overview"

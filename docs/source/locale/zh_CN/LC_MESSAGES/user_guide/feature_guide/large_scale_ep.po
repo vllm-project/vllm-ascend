@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:1
 msgid "Distributed DP Server With Large Scale Expert Parallelism"
-msgstr "大规模专家并行的分布式DP服务指南"
+msgstr "大规模专家并行的DP分布式部署"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:3
 msgid "Getting Start"

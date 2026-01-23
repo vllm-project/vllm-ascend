@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/tutorials/ray.md:1
 msgid "Ray Distributed (Qwen3-235B-A22B)"
-msgstr "Ray 分布式推理 (Qwen3-235B-A22B)"
+msgstr "Ray分布式部署(Qwen3-235B-A22B)"
 
 #: ../../source/tutorials/ray.md:3
 msgid ""

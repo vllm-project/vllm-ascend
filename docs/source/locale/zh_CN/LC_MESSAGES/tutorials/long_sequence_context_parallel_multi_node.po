@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:1
 msgid "Long-Sequence Context Parallel (Deepseek)"
-msgstr "Long-Sequence Context Parallel (Deepseek)"
+msgstr "长序列上下文并行(Deepseek)"
 
 #: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:3
 msgid "Getting Start"

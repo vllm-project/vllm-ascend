@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/developer_guide/feature_guide/patch.md:1
 msgid "Patch in vLLM Ascend"
-msgstr "vLLM Ascend 中的补丁机制"
+msgstr "vLLM Ascend补丁说明"
 
 #: ../../source/developer_guide/feature_guide/patch.md:3
 msgid ""

@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:1
 msgid "Fine-Grained Tensor Parallelism (Finegrained TP)"
-msgstr "细粒度张量并行指南"
+msgstr "细粒度张量并行"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:3
 msgid "Overview"

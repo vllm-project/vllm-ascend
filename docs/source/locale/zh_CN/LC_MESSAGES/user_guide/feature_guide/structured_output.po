@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/structured_output.md:1
 msgid "Structured Output Guide"
-msgstr "结构化输出指南"
+msgstr "结构化输出"
 
 #: ../../source/user_guide/feature_guide/structured_output.md:3
 msgid "Overview"

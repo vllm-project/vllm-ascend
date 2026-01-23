@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:1
 msgid "Prepare inputs for model forwarding"
-msgstr "为模型前向传播准备输入"
+msgstr "模型前向计算输入准备"
 
 #: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:3
 msgid "Purpose"
@@ -30,7 +30,7 @@ msgstr "目的"
 
 #: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:4
 msgid "Information required to perform model forward pass:"
-msgstr "执行模型前向传播所需的信息："
+msgstr "执行模型前向计算所需的信息："
 
 #: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:5
 msgid "the inputs"
@@ -48,7 +48,7 @@ msgstr "下图展示了模型推理需要准备的内容。"
 msgid ""
 "Therefore, as long as we have these two pieces of information mentioned "
 "above, we can perform the model's forward propagation."
-msgstr "因此，只要拥有上述两部分信息，我们就能执行模型的前向传播。"
+msgstr "因此，只要拥有上述两部分信息，我们就能执行模型的前向计算。"
 
 #: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:20
 msgid ""
@@ -103,7 +103,7 @@ msgstr "2. 构建输入注意力元数据"
 
 #: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:36
 msgid "A model requires these attention metadata during the forward pass:"
-msgstr "模型在前向传播过程中需要以下注意力元数据："
+msgstr "模型在前向计算过程中需要以下注意力元数据："
 
 #: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:37
 msgid ""
@@ -622,4 +622,4 @@ msgid ""
 "Hope this document can help you better understand how vLLM prepares "
 "inputs for model forwarding. If you have any good idea, welcome to "
 "contribute to us."
-msgstr "希望本文档能帮助你更好地理解vLLM如何为模型前向传播准备输入。如果你有任何好想法，欢迎提供给我们。"
+msgstr "希望本文档能帮助你更好地理解vLLM如何为模型前向计算准备输入。如果你有任何好想法，欢迎提供给我们。"

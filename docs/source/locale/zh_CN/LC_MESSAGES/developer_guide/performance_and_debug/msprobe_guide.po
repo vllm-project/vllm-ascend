@@ -69,7 +69,7 @@ msgstr "**mix**：同时捕获结构信息和算子统计，适用于需要同�
 
 #: ../../developer_guide/performance_and_debug/msprobe_guide.md
 msgid "1. Prerequisites"
-msgstr "1. 前提条件"
+msgstr "1.前提条件"
 
 #: ../../developer_guide/performance_and_debug/msprobe_guide.md
 msgid "1.1 Install `msprobe`"
@@ -94,7 +94,7 @@ msgstr "安装 `tb_graph_ascend`："
 
 #: ../../developer_guide/performance_and_debug/msprobe_guide.md
 msgid "2. Collecting Data with `msprobe`"
-msgstr "2. 使用 `msprobe` 采集数据"
+msgstr "2.使用 `msprobe` 采集数据"
 
 #: ../../developer_guide/performance_and_debug/msprobe_guide.md
 msgid ""
@@ -259,7 +259,7 @@ msgstr "配置示例："
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md
 msgid "2. Enable `msprobe` in vllm-ascend"
-msgstr "2. 在 vllm-ascend 中启用 `msprobe`"
+msgstr "2.在 vllm-ascend 中启用 `msprobe`"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md
 msgid ""
@@ -270,7 +270,7 @@ msgstr "通过添加 `--enforce-eager` 以动态图模式启动 vLLM（暂不支
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md
 msgid "3. Send requests and collect dumps"
-msgstr "3. 发送请求并采集数据"
+msgstr "3.发送请求并采集数据"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md
 msgid "Send inference requests as usual, for example:"
@@ -344,11 +344,11 @@ msgstr "`construct.json`：分层结构描述。`level=L1` 时为空。"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md
 msgid "4. Analyze the results"
-msgstr "4. 分析结果"
+msgstr "4.分析结果"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md
 msgid "4.1 Prerequisites"
-msgstr "4.1 前提条件"
+msgstr "4.1前提条件"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md
 msgid ""
@@ -471,7 +471,7 @@ msgstr "手动映射：自动映射无法覆盖所有情况，因此该工具允
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md
 msgid "5. Troubleshooting"
-msgstr "5. 故障排除"
+msgstr "5.故障排除"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md
 msgid ""

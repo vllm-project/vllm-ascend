@@ -111,7 +111,7 @@ msgstr "本节使用 `deepseek-ai/DeepSeek-V2-Lite` 作为示例，但您可以�
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:32
 msgid "2.1 Prerequisites"
-msgstr "2.1 先决条件"
+msgstr "2.1前提条件"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:34
 msgid "Kubernetes cluster with Ascend NPU nodes:"

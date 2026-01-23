@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/dynamic_batch.md:1
 msgid "Dynamic Batch"
-msgstr "动态批处理指南"
+msgstr "动态批处理"
 
 #: ../../source/user_guide/feature_guide/dynamic_batch.md:3
 msgid ""
@@ -52,7 +52,7 @@ msgstr "快速入门"
 
 #: ../../source/user_guide/feature_guide/dynamic_batch.md:12
 msgid "Prerequisites"
-msgstr "先决条件"
+msgstr "前提条件"
 
 #: ../../source/user_guide/feature_guide/dynamic_batch.md:14
 msgid ""

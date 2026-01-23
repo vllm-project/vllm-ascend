@@ -27,7 +27,7 @@ msgstr "支持的模型"
 msgid ""
 "Get the latest info here: https://github.com/vllm-project/vllm-"
 "ascend/issues/1608"
-msgstr "在此处获取最新信息：https://github.com/vllm-project/vllm-ascend/issues/1608"
+msgstr "在此处获取最新信息：<https://github.com/vllm-project/vllm-ascend/issues/1608>"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:5
 msgid "Text-Only Language Models"

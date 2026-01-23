@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/netloader.md:1
 msgid "Netloader Guide"
-msgstr "Netloader 指南"
+msgstr "网络加载器"
 
 #: ../../source/user_guide/feature_guide/netloader.md:3
 msgid ""

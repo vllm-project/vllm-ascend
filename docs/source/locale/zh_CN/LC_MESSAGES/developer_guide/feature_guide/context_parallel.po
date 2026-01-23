@@ -351,19 +351,19 @@ msgstr "相关文件"
 
 #: ../../source/developer_guide/feature_guide/context_parallel.md:116
 msgid "slot_mapping computation: `vllm_ascend/worker/block_table.py`"
-msgstr "slot_mapping计算：vllm_ascend/worker/block_table.py"
+msgstr "slot_mapping计算：`vllm_ascend/worker/block_table.py`"
 
 #: ../../source/developer_guide/feature_guide/context_parallel.md:117
 msgid ""
 "sequences splitting and metadata prepare: "
 "`vllm_ascend/worker/model_runner_v1.py`"
-msgstr "序列分割和元数据准备：vllm_ascend/worker/model_runner_v1.py"
+msgstr "序列分割和元数据准备：`vllm_ascend/worker/model_runner_v1.py`"
 
 #: ../../source/developer_guide/feature_guide/context_parallel.md:118
 msgid "GQA backend: `vllm_ascend/attention/attention_cp.py`"
-msgstr "GQA后端：vllm_ascend/attention/attention_cp.py"
+msgstr "GQA后端：`vllm_ascend/attention/attention_cp.py`"
 
 #: ../../source/developer_guide/feature_guide/context_parallel.md:119
 msgid "MLA backend: `vllm_ascend/attention/mla_cp.py`"
-msgstr "MLA后端：vllm_ascend/attention/mla_cp.py"
+msgstr "MLA后端：`vllm_ascend/attention/mla_cp.py`"
 

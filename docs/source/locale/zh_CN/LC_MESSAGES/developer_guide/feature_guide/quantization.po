@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/developer_guide/feature_guide/quantization.md:1
 msgid "Quantization Adaptation Guide"
-msgstr "量化适配指南"
+msgstr "量化适配"
 
 #: ../../source/developer_guide/feature_guide/quantization.md:3
 msgid ""
