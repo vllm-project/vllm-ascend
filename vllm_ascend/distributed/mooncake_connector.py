@@ -1458,7 +1458,8 @@ class MooncakeConnectorWorker:
         def get_remote_port_send_num(local_remote_block_port_mappings):
             remote_port_send_num: dict[int, dict[str, int | str]] = {}
             for port in range(self._prefill_tp_size * meta.remote_pcp_size):
-                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(port), None)
+                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(
+                    str(port), None)
                 if remote_host_info is None:
                     remote_host = meta.remote_host
                 else:
