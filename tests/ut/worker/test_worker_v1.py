@@ -5,7 +5,6 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.utils import vllm_version_is
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 
@@ -141,10 +140,7 @@ class TestNPUWorker(TestBase):
         )
 
         # Verify init_cached_hf_modules is called (trust_remote_code=True)
-        if vllm_version_is('0.13.0'):
-            mock_init_cached_hf_modules.assert_called_once()
-        else:
-            mock_init_cached_hf_modules.assert_not_called()
+        mock_init_cached_hf_modules.assert_not_called()
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
