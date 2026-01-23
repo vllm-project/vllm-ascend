@@ -62,7 +62,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         MambaSpec, UniformTypeKVCacheSpecs)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              LogprobsLists, LogprobsTensors, ModelRunnerOutput,
-                             SamplerOutput,
+                             SamplerOutput, ECConnectorOutput,
                              make_empty_encoder_model_runner_output)
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -183,6 +183,7 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     attn_metadata: dict[str, Any]
     positions: torch.Tensor
+    ec_connector_output: ECConnectorOutput | None
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -1352,7 +1353,7 @@ class NPUModelRunner(GPUModelRunner):
                 with self.maybe_get_ec_connector_output(
                         scheduler_output,
                         encoder_cache=self.encoder_cache,
-                ):
+                ) as ec_connector_output:
                     self._execute_mm_encoder(scheduler_output)
                     return make_empty_encoder_model_runner_output(
                         scheduler_output)
@@ -1375,7 +1376,7 @@ class NPUModelRunner(GPUModelRunner):
              max_query_len) = self._prepare_inputs(scheduler_output)
 
             (input_ids, inputs_embeds, positions, intermediate_tensors,
-             model_kwargs) = self._preprocess(scheduler_output,
+             model_kwargs, ec_connector_output) = self._preprocess(scheduler_output,
                                               num_input_tokens,
                                               intermediate_tensors)
 
@@ -1493,6 +1494,7 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states,
                 attn_metadata,
                 positions,
+                ec_connector_output
             )
             self.kv_connector_output = kv_connector_output
         return None
@@ -1527,6 +1529,7 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states,
             attn_metadata,
             positions,
+            ec_connector_output
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -1593,16 +1596,15 @@ class NPUModelRunner(GPUModelRunner):
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
 
-        extra_args = ({"kv_connector_output": kv_connector_output})
-
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            ec_connector_output=ec_connector_output,
+            kv_connector_output=kv_connector_output,
             pooler_output=[],
-            **extra_args,
         )
 
         durations = ProfileExecuteDuration().pop_captured_sync()
