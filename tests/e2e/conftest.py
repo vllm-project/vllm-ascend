@@ -80,21 +80,24 @@ logger = logging.getLogger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 
 
-def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: float):
+def _check_npu_memory_worker(target_free_percentage: float,
+                             max_wait_seconds: float):
     import torch_npu  # type: ignore
-    
+
     # We can try to clean up memory in this subprocess, though it mostly affects this process.
     # But if there are any lingering contexts in this process (unlikely for a fresh spawn), it helps.
     gc.collect()
     torch.npu.empty_cache()
-    
+
     _, total_npu_memory = torch.npu.mem_get_info()
     start_time = time.time()
 
     while True:
         free_bytes, _ = torch.npu.mem_get_info()
         if free_bytes / total_npu_memory >= target_free_percentage:
-            print(f'check_npu_memory_worker: npu free memory decreased target value.')
+            print(
+                f'check_npu_memory_worker: npu free memory decreased target value.'
+            )
             return  # Success
 
         elapsed = time.time() - start_time
@@ -103,43 +106,41 @@ def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: fl
             print(
                 f"Timeout: NPU memory free size did not reach "
                 f"{target_free_percentage} of total npu memory within {max_wait_seconds} seconds.",
-                file=sys.stderr
-            )
+                file=sys.stderr)
             sys.exit(1)  # Failure
 
-        print(
-            f"Waiting for NPU memory to be free: "
-            f"{free_bytes / 1024**3:.2f} GB available, "
-            f"Elapsed time: {elapsed:.2f} s."
-        )
+        print(f"Waiting for NPU memory to be free: "
+              f"{free_bytes / 1024**3:.2f} GB available, "
+              f"Elapsed time: {elapsed:.2f} s.")
         # Try to clean up
         gc.collect()
         torch.npu.empty_cache()
         time.sleep(1)
 
 
-def wait_until_npu_memory_free(target_free_percentage: float = 0.5, max_wait_seconds: float = 50):
+def wait_until_npu_memory_free(target_free_percentage: float = 0.5,
+                               max_wait_seconds: float = 50):
     """Decorator to wait until the NPU memory free size is above target_free_percentage.
 
     Args:
         target_free_percentage (float): Target free memory percentage of total.
         max_wait_seconds (float): Maximum wait time in seconds.
     """
+
     def decorator(func):
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             # Clean up non-NPU resources in the main process
             cleanup_dist_env_and_memory()
-            
+
             # Use a spawned subprocess to check NPU memory to avoid initializing NPU in the main process
             ctx = multiprocessing.get_context("spawn")
-            p = ctx.Process(
-                target=_check_npu_memory_worker,
-                args=(target_free_percentage, max_wait_seconds)
-            )
+            p = ctx.Process(target=_check_npu_memory_worker,
+                            args=(target_free_percentage, max_wait_seconds))
             p.start()
             p.join()
-            
+
             if p.exitcode != 0:
                 raise TimeoutError(
                     f"Timeout: NPU memory free size did not reach "
@@ -147,7 +148,9 @@ def wait_until_npu_memory_free(target_free_percentage: float = 0.5, max_wait_sec
                 )
 
             return func(*args, **kwargs)
+
         return wrapper
+
     return decorator
 
 
@@ -160,13 +163,59 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         import ray  # Lazy import Ray
         ray.shutdown()
     gc.collect()
-    
+
     # Only clean NPU cache if NPU is already initialized/available in this process.
     # This prevents accidental initialization of NPU context in the main process,
     # which would break subsequent forks.
     if hasattr(torch, "npu") and torch.npu.is_initialized():
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
+
+
+class MooncakeLauncher:
+
+    def __init__(
+        self,
+        mooncake_port,
+        mooncake_metrics_port,
+        eviction_high_watermark_ratio=0.8,
+        eviction_ratio=0.05,
+    ):
+        self.mooncake_port = mooncake_port
+        self.mooncake_metrics_port = mooncake_metrics_port
+        self.eviction_high_watermark_ratio = eviction_high_watermark_ratio
+        self.eviction_ratio = eviction_ratio
+
+    def __enter__(self):
+        cmd = [
+            "mooncake_master",
+            "--eviction_high_watermark_ratio",
+            str(self.eviction_high_watermark_ratio),
+            "--eviction_ratio",
+            str(self.eviction_ratio),
+            "--port",
+            str(self.mooncake_port),
+            "--metrics_port",
+            str(self.mooncake_metrics_port),
+        ]
+
+        logger.info("Launching mooncake: %s", " ".join(cmd))
+        curr_ld_path = os.environ.get("LD_LIBRARY_PATH")
+        mooncake_ld_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:"
+        os.environ["LD_LIBRARY_PATH"] = mooncake_ld_path + curr_ld_path
+        env = os.environ.copy()
+        self.process = subprocess.Popen(cmd, env=env)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self.process:
+            return
+        logger.info("Stopping mooncake server...")
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
 
 
 class RemoteOpenAIServer:
@@ -453,9 +502,9 @@ class VllmRunner:
             if images is not None and (image := images[i]) is not None:
                 multi_modal_data["image"] = image
             if videos is not None and (video := videos[i]) is not None:
-                multi_modal_data["video"] = video # type: ignore
+                multi_modal_data["video"] = video  # type: ignore
             if audios is not None and (audio := audios[i]) is not None:
-                multi_modal_data["audio"] = audio # type: ignore
+                multi_modal_data["audio"] = audio  # type: ignore
 
             text_prompt_kwargs: dict[str, Any] = {
                 "multi_modal_data": multi_modal_data or None
