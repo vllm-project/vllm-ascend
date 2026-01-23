@@ -4,11 +4,10 @@ import vllm
 from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_groups_uniform_page_size, _get_kv_cache_groups_uniform_spec,
-    _get_kv_cache_groups_uniform_type, check_uniform_page_size,
-    create_kv_cache_group_specs, get_num_blocks, get_uniform_page_size,
-    is_kv_cache_spec_uniform, is_kv_cache_type_attention_free,
-    may_override_num_blocks, unify_hybrid_kv_cache_specs,
-    unify_kv_cache_spec_page_size)
+    _get_kv_cache_groups_uniform_type, create_kv_cache_group_specs,
+    get_num_blocks, get_uniform_page_size, is_kv_cache_spec_uniform,
+    is_kv_cache_type_attention_free, may_override_num_blocks,
+    unify_hybrid_kv_cache_specs, unify_kv_cache_spec_page_size)
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroupSpec,
                                         KVCacheSpec, KVCacheTensor,
                                         UniformTypeKVCacheSpecs)
@@ -38,6 +37,12 @@ def _get_kv_cache_groups_uniform_block_size(
         same_type_layers[layer_spec].append(layer_name)
     grouped_layers = list(same_type_layers.values())
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
+
+
+def check_uniform_page_size(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
+    kv_cache_specs = [group.kv_cache_spec for group in kv_cache_groups]
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
+    return len(page_sizes) == 1
 
 
 def get_kv_cache_groups(
