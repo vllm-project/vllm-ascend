@@ -24,27 +24,23 @@ from vllm_ascend.utils import (COMPRESSED_TENSORS_METHOD, AscendDeviceType,
                                get_ascend_device_type,
                                get_weight_prefetch_method, maybe_trans_nz)
 
-
-def quant_per_tensor(in_tensor: torch.Tensor,
-                     input_scale: torch.Tensor,
-                     input_offset: torch.Tensor,
-                     function=False):
-    return torch_npu.npu_quantize(in_tensor, input_scale, input_offset,
-                                  torch.qint8, -1, function)
+from .base import AscendLinearScheme
+from .registry import register_scheme
 
 
-class AscendW8A8LinearMethod:
-    """Linear method for Ascend W8A8.
+@register_scheme("W8A8", "linear")
+class AscendW8A8LinearMethod(AscendLinearScheme):
+    """Linear method for Ascend W8A8 static quantization.
 
-    Args:
-        w_sym: whether the linear weight is symmetrically quantized.
+    This scheme uses static per-tensor quantization for activations
+    and per-channel quantization for weights.
     """
 
     def __init__(self) -> None:
         pass
 
-    @staticmethod
     def get_weight(
+        self,
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype = torch.bfloat16,
@@ -54,15 +50,14 @@ class AscendW8A8LinearMethod:
         }
         return params_dict
 
-    @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pertensor_param(self, params_dtype: torch.dtype) -> Dict[str, Any]:
         params_dict = {}
         params_dict["input_scale"] = torch.empty(1, dtype=params_dtype)
         params_dict["input_offset"] = torch.empty(1, dtype=torch.int8)
         return params_dict
 
-    @staticmethod
     def get_perchannel_param(
+        self,
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
@@ -82,15 +77,8 @@ class AscendW8A8LinearMethod:
                                                    dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self,
-                           input_size: int,
-                           output_size: int,
-                           params_dtype: torch.dtype,
-                           layer_type: Optional[str] = None) -> Dict[str, Any]:
-        return {}
-
-    @staticmethod
     def apply(
+        self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,

@@ -12,19 +12,16 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: linux-amd64-cpu-16-hk
+    runs-on: linux-amd64-cpu-8-hk
     container:
       # Build it from https://github.com/nv-action/vllm-benchmarks/blob/main/Dockerfile
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
-    env:
-      GOPROXY: https://goproxy.io,direct
-      GITHUB_WORKSPACE: /__w/vllm-ascend/vllm-ascend
+      image: quay.io/ascend-ci/vllm-ascend:lint
     steps:
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v6
 
     # With problem matchers in a container, the output of $GITHUB_WORKSPACE and ${{ github.workspace }} are different.
-    # So we will just copy it into the path ${{ github.workspace }}. see https://github.com/actions/runner/issues/2058
+    # So we will just copy it into a temp path. see https://github.com/actions/runner/issues/2058
     - name: cp problem matchers
       run: |
         cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
@@ -41,14 +38,21 @@ jobs:
         repository: vllm-project/vllm
         path: ./vllm-empty
         ref: ${{ inputs.vllm }}
-    - name: Install vllm
-      working-directory: vllm-empty
-      run: |
-        VLLM_TARGET_DEVICE=empty python3 -m pip install . --extra-index https://download.pytorch.org/whl/cpu/
-    - name: Install vllm-ascend dev
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          lint_tracker:
+            - 'requirements.txt'
+            - 'requirements-dev.txt'
+            - 'requirements-lint.txt'
+
+    - name: Install vllm-ascend dev (conditional)
+      if: steps.filter.outputs.lint_tracker == 'true'
       run: |
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
     - name: Run pre-commit
       env:
         PRE_COMMIT_COLOR: always
@@ -56,4 +60,17 @@ jobs:
         TERM: xterm-256color
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       run: |
+        git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+    - name: Run mypy
+      run: |
+        PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+        export PYTHONPATH
+        git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+        # Run mypy for Python 3.10, 3.11, 3.12 manually
+        # Note: We are now separating mypy from pre-commit hooks for performance reasons.
+        for python_version in "3.10" "3.11" "3.12"; do
+          echo "============================"
+          tools/mypy.sh 1 "$python_version"
+          echo "============================"
+        done

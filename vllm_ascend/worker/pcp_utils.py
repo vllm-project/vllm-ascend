@@ -88,9 +88,6 @@ class PCPManager:
         )
         self.num_actual_tokens_pcp_padded = 0
         self.pcp_unpad_mask_cpu = self.pcp_unpad_mask_cpu_tensor.numpy()
-        self.cp_kv_recover_idx_for_chunk: List[List[int]] = [
-            [] for _ in range(self.pcp_world_size)
-        ]
         self.full_indices = list(
             range(self.max_num_tokens * self.pcp_world_size *
                   self.dcp_world_size + self.pcp_world_size *
@@ -567,47 +564,6 @@ class PCPManager:
             [-1, pcp_world_size, dcp_world_size])
         return dcp_local_seq_lens
 
-    def generate_kv_idx(self, scheduler_output, input_batch):
-        if not self.pcp_world_size > 1:
-            return
-        self.cp_kv_recover_idx_for_chunk = [[]
-                                            for _ in range(self.pcp_world_size)
-                                            ]
-
-        for i, req_id in enumerate(input_batch.req_ids):
-            num_scheduled_token = scheduler_output.num_scheduled_tokens[req_id]
-            is_prefill = num_scheduled_token > self.decode_threshold
-            if is_prefill:
-                num_cp_padded_scheduled_tokens = cdiv(
-                    num_scheduled_token,
-                    2 * self.pcp_world_size) * (2 * self.pcp_world_size)
-                chunk_size = num_cp_padded_scheduled_tokens // (
-                    2 * self.pcp_world_size)
-                num_added_recover_tokens = len(
-                    self.cp_kv_recover_idx_for_chunk[0]) * self.pcp_world_size
-                for rank in range(self.pcp_world_size):
-                    self.cp_kv_recover_idx_for_chunk[rank].extend(
-                        self.full_indices[rank * chunk_size +
-                                          num_added_recover_tokens:(rank + 1) *
-                                          chunk_size +
-                                          num_added_recover_tokens])
-                    self.cp_kv_recover_idx_for_chunk[rank].extend(
-                        self.full_indices[num_cp_padded_scheduled_tokens -
-                                          (rank + 1) * chunk_size +
-                                          num_added_recover_tokens:
-                                          num_cp_padded_scheduled_tokens -
-                                          rank * chunk_size +
-                                          num_added_recover_tokens])
-
-        cp_kv_recover_idx_for_chunk = torch.from_numpy(
-            np.concatenate(
-                self.cp_kv_recover_idx_for_chunk)).to(device=self.device)
-        cp_kv_recover_idx_for_chunk.copy_(torch.tensor(
-            np.array(self.cp_kv_recover_idx_for_chunk).flatten().tolist()),
-                                          non_blocking=True)
-        self.cp_kv_recover_idx_for_chunk = cp_kv_recover_idx_for_chunk.to(
-            torch.float32).argsort().to(torch.int32)
-
     def generate_pcp_metadata(self, total_num_scheduled_tokens, query_lens,
                               input_batch, num_scheduled_tokens):
         from vllm_ascend.attention.utils import \
@@ -778,7 +734,6 @@ class PCPManager:
                 }
                 long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:
                                                                                                  num_actual_tokens_pcp_padded]
-                long_seq_metadata.cp_kv_recover_idx_for_chunk = self.cp_kv_recover_idx_for_chunk
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
                 long_seq_metadata.q_full_idx = self.q_full_idx
