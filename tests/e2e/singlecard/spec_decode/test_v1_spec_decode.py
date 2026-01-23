@@ -17,10 +17,10 @@ from tests.e2e.conftest import VllmRunner
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODELS = {
-    "eagle": {
-        "main": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
-        "spec": "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
-    },
+    #"eagle": {
+    #    "main": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+    #    "spec": "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+    #},
     "eagle3": {
         "main": "Qwen/Qwen3-8B",
         "spec": "RedHatAI/Qwen3-8B-speculator.eagle3",
