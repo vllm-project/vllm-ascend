@@ -53,7 +53,7 @@ class AscendMMEncoderAttention310(_Base):
 
         seq_len = torch.diff(cu_seqlens).to("cpu", dtype=torch.int32)
 
-        context_flat = torch.empty_like(q)
+        context_layer = torch.empty_like(q)
         torch_npu._npu_flash_attention_unpad(
             query=q,
             key=k,
@@ -62,11 +62,8 @@ class AscendMMEncoderAttention310(_Base):
             scale_value=self.head_size**-0.5,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
-            out=context_flat,
+            out=context_layer,
         )
 
-        if context_flat.shape[-1] != origin_dim:
-            context_flat = context_flat[..., :origin_dim]
-
-        context_layer = einops.rearrange(context_flat, "(b s) h d -> b s h d", b=bsz).contiguous()
+        context_layer = einops.rearrange(context_layer, "(b s) h d -> b s h d", b=bsz).contiguous()
         return context_layer

@@ -1,4 +1,5 @@
 import torch
+import torch_npu
 
 from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
 
@@ -9,8 +10,6 @@ class AscendRMSNorm310(AscendRMSNorm):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        import torch_npu
-
         if residual is not None:
             orig_dtype = residual.dtype
             if x is None or x.numel() == 0 or x.shape[-1] == 0:
@@ -34,8 +33,6 @@ class AscendGemmaRMSNorm310(AscendGemmaRMSNorm):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        import torch_npu
-
         if residual is not None:
             orig_dtype = residual.dtype
             x = x + residual.to(x.dtype)
