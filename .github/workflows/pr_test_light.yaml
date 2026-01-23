@@ -61,6 +61,7 @@ jobs:
           filters: |
             e2e_tracker:
               - '.github/workflows/pr_test_light.yaml'
+              - '.github/workflows/_e2e_test.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
               - 'cmake/**'
