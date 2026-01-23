@@ -11,11 +11,11 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 8.3.RC2                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.8.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.8.0                          | Required for torch-npu and vllm           |
-    | NNAL          | == 8.3.RC2                       | Required for libatb.so, enables advanced tensor operations |
+    | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/850/releasenote/releasenote_0000.html) 25.5 is recommended | Required for CANN |
+    | CANN          | == 8.5.0  | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.8.0  | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.8.0  | Required for torch-npu and vllm           |
+    | NNAL          | == 8.5.0  | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
@@ -135,8 +135,8 @@ pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/si
 **[Optional]** Then configure the extra-index of `pip` if you are working on an x86 machine or using torch-npu dev version:
 
 ```bash
-# For torch-npu dev version or x86 machine
-pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
+# For x86 machine
+pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
 ```
 
 Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
