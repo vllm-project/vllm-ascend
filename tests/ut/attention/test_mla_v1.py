@@ -757,12 +757,15 @@ class TestAscendMLAImpl(TestBase):
         vllm_config = MagicMock()
         speculative_config = MagicMock()
         model_config = MagicMock()
+        parallel_config = MagicMock()
+        parallel_config.prefill_context_parallel_size = 1
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
         model_config.dtype = torch.float16
         vllm_config.model_config = model_config
         get_current_vllm_config.return_value = vllm_config
         vllm_config.additional_config = {"refresh": True}
+        vllm_config.parallel_config = parallel_config
         init_ascend_config(vllm_config)
 
         num_heads = 256
