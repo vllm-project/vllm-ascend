@@ -30,7 +30,7 @@ from vllm.distributed import (
 from vllm.utils.system_utils import update_environment_variables
 
 import vllm_ascend.ops.register_custom_ops  # noqa
-from tests.e2e.singlecard.compile.backend import TestBackend
+from tests.e2e.singlecard.compile.graph_ex_backend import TestBackend
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.npugraph_ex_passes.graphex_norm_quant_fusion_pass import (
     GraphEXAddRMSNormFusionPass
@@ -288,7 +288,7 @@ class TestModelSPWithBias(nn.Module):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("num_tokens", [257])
-@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("use_bias", [False, True])
 @pytest.mark.parametrize("sp_enable", [False, True])
 def test_rmsnorm_quant_fusion(

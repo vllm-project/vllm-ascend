@@ -36,6 +36,7 @@ from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPILATION_PASS_KEY,
+    GRAPHEX_COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     check_kv_extra_config,
@@ -113,7 +114,11 @@ class NPUPlatform(Platform):
         It is a parameter of inductor_config used to register custom passes.
         Currently, we only use Inductor's 'pattern matcher' functionality, so we define our own pass_key.
         """
-        return COMPILATION_PASS_KEY
+        npugraph_ex_config = get_ascend_config().npugraph_ex_config
+        if npugraph_ex_config.enable:
+            return GRAPHEX_COMPILATION_PASS_KEY
+        else:
+            return COMPILATION_PASS_KEY
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:
