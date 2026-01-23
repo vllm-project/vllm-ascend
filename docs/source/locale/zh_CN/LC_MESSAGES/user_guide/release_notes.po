@@ -424,7 +424,6 @@ msgid ""
 msgstr "Eagle3 现已回归。[#4721](https://github.com/vllm-project/vllm-ascend/pull/4721)"
 
 #: ../../source/user_guide/release_notes.md:60
-#, fuzzy
 msgid ""
 "Improved the performance for kimi-k2.  [#4555](https://github.com/vllm-"
 "project/vllm-ascend/pull/4555)"
@@ -1853,7 +1852,6 @@ msgstr ""
 "张量并行。[#2309](https://github.com/vllm-project/vllm-ascend/pull/2309)"
 
 #: ../../source/user_guide/release_notes.md:306
-#, fuzzy
 msgid ""
 "Some unused environment variables `HCCN_PATH`, `PROMPT_DEVICE_ID`, "
 "`DECODE_DEVICE_ID`, `LLMDATADIST_COMM_PORT` and "
@@ -2801,7 +2799,6 @@ msgstr ""
 "ascend/pull/2019)"
 
 #: ../../source/user_guide/release_notes.md:462
-#, fuzzy
 msgid ""
 "Qwen3 MoE support improvement and bugfix around graph mode and DP:  "
 "[#1940](https://github.com/vllm-project/vllm-ascend/pull/1940) "
@@ -3140,7 +3137,6 @@ msgstr ""
 "Python 升级至 3.11。"
 
 #: ../../source/user_guide/release_notes.md:504
-#, fuzzy
 msgid ""
 "Disabled quantization in mindie_turbo  in [#1749](https://github.com"
 "/vllm-project/vllm-ascend/pull/1749)"
@@ -3269,7 +3265,6 @@ msgstr ""
 "中修复了无法识别实际量化类型的问题。"
 
 #: ../../source/user_guide/release_notes.md:519
-#, fuzzy
 msgid ""
 "Fixed DeepSeek bug when tp_size == 1  in [#1755](https://github.com/vllm-"
 "project/vllm-ascend/pull/1755)"
@@ -3343,7 +3338,6 @@ msgstr ""
 " 进程组以解决 `self.cpu_group` 为 None 的问题。"
 
 #: ../../source/user_guide/release_notes.md:528
-#, fuzzy
 msgid ""
 "Pin vllm version to v0.9.1 to make mypy check passed  in "
 "[#1904](https://github.com/vllm-project/vllm-ascend/pull/1904)."
@@ -3479,7 +3473,6 @@ msgstr ""
 "project/vllm-ascend/pull/1379)"
 
 #: ../../source/user_guide/release_notes.md:547
-#, fuzzy
 msgid ""
 "Disaggregate prefill for kv cache register style  "
 "[#1296](https://github.com/vllm-project/vllm-ascend/pull/1296)"
@@ -4363,7 +4356,6 @@ msgid "Bug Fixes"
 msgstr "漏洞修复"
 
 #: ../../source/user_guide/release_notes.md:707
-#, fuzzy
 msgid ""
 "Qwen2.5-VL  works for RLHF scenarios now. [#928](https://github.com/vllm-"
 "project/vllm-ascend/pull/928)"
@@ -4670,7 +4662,6 @@ msgstr ""
 "/vllm-project/vllm-ascend/pull/762)"
 
 #: ../../source/user_guide/release_notes.md:762
-#, fuzzy
 msgid ""
 "Add Qwen3-0.6B test [#717](https://github.com/vllm-project/vllm-"
 "ascend/pull/717)"
@@ -4732,7 +4723,6 @@ msgstr ""
 "project/vllm-ascend/pull/580)"
 
 #: ../../source/user_guide/release_notes.md:773
-#, fuzzy
 msgid ""
 "DeepSeek V3/R1 works with DP, TP and MTP now. Please note that it's still"
 " in experimental status. Let us know if you hit any problem. "
@@ -4972,7 +4962,6 @@ msgid ""
 msgstr "安装指南：https://docs.vllm.ai/projects/ascend/en/v0.7.3/installation.html"
 
 #: ../../source/user_guide/release_notes.md:816
-#, fuzzy
 msgid ""
 "Add Ascend Custom Ops framework. Developers now can write customs ops "
 "using AscendC. An example ops `rotary_embedding` is added. More tutorials"
