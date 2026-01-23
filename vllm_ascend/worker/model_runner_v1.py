@@ -996,6 +996,8 @@ class NPUModelRunner(GPUModelRunner):
                                 1:pad_size +
                                 1] * self.uniform_decode_query_len + last_query_loc
                         self.query_start_loc.copy_to_gpu(num_reqs_padded + 1)
+                        self.seq_lens.np[num_reqs:].fill(0)
+                        self.seq_lens.copy_to_gpu(num_reqs_padded)
 
                     # So we are trying to simulate the behavior of GPUModelRunner's
                     # prepare_inputs for uniform decode mode by padding query_start_loc
