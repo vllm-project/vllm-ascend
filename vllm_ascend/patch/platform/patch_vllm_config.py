@@ -434,4 +434,3 @@ def post_init(self):
 
 
 vllm.config.VllmConfig.__post_init__ = post_init
-# vllm.config.vllm.VllmConfig.__post_init__ = post_init
