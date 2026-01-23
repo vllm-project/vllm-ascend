@@ -3,9 +3,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import (CacheConfig, CompilationConfig, CUDAGraphMode,
-                         ModelConfig, SchedulerConfig, SpeculativeConfig,
-                         VllmConfig)
+from vllm.config import (CacheConfig, CompilationConfig, CompilationMode,
+                         CUDAGraphMode, ModelConfig, SchedulerConfig,
+                         SpeculativeConfig, VllmConfig)
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -72,7 +72,6 @@ class TestMtpProposer:
         runner.pcp_rank = 0
         runner.max_num_tokens = 4096
         runner.max_num_reqs = 256
-        runner._use_aclgraph.return_value = False
         runner.reserved_mc2_mask = None
         return runner
 
@@ -98,12 +97,16 @@ class TestMtpProposer:
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
     def test_init_with_aclgraph(self, mock_cpu_gpu_buffer, vllm_config,
                                 runner):
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.scheduler_config.async_scheduling = False
+        vllm_config.speculative_config.enforce_eager = False
+
         mock_buffer_instance = MagicMock()
         mock_cpu_gpu_buffer.return_value = mock_buffer_instance
-        runner._use_aclgraph.return_value = True
         proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
 
-        assert proposer.use_aclgraph is True
+        assert proposer.use_cuda_graph is True
 
     @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")
