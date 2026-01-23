@@ -166,10 +166,12 @@ class EagleProposer(VllmEagleProposer):
         slot_mapping_lens = self.runner.max_num_tokens + \
             2 * self.pcp_size * self.runner.max_num_reqs
         self.slot_mapping_group = [
-            torch.zeros(
-                slot_mapping_lens, dtype=torch.int32, device=device,
-                pin_memory=self.runner.pin_memory)
-            for _ in range(self.num_speculative_tokens)]
+            torch.zeros(slot_mapping_lens,
+                        dtype=torch.int32,
+                        device=device,
+                        pin_memory=self.runner.pin_memory)
+            for _ in range(self.num_speculative_tokens)
+        ]
 
         self._runnable = self._run_merged_draft
 
@@ -246,9 +248,10 @@ class EagleProposer(VllmEagleProposer):
                                              self.vllm_config,
                                              runtime_mode=CUDAGraphMode.FULL)
             else:
-                self._runnable = ACLGraphWrapper(self._run_merged_draft,
-                                                 self.vllm_config,
-                                                 runtime_mode=CUDAGraphMode.FULL)
+                self._runnable = ACLGraphWrapper(
+                    self._run_merged_draft,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.FULL)
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -316,7 +319,8 @@ class EagleProposer(VllmEagleProposer):
                 common_attn_metadata = self.shallow_copy_metadata(
                     common_attn_metadata)
                 # Set the real slot_mapping.
-                common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
+                common_attn_metadata.slot_mapping = self.slot_mapping_group[
+                    draft_step]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata, AscendAttentionState.ChunkedPrefill)
                 per_layer_attn_metadata = dict()
@@ -324,13 +328,12 @@ class EagleProposer(VllmEagleProposer):
                     per_layer_attn_metadata[layer_name] = attn_metadata_eagle
                 multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
-        model_input_ids = self.input_ids[:num_tokens]
         model_positions = self.positions[:num_tokens]
-        model_previous_hidden_states = self.hidden_states[:num_tokens]
 
         batch_size = num_tokens // (self.num_speculative_tokens + 1)
         with set_ascend_forward_context(
-                multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
+                multi_steps_attn_metadata[0]
+                if multi_steps_attn_metadata else None,
                 self.vllm_config,
                 num_tokens=num_tokens,
                 num_actual_tokens=0,
@@ -349,8 +352,7 @@ class EagleProposer(VllmEagleProposer):
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
             )
             forward_context = get_forward_context()
-            if (forward_context.cudagraph_runtime_mode
-                    == CUDAGraphMode.FULL
+            if (forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
                     and not forward_context.capturing):
                 self._update_full_graph_params(forward_context, num_tokens,
                                                multi_steps_attn_metadata)
@@ -426,7 +428,8 @@ class EagleProposer(VllmEagleProposer):
         self.slot_mapping_group[0][:slot_mapping_lens].copy_(
             common_attn_metadata.slot_mapping[:slot_mapping_lens])
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
-        common_attn_metadata.slot_mapping = self.slot_mapping_group[0][:slot_mapping_lens]
+        common_attn_metadata.slot_mapping = self.slot_mapping_group[
+            0][:slot_mapping_lens]
 
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
@@ -475,7 +478,8 @@ class EagleProposer(VllmEagleProposer):
             draft_token_ids = self._runnable(
                 num_input_tokens=num_input_tokens,
                 batch_size=batch_size,
-                last_token_indices=self.last_token_indices[:last_token_indices_len],
+                last_token_indices=self.
+                last_token_indices[:last_token_indices_len],
                 target_positions=target_positions,
                 inputs_embeds=None,
                 multi_steps_attn_metadata=multi_steps_attn_metadata)
@@ -487,13 +491,14 @@ class EagleProposer(VllmEagleProposer):
                                                multi_steps_attn_metadata)
         return draft_token_ids
 
-    def _run_merged_draft(self,
-                          num_input_tokens,
-                          batch_size,
-                          last_token_indices,
-                          target_positions,
-                          inputs_embeds,
-                          multi_steps_attn_metadata,
+    def _run_merged_draft(
+        self,
+        num_input_tokens,
+        batch_size,
+        last_token_indices,
+        target_positions,
+        inputs_embeds,
+        multi_steps_attn_metadata,
     ) -> torch.Tensor:
         # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all speculative tokens' proposings.
         # `model_input_ids`, `model_positions` and `model_hidden_states` are used to represent the inputs of speculative model.
@@ -615,17 +620,18 @@ class EagleProposer(VllmEagleProposer):
         draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
         return draft_token_ids
 
-    def attn_update_stack_num_spec_norm(self,
-                                        # `draft_step` must start from `1`, no `0`
-                                        draft_step,
-                                        old_attn_metadata,
-                                        old_common_metadata,
-                                        batch_size,
-                                        input_batch_size,
-                                        used_update_positions,
-                                        aclgraph_runtime_mode):
+    def attn_update_stack_num_spec_norm(
+            self,
+            # `draft_step` must start from `1`, no `0`
+            draft_step,
+            old_attn_metadata,
+            old_common_metadata,
+            batch_size,
+            input_batch_size,
+            used_update_positions,
+            aclgraph_runtime_mode):
 
-        assert(draft_step > 0)
+        assert (draft_step > 0)
         attn_metadata = self.shallow_copy_metadata(old_attn_metadata)
 
         if draft_step == 1:
@@ -671,8 +677,9 @@ class EagleProposer(VllmEagleProposer):
 
         # Compute the slot mapping.
         block_numbers = (clamped_positions // block_size)
-        block_ids = attn_metadata.block_tables.gather(
-            dim=1, index=block_numbers.view(-1, 1))
+        block_ids = attn_metadata.block_tables.gather(dim=1,
+                                                      index=block_numbers.view(
+                                                          -1, 1))
         block_ids = block_ids.view(-1)
         slot_mapping_tmp = (block_ids * block_size +
                             clamped_positions % block_size)
@@ -680,15 +687,14 @@ class EagleProposer(VllmEagleProposer):
         # Mask out the slot mappings that exceed the max model length.
         # Otherwise, the KV cache will be inadvertently updated with the
         # padding tokens.
-        slot_mapping_tmp.masked_fill_(exceeds_max_model_len,
-                                      PADDING_SLOT_ID)
+        slot_mapping_tmp.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
         self.slot_mapping_group[draft_step][:slot_mapping_tmp.shape[0]].copy_(
             slot_mapping_tmp.to(torch.int32))
         self.slot_mapping_group[draft_step][slot_mapping_tmp.shape[0]:].fill_(
             PADDING_SLOT_ID)
         # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
-        attn_metadata.slot_mapping = self.slot_mapping_group[draft_step][
-            :slot_mapping_tmp.shape[0]]
+        attn_metadata.slot_mapping = self.slot_mapping_group[
+            draft_step][:slot_mapping_tmp.shape[0]]
 
         return old_common_metadata, attn_metadata
 
@@ -1030,7 +1036,10 @@ class EagleProposer(VllmEagleProposer):
         return num_tokens, input_ids, target_hidden_states, max_query_len, seq_lens, cu_num_tokens
 
     # update full-graph params for one spec token
-    def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
+    def _update_full_graph_params(self,
+                                  forward_context,
+                                  num_tokens,
+                                  draft_attn_metadatas=None):
         if self.vllm_config.model_config.use_mla:
             if self.pcp_size * self.dcp_size > 1:
                 update_mla_attn_dcp_pcp_params(self.update_stream,
@@ -1045,4 +1054,5 @@ class EagleProposer(VllmEagleProposer):
                                            num_tokens)
             else:
                 update_attn_params(self.update_stream, forward_context,
-                                   num_tokens, self.vllm_config, draft_attn_metadatas)
+                                   num_tokens, self.vllm_config,
+                                   draft_attn_metadatas)

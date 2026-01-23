@@ -199,11 +199,9 @@ class ACLGraphWrapper:
         # so that update_attn_params only executes after the previous graph replay has fully completed.
         # If we do not in main model and in full-graph mode when using merge-eagle-graph,
         # we do not need to synchronize.
-        use_eagle = (
-            self.vllm_config.speculative_config.method in ("eagle", "eagle3")
-            if self.vllm_config.speculative_config
-            else False
-        )
+        use_eagle = (self.vllm_config.speculative_config.method in ("eagle",
+                                                                    "eagle3")
+                     if self.vllm_config.speculative_config else False)
         if self.runtime_mode != CUDAGraphMode.FULL or not forward_context.is_draft_model or not use_eagle:
             torch.npu.synchronize()
         entry.aclgraph.replay()
@@ -262,7 +260,10 @@ def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
             event.record(update_stream)
 
 
-def _update_attn_fia_params(update_stream, forward_context, runtime_shape, draft_attn_metadatas=None):
+def _update_attn_fia_params(update_stream,
+                            forward_context,
+                            runtime_shape,
+                            draft_attn_metadatas=None):
     if forward_context.is_draft_model:
         graph_params = get_draft_graph_params()
         attn_metadata = draft_attn_metadatas
@@ -282,7 +283,8 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape, draft
     if num_layers == 0:
         return
     if forward_context.is_draft_model:
-        attn_keys = attn_keys * (len(graph_params.attn_params[runtime_shape]) // num_layers)
+        attn_keys = attn_keys * (
+            len(graph_params.attn_params[runtime_shape]) // num_layers)
     attn_count = 0
     with torch.npu.stream(update_stream):
         for key, param, handle, event in zip(
@@ -298,7 +300,8 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape, draft
             if forward_context.is_draft_model:
                 draft_step = attn_count // num_layers
                 seq_lens = attn_metadata[draft_step][key].seq_lens_list
-                actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
+                actual_seq_lengths_q = attn_metadata[draft_step][
+                    key].actual_seq_lengths_q
                 attn_count = attn_count + 1
             else:
                 seq_lens = attn_metadata[key].seq_lens_list
@@ -327,12 +330,16 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape, draft
             event.record(update_stream)
 
 
-def update_attn_params(update_stream, forward_context, runtime_shape,
-                       vllm_config, draft_attn_metadatas=None):
+def update_attn_params(update_stream,
+                       forward_context,
+                       runtime_shape,
+                       vllm_config,
+                       draft_attn_metadatas=None):
     if using_paged_attention(runtime_shape, vllm_config):
         _update_attn_pa_params(update_stream, forward_context, runtime_shape)
     else:
-        _update_attn_fia_params(update_stream, forward_context, runtime_shape, draft_attn_metadatas)
+        _update_attn_fia_params(update_stream, forward_context, runtime_shape,
+                                draft_attn_metadatas)
 
 
 def update_mla_attn_params(update_stream, forward_context, runtime_shape,

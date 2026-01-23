@@ -73,6 +73,7 @@ class TestMtpProposer:
         runner.max_num_tokens = 4096
         runner.max_num_reqs = 256
         runner.reserved_mc2_mask = None
+        runner.pin_memory = False
         return runner
 
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
