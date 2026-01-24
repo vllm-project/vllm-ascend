@@ -375,6 +375,7 @@ class KVCacheRecvingThread(threading.Thread):
                     self.model_config.hf_text_config.num_key_value_heads //
                     self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
+        self.invalid_block_ids: set[int] = set()
 
     def add_request(self,
                     request_id: str,
@@ -412,6 +413,12 @@ class KVCacheRecvingThread(threading.Thread):
         """
         return self.task_tracker.get_and_clear_finished_requests()
 
+    def get_invalid_block_ids(self) -> set[int]:
+        """Get block IDs that failed to load via Mooncake."""
+        invalid_block_ids = self.invalid_block_ids
+        self.invalid_block_ids = set()
+        return invalid_block_ids
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         self.ready_event.set()
@@ -424,6 +431,7 @@ class KVCacheRecvingThread(threading.Thread):
                     continue
                 self._handle_request(request_data)
             except Exception as e:
+                self.invalid_block_ids.update(request_data.get("local_block_ids", []))
                 logger.error(f"Error in KVCacheTransferThread: {e}")
 
     def _handle_request(self, req_meta: dict[str, Any]):
@@ -894,6 +902,11 @@ class MooncakeConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         """MooncakeConnector does not save explicitly."""
         pass
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Get block IDs that failed to load via Mooncake."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
@@ -1658,6 +1671,18 @@ class MooncakeConnectorWorker:
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 self.kv_send_thread.add_delayed_request(
                     req_id, delay_start_time)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """
+        Return and clear the set of block IDs that failed to load.
+
+        This is called by the scheduler to identify blocks that need
+        to be retried after a Mooncake transfer failure.
+        """
+        result: set[int] = set()
+        if self.kv_recv_thread is not None:
+            result = self.kv_recv_thread.get_invalid_block_ids()
+        return result
 
     def _get_remote_host_info_by_port(self, base_port: int,
                                       remote_handshake_port: int,
