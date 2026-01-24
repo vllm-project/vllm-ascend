@@ -459,7 +459,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     # NOTE: Must process Attention/MLAAttention before MambaBase to maintain
-    # ordering expected by acl_graph.py's _update_attn_fia_params.
+    # ordering expected by graph parameter update logic in attention backends.
     mamba_layers: dict[str, MambaBase] = {}
     for layer_name, attn_module in attn_layers.items():
         if isinstance(attn_module, Attention):
