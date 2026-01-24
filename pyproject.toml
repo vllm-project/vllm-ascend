@@ -61,10 +61,6 @@ exclude = [
     "vllm_ascend/distributed/kv_transfer/utils/**",
     "vllm_ascend/kv_offload/**",
     "vllm_ascend/lora/**",
-    # (6)
-    "vllm_ascend/eplb/**",
-    "vllm_ascend/model_loader/netloader/**",
-    "vllm_ascend/patch/**",
     # (7)
     "vllm_ascend/quantization/**",
     "vllm_ascend/sample/*.py",
@@ -92,6 +88,7 @@ exclude = [
     "vllm_ascend/distributed/parallel_state.py",
     "vllm_ascend/distributed/utils.py",
     "vllm_ascend/xlite/*.py",
+    "vllm_ascend/patch/worker/patch_*.py",
     # (11)
     "vllm_ascend/ops/fused_moe/**",
 ]
