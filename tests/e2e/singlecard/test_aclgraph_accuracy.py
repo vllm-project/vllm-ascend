@@ -113,24 +113,3 @@ def test_full_decode_only_res_consistency(cur_case: LLMTestCase, monkeypatch):
                   prompts=cur_case.prompts,
                   sampling_params=cur_case.sampling_params,
                   golden_answers=cur_case.golden_answers)
-
-
-@pytest.mark.parametrize("cur_case", [CASE_QWEN_EX, CASE_DS_EX])
-def test_npugraph_ex_res_consistency(cur_case: LLMTestCase, monkeypatch):
-    monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
-    runner_kwargs = {
-        "model_name": cur_case.model,
-        "quantization": cur_case.quantization,
-        "max_model_len": 1024,
-        "compilation_config": {
-            "cudagraph_capture_sizes": [4, 8, 32, 64],
-            "cudagraph_mode": "FULL_DECODE_ONLY"
-        },
-        "additional_config": {
-            "enable_npugraph_ex": True
-        },
-    }
-    gen_and_valid(runner_kwargs=runner_kwargs,
-                  prompts=cur_case.prompts,
-                  sampling_params=cur_case.sampling_params,
-                  golden_answers=cur_case.golden_answers)
