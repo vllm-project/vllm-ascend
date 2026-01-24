@@ -38,7 +38,8 @@ def verify_and_update_config(cls, vllm_config) -> None:
         block_size=1,
         num_kv_heads=model_config.get_num_kv_heads(parallel_config),
         head_size=model_config.get_head_size(),
-        dtype=kv_cache_dtype).page_size_bytes
+        dtype=kv_cache_dtype,
+    ).page_size_bytes
 
     model_cls, _ = ModelRegistry.resolve_model_cls(
         model_config.architecture,
@@ -58,23 +59,20 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # block size to multiple of 16, so let's suggest a value
     # that would work (note: FA is currently not compatible
     # with mamba layers, use FlashInfer instead).
-    attn_block_size = block_alignment_bytes * cdiv(
-        mamba_page_size, block_alignment_bytes * attn_page_size_1_token)
+    attn_block_size = block_alignment_bytes * cdiv(mamba_page_size, block_alignment_bytes * attn_page_size_1_token)
 
     # override attention block size if either (a) the
     # user has not set it or (b) the user has set it
     # too small.
-    if (cache_config.block_size is None
-            or cache_config.block_size < attn_block_size):
+    if cache_config.block_size is None or cache_config.block_size < attn_block_size:
         cache_config.block_size = attn_block_size
         logger.info(
-            "Setting attention block size to %d tokens "
-            "to ensure that attention page size is >= mamba page size.",
-            attn_block_size)
+            "Setting attention block size to %d tokens to ensure that attention page size is >= mamba page size.",
+            attn_block_size,
+        )
 
     # compute new attention page size
-    attn_page_size = \
-        cache_config.block_size * attn_page_size_1_token
+    attn_page_size = cache_config.block_size * attn_page_size_1_token
 
     assert attn_page_size >= mamba_page_size
 
@@ -83,15 +81,15 @@ def verify_and_update_config(cls, vllm_config) -> None:
         return
 
     # pad mamba page size to exactly match attention
-    if (cache_config.mamba_page_size_padded is None
-            or cache_config.mamba_page_size_padded != attn_page_size):
-        cache_config.mamba_page_size_padded = (attn_page_size)
-        mamba_padding_pct = 100 * (attn_page_size -
-                                   mamba_page_size) / mamba_page_size
+    if cache_config.mamba_page_size_padded is None or cache_config.mamba_page_size_padded != attn_page_size:
+        cache_config.mamba_page_size_padded = attn_page_size
+        mamba_padding_pct = 100 * (attn_page_size - mamba_page_size) / mamba_page_size
         logger.info(
             "Padding mamba page size by %.2f%% to ensure "
             "that mamba page size and attention page size are "
-            "exactly equal.", mamba_padding_pct)
+            "exactly equal.",
+            mamba_padding_pct,
+        )
 
 
 vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config = verify_and_update_config
