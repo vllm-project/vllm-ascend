@@ -73,7 +73,7 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/*
 
 # Install modelscope (for fast download), ray (for multinode) and torch-npu post version
-RUN python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' 'torch-npu==2.8.0.post1' -i https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+RUN python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' 'torch-npu==2.8.0.post1' --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     python3 -m pip cache purge
 
 RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
