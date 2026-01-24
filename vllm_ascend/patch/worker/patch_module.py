@@ -13,6 +13,7 @@ def _argsort(tensor, *args, **kwargs):
 
 
 class _TorchWrapper:
+
     def __init__(self):
         self._raw_torch = torch
 
@@ -31,6 +32,5 @@ def patch_torch_npu_argsort():
     global _is_patched
     if not _is_patched:
         import vllm.v1.attention.backends.gdn_attn as gdn_attn
-
         gdn_attn.torch = _TorchWrapper()
         _is_patched = True

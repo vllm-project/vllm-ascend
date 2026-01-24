@@ -51,7 +51,6 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
-<<<<<<< HEAD
     # (3)
     "vllm_ascend/attention/*.py",
     "vllm_ascend/core/*.py",
@@ -62,10 +61,6 @@ exclude = [
     "vllm_ascend/distributed/kv_transfer/utils/**",
     "vllm_ascend/kv_offload/**",
     "vllm_ascend/lora/**",
-    # (6)
-    "vllm_ascend/eplb/**",
-    "vllm_ascend/model_loader/netloader/**",
-    "vllm_ascend/patch/**",
     # (7)
     "vllm_ascend/quantization/**",
     "vllm_ascend/sample/*.py",
@@ -74,16 +69,6 @@ exclude = [
     "vllm_ascend/worker/npu_input_batch.py",
     # (8)
     "vllm_ascend/ops/__init__.py",
-=======
-    "vllm_ascend/attention/mla_v1.py",
-    "vllm_ascend/attention/sfa_v1.py",
-    "vllm_ascend/core",
-    "vllm_ascend/distributed",
-    "vllm_ascend/kv_offload",
-    "vllm_ascend/lora",
-    "vllm_ascend/model_loader",
-    "vllm_ascend/ops/fused_moe",
->>>>>>> 1edb56c5 (auto)
     "vllm_ascend/ops/activation.py",
     "vllm_ascend/ops/flashcomm2_oshard_manager.py",
     "vllm_ascend/ops/layernorm.py",

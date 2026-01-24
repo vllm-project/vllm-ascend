@@ -22,7 +22,8 @@ import vllm
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
-from vllm.v1.worker.gpu.spec_decode.eagle import prepare_eagle_decode, prepare_eagle_inputs
+from vllm.v1.worker.gpu.spec_decode.eagle import (prepare_eagle_decode,
+                                                  prepare_eagle_inputs)
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
@@ -53,7 +54,8 @@ def propose(
     # seq_lens) of the target model.
     if aux_hidden_states:
         assert self.method == "eagle3"
-        hidden_states = self.model.combine_hidden_states(torch.cat(aux_hidden_states, dim=-1))
+        hidden_states = self.model.combine_hidden_states(
+            torch.cat(aux_hidden_states, dim=-1))
     else:
         hidden_states = last_hidden_states
     num_tokens = input_batch.num_tokens_after_padding
@@ -93,12 +95,19 @@ def propose(
     seeds = self.seeds[:num_reqs].clone()
     pos = self.input_buffers.positions[:num_reqs].clone()
     # Gather the values and copy them to the pre-allocated buffers.
-    torch.gather(sampling_metadata.temperature, 0, cu_num_logits, out=temperature)
+    torch.gather(sampling_metadata.temperature,
+                 0,
+                 cu_num_logits,
+                 out=temperature)
     torch.gather(sampling_metadata.seeds, 0, cu_num_logits, out=seeds)
     torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
     # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
     # used for draft and target sampling.
-    draft_tokens = gumbel_sample(logits, temperature, seeds, pos + 1, apply_temperature=True)
+    draft_tokens = gumbel_sample(logits,
+                                 temperature,
+                                 seeds,
+                                 pos + 1,
+                                 apply_temperature=True)
     if self.num_speculative_steps == 1:
         # Early exit.
         return draft_tokens.view(-1, 1)
@@ -118,8 +127,9 @@ def propose(
         self.max_num_reqs,
     )
     query_start_loc = self.input_buffers.query_start_loc
-    query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
-    slot_mappings = self.block_tables.compute_slot_mappings(query_start_loc_gpu, pos)
+    query_start_loc_gpu = query_start_loc.gpu[:num_reqs + 1]
+    slot_mappings = self.block_tables.compute_slot_mappings(
+        query_start_loc_gpu, pos)
 
     cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
     if cudagraph_size is not None:
@@ -128,8 +138,8 @@ def propose(
         return self.draft_tokens[:num_reqs]
 
     # Run eager mode.
-    query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1)
-    query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
+    query_start_loc.np[:num_reqs + 1] = np.arange(num_reqs + 1)
+    query_start_loc_cpu = query_start_loc.cpu[:num_reqs + 1]
     # HACK(woosuk)
     seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
     block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
@@ -148,7 +158,8 @@ def propose(
         slot_mappings=slot_mappings,
         kv_cache_config=self.kv_cache_config,
     )
-    self.generate_draft(num_reqs, attn_metadata, num_tokens_across_dp=None)  # FIXME
+    self.generate_draft(num_reqs, attn_metadata,
+                        num_tokens_across_dp=None)  # FIXME
     return self.draft_tokens[:num_reqs]
 
 

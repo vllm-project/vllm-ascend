@@ -41,9 +41,7 @@ class EplbUpdator:
         self.world_size = dist.get_world_size()
         self.device = local_load.device
         shape = (self.world_size, *local_load.shape)
-        self._gather_buffer = torch.empty(shape,
-                                          dtype=local_load.dtype,
-                                          device=self.device)
+        self._gather_buffer = torch.empty(shape, dtype=local_load.dtype, device=self.device)
 
     def init_eplb(self, expert_map_path, process):
         self.rank_id = dist.get_rank()
@@ -139,9 +137,7 @@ class EplbUpdator:
 
         moe_load = self._gather_buffer.permute(1, 0, 2)
         self.shared_dict["moe_load"] = moe_load.cpu()
-        logger.debug(
-            f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-        )
+        logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
 
         if dist.get_rank() == 0:
             self.compute_moe_imbalance(moe_load)
