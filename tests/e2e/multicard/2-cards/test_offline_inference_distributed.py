@@ -21,8 +21,8 @@
 Run `pytest tests/test_offline_inference.py`.
 """
 import os
-from unittest.mock import patch
-
+from unittest.mock import MagicMock, patch
+from vllm.config import set_current_vllm_config
 import pytest
 from vllm import SamplingParams
 
@@ -51,6 +51,17 @@ DEEPSEEK_W4A8_MODELS = [
 GPT_OSS_MODELS = [
     "unsloth/gpt-oss-20b-BF16",
 ]
+
+
+@pytest.fixture
+def default_vllm_config():
+    mock_config = MagicMock()
+
+    mock_config.compilation_config.dispatch_forward_backend = "eager"
+    mock_config.compilation_config.custom_ops = ["all"]
+
+    with set_current_vllm_config(mock_config):
+        yield mock_config
 
 
 def test_deepseek_multistream_moe_tp2():
@@ -296,7 +307,7 @@ def test_qwen3_w4a4_distributed_tp2(model):
 
 
 @pytest.mark.parametrize("model", GPT_OSS_MODELS)
-def test_gpt_oss_distributed_tp2(model):
+def test_gpt_oss_distributed_tp2(model, default_vllm_config):
     example_prompts = [
         "Hello, my name is",
     ]
