@@ -176,12 +176,16 @@ class TestAscendMLAImpl(TestBase):
         vllm_config = MagicMock()
         speculative_config = MagicMock()
         model_config = MagicMock()
+        parallel_config = MagicMock()
+        parallel_config.prefill_context_parallel_size = 1
+        parallel_config.tensor_parallel_size = 2
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
         model_config.dtype = torch.float16
         vllm_config.model_config = model_config
         get_current_vllm_config.return_value = vllm_config
         vllm_config.additional_config = {"refresh": True}
+        vllm_config.parallel_config = parallel_config
         init_ascend_config(vllm_config)
 
         num_heads = 256
@@ -439,22 +443,18 @@ class TestAscendMLAImpl(TestBase):
         decode_metadata = MagicMock()
         decode_metadata.actual_seq_lengths_q = MagicMock()
         decode_metadata.seq_lens_list = MagicMock()
-        decode_metadata.batch_seq_mask = torch.tensor([True, False],
-                                                      dtype=torch.bool)
-
-        result = _process_attn_out_lse(attn_output, softmax_lse,
-                                       decode_metadata.batch_seq_mask)
+        result = _process_attn_out_lse(attn_output, softmax_lse)
 
         self.assertEqual(result.shape[0], B * self.impl.pcp_size)
         self.assertEqual(result.shape[1], N)
         self.assertEqual(result.shape[2], self.impl.kv_lora_rank + 1)
 
     @patch('vllm_ascend.attention.context_parallel.mla_cp.get_forward_context')
-    @patch("torch_npu.atb.npu_multi_head_latent_attention")
+    @patch("torch_npu.npu_fused_infer_attention_score")
     @patch('torch_npu.npu_attention_update')
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_forward_decode_pcp_dcp(self, mock_npu_attention_update,
-                                    mock_npu_multi_head_latent_attention,
+                                    mock_npu_fused_infer_attention_score,
                                     mock_get_forward_context):
         self.impl.dcp_size = 2
         self.impl.pcp_size = 2
@@ -470,22 +470,20 @@ class TestAscendMLAImpl(TestBase):
 
         q_nope = torch.randn(B, N, self.impl.qk_nope_head_dim)
         q_pe = torch.randn(B, N, self.impl.qk_rope_head_dim)
-        k_nope = torch.randn(NB, BS, 1, self.impl.kv_lora_rank)
-        k_pe = torch.randn(NB, BS, 1, self.impl.qk_rope_head_dim)
+        k_nope = torch.randn(NB, 1, BS, self.impl.kv_lora_rank)
+        k_pe = torch.randn(NB, 1, BS, self.impl.qk_rope_head_dim)
 
         attn_metadata = MagicMock()
         attn_metadata.attn_state = AscendAttentionState.SpecDecoding
         attn_metadata.decode = MagicMock()
         attn_metadata.decode.actual_seq_lengths_q = MagicMock()
         attn_metadata.decode.seq_lens_list = MagicMock()
-        attn_metadata.decode.batch_seq_mask = torch.tensor([False, False],
-                                                           dtype=torch.bool)
 
         self.impl.enable_kv_nz = True
 
         mock_npu_attention_update.return_value = (torch.randn(
             B, self.impl.num_heads, self.impl.kv_lora_rank), None)
-        mock_npu_multi_head_latent_attention.return_value = [
+        mock_npu_fused_infer_attention_score.return_value = [
             torch.randn(B, N, self.impl.kv_lora_rank),
             torch.randn(B, N, 1)
         ]
@@ -886,12 +884,9 @@ class TestAscendMLAImpl(TestBase):
             # Inputs
             attn_output = torch.randn(B, H, D)
             softmax_lse = torch.randn(B, H, 1)
-            batch_seq_mask = torch.tensor([False, True, False, False])  # [B]
             decode_meta = MagicMock()
-            decode_meta.batch_seq_mask = batch_seq_mask
 
-            result = _process_attn_out_lse(attn_output, softmax_lse,
-                                           batch_seq_mask)
+            result = _process_attn_out_lse(attn_output, softmax_lse)
             # [PCP * S, DCP * H, D + 1]
             self.assertIsInstance(result, torch.Tensor)
             assert result.shape == (B * self.impl.pcp_size, H, D + 1)

@@ -49,12 +49,9 @@ jobs:
       fail-fast: false
       matrix:
         test_config:
-          - name: qwen3-8b
-            os: linux-aarch64-a2-1
-            tests: tests/e2e/nightly/single_node/models/test_qwen3_8b.py
           - name: qwen3next
             os: linux-aarch64-a2-4
-            ests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
           - name: qwen3-32b
             os: linux-aarch64-a2-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_32b.py
@@ -69,7 +66,7 @@ jobs:
             tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: v0.13.0
+      vllm: v0.14.0
       runner: ${{ matrix.test_config.os }}
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
@@ -140,8 +137,8 @@ jobs:
               - Qwen3-Omni-30B-A3B-Instruct
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: v0.13.0
+      vllm: v0.14.0
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11'
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11'
       upload: false

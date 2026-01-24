@@ -9,6 +9,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
+from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -19,14 +20,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     KVPoolScheduler, get_zmq_rpc_path_lookup)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import \
     KVPoolWorker
-from vllm_ascend.utils import vllm_version_is
-
-# isort: off
-if vllm_version_is('0.13.0'):
-    from vllm.attention.backends.abstract import AttentionMetadata  # type: ignore
-else:
-    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
-# isort: on
 
 
 class AscendStoreConnector(KVConnectorBase_V1):
@@ -145,7 +138,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         done_sending, done_recving = self.connector_worker.get_finished(
-            finished_req_ids)
+            finished_req_ids, self._get_connector_metadata())
         return done_sending, done_recving
 
 
