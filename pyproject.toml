@@ -88,6 +88,7 @@ exclude = [
     "vllm_ascend/distributed/parallel_state.py",
     "vllm_ascend/distributed/utils.py",
     "vllm_ascend/xlite/*.py",
+    "vllm_ascend/patch/worker/patch_*.py",
     # (11)
     "vllm_ascend/ops/fused_moe/**",
 ]
