@@ -21,7 +21,7 @@ Schemes are automatically registered via the @register_scheme decorator.
 
 Usage:
     from vllm_ascend.quantization.methods import get_scheme_class
-    
+
     # Get a scheme class by quant_type and layer_type
     scheme_cls = get_scheme_class("W8A8_DYNAMIC", "linear")
     scheme = scheme_cls()
@@ -30,28 +30,26 @@ Usage:
 from typing import Any
 
 # Import base classes
-from .base import (AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme,
-                   QuantType)
+from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, QuantType
+
 # Import registry functions
 from .registry import get_scheme_class, register_scheme
+
 # Import all scheme classes for external access
 from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
-from .w4a8 import (AscendW4A8DynamicFusedMoEMethod,
-                   AscendW4A8DynamicLinearMethod)
+from .w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
 from .w4a16 import AscendW4A16FusedMoEMethod
-from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
-                           AscendW8A8DynamicLinearMethod)
+from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from .w8a8_pdmix import (AscendW8A8PDMixFusedMoeMethod,
-                         AscendW8A8PDMixLinearMethod)
+from .w8a8_pdmix import AscendW8A8PDMixFusedMoeMethod, AscendW8A8PDMixLinearMethod
 from .w8a8_static import AscendW8A8LinearMethod
 from .w8a16 import AscendW8A16LinearMethod
 
 
 def is_mx_quant_type(instance: Any) -> bool:
     """Checks if the quantization method is a microscaling (MX) type."""
-    MX_QUANT_TYPES = (AscendW8A8MXFP8DynamicLinearMethod, )
+    MX_QUANT_TYPES = (AscendW8A8MXFP8DynamicLinearMethod,)
     return isinstance(instance, MX_QUANT_TYPES)
 
 
