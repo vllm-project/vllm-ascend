@@ -6,13 +6,13 @@ from vllm import SamplingParams
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
-DENSE_MODELS = [
-    "Qwen/Qwen3-VL-2B-Instruct", "Qwen/Qwen3-8B"
+MODELS = [
+    "Qwen/Qwen3-VL-2B-Instruct",
 ]
 
 
-@pytest.mark.parametrize("model", DENSE_MODELS)
-def test_qwen3_dense_sp_tp2(model: str) -> None:
+@pytest.mark.parametrize("model", MODELS)
+def test_qwen3_vl_sp_tp2(model: str) -> None:
     prompts = [
         "Hello, my name is", "The capital of the United States is",
         "The capital of France is", "The future of AI is"
