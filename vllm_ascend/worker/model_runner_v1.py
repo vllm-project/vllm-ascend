@@ -658,7 +658,8 @@ class NPUModelRunner(GPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1:num_reqs + 1] = cu_num_tokens
-        self.query_start_loc.np[num_reqs + 1:].fill(cu_num_tokens[-1])
+        # Note: Due to the FIA operator limitation, here we pad so that hidden_states.shape[0] and self.query_start_loc[num_reqs_padded] are equal
+        self.query_start_loc.np[num_reqs + 1:] = self.arange_np[1:self.max_num_reqs + 1 - num_reqs] * self.uniform_decode_query_len + cu_num_tokens[-1]
         self.query_start_loc.copy_to_gpu()
 
         self.seq_lens.np[:num_reqs] = (
@@ -1944,10 +1945,11 @@ class NPUModelRunner(GPUModelRunner):
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 if self.pcp_size == 1:
                     slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
-                    blk_table_tensor[num_reqs:num_reqs_padded].fill_(-1)
+                    blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
             if self.pcp_size > 1:
                 slot_mapping = self.pcp_manager.get_padded_slot_mapping(
                     num_tokens,
+                    num_tokens_padded,
                     slot_mapping,
                 )
             return blk_table_tensor, slot_mapping
@@ -1955,15 +1957,6 @@ class NPUModelRunner(GPUModelRunner):
         long_seq_metdadata = _get_pcp_metadata(num_tokens)
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
 
-        if for_cudagraph_capture:
-            self.attn_state = AscendAttentionState.DecodeOnly
-            if self.speculative_config and \
-                    self.speculative_config.method == "mtp":
-                # `AscendAttentionState.SpecDecoding` is only designed for mla
-                if self.vllm_config.model_config.use_mla:
-                    self.attn_state = AscendAttentionState.SpecDecoding
-                else:
-                    self.attn_state = AscendAttentionState.ChunkedPrefill
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -2204,6 +2197,14 @@ class NPUModelRunner(GPUModelRunner):
         if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
             if create_mixed_batch:
                 raise NotImplementedError("create_mixed_batch is used for warmup deepgemm, vllm-ascend does not need it")
+            self.attn_state = AscendAttentionState.DecodeOnly
+            if self.speculative_config and \
+                    self.speculative_config.method == "mtp":
+                # `AscendAttentionState.SpecDecoding` is only designed for mla
+                if self.vllm_config.model_config.use_mla:
+                    self.attn_state = AscendAttentionState.SpecDecoding
+                else:
+                    self.attn_state = AscendAttentionState.ChunkedPrefill
             # The reason why we use a fixed seq_len rather than max_query_len is that
             # _npu_paged_attention_get_workspace only returns max workspace with specific
             # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
