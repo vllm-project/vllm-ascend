@@ -51,11 +51,6 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
-    # (3)
-    "vllm_ascend/attention/*.py",
-    "vllm_ascend/core/*.py",
-    "vllm_ascend/distributed/device_communicators/**",
-    "vllm_ascend/distributed/utils.py",
     # (5)
     "vllm_ascend/distributed/kv_transfer/kv_pool/**",
     "vllm_ascend/distributed/kv_transfer/utils/**",
