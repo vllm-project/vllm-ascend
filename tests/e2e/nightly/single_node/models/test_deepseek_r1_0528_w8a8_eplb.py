@@ -56,7 +56,6 @@ async def test_models(model: str) -> None:
         "OMP_NUM_THREADS": "100",
         "OMP_PROC_BIND": "false",
         "HCCL_BUFFSIZE": "200",
-        "VLLM_ASCEND_ENABLE_MLAPO": "1",
         "VLLM_RPC_TIMEOUT": "3600000",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000",
         "DISABLE_L2_CACHE": "1",

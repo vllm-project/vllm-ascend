@@ -38,14 +38,11 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import \
     global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     align_memory, get_transfer_timeout_value, kv_alltoall_and_rearrange)
-from vllm_ascend.utils import npu_stream_switch, vllm_version_is
+from vllm_ascend.utils import npu_stream_switch
 
 # isort: off
 if TYPE_CHECKING:
-    if vllm_version_is('0.13.0'):
-        from vllm.attention.backends.abstract import AttentionMetadata  # type: ignore
-    else:
-        from vllm.attention.backends import AttentionMetadata  # type: ignore
+    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -570,10 +567,26 @@ class MooncakeLayerwiseConnectorScheduler:
         self._reqs_need_recv: dict[str, tuple[Request, list[int],
                                               list[int]]] = {}
         self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
-
         self.executor = ThreadPoolExecutor(32)
-        self.metaserver_client = httpx.Client(
-            limits=httpx.Limits(max_connections=100000), timeout=None)
+        tls_config: dict[
+            str, Any] = vllm_config.kv_transfer_config.get_from_extra_config(
+                "tls_config", {})
+        ssl_keyfile = tls_config.get("ssl_keyfile", None)
+        ssl_certfile = tls_config.get("ssl_certfile", None)
+        ssl_ca_certs = tls_config.get("ssl_ca_certs", False)
+        ssl_keyfile_password = tls_config.get("ssl_keyfile_password", None)
+        self.cert_path = (ssl_certfile, ssl_keyfile, ssl_keyfile_password)
+        self.ssl_enable = tls_config.get("ssl_enable", False)
+        self.ca_path = ssl_ca_certs
+        if self.ssl_enable:
+            self.metaserver_client = httpx.Client(
+                limits=httpx.Limits(max_connections=100000),
+                timeout=None,
+                cert=self.cert_path,
+                verify=self.ca_path)
+        else:
+            self.metaserver_client = httpx.Client(
+                limits=httpx.Limits(max_connections=100000), timeout=None)
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -648,11 +661,10 @@ class MooncakeLayerwiseConnectorScheduler:
                 remote_host=self.side_channel_host,
                 remote_port=self.side_channel_port,
             )
-            future = self.executor.submit(
-                self._access_metaserver,
-                url=params.get("metaserver", None),
-                message=kv_transfer_params,
-            )
+
+            future = self.executor.submit(self._access_metaserver,
+                                          url=params.get("metaserver", None),
+                                          message=kv_transfer_params)
 
             def handle_exception(future):
                 if future.exception():

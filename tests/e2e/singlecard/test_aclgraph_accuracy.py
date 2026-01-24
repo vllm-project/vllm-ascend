@@ -57,9 +57,9 @@ CASE_DS_FULL_DECODE_ONLY = LLMTestCase(
     quantization="ascend",
     prompts=PROMPTS_LONG,
     golden_answers=[
-        '\n\nSelect an assignment template',
-        '\n\nSelect an assignment template',
-        '\n\nSelect an assignment template'
+        "\n\nSelect an assignment template",
+        "\n\nI'm not sure how to approach this problem. I'm not sure if I should use the law of total probability or if I should use",
+        "\n\n## Answer\n\n$a + b + c = 0$\n\nSolution\n\nLet $x$ be the common root of the equations"
     ])
 
 CASE_QWEN_EX = LLMTestCase(
@@ -75,11 +75,10 @@ CASE_DS_EX = LLMTestCase(model="vllm-ascend/DeepSeek-V2-Lite-W8A8",
                          quantization="ascend",
                          prompts=PROMPTS_LONG,
                          golden_answers=[
-                             '\n\nSelect an assignment template',
-                             '\n\nSelect an assignment template',
-                             '\n\nSelect an assignment template'
+                             "\n\nSelect an assignment template",
+                             "\n\nI'm not sure how to approach this problem. I'm not sure if I should use the law of total probability or if I should use",
+                             "\n\n## Answer\n\n$a + b + c = 0$\n\nSolution\n\nLet $x$ be the common root of the equations"
                          ])
-
 
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH])
 def test_piecewise_res_consistency(cur_case: LLMTestCase):
@@ -112,7 +111,6 @@ def test_full_decode_only_res_consistency(cur_case: LLMTestCase, monkeypatch):
                   prompts=cur_case.prompts,
                   sampling_params=cur_case.sampling_params,
                   golden_answers=cur_case.golden_answers)
-
 
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_EX, CASE_DS_EX])
 def test_npugraph_ex_res_consistency(cur_case: LLMTestCase, monkeypatch):

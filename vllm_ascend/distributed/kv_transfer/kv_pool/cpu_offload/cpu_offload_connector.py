@@ -24,25 +24,14 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.metadata import (
     MetadataServer, MetadataServerProc, MLAConfig)
-from vllm_ascend.utils import vllm_version_is
 
-# isort: off
-if vllm_version_is('0.13.0'):
-    from vllm.attention.backends.abstract import AttentionType  # type: ignore
-else:
-    from vllm.v1.attention.backend import AttentionType  # type: ignore
 
 if TYPE_CHECKING:
-    if vllm_version_is('0.13.0'):
-        from vllm.attention.backends.abstract import \
-            AttentionMetadata  # type: ignore
-    else:
-        from vllm.v1.attention.backend import AttentionType  #type: ignore
+    from vllm.v1.attention.backend import AttentionMetadata  #type: ignore
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
-# isort: on
 
 
 @dataclass

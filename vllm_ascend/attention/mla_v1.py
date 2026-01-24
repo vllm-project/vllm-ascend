@@ -10,7 +10,10 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.v1.attention.backend import (  # type: ignore
+    AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend import envs
@@ -22,7 +25,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata, ascend_chunked_prefill_workspace_size,
     enable_cp, maybe_save_kv_layer_to_connector, split_decodes_and_prefills,
-    trans_rope_weight, transdata, wait_for_kv_layer_from_connector)
+    trans_rope_weight, transdata, wait_for_kv_layer_from_connector,
+    enabling_malpo)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
     update_draft_graph_params_workspaces, update_graph_params_workspaces)
@@ -32,25 +36,14 @@ from vllm_ascend.ops.layer_shard_linear import (
     register_all_layers_to_shard_weight_series)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, maybe_trans_nz,
-                               vllm_version_is, weak_ref_tensors)
+                               weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
-# isort: off
-if vllm_version_is('0.13.0'):
-    from vllm.v1.attention.backends.utils import AttentionCGSupport
-    from vllm.attention.backends.abstract import (  # type: ignore
-        AttentionBackend, MLAAttentionImpl)
-    from vllm.attention.backends.utils import PAD_SLOT_ID  # type: ignore
-else:
-    from vllm.v1.attention.backend import (  # type: ignore
-        AttentionBackend, AttentionCGSupport, MLAAttentionImpl)
-    from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
-# isort: on
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 BUILD_METADATA_STEP_PREFILL = 0
@@ -141,7 +134,6 @@ class AscendMLADecodeMetadata:
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     cp_seq_len: torch.Tensor = None
-    batch_seq_mask: torch.Tensor = None
 
 
 @dataclass
@@ -584,7 +576,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             self.block_table = self.block_table[:self.graph_pad_size, ...]
         seq_lens_list = self.seq_lens.tolist()
 
-        cp_seq_len, batch_seq_mask = None, None
+        cp_seq_len = None
 
         if self.graph_pad_size > num_reqs:
             if self.speculative_config.disable_padded_drafter_batch:
@@ -645,8 +637,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             actual_seq_lengths_q=actual_seq_lengths_q,
             sin=sin[:self.num_decode_tokens, ...],
             cos=cos[:self.num_decode_tokens, ...],
-            cp_seq_len=cp_seq_len,
-            batch_seq_mask=batch_seq_mask)
+            cp_seq_len=cp_seq_len)
         return decode_metadata
 
     def build_for_graph_capture(
@@ -741,7 +732,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
+        self.enable_mlapo = enabling_malpo(self.vllm_config)
 
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         self.layer_sharding_kwargs = []
@@ -1491,7 +1482,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # MLA Preprocess
         if self.enable_mlapo and \
-            not has_prefill and \
             attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv)

@@ -31,7 +31,6 @@ MODELS = [
 MODES = [
     "single",
     "aclgraph",
-    "aclgraph_mlapo",
 ]
 
 prompts = [
@@ -88,8 +87,6 @@ async def test_models(model: str, mode: str) -> None:
     ]
     if mode == "single":
         server_args.append("--enforce-eager")
-    if mode == "aclgraph_mlapo":
-        env_dict["VLLM_ASCEND_ENABLE_MLAPO"] = "1"
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,

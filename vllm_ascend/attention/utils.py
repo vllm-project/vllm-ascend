@@ -9,6 +9,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
+from vllm_ascend import envs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
 
 
@@ -302,3 +303,8 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
     )
     nz_mat = torch.reshape(nz_mat, (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3]))
     return nz_mat
+
+
+def enabling_malpo(vllm_config: VllmConfig) -> bool:
+    is_decode_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+    return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)
