@@ -52,15 +52,8 @@ class AscendRMSNorm(RMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
-            if get_ascend_device_type() == AscendDeviceType._310P:
-                orig_dtype = residual.dtype
-                x = x + residual.to(x.dtype)
-                residual = x.to(orig_dtype)
-                x, _ = torch_npu.npu_rms_norm(x, self.weight,
-                                              self.variance_epsilon)
-            elif enable_custom_op():
+            if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon)
             else:
@@ -88,13 +81,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
-            if get_ascend_device_type() == AscendDeviceType._310P:
-                orig_dtype = residual.dtype
-                x = x + residual.to(x.dtype)
-                residual = x.to(orig_dtype)
-                x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
-                                              self.variance_epsilon)
-            elif enable_custom_op():
+            if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None,
                     self.variance_epsilon)
