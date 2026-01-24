@@ -7,8 +7,7 @@ from typing import Any
 import torch
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import \
-    Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
@@ -20,10 +19,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 
 
 class KVTransferThread(threading.Thread):
-
-    def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 block_size: int, tp_rank: int, dcp_size: int,
-                 ready_event: threading.Event, name: str):
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        dcp_size: int,
+        ready_event: threading.Event,
+        name: str,
+    ):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
         self.ready_event = ready_event
@@ -39,7 +44,7 @@ class KVTransferThread(threading.Thread):
 
     def add_request(
         self,
-        request: ReqMeta,
+        request: ReqMeta | LasyerMultiBlockReqMeta,
     ) -> torch.Tensor:
         self.request_queue.put(request)
 
@@ -98,17 +103,20 @@ class KVTransferThread(threading.Thread):
 
 
 class KVCacheStoreSendingThread(KVTransferThread):
-
-    def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 block_size: int, tp_rank: int, dcp_size: int, put_step: int,
-                 kv_role: str, ready_event: threading.Event):
-        super().__init__(m_store,
-                         token_database,
-                         block_size,
-                         tp_rank,
-                         dcp_size,
-                         ready_event,
-                         name="KVCacheSendingThread")
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        dcp_size: int,
+        put_step: int,
+        kv_role: str,
+        ready_event: threading.Event,
+    ):
+        super().__init__(
+            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheSendingThread"
+        )
         self.put_step = put_step
         self.kv_role = kv_role
         self.stored_requests = defaultdict[str, int](int)
@@ -139,16 +147,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.request_queue.task_done()
             return
 
-        for start, end, key in self.token_database.process_tokens(
-                token_len, req_meta.block_hashes):
+        for start, end, key in self.token_database.process_tokens(token_len, req_meta.block_hashes):
             starts.append(start)
             ends.append(end)
             keys.append(key.to_string())
 
         if not self.dcp_size > 1:
-            starts = starts[self.tp_rank % self.put_step::self.put_step]
-            ends = ends[self.tp_rank % self.put_step::self.put_step]
-            keys = keys[self.tp_rank % self.put_step::self.put_step]
+            starts = starts[self.tp_rank % self.put_step :: self.put_step]
+            ends = ends[self.tp_rank % self.put_step :: self.put_step]
+            keys = keys[self.tp_rank % self.put_step :: self.put_step]
 
         if not keys:
             self.dec_stored_request(req_id)
@@ -165,8 +172,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys = keys[skip_block_num:]
 
         logger.info(
-            "Storing KV cache for %d out of %d blocks "
-            "(skip_block_num=%d) for request %s",
+            "Storing KV cache for %d out of %d blocks (skip_block_num=%d) for request %s",
             len(keys),
             token_len // self.block_size,
             skip_block_num,
@@ -183,14 +189,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
             addrs = []
             sizes = []
             for index, start in enumerate(starts):
-                addr, size, _ = self.token_database.prepare_value(
-                    start, ends[index], block_ids)
+                addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids)
                 addrs.append(addr)
                 sizes.append(size)
 
             if self.kv_role == "kv_consumer":
-                keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(
-                    keys, addrs, sizes)
+                keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
             if current_event is not None:
                 current_event.synchronize()
@@ -201,69 +205,69 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
 
 class KVCacheStoreRecvingThread(KVTransferThread):
-
-    def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 block_size: int, tp_rank: int, dcp_size: int,
-                 ready_event: threading.Event):
-        super().__init__(m_store,
-                         token_database,
-                         block_size,
-                         tp_rank,
-                         dcp_size,
-                         ready_event,
-                         name="KVCacheStoreRecvingThread")
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        dcp_size: int,
+        ready_event: threading.Event,
+    ):
+        super().__init__(
+            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
+        )
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
         mask_num = (
             req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
-            // self.block_size * self.block_size)
+            // self.block_size
+            * self.block_size
+        )
         addr_list = []
         size_list = []
         key_list = []
-        for start, end, key in self.token_database.process_tokens(
-                token_len, req_meta.block_hashes, mask_num):
-            addr, size, _ = self.token_database.prepare_value(
-                start, end, req_meta.block_ids)
+        for start, end, key in self.token_database.process_tokens(token_len, req_meta.block_hashes, mask_num):
+            addr, size, _ = self.token_database.prepare_value(start, end, req_meta.block_ids)
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_c = key_list[self.tp_rank %
-                              len(key_list):] + key_list[:self.tp_rank %
-                                                         len(key_list)]
-        addr_list_c = addr_list[self.tp_rank %
-                                len(addr_list):] + addr_list[:self.tp_rank %
-                                                             len(addr_list)]
-        size_list_c = size_list[self.tp_rank %
-                                len(size_list):] + size_list[:self.tp_rank %
-                                                             len(size_list)]
+        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+        addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+        size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
         self.m_store.get(key_list_c, addr_list_c, size_list_c)
         self.set_finished_request(req_id)
         self.request_queue.task_done()
 
 
 class KVCacheStoreLayerSendingThread(KVTransferThread):
-
-    def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 block_size: int, tp_rank: int, dcp_size: int, put_step: int,
-                 ready_event: threading.Event, num_layers: int):
-        super().__init__(m_store,
-                         token_database,
-                         block_size,
-                         tp_rank,
-                         dcp_size,
-                         ready_event,
-                         name="KVCacheStoreLayerSendingThread")
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        dcp_size: int,
+        put_step: int,
+        ready_event: threading.Event,
+        num_layers: int,
+    ):
+        super().__init__(
+            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreLayerSendingThread"
+        )
         self.final_layer_id = num_layers - 1
         self.put_step = put_step
 
     def add_request(  # type: ignore[override]
-            self, req_meta: ReqMeta) -> torch.Tensor:
+        self, req_meta: ReqMeta
+    ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
     def _handle_request(  # type: ignore[override]
-            self, req_meta: LasyerMultiBlockReqMeta):
+        self, req_meta: LasyerMultiBlockReqMeta
+    ):
         starts = req_meta.starts
         ends = req_meta.ends
         keys = req_meta.keys
@@ -272,9 +276,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         total_block = len(keys)
         is_last_chunk = req_meta.is_last_chunk
         if not self.dcp_size > 1:
-            starts = starts[self.tp_rank % self.put_step::self.put_step]
-            ends = ends[self.tp_rank % self.put_step::self.put_step]
-            keys = keys[self.tp_rank % self.put_step::self.put_step]
+            starts = starts[self.tp_rank % self.put_step :: self.put_step]
+            ends = ends[self.tp_rank % self.put_step :: self.put_step]
+            keys = keys[self.tp_rank % self.put_step :: self.put_step]
 
         if not keys:
             if is_last_chunk:
@@ -300,7 +304,8 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         size_list = []
         for index, key in enumerate(key_list):
             addr, size = self.token_database.prepare_value_layer(
-                starts[index], ends[index], req_meta.block_ids, layer_id)
+                starts[index], ends[index], req_meta.block_ids, layer_id
+            )
             addr_list.append(addr)
             size_list.append(size)
 
@@ -313,8 +318,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.request_queue.task_done()
 
         logger.info(
-            "Storing KV cache for %d out of %d blocks "
-            "(skip_block_num=%d) for request %s",
+            "Storing KV cache for %d out of %d blocks (skip_block_num=%d) for request %s",
             len(keys),
             total_block,
             skip_block_num,
@@ -323,44 +327,42 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
-
-    def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 block_size: int, tp_rank: int, dcp_size: int,
-                 ready_event: threading.Event, get_event: threading.Event):
-        super().__init__(m_store,
-                         token_database,
-                         block_size,
-                         tp_rank,
-                         dcp_size,
-                         ready_event,
-                         name="KVCacheStoreLayerRecvingThread")
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        dcp_size: int,
+        ready_event: threading.Event,
+        get_event: threading.Event,
+    ):
+        super().__init__(
+            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreLayerRecvingThread"
+        )
         self.get_event = get_event
 
     def add_request(  # type: ignore[override]
-            self, req_meta: LasyerMultiBlockReqMeta) -> torch.Tensor:
+        self, req_meta: LasyerMultiBlockReqMeta
+    ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
     def _handle_request(  # type: ignore[override]
-            self, req_meta: LasyerMultiBlockReqMeta):
+        self, req_meta: LasyerMultiBlockReqMeta
+    ):
         addr_list = []
         size_list = []
         key_list = []
         for index, key in enumerate(req_meta.keys):
             addr, size = self.token_database.prepare_value_layer(
-                req_meta.starts[index], req_meta.ends[index],
-                req_meta.block_ids, req_meta.layer_id)
+                req_meta.starts[index], req_meta.ends[index], req_meta.block_ids, req_meta.layer_id
+            )
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_c = key_list[self.tp_rank %
-                              len(key_list):] + key_list[:self.tp_rank %
-                                                         len(key_list)]
-        addr_list_c = addr_list[self.tp_rank %
-                                len(addr_list):] + addr_list[:self.tp_rank %
-                                                             len(addr_list)]
-        size_list_c = size_list[self.tp_rank %
-                                len(size_list):] + size_list[:self.tp_rank %
-                                                             len(size_list)]
+        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+        addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+        size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
         self.m_store.get(key_list_c, addr_list_c, size_list_c)
 
         self.request_queue.task_done()
