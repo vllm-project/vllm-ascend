@@ -259,13 +259,13 @@ Content of the run_proxy.sh script
 
 ```shell
 python3 epd_load_balance_proxy_layerwise_server_example.py \
-    --encoder-hosts 127.0.0.1 127.0.0.1 \
+    --encoder-hosts 127.0.0.1 \
     --encoder-ports 23001 23002 \
-    --prefiller-hosts 127.0.0.1 127.0.0.1 \
-    --prefiller-ports 33005 33003 \
-    --decoder-hosts 127.0.0.1 127.0.0.1 \
-    --decoder-ports 33006 33007 \
-    --host 7.150.13.44 \
+    --prefiller-hosts 127.0.0.1 \
+    --prefiller-ports 33003 \
+    --decoder-hosts 127.0.0.1 \
+    --decoder-ports 33006 \
+    --host 127.0.0.1 \
     --port 8001
 ```
 `--prefiller-hosts`: Prefill node IP address.<br>
