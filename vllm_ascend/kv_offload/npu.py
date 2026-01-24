@@ -3,6 +3,7 @@ from collections.abc import Iterator
 import torch
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
@@ -14,10 +15,7 @@ from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandler
 
 
 class NPUOffloadingSpec(OffloadingSpec):
-
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 kv_cache_config: Optional[KVCacheConfig] = None):
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config, kv_cache_config)
 
         num_cpu_blocks = self.extra_config.get("num_cpu_blocks")

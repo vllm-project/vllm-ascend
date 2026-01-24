@@ -56,11 +56,6 @@ exclude = [
     "vllm_ascend/core/*.py",
     "vllm_ascend/distributed/device_communicators/**",
     "vllm_ascend/distributed/utils.py",
-    # (5)
-    "vllm_ascend/distributed/kv_transfer/kv_pool/**",
-    "vllm_ascend/distributed/kv_transfer/utils/**",
-    "vllm_ascend/kv_offload/**",
-    "vllm_ascend/lora/**",
     # (6)
     "vllm_ascend/eplb/**",
     "vllm_ascend/model_loader/netloader/**",

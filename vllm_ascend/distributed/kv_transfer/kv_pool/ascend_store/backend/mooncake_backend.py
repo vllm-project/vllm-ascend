@@ -2,9 +2,9 @@
 import json
 import os
 import re
-import torch
-
 from dataclasses import dataclass
+
+import torch
 
 # Third Party
 from mooncake.store import ReplicateConfig  # type: ignore

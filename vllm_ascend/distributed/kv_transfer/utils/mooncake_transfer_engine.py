@@ -1,4 +1,3 @@
-import ipaddress
 import threading
 
 from mooncake.engine import TransferEngine  # type: ignore

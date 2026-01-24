@@ -23,12 +23,14 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.metadata import (
-    MetadataServer, MetadataServerProc, MLAConfig)
-
+    MetadataServer,
+    MetadataServerProc,
+    MLAConfig,
+)
 
 if TYPE_CHECKING:
-    from vllm.v1.attention.backend import AttentionMetadata  #type: ignore
     from vllm.forward_context import ForwardContext
+    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request

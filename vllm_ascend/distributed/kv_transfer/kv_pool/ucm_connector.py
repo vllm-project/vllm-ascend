@@ -8,7 +8,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
-
 logger = init_logger(__name__)
 
 # isort: off
