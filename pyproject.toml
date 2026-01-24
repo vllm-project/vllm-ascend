@@ -51,11 +51,6 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
-    # (5)
-    "vllm_ascend/distributed/kv_transfer/kv_pool/**",
-    "vllm_ascend/distributed/kv_transfer/utils/**",
-    "vllm_ascend/kv_offload/**",
-    "vllm_ascend/lora/**",
     # (7)
     "vllm_ascend/quantization/**",
     "vllm_ascend/sample/*.py",
