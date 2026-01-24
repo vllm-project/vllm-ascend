@@ -1,9 +1,10 @@
 import math
 import os
 import pickle
+from collections.abc import Callable
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
-from typing import Any, Callable, Optional
+from typing import Any
 
 import torch
 import vllm.envs as envs
@@ -14,8 +15,7 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.cpu_kv_cache_manager import \
-    CPUKVCacheManager
+from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.cpu_kv_cache_manager import CPUKVCacheManager
 
 
 @dataclass
@@ -30,8 +30,7 @@ def get_cpu_offload_connector(vllm_config: VllmConfig) -> KVTransferConfig:
         if kv_transfer_config.kv_connector == "CPUOffloadingConnector":
             return kv_transfer_config
         elif kv_transfer_config.kv_connector == "MultiConnector":
-            ktcs = kv_transfer_config.kv_connector_extra_config.get(
-                "connectors")
+            ktcs = kv_transfer_config.kv_connector_extra_config.get("connectors")
             for ktc in ktcs:
                 kv_transfer_config = KVTransferConfig(**ktc)
                 if kv_transfer_config.kv_connector == "CPUOffloadingConnector":
@@ -44,7 +43,6 @@ class MetadataServer:
     DEFAULT_CPU_SWAP_SPACE_GB = 800
 
     class ZMQRPCClient:
-
         def __init__(self, identity=None):
             if identity is None:
                 identity = f"worker-{os.getpid()}-{id(self)}"
@@ -56,7 +54,8 @@ class MetadataServer:
                 zmq.DEALER,  # type: ignore
                 bind=False,
                 identity=identity.encode(),
-                linger=0)
+                linger=0,
+            )
 
         def call(self, func_name: str, *args, **kwargs) -> Any:
             request = (func_name, args, kwargs)
@@ -74,11 +73,9 @@ class MetadataServer:
                 self.shared_memory_dict = memory_dict
                 result = {}
                 for key, shm in memory_dict.items():
-                    tensor = torch.frombuffer(
-                        shm.buf, dtype=layer_dtype).reshape(layer_size)
+                    tensor = torch.frombuffer(shm.buf, dtype=layer_dtype).reshape(layer_size)
                     if mla_config is not None:
-                        tensor = tensor.split(
-                            [mla_config.nope_dim, mla_config.rope_dim], dim=-1)
+                        tensor = tensor.split([mla_config.nope_dim, mla_config.rope_dim], dim=-1)
                     result[key] = tensor
             return result
 
@@ -86,7 +83,7 @@ class MetadataServer:
             # will be finalized by outer process
             self.socket.close()
             self.ctx.term()
-            if hasattr(self, 'shared_memory_dict'):
+            if hasattr(self, "shared_memory_dict"):
                 for shm in self.shared_memory_dict.values():
                     shm.close()
 
@@ -96,7 +93,8 @@ class MetadataServer:
         kv_transfer_config = get_cpu_offload_connector(vllm_config)
         assert kv_transfer_config is not None
         available_memory_gb = kv_transfer_config.get_from_extra_config(
-            "cpu_swap_space_gb", MetadataServer.DEFAULT_CPU_SWAP_SPACE_GB)
+            "cpu_swap_space_gb", MetadataServer.DEFAULT_CPU_SWAP_SPACE_GB
+        )
         self.available_memory = available_memory_gb * 1024 * 1024 * 1024
         logger.info(f"cpu swap space: {self.available_memory} bytes")
         self.ctx = zmq.Context()  # type: ignore
@@ -105,7 +103,8 @@ class MetadataServer:
             MetadataServer.METADATA_SERVER_ADDRESS,
             zmq.ROUTER,  # type: ignore
             bind=True,
-            linger=0)
+            linger=0,
+        )
         self.functions: dict[str, Callable] = {
             "init_cpu_kv_caches": self.init_cpu_kv_caches,
             "post_init": self.post_init,
@@ -133,15 +132,11 @@ class MetadataServer:
         tp_rank: int,
         kv_cache_specs: dict[str, AttentionSpec],
         mla_config: MLAConfig,
-    ) -> tuple[dict[str, SharedMemory], tuple[int, ...], torch.dtype,
-               MLAConfig]:
+    ) -> tuple[dict[str, SharedMemory], tuple[int, ...], torch.dtype, MLAConfig]:
         logger.info(f"receive pp rank: {pp_rank}, tp rank: {tp_rank}")
         # follow the assumption that each layer has the same spec
         layer = next(iter(kv_cache_specs.values()))
-        assert all([
-            layer.page_size_bytes == any.page_size_bytes
-            for any in kv_cache_specs.values()
-        ])
+        assert all([layer.page_size_bytes == any.page_size_bytes for any in kv_cache_specs.values()])
         use_mla = isinstance(layer, MLAAttentionSpec)
         # mla shares the same kv cache among different tp
         if use_mla:
@@ -154,30 +149,24 @@ class MetadataServer:
             available_memory //= self.pipeline_parallel_size
             available_memory //= len(kv_cache_specs)
             num_blocks = available_memory // layer.page_size_bytes
-            layer_size = (num_blocks, layer.block_size, layer.num_kv_heads,
-                          layer.head_size)  # type: ignore
+            layer_size = (num_blocks, layer.block_size, layer.num_kv_heads, layer.head_size)  # type: ignore
         else:
             available_memory //= self.world_size
             available_memory //= len(kv_cache_specs)
             num_blocks = available_memory // layer.page_size_bytes
-            layer_size = (2, num_blocks, layer.block_size, layer.num_kv_heads,
-                          layer.head_size)  # type: ignore
+            layer_size = (2, num_blocks, layer.block_size, layer.num_kv_heads, layer.head_size)  # type: ignore
         nbytes = math.prod(layer_size) * get_dtype_size(layer.dtype)
-        for layer_name in kv_cache_specs.keys():
+        for layer_name in kv_cache_specs:
             # only this format can share during ZeroMQ+pickle
-            shared_memory_dict[
-                layer_name] = MetadataServer._safe_create_shared_memory(
-                    f"cpu_kv_cache_{pp_rank}_{tp_rank}_{layer_name}", nbytes)
+            shared_memory_dict[layer_name] = MetadataServer._safe_create_shared_memory(
+                f"cpu_kv_cache_{pp_rank}_{tp_rank}_{layer_name}", nbytes
+            )
         if use_mla:
             assert mla_config is not None
             assert layer.head_size == mla_config.rope_dim + mla_config.nope_dim
-            self.shared_memory[(pp_rank,
-                                tp_rank)] = (shared_memory_dict, layer_size,
-                                             layer.dtype, mla_config)
+            self.shared_memory[(pp_rank, tp_rank)] = (shared_memory_dict, layer_size, layer.dtype, mla_config)
         else:
-            self.shared_memory[(pp_rank,
-                                tp_rank)] = (shared_memory_dict, layer_size,
-                                             layer.dtype, None)
+            self.shared_memory[(pp_rank, tp_rank)] = (shared_memory_dict, layer_size, layer.dtype, None)
         if self.num_cpu_blocks == -1 or num_blocks < self.num_cpu_blocks:
             self.num_cpu_blocks = num_blocks
         self.layer = layer
@@ -185,23 +174,20 @@ class MetadataServer:
 
     def post_init(self):
         # different processors in data parallel may call multiple times
-        if hasattr(self, 'cpu_block_manager'):
+        if hasattr(self, "cpu_block_manager"):
             return
         # do shared_memory() at least once
         logger.info(f"assign cpu num blocks: {self.num_cpu_blocks}")
         assert self.num_cpu_blocks >= 0
-        self.cpu_block_manager = CPUKVCacheManager(self.layer,
-                                                   self.num_cpu_blocks)
-        self.functions.update({
-            "get_matched_num_and_touch":
-            self.cpu_block_manager.get_matched_num_and_touch,
-            "allocate_slots":
-            self.cpu_block_manager.allocate_slots,
-            "record_request_cache_and_free_slots":
-            self.cpu_block_manager.record_request_cache_and_free_slots,
-            "cache_and_free_slots":
-            self.cpu_block_manager.cache_and_free_slots,
-        })
+        self.cpu_block_manager = CPUKVCacheManager(self.layer, self.num_cpu_blocks)
+        self.functions.update(
+            {
+                "get_matched_num_and_touch": self.cpu_block_manager.get_matched_num_and_touch,
+                "allocate_slots": self.cpu_block_manager.allocate_slots,
+                "record_request_cache_and_free_slots": self.cpu_block_manager.record_request_cache_and_free_slots,
+                "cache_and_free_slots": self.cpu_block_manager.cache_and_free_slots,
+            }
+        )
 
     def serve_step(self):
         client_id = self.socket.recv()
@@ -228,8 +214,7 @@ class MetadataServer:
     def shutdown(self):
         self.socket.close()
         self.ctx.term()
-        socket_path = MetadataServer.METADATA_SERVER_ADDRESS.replace(
-            "ipc://", "")
+        socket_path = MetadataServer.METADATA_SERVER_ADDRESS.replace("ipc://", "")
         if os.path.exists(socket_path):
             os.remove(socket_path)
         for cached in self.shared_memory.values():
@@ -239,11 +224,9 @@ class MetadataServer:
 
 
 class MetadataServerProc:
-
     @staticmethod
     def run_metadata_server(vllm_config: VllmConfig):
-        if (not vllm_config.cache_config.enable_prefix_caching
-                or get_cpu_offload_connector(vllm_config) is None):
+        if not vllm_config.cache_config.enable_prefix_caching or get_cpu_offload_connector(vllm_config) is None:
             return
 
         shutdown_requested = False
@@ -257,7 +240,7 @@ class MetadataServerProc:
         # Either SIGTERM or SIGINT will terminate the worker
         # signal.signal(signal.SIGTERM, _signal_handler)
         # signal.signal(signal.SIGINT, _signal_handler)
-        metadata_server: Optional[MetadataServer] = None
+        metadata_server: MetadataServer | None = None
         try:
             metadata_server = MetadataServer(vllm_config)
             logger.info("Metadata server started.")
