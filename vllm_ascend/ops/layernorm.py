@@ -25,6 +25,8 @@ from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 
 from vllm_ascend.utils import enable_custom_op
 
+from vllm_ascend.utils import enable_custom_op
+
 
 class AscendRMSNorm(RMSNorm):
 
