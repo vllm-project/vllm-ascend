@@ -394,6 +394,7 @@ class EagleProposer(VllmEagleProposer):
                 if multi_steps_attn_metadata else None,
                 self.vllm_config,
                 num_tokens=num_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
                 num_actual_tokens=0,
                 in_profile_run=is_profile,
                 batch_descriptor=batch_descriptor,
