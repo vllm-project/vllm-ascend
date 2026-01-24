@@ -122,7 +122,8 @@ jobs:
           --exclude "libascend*.so" \
           --exclude "libtorch*.so" \
           --exclude "libopapi.so" \
-          --exclude "liberror_manager.so"
+          --exclude "liberror_manager.so" \
+          --exclude "libruntime.so"
         done
         rm -f dist/*.whl
         mv dist/repaired/*.whl dist/
