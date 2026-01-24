@@ -382,10 +382,17 @@ class EagleProposer(VllmEagleProposer):
         model_previous_hidden_states = self.hidden_states[:num_tokens]
 
         batch_size = num_tokens // (self.num_speculative_tokens + 1)
+        (
+            num_tokens,
+            num_tokens_across_dp,
+            _,
+        ) = self.runner._sync_metadata_across_dp(num_tokens,
+                                                 is_draft_model=True)
         with set_ascend_forward_context(
                 multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
                 self.vllm_config,
                 num_tokens=num_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
                 num_actual_tokens=0,
                 in_profile_run=is_profile,
                 batch_descriptor=batch_descriptor,
@@ -531,10 +538,17 @@ class EagleProposer(VllmEagleProposer):
         self.last_token_indices[:last_token_indices_len].copy_(
             last_token_indices)
 
+        (
+            num_input_tokens,
+            num_tokens_across_dp,
+            _,
+        ) = self.runner._sync_metadata_across_dp(num_input_tokens,
+                                                 is_draft_model=True)
         with set_ascend_forward_context(
                 multi_steps_attn_metadata[0],
                 self.vllm_config,
                 num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
                 num_actual_tokens=num_tokens,
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=aclgraph_runtime_mode,
