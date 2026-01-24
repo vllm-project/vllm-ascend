@@ -236,7 +236,7 @@ class NpugraphExConfig:
     These configurations can directly impact the performance and behavior of models deployed on Ascend platforms.
     """
 
-    def __init__(self, enable: bool = False, enable_static_kernel: bool = False, **kwargs):
+    def __init__(self, enable: bool = True, enable_static_kernel: bool = False, **kwargs):
         """
         Initialize the configuration.
 
