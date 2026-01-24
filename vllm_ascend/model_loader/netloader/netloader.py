@@ -18,7 +18,6 @@ import gc
 import json
 import time
 from copy import deepcopy
-from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -27,8 +26,7 @@ from vllm.logger import logger
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.utils import (
-    initialize_model, process_weights_after_loading)
+from vllm.model_executor.model_loader.utils import initialize_model, process_weights_after_loading
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .interaction.elastic import ElasticServer
@@ -41,12 +39,13 @@ class ModelNetLoaderElastic(BaseModelLoader):
     """
     A model loader that uses elastic loading for loading weights.
     """
-    source: Optional[List[dict]]
-    model_path: Optional[str]
-    listen_port: Optional[int]
+
+    source: list[dict] | None
+    model_path: str | None
+    listen_port: int | None
     int8_cache: str
-    int8_cache_name: Optional[List[str]]
-    output_prefix: Optional[str]
+    int8_cache_name: list[str] | None
+    output_prefix: str | None
 
     def __init__(self, load_config: LoadConfig):
         """
@@ -63,18 +62,15 @@ class ModelNetLoaderElastic(BaseModelLoader):
         extra = load_config.model_loader_extra_config
         if extra and "CONFIG_FILE" in extra:
             try:
-                logger.info(
-                    f"Reading configs in file {load_config.model_loader_extra_config['CONFIG_FILE']} ..."
-                )
-                with open(extra["CONFIG_FILE"], 'r') as f:
+                logger.info(f"Reading configs in file {load_config.model_loader_extra_config['CONFIG_FILE']} ...")
+                with open(extra["CONFIG_FILE"]) as f:
                     config = json.load(f)
             except FileNotFoundError:
                 logger.error("CONFIG_FILE not found")
             except json.JSONDecodeError:
                 logger.error("CONFIG_FILE is not a valid JSON file")
             except Exception as e:
-                logger.error(
-                    f"Unexpected error while reading CONFIG_FILE: {e}")
+                logger.error(f"Unexpected error while reading CONFIG_FILE: {e}")
 
         if config is None and extra:
             logger.info("Reading configs in model_loader_extra_config ...")
@@ -82,19 +78,30 @@ class ModelNetLoaderElastic(BaseModelLoader):
         config = config or {}
 
         for key, attr, checker, caster, default in [
-            ("SOURCE", "source", lambda v: isinstance(v, list), lambda v: v,
-             None),
-            ("MODEL", "model_path", lambda v: isinstance(v, str), lambda v: v,
-             None),
-            ("LISTEN_PORT", "listen_port", lambda v: isinstance(v, int) or
-             (isinstance(v, str) and v.isdigit()), lambda v: int(v), None),
-            ("INT8_CACHE", "int8_cache", lambda v: isinstance(v, str) and v.
-             lower() in ['hbm', 'dram', 'no'], lambda v: v.lower(), 'no'),
-            ("INT8_CACHE_NAME", "int8_cache_name",
-             lambda v: isinstance(v, list), lambda v: v, None),
-            ("OUTPUT_PREFIX", "output_prefix",
-             lambda v: isinstance(v, str) and is_valid_path_prefix(v),
-             lambda v: v, None),
+            ("SOURCE", "source", lambda v: isinstance(v, list), lambda v: v, None),
+            ("MODEL", "model_path", lambda v: isinstance(v, str), lambda v: v, None),
+            (
+                "LISTEN_PORT",
+                "listen_port",
+                lambda v: isinstance(v, int) or (isinstance(v, str) and v.isdigit()),
+                lambda v: int(v),
+                None,
+            ),
+            (
+                "INT8_CACHE",
+                "int8_cache",
+                lambda v: isinstance(v, str) and v.lower() in ["hbm", "dram", "no"],
+                lambda v: v.lower(),
+                "no",
+            ),
+            ("INT8_CACHE_NAME", "int8_cache_name", lambda v: isinstance(v, list), lambda v: v, None),
+            (
+                "OUTPUT_PREFIX",
+                "output_prefix",
+                lambda v: isinstance(v, str) and is_valid_path_prefix(v),
+                lambda v: v,
+                None,
+            ),
         ]:
             v = config.get(key, default)
             if not checker(v):
@@ -116,8 +123,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
             self.output_prefix,
         )
 
-    def load_model(self, vllm_config: VllmConfig,
-                   model_config: ModelConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig) -> nn.Module:
         """
         Loads the model using the specified configuration.
 
@@ -140,15 +146,18 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
         device_id = torch.distributed.get_rank()
 
-        if (self.source is None or not isinstance(self.source, list)
-                or device_id not in [
-                    one_device["device_id"] for one_device in self.source if
-                    isinstance(one_device, dict) and "device_id" in one_device
-                ]):
-            logger.warning(
-                "Did not get valid source info, use DefaultModelLoader")
-            model, need_process_weights_after_loading = self.revert_to_default(
-                model_config, vllm_config, device_config)
+        if (
+            self.source is None
+            or not isinstance(self.source, list)
+            or device_id
+            not in [
+                one_device["device_id"]
+                for one_device in self.source
+                if isinstance(one_device, dict) and "device_id" in one_device
+            ]
+        ):
+            logger.warning("Did not get valid source info, use DefaultModelLoader")
+            model, need_process_weights_after_loading = self.revert_to_default(model_config, vllm_config, device_config)
 
         else:
             target_device = torch.device(device_config.device)
@@ -158,8 +167,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
             with set_default_torch_dtype(model_config.dtype):
                 with target_device:
-                    model = initialize_model(vllm_config=vllm_config,
-                                             model_config=model_config)
+                    model = initialize_model(vllm_config=vllm_config, model_config=model_config)
 
                 start_elastic_load = time.perf_counter()
                 model = elastic_load(
@@ -171,43 +179,39 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     pp=parallel_config.pipeline_parallel_size,
                 )
                 end_elastic_load = time.perf_counter()
-                logger.info(
-                    f"Elastic load time: {end_elastic_load - start_elastic_load}, rank: {device_id}"
-                )
+                logger.info(f"Elastic load time: {end_elastic_load - start_elastic_load}, rank: {device_id}")
                 need_process_weights_after_loading = True
 
                 if model is None:
-                    logger.warning(
-                        "Netloader elastic loading fails, use load format DefaultModelLoader"
-                    )
+                    logger.warning("Netloader elastic loading fails, use load format DefaultModelLoader")
 
                     vllm_config = vllm_config_backup
                     model_config = model_config_backup
 
                     del model
                     gc.collect()
-                    if device_config.device_type == 'npu':
+                    if device_config.device_type == "npu":
                         logger.info("Empty NPU cache")
                         torch.npu.empty_cache()
-                    elif device_config.device_type == 'cuda':
+                    elif device_config.device_type == "cuda":
                         logger.info("Empty CUDA cache")
                         torch.cuda.empty_cache()
 
                     model, need_process_weights_after_loading = self.revert_to_default(
-                        model_config, vllm_config, device_config)
+                        model_config, vllm_config, device_config
+                    )
 
         start_elastic_server = time.perf_counter()
         # start elastic server
         if model is not None and (
-            (self.listen_port and self.listen_port in range(1024, 65535)) or
-            (self.listen_port is None)):
-
+            (self.listen_port and self.listen_port in range(1024, 65535)) or (self.listen_port is None)
+        ):
             from vllm.utils.network_utils import get_ip
+
             driver_ip = get_ip()
 
-            if driver_ip == '0.0.0.0':
-                logger.error(
-                    "Driver IP is not set, skip to start Netloader server")
+            if driver_ip == "0.0.0.0":
+                logger.error("Driver IP is not set, skip to start Netloader server")
             else:
                 if self.listen_port is None:
                     self.listen_port = find_free_port()
@@ -220,21 +224,14 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
                 if self.output_prefix is not None:
                     try:
-                        with open(self.output_prefix + str(device_id) + '.txt',
-                                  'w') as file:
+                        with open(self.output_prefix + str(device_id) + ".txt", "w") as file:
                             file.write(f"{driver_ip}:{self.listen_port}")
-                        logger.info(
-                            f"Successfully wrote server address to file: {self.output_prefix + str(device_id)}"
-                        )
+                        logger.info(f"Successfully wrote server address to file: {self.output_prefix + str(device_id)}")
                     except FileNotFoundError:
-                        logger.error(
-                            f"File path {self.output_prefix + str(device_id)} does not exist."
-                        )
+                        logger.error(f"File path {self.output_prefix + str(device_id)} does not exist.")
                     except PermissionError:
-                        logger.error(
-                            f"No permission to write to file {self.output_prefix + str(device_id)}."
-                        )
-                    except IOError as e:
+                        logger.error(f"No permission to write to file {self.output_prefix + str(device_id)}.")
+                    except OSError as e:
                         logger.error(
                             f"I/O error occurred while writing to file {self.output_prefix + str(device_id)}: {e}"
                         )
@@ -242,31 +239,30 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         logger.error(f"Unknown error: {e}")
 
                 try:
-                    assert isinstance(
-                        self.listen_port, int
-                    ), f"listen port should be int but get {self.listen_port}"
+                    assert isinstance(self.listen_port, int), f"listen port should be int but get {self.listen_port}"
 
                     elastic_server = ElasticServer(
-                        driver_ip, self.listen_port, model, device_id,
-                        self.model_path, parallel_config.tensor_parallel_size,
+                        driver_ip,
+                        self.listen_port,
+                        model,
+                        device_id,
+                        self.model_path,
+                        parallel_config.tensor_parallel_size,
                         parallel_config.pipeline_parallel_size,
-                        self.int8_cache, self.int8_cache_name)
+                        self.int8_cache,
+                        self.int8_cache_name,
+                    )
                     elastic_server.start()
                 except Exception as e:
-                    logger.error(
-                        f"Failed to start Netloader server for rank: {device_id}, details: {e}"
-                    )
+                    logger.error(f"Failed to start Netloader server for rank: {device_id}, details: {e}")
         else:
             logger.info("Skip to start Netloader server")
 
         end_elastic_server = time.perf_counter()
-        logger.info(
-            f"Elastic server start time: {end_elastic_server - start_elastic_server}, rank: {device_id}"
-        )
+        logger.info(f"Elastic server start time: {end_elastic_server - start_elastic_server}, rank: {device_id}")
 
         if need_process_weights_after_loading:
-            process_weights_after_loading(model, model_config,
-                                          torch.device(device_config.device))
+            process_weights_after_loading(model, model_config, torch.device(device_config.device))
 
         if model is None:
             logger.error("NetLoader elastic loads model fails")
@@ -274,8 +270,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
         return model.eval()
 
-    def revert_to_default(self, model_config, vllm_config,
-                          device_config) -> Tuple[nn.Module, bool]:
+    def revert_to_default(self, model_config, vllm_config, device_config) -> tuple[nn.Module, bool]:
         """
         Reverts to the default model loading logic when elastic loading fails or is not applicable.
 
@@ -300,19 +295,15 @@ class ModelNetLoaderElastic(BaseModelLoader):
         default_model_loader = DefaultModelLoader(self.load_config)
 
         if model_config.quantization is None:
-            model = default_model_loader.load_model(vllm_config=vllm_config,
-                                                    model_config=model_config)
+            model = default_model_loader.load_model(vllm_config=vllm_config, model_config=model_config)
             need_process_weights_after_loading = False
         else:
-            logger.warning(
-                "Quantization is set, netloader use DefaultModelLoader with process_weights_after_loading "
-            )
+            logger.warning("Quantization is set, netloader use DefaultModelLoader with process_weights_after_loading ")
             need_process_weights_after_loading = True
             target_device = torch.device(device_config.device)
             with set_default_torch_dtype(model_config.dtype):
                 with target_device:
-                    model = initialize_model(vllm_config=vllm_config,
-                                             model_config=model_config)
+                    model = initialize_model(vllm_config=vllm_config, model_config=model_config)
                 default_model_loader.load_weights(model, model_config)
             model = model.eval()
 
@@ -321,6 +312,5 @@ class ModelNetLoaderElastic(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         pass
 
-    def load_weights(self, model: nn.Module,
-                     model_config: ModelConfig) -> None:
+    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         pass

@@ -19,8 +19,7 @@ from abc import abstractmethod
 from typing import Any
 
 
-class EplbAdaptor():
-
+class EplbAdaptor:
     def __init__(self, **args):
         pass
 
@@ -29,12 +28,9 @@ class EplbAdaptor():
         raise NotImplementedError
 
     @abstractmethod
-    def do_update_expert_map(self, layer_id: Any,
-                             updated_expert_map: Any) -> Any:
+    def do_update_expert_map(self, layer_id: Any, updated_expert_map: Any) -> Any:
         raise NotImplementedError
 
     @abstractmethod
-    def do_update_expert_weight(self, layer_id: Any,
-                                local_expert_to_replace: Any,
-                                buffer_tensor_id: Any) -> Any:
+    def do_update_expert_weight(self, layer_id: Any, local_expert_to_replace: Any, buffer_tensor_id: Any) -> Any:
         raise NotImplementedError
