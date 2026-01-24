@@ -51,15 +51,6 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
-    # (3)
-    "vllm_ascend/attention/*.py",
-    "vllm_ascend/core/*.py",
-    "vllm_ascend/distributed/device_communicators/**",
-    "vllm_ascend/distributed/utils.py",
-    # (6)
-    "vllm_ascend/eplb/**",
-    "vllm_ascend/model_loader/netloader/**",
-    "vllm_ascend/patch/**",
     # (7)
     "vllm_ascend/quantization/**",
     "vllm_ascend/sample/*.py",
@@ -87,6 +78,7 @@ exclude = [
     "vllm_ascend/distributed/parallel_state.py",
     "vllm_ascend/distributed/utils.py",
     "vllm_ascend/xlite/*.py",
+    "vllm_ascend/patch/worker/patch_*.py",
     # (11)
     "vllm_ascend/ops/fused_moe/**",
 ]
