@@ -126,7 +126,7 @@ class TestModelWithBias(nn.Module):
         residual = torch.zeros_like(x)
 
         norm_output_with_bias, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-            x, residual, self.rms_norm_weight, self.eps)
+            x, residual, self.rms_norm_weight, self.bias, self.eps)
 
         quantized_output = torch.ops.vllm.quantize(norm_output_with_bias,
                                                    self.quant_scale,
@@ -247,7 +247,7 @@ class TestModelSPWithBias(nn.Module):
         residual = torch.zeros_like(x)
 
         norm_output_with_bias, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-            x, residual, self.rms_norm_weight, self.eps)
+            x, residual, self.rms_norm_weight, self.bias, self.eps)
 
         norm_output_with_bias = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             norm_output_with_bias, True)
