@@ -658,8 +658,10 @@ class NPUModelRunner(GPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1:num_reqs + 1] = cu_num_tokens
-        # Note: Due to the FIA operator limitation, here we pad so that hidden_states.shape[0] and self.query_start_loc[num_reqs_padded] are equal
-        self.query_start_loc.np[num_reqs + 1:] = self.arange_np[1:self.max_num_reqs + 1 - num_reqs] * self.uniform_decode_query_len + cu_num_tokens[-1]
+        # NOTE: Due to the FIA operator limitation, here we pad so that hidden_states.shape[0]
+        # and self.query_start_loc[num_reqs_padded] are equal
+        self.query_start_loc.np[num_reqs + 1:] = (self.arange_np[1:self.max_num_reqs + 1 - num_reqs]
+                                                  * self.uniform_decode_query_len + cu_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
 
         self.seq_lens.np[:num_reqs] = (
