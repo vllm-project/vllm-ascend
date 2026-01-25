@@ -15,12 +15,12 @@
 # limitations under the License.
 import os
 
-from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.math_utils import cdiv
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 
 
 class AscendConfig:
