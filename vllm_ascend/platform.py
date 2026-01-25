@@ -653,14 +653,15 @@ class NPUPlatform(Platform):
         If GPU-specific or currently unsupported parameters are set by the user,
         log a warning and reset them to safe values.
         """
+        model_config = vllm_config.model_config
         # ==================== 1. Model Config ====================
-        if vllm_config.model_config:
+        if model_config:
             # Disable Cascade Attention (GPU feature)
-            if getattr(vllm_config.model_config, "disable_cascade_attn", False):
+            if getattr(model_config, "disable_cascade_attn", False):
                 logger.warning(
                     "Parameter '--disable-cascade-attn' is a GPU-specific feature. Resetting to False for Ascend."
                 )
-                vllm_config.model_config.disable_cascade_attn = False
+                model_config.disable_cascade_attn = False
 
         # ==================== 2. Parallel Config ====================
         if vllm_config.parallel_config:
@@ -684,14 +685,15 @@ class NPUPlatform(Platform):
                 vllm_config.cache_config.cpu_kvcache_space_bytes = None
 
         # ==================== 4. MultiModal Config ====================
-        if vllm_config.model_config.multimodal_config:
+        multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
+        if multimodal_config:
             # Ascend uses a different mechanism for Multi-Modal attention
-            if getattr(vllm_config.model_config.multimodal_config, "mm_encoder_attn_backend", None) is not None:
+            if getattr(multimodal_config, "mm_encoder_attn_backend", None) is not None:
                 logger.warning(
                     "Parameter '--mm-encoder-attn-backend' is set but Ascend uses "
                     "a plugin mechanism for multi-modal attention. Resetting to None."
                 )
-                vllm_config.model_config.multimodal_config.mm_encoder_attn_backend = None
+                multimodal_config.mm_encoder_attn_backend = None
 
         # ==================== 5. Observability Config ====================
         if vllm_config.observability_config:
