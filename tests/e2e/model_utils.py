@@ -46,7 +46,9 @@ def check_outputs_equal(
         # The text and token outputs should exactly match
         fail_msg = (f"Test{prompt_idx}:"
                     f"\n{name_0}:\t{output_str_0!r}"
-                    f"\n{name_1}:\t{output_str_1!r}")
+                    f"\n{name_1}:\t{output_str_1!r}"
+                    f"\n{name_0}:\t{output_ids_0!r}"
+                    f"\n{name_1}:\t{output_ids_1!r}")
 
         assert output_str_0 == output_str_1, fail_msg
         assert output_ids_0 == output_ids_1, fail_msg

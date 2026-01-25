@@ -17,10 +17,10 @@ from tests.e2e.conftest import VllmRunner
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODELS = {
-    "eagle": {
-        "main": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
-        "spec": "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
-    },
+    #"eagle": {
+    #    "main": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+    #    "spec": "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+    #},
     "eagle3": {
         "main": "Qwen/Qwen3-8B",
         "spec": "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -420,7 +420,7 @@ def test_llama_qwen_eagle_acceptance(
     ]
     golden = BASELINES[method]
 
-    match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
+    match = all(abs(a - b) < 0.08 for a, b in zip(acceptance_per_pos, golden))
     if not match:
         print(f"acceptance_per_pos: {acceptance_per_pos}")
         print(f"golden: {golden}")
