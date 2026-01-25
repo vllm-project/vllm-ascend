@@ -928,7 +928,7 @@ class NPUModelRunner(GPUModelRunner):
         positions: torch.Tensor,
         num_scheduled_tokens: int,
         hidden_states: torch.Tensor,
-        attn_metadata: dict[str, Any],
+        attn_metadata: list[dict[str, Any]] | dict[str, Any],
         aux_hidden_states: torch.Tensor = None,
         sample_hidden_states: torch.Tensor = None
     ) -> Optional[list[list[int]]]:
