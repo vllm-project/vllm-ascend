@@ -36,7 +36,10 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
-                                               update_full_graph_params)
+                                               update_attn_dcp_pcp_params,
+                                               update_attn_params,
+                                               update_mla_attn_dcp_pcp_params,
+                                               update_mla_attn_params)
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.utils import \
     prepare_inputs_padded_kernel
@@ -1178,9 +1181,21 @@ class EagleProposer(VllmEagleProposer):
 
     # update full-graph params for one spec token
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
-        update_full_graph_params(
-            self.runner.attn_backend, self.update_stream, forward_context, num_tokens,
-            self.vllm_config, self.vllm_config.speculative_config)
+        if self.vllm_config.model_config.use_mla:
+            if self.pcp_size * self.dcp_size > 1:
+                update_mla_attn_dcp_pcp_params(self.update_stream,
+                                               forward_context, num_tokens)
+            else:
+                update_mla_attn_params(self.update_stream, forward_context,
+                                       num_tokens,
+                                       self.vllm_config.speculative_config)
+        else:
+            if self.pcp_size * self.dcp_size > 1:
+                update_attn_dcp_pcp_params(self.update_stream, forward_context,
+                                           num_tokens)
+            else:
+                update_attn_params(self.update_stream, forward_context,
+                                   num_tokens, self.vllm_config, draft_attn_metadatas)
 
     # padding tensor into desired size
     def _pad_tensor(self, tensor, pad_size):
