@@ -448,7 +448,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         shared_act = shared_expert.act_fn(shared_gate_up)  # type: ignore
         shared_out, _ = shared_expert.down_proj(shared_act)  # type: ignore
 
-        # Shared expert gating mechanism (e.g., Qwen2/3-Next, Qwen3-Omni).
+        # Shared expert gating mechanism (e.g., Qwen3-Next, Qwen3-Omni).
         expert_gate = self._get_shared_expert_gate()
         if expert_gate is not None:
             gate_out = expert_gate(hidden_states)
