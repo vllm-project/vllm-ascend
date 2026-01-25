@@ -24,15 +24,12 @@ from vllm.forward_context import BatchDescriptor, ForwardContext
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (AscendMetadata,
                                                 AscendMetadataForDecode)
-from vllm_ascend.attention.context_parallel.attention_cp import \
-    AscendAttentionCPImpl
-from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl
 from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                           AscendMLAMetadata)
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry, ACLGraphWrapper, get_draft_graph_params, get_graph_params,
-    set_draft_graph_params, set_graph_params,
-    update_draft_graph_params_workspaces)
+    set_draft_graph_params, set_graph_params, update_attn_dcp_pcp_params,
+    update_draft_graph_params_workspaces, update_mla_attn_dcp_pcp_params)
 
 
 class TestACLGraphEntry(TestBase):
@@ -814,9 +811,8 @@ class TestPCPDCPGraphParams(TestBase):
              out, lse))
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
-            AscendMlaCPImpl.update_graph_params(
-                self.update_stream, forward_context, 4
-            )
+            update_mla_attn_dcp_pcp_params(self.update_stream, forward_context,
+                                           4)
 
         _mock_graph_task_end.assert_called_once()
 
@@ -856,8 +852,6 @@ class TestPCPDCPGraphParams(TestBase):
              out, lse, 2, 0, 0))
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
-            AscendAttentionCPImpl.update_graph_params(
-                self.update_stream, forward_context, 4, None
-            )
+            update_attn_dcp_pcp_params(self.update_stream, forward_context, 4)
 
         _mock_graph_task_end.assert_called_once()
