@@ -437,23 +437,48 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
     def _shared_experts_part1(self, hidden_states: torch.Tensor):
-        shared_gate_up, _ = self._shared_experts.gate_up_proj(
-            hidden_states)  # type: ignore
+        shared_expert = self._get_shared_expert_mlp()
+        shared_gate_up, _ = shared_expert.gate_up_proj(  # type: ignore
+            hidden_states)
         return shared_gate_up
 
     def _shared_experts_part2(self, hidden_states: torch.Tensor,
                               shared_gate_up: torch.Tensor):
-        shared_act = self._shared_experts.act_fn(
-            shared_gate_up)  # type: ignore
-        shared_out, _ = self._shared_experts.down_proj(
-            shared_act)  # type: ignore
+        shared_expert = self._get_shared_expert_mlp()
+        shared_act = shared_expert.act_fn(shared_gate_up)  # type: ignore
+        shared_out, _ = shared_expert.down_proj(shared_act)  # type: ignore
 
-        # Qwen3-Next specific gating mechanism
-        if hasattr(self._shared_experts, "expert_gate") and \
-            self._shared_experts.expert_gate is not None:
-            gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
+        # Shared expert gating mechanism (e.g., Qwen2/3-Next, Qwen3-Omni).
+        expert_gate = self._get_shared_expert_gate()
+        if expert_gate is not None:
+            gate_out = expert_gate(hidden_states)
+            if isinstance(gate_out, tuple):
+                gate_out = gate_out[0]  # ReplicatedLinear returns (output, bias).
             shared_out = F.sigmoid(gate_out) * shared_out
         return shared_out
+
+    def _get_shared_expert_mlp(self) -> torch.nn.Module:
+        if self._shared_experts is None:
+            raise AttributeError("Shared experts are not set.")
+        if hasattr(self._shared_experts, "gate_up_proj"):
+            return self._shared_experts
+        if hasattr(self._shared_experts, "_shared_expert"):
+            return self._shared_experts._shared_expert  # type: ignore[attr-defined]
+        raise AttributeError(
+            "Shared experts must expose gate_up_proj/down_proj or "
+            "_shared_expert with those attributes. Got: "
+            f"{type(self._shared_experts).__name__}")
+
+    def _get_shared_expert_gate(self):
+        if self._shared_experts is None:
+            return None
+        if hasattr(self._shared_experts, "expert_gate"):
+            expert_gate = self._shared_experts.expert_gate
+            if expert_gate is not None:
+                return expert_gate
+        if hasattr(self._shared_experts, "_shared_expert_gate"):
+            return self._shared_experts._shared_expert_gate  # type: ignore[attr-defined]
+        return None
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated
