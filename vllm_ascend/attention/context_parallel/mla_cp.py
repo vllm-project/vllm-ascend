@@ -315,7 +315,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
         prefill_kv_no_split = kv_no_split[:num_actual_tokens]
         kv_c, k_pe = prefill_kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())  # type: ignore[misc]
         assert len(kv_cache) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
         kv_c_normed = kv_c_normed.view([num_actual_tokens, self.num_kv_heads, -1])
         k_pe = k_pe.unsqueeze(1)
