@@ -74,7 +74,7 @@ class NPUModelRunner310(NPUModelRunner):
             corresponding memory buffer size.
         """
         # init kv cache tensors
-        kv_cache_sizes: dict[str, tuple[int]] = {}
+        kv_cache_sizes: dict[str, tuple[int, ...]] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
