@@ -30,14 +30,9 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
+from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.utils import (enable_sp, npu_stream_switch,
                                prefill_context_parallel_enable)
-
-
-class QuantType(Enum):
-    NONE = 0
-    W8A8 = 1
-    W4A8 = 2
 
 
 class PrepareAndFinalize(ABC):
