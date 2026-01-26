@@ -49,7 +49,7 @@ jobs:
       fail-fast: false
       matrix:
         test_config:
-          - name: qwen3next
+          - name: qwen3-next
             os: linux-aarch64-a2-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
           - name: qwen3-32b
