@@ -27,11 +27,13 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 class NPUModelRunner310(NPUModelRunner):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
 
-    def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+    def initialize_kv_cache_tensors(
+            self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initialize the memory buffer for KV cache.
 
@@ -45,23 +47,31 @@ class NPUModelRunner310(NPUModelRunner):
         if self.vllm_config.kv_transfer_config is not None:
             raise ValueError("KV cache transfer is not supported for 310P.")
         if self.use_sparse:
-            raise ValueError("Deepseek Sparse Attention is not supported for 310P.")
+            raise ValueError(
+                "Deepseek Sparse Attention is not supported for 310P.")
         if self.model_config.use_mla:
             raise ValueError("MLAAttention is not supported for 310P.")
         # Initialize the memory size for KV cache
         kv_cache_size = self._calculate_kv_cache_tensors_size(kv_cache_config)
         # Allocate and reshape KV cache Tensors
-        kv_caches = self._allocate_kv_cache_tensors(kv_cache_config, kv_cache_size)
+        kv_caches = self._allocate_kv_cache_tensors(kv_cache_config,
+                                                    kv_cache_size)
         # Set up cross-layer KV cache sharing
-        for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
-            logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
+        for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
+        ):
+            logger.debug("%s reuses KV cache of %s", layer_name,
+                         target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         from vllm.v1.worker.utils import bind_kv_cache
-        bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches)
+        bind_kv_cache(kv_caches,
+                      self.compilation_config.static_forward_context,
+                      self.kv_caches)
         return kv_caches
 
-    def _calculate_kv_cache_tensors_size(self, kv_cache_config: KVCacheConfig) -> dict[str, int | tuple[int]]:
+    def _calculate_kv_cache_tensors_size(
+            self,
+            kv_cache_config: KVCacheConfig) -> dict[str, int | tuple[int]]:
         """
         Initializes the KV cache size. The buffer needs to be reshaped to the desired shape before being used by
         the models.
@@ -91,7 +101,8 @@ class NPUModelRunner310(NPUModelRunner):
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache between the self_attn specs in the same group
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            kv_cache_sizes[layer_name_inner] = (kv_tensor_size, kv_tensor_size)
+                            kv_cache_sizes[layer_name_inner] = (kv_tensor_size,
+                                                                kv_tensor_size)
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
@@ -99,7 +110,8 @@ class NPUModelRunner310(NPUModelRunner):
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 layer_names.add(layer_name)
-        assert layer_names == set(kv_cache_sizes.keys()), "Some layers are not correctly initialized"
+        assert layer_names == set(
+            kv_cache_sizes.keys()), "Some layers are not correctly initialized"
 
         return kv_cache_sizes
 
@@ -134,7 +146,8 @@ class NPUModelRunner310(NPUModelRunner):
                     num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
 
-                    if hasattr(attn_backend, "get_supported_block_size") and self.use_hybrid_blocks:
+                    if hasattr(attn_backend, "get_supported_block_size"
+                               ) and self.use_hybrid_blocks:
                         block_size = attn_backend.get_supported_block_size()[0]
 
                         block_size_chunk = kv_cache_spec.block_size // block_size
@@ -146,22 +159,30 @@ class NPUModelRunner310(NPUModelRunner):
                         )
                     else:
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                            num_blocks, kv_cache_spec.block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
-                        )
+                            num_blocks, kv_cache_spec.block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
                     k_shape = kv_cache_shape[1:]
                     v_shape = k_shape
                     k_cache = torch_npu.empty_with_format(
-                        size=k_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
-                    )
+                        size=k_shape,
+                        dtype=dtype,
+                        device=self.device,
+                        acl_format=self._acl_format)
                     v_cache = torch_npu.empty_with_format(
-                        size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
-                    )
+                        size=v_shape,
+                        dtype=dtype,
+                        device=self.device,
+                        acl_format=self._acl_format)
                     kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     tensor_size = kv_cache_sizes[layer_name]
                     tensor_element_size = 2
-                    raw_tensor = torch.zeros(tensor_size // tensor_element_size, dtype=dtype, device=self.device)
+                    raw_tensor = torch.zeros(tensor_size //
+                                             tensor_element_size,
+                                             dtype=dtype,
+                                             device=self.device)
                     assert tensor_size is not None
                     assert tensor_size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = tensor_size // kv_cache_spec.page_size_bytes
@@ -170,13 +191,16 @@ class NPUModelRunner310(NPUModelRunner):
                     state_tensors = []
                     target_idx = 0
                     start_idx = 0
-                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                    for shape, dtype in zip(kv_cache_spec.shapes,
+                                            kv_cache_spec.dtypes):
                         # normally, there is conv state and ssm state in this loop. And there is only
                         # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
 
-                        target_idx += torch.prod(torch.tensor(target_shape)).item()
-                        tensor = raw_tensor[start_idx:target_idx].view(target_shape)
+                        target_idx += torch.prod(
+                            torch.tensor(target_shape)).item()
+                        tensor = raw_tensor[start_idx:target_idx].view(
+                            target_shape)
                         start_idx = target_idx
                         state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
