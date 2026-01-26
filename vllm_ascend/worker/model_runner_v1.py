@@ -1465,7 +1465,6 @@ class NPUModelRunner(GPUModelRunner):
 
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
-        extra_args = ({"kv_connector_output": kv_connector_output})
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
@@ -1478,7 +1477,6 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output
             if self.supports_mm_inputs
             else None,
-            **extra_args,
         )
 
         durations = ProfileExecuteDuration().pop_captured_sync()
