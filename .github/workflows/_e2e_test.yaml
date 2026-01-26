@@ -89,9 +89,7 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'full' }}
         run: |
-          # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
-          # the test separately.
-          python3 .github/scripts/run_suite.py --suite e2e-singlecard
+          python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard
   
   e2e-2-cards:
     name: multicard-2

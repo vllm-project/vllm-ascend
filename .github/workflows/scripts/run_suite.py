@@ -6,54 +6,20 @@ import tabulate
 from sglang.test.ci.ci_utils import TestFile, run_unittest_files
 
 # NOTE: please sort the test cases alphabetically by the test file name
-suites = {}
-
-# Add Ascend NPU tests
-# TODO: Set accurate estimate time
-# NOTE: please sort the test cases alphabetically by the test file name
-suite_ascend = {
-    "per-commit-1-npu-a2": [
-        TestFile("ascend/test_ascend_graph_tp1_bf16.py", 400),
-        TestFile("ascend/test_ascend_piecewise_graph_prefill.py", 400),
-        TestFile("ascend/test_ascend_hicache_mha.py", 400),
-        TestFile("ascend/test_ascend_sampling_backend.py", 400),
-        TestFile("ascend/test_ascend_tp1_bf16.py", 400),
-        TestFile("ascend/test_ascend_compile_graph_tp1_bf16.py", 400),
-        TestFile("ascend/test_ascend_w8a8_quantization.py", 400),
-        TestFile("test_embed_interpolate_unittest.py", 400),
-    ],
-    "per-commit-2-npu-a2": [
-        TestFile("ascend/test_ascend_graph_tp2_bf16.py", 400),
-        TestFile("ascend/test_ascend_mla_fia_w8a8int8.py", 400),
-        TestFile("ascend/test_ascend_tp2_bf16.py", 400),
-        TestFile("ascend/test_ascend_tp2_fia_bf16.py", 400),
-    ],
-    "per-commit-4-npu-a2": [
-        TestFile("ascend/test_ascend_mla_w8a8int8.py", 400),
-        TestFile("ascend/test_ascend_hicache_mla.py", 400),
-        TestFile("ascend/test_ascend_tp4_bf16.py", 400),
-    ],
-    "per-commit-16-npu-a3": [
-        TestFile("ascend/test_ascend_deepep.py", 3600),
-        # TestFile("ascend/test_ascend_deepseek_mtp.py", 2800),
-        TestFile("ascend/test_ascend_w4a4_quantization.py", 600),
-    ],
-}
-
-suite_e2e = {
+suites = {
     "e2e-singlecard": [
-        TestFile("tests/e2e/singlecard/test_auto_fit_max_mode_len.py", 600),
-        TestFile("tests/e2e/singlecard/test_aclgraph_accuracy.py", 600),
-        TestFile("tests/e2e/singlecard/test_aclgraph_batch_invariant.py", 600),
-        TestFile("tests/e2e/singlecard/test_aclgraph_mem.py", 600),
-        TestFile("tests/e2e/singlecard/test_async_scheduling.py", 600),
-        TestFile("tests/e2e/singlecard/test_batch_invariant.py", 600),
-        TestFile("tests/e2e/singlecard/test_camem.py", 600),
-        TestFile("tests/e2e/singlecard/test_completion_with_prompt_embeds.py", 600),
-        TestFile("tests/e2e/singlecard/test_cpu_offloading.py", 600),
-        TestFile("tests/e2e/singlecard/test_guided_decoding.py", 600),
-        TestFile("tests/e2e/singlecard/test_ilama_lora.py", 600),
-        TestFile("tests/e2e/singlecard/test_llama32_lora.py", 600),
+        TestFile("tests/e2e/singlecard/test_auto_fit_max_mode_len.py", 25),
+        TestFile("tests/e2e/singlecard/test_aclgraph_accuracy.py", 480),
+        TestFile("tests/e2e/singlecard/test_aclgraph_batch_invariant.py", 410),
+        TestFile("tests/e2e/singlecard/test_aclgraph_mem.py", 130),
+        TestFile("tests/e2e/singlecard/test_async_scheduling.py", 150),
+        TestFile("tests/e2e/singlecard/test_batch_invariant.py", 320),
+        TestFile("tests/e2e/singlecard/test_camem.py", 77),
+        TestFile("tests/e2e/singlecard/test_completion_with_prompt_embeds.py", 76),
+        TestFile("tests/e2e/singlecard/test_cpu_offloading.py", 132),
+        TestFile("tests/e2e/singlecard/test_guided_decoding.py", 354),
+        TestFile("tests/e2e/singlecard/test_ilama_lora.py", 95),
+        TestFile("tests/e2e/singlecard/test_llama32_lora.py", 162),
         TestFile("tests/e2e/singlecard/test_qwen3_multi_loras.py", 600),
         TestFile("tests/e2e/singlecard/test_models.py", 600),
         TestFile("tests/e2e/singlecard/test_multistream_overlap_shared_expert.py", 600),
@@ -70,9 +36,6 @@ suite_e2e = {
         TestFile("tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py", 600),
     ],
 }
-
-suites.update(suite_ascend)
-suites.update(suite_e2e)
 
 
 def auto_partition(files, rank, size):
