@@ -32,9 +32,7 @@ class NPUModelRunner310(NPUModelRunner):
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
 
     def initialize_kv_cache_tensors(
-        self,
-        kv_cache_config: KVCacheConfig,
-    ) -> dict[str, Any]:
+            self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initialize the memory buffer for KV cache.
 
