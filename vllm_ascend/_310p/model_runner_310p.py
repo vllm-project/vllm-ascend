@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import torch
 import torch_npu
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, KVCacheConfig
 from vllm.logger import logger
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, KVCacheConfig
 
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -31,8 +31,7 @@ class NPUModelRunner310(NPUModelRunner):
         super().__init__(*args, **kwargs)
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
 
-    def initialize_kv_cache_tensors(
-            self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+    def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initialize the memory buffer for KV cache.
 
@@ -52,21 +51,16 @@ class NPUModelRunner310(NPUModelRunner):
         # Initialize the memory size for KV cache
         kv_cache_size = self._calculate_kv_cache_tensors_size(kv_cache_config)
         # Allocate and reshape KV cache Tensors
-        kv_caches = self._allocate_kv_cache_tensors(kv_cache_config,
-                                                    kv_cache_size)
+        kv_caches = self._allocate_kv_cache_tensors(kv_cache_config, kv_cache_size)
         # Set up cross-layer KV cache sharing
-        for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
-        ):
-            logger.debug("%s reuses KV cache of %s", layer_name,
-                         target_layer_name)
+        for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
+            logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         from vllm.v1.worker.utils import bind_kv_cache
-        bind_kv_cache(kv_caches,
-                      self.compilation_config.static_forward_context,
-                      self.kv_caches)
+        bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches)
         return kv_caches
-    
+
     def _calculate_kv_cache_tensors_size(self, kv_cache_config: KVCacheConfig) -> dict[str, int | tuple[int]]:
         """
         Initializes the KV cache size. The buffer needs to be reshaped to the desired shape before being used by
@@ -167,9 +161,7 @@ class NPUModelRunner310(NPUModelRunner):
                 elif isinstance(kv_cache_spec, MambaSpec):
                     tensor_size = kv_cache_sizes[layer_name]
                     tensor_element_size = 2
-                    raw_tensor = torch.zeros(
-                        tensor_size // tensor_element_size, dtype=dtype, device=self.device
-                    )
+                    raw_tensor = torch.zeros(tensor_size // tensor_element_size, dtype=dtype, device=self.device)
                     assert tensor_size is not None
                     assert tensor_size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = tensor_size // kv_cache_spec.page_size_bytes
