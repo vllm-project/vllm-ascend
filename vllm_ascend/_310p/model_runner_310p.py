@@ -88,7 +88,7 @@ class NPUModelRunner310(NPUModelRunner):
                             kv_cache_sizes[layer_name_inner] = (kv_cache_size,)
                 elif "attn" in layer_name and layer_name not in kv_cache_sizes:
                     kv_tensor_split_factor = 2
-                    kv_tensor_size = kv_cache_tensor.size // kv_tensor_split_factor
+                    kv_tensor_size = int(kv_cache_tensor.size // kv_tensor_split_factor)
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache between the self_attn specs in the same group
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
