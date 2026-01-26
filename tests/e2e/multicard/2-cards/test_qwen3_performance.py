@@ -38,7 +38,7 @@ api_keyword_args = {
 vllm_bench_cases = {
     "dataset-name": "random",
     "num_prompts": 500,
-    "request_rate": 20,
+    "request_rate": float('inf'),
     "random_input_len": 128,
     "max_concurrency": 40,
     "random_output_len": 100,
