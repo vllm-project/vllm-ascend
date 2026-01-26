@@ -20,7 +20,7 @@ from __future__ import annotations
 import torch
 import torch_npu
 from vllm.logger import logger
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
