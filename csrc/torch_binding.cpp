@@ -1234,6 +1234,26 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_
     return std::tie(expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale);
 }
 
+at::Tensor npu_apply_top_k_top_p(
+    const at::Tensor& logits,
+    const c10::optional<at::Tensor>& p,
+    const c10::optional<at::Tensor>& k)
+{
+    TORCH_CHECK(p.has_value() || k.has_value(),
+                "apply_top_k_top_p: p and k cannot be None at the same time.");
+
+    at::Tensor out = at::empty_like(logits);
+
+    EXEC_NPU_CMD(
+        aclnnApplyTopKTopPCustom,
+        logits,
+        p,
+        k,
+        out);
+
+    return out;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k(
     const at::Tensor& x,
     int64_t k,
@@ -1495,4 +1515,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor rstd, Tensor x)"
         );
     ops.impl("npu_add_rms_norm_bias", torch::kPrivateUse1, &vllm_ascend::npu_add_rms_norm_bias);
+
+    ops.def("npu_apply_top_k_top_p(Tensor logits, Tensor? p=None, Tensor? k=None) -> Tensor");
+    ops.impl("npu_apply_top_k_top_p", torch::kPrivateUse1, &vllm_ascend::npu_apply_top_k_top_p);
 }
