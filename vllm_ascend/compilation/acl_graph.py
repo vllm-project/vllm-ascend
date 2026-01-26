@@ -261,10 +261,8 @@ def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
 
 
 def _pad_attention_seq_params(
-    actual_seq_lengths_q: list[int],
-    seq_lens: list[int],
-    runtime_shape: int
-) -> tuple[list[int], list[int]]:
+        actual_seq_lengths_q: list[int], seq_lens: list[int],
+        runtime_shape: int) -> tuple[list[int], list[int]]:
     if not actual_seq_lengths_q:
         padded_actual_seq_lengths_q = [runtime_shape]
     else:
@@ -331,7 +329,8 @@ def _update_attn_fia_params(update_stream,
                 seq_lens = attn_metadata[key].seq_lens_list
                 actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
 
-            actual_seq_lengths_q, seq_lens = _pad_attention_seq_params(actual_seq_lengths_q, seq_lens, runtime_shape)
+            actual_seq_lengths_q, seq_lens = _pad_attention_seq_params(
+                actual_seq_lengths_q, seq_lens, runtime_shape)
             torch.npu.graph_task_update_begin(update_stream, handle)
             torch_npu.npu_fused_infer_attention_score.out(
                 query=query,
