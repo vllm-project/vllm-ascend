@@ -484,6 +484,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
         kv_with_q_tail_nomask_idx_lst = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_nomask_idx_lst
         head_attn_nomask_seqlens_lst = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens_lst
         tail_attn_nomask_seqlens_lst = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens_lst
+        assert kv_with_q_head_nomask_idx_lst is not None
+        assert kv_with_q_tail_nomask_idx_lst is not None
+        assert head_attn_nomask_seqlens_lst is not None
+        assert tail_attn_nomask_seqlens_lst is not None
         output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
