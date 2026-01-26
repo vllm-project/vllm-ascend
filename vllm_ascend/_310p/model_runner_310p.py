@@ -47,7 +47,7 @@ class NPUModelRunner310(NPUModelRunner):
         """
         # 310P limitation: KV transfer is not supported.
         if self.vllm_config.kv_transfer_config is not None:
-            raise ValueError("KV cache transfer is not supported for 310P.")
+            raise ValueError("KV cache transfer is not supported for 310P, please check and remove.")
 
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors_310p(kv_cache_config)
         kv_caches = self._reshape_kv_cache_tensors_310p(kv_cache_config, kv_cache_raw_tensors)
