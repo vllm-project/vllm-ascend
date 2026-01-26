@@ -34,4 +34,4 @@ class NPUWorker310(NPUWorker):
 
     def _warm_up_atb(self):
         # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops
-        logger.info("Skip warm-up atb ops for 310P device")
+        logger.info("Skip warm-up atb ops for 310P device.")
