@@ -23,6 +23,7 @@ import torch.distributed as dist
 from vllm.logger import logger
 
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
+from vllm_ascend.eplb.utils import moe_load_async_stream
 
 
 class VllmEplbAdaptor(EplbAdaptor):
@@ -49,6 +50,8 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = self.model.get_log2phy_map(
                 self.num_dense_layers + layer_idx
             )
+
+        self.async_copy_stream = moe_load_async_stream()
 
     def init_buffer_tensor(self, num_buffer_tensor):
         for buffer_id in range(num_buffer_tensor):
@@ -123,8 +126,12 @@ class VllmEplbAdaptor(EplbAdaptor):
             logger.debug(f"Expert tensor shape is :{expert_tensor.shape}")
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
-        if self.log2phy_map_per_layer[layer_id] is not None:
-            self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
+        cur_stream = torch.npu.current_stream()
+        updated_log2phy_map = updated_log2phy_map.pin_memory()
+        self.async_copy_stream.wait_stream(cur_stream)
+        with torch.npu.stream(self.async_copy_stream):
+            if self.log2phy_map_per_layer[layer_id] is not None:
+                self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map.to(self.log2phy_map_per_layer[layer_id].device, non_blocking=True))
 
     def get_global_expert_map(self):
         all_layer_global_expert_map = []
@@ -134,3 +141,7 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.expert_map_per_layer_cpu[self.num_dense_layers + layer_id] = map_cpu[self.rank_id]
 
         return torch.stack(all_layer_global_expert_map)
+
+    def wait_for_copy_stream_completion(self):
+        if self.async_copy_stream is not None:
+            self.async_copy_stream.synchronize()

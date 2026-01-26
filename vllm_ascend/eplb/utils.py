@@ -18,10 +18,13 @@
 import types
 
 import torch
+import torch_npu
 
+_MOE_LOAD_ASYNC_STREAM = None
 
 def get_expert_map(self, layer_id):
     return self.model.layers[layer_id].mlp.experts.expert_map
+
 
 
 def get_log2phy_map(self, layer_id):
@@ -72,3 +75,9 @@ def model_register(model, model_config):
         model.num_moe_layers = config.num_hidden_layers - model.num_dense_layers
     else:
         raise NotImplementedError("EPLB is not supported.")
+
+def moe_load_async_stream() -> torch_npu.npu.Stream:
+    global _MOE_LOAD_ASYNC_STREAM
+    if _MOE_LOAD_ASYNC_STREAM is None:
+        _MOE_LOAD_ASYNC_STREAM = torch_npu.npu.Stream()
+    return _MOE_LOAD_ASYNC_STREAM
