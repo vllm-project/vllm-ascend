@@ -186,7 +186,7 @@ curl http://localhost:8000/v1/completions \
     -d '{
         "model": "qwen",
         "prompt": "tell me how to sleep well",
-        "max_tokens": 100,
+        "max_completion_tokens": 100,
         "temperature": 0
     }'
 ```
