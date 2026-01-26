@@ -62,7 +62,7 @@ class NPUModelRunner310(NPUModelRunner):
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches)
         return kv_caches
 
-    def _calculate_kv_cache_tensors_size(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int]]:
+    def _calculate_kv_cache_tensors_size(self, kv_cache_config: KVCacheConfig) -> dict[str, int | tuple[int, int]]:
         """
         Initializes the KV cache size. The buffer needs to be reshaped to the desired shape before being used by
         the models.
@@ -70,11 +70,11 @@ class NPUModelRunner310(NPUModelRunner):
         Args:
             kv_cache_config: The KV cache config
         Returns:
-            dict[str, tuple[int]]: A map between layer names to their
+            dict[str, int | tuple[int, int]]: A map between layer names to their
             corresponding memory buffer size.
         """
         # init kv cache tensors
-        kv_cache_sizes: dict[str, tuple[int] | tuple[int, int]] = {}
+        kv_cache_sizes: dict[str, int | tuple[int, int]] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
@@ -85,7 +85,7 @@ class NPUModelRunner310(NPUModelRunner):
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache between the self_attn specs in the same group
                         if "linear_attn" in layer_name_inner:
-                            kv_cache_sizes[layer_name_inner] = (kv_cache_size,)
+                            kv_cache_sizes[layer_name_inner] = kv_cache_size
                 elif "attn" in layer_name and layer_name not in kv_cache_sizes:
                     kv_tensor_split_factor = 2
                     kv_tensor_size = int(kv_cache_tensor.size // kv_tensor_split_factor)
@@ -107,7 +107,7 @@ class NPUModelRunner310(NPUModelRunner):
     def _allocate_kv_cache_and_reshape_tensors(
         self,
         kv_cache_config: KVCacheConfig,
-        kv_cache_sizes: dict[str, tuple[int]],
+        kv_cache_sizes: dict[str, int | tuple[int, int]],
     ) -> dict[str, torch.Tensor]:
         """
         Allocate the KV cache tensors to the desired shape and dtype.
@@ -160,7 +160,7 @@ class NPUModelRunner310(NPUModelRunner):
                     )
                     kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    tensor_size = kv_cache_sizes[layer_name][0]
+                    tensor_size = kv_cache_sizes[layer_name]
                     tensor_element_size = 2
                     raw_tensor = torch.zeros(tensor_size // tensor_element_size, dtype=dtype, device=self.device)
                     assert tensor_size is not None
