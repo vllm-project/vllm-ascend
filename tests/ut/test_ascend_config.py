@@ -99,7 +99,6 @@ class TestAscendConfig(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_init_ascend_config_enable_npugraph_ex_when_PIECEWISE(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
-        test_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         test_vllm_config.additional_config = {
             "npugraph_ex_config": {
                 "enable": True,
