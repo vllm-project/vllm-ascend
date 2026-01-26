@@ -5,7 +5,7 @@ Here is an example guiding how to use `launch_online_dp.py` to launch external d
 `run_dp_template.sh` is an template script used to launch each dp vllm instance separately. It will be called by `launch_online_dp.py` in multi threads and most of its configurations are set by `launch_online_dp.py`. Parameters you need to set manually include:
 
 1. The IP and socket_ifname of your machine. If running on multi-nodes, please make sure the scripts on each node has been set with correct IP and socket_ifname of that node.
-2. vLLM serving related parameters including model_path and other configurations. Note that port, dp-related parammeters and tp_size is set by `launch_online_dp.py`, all the other vLLM parameters in this file only serve as an example and you are free to modify them according to your purpose.
+2. vLLM serving related parameters including model_path and other configurations. Note that port, dp-related parameters and tp_size is set by `launch_online_dp.py`, all the other vLLM parameters in this file only serve as an example and you are free to modify them according to your purpose.
 
 ### Run `launch_online_dp.py` with CL arguments
 

@@ -903,7 +903,7 @@ void MoeInitRountingCustomTilingBase::Tinlig4VBSMultiCoreCompute(MoeCustomVBSCom
     needCoreNum = std::min(needCoreNum, aivNum);
 
     if (needCoreNum == 0) {
-        OPS_LOG_E(context_->GetNodeName(), "Variale needCoreNum cannot be 0.");
+        OPS_LOG_E(context_->GetNodeName(), "Variate needCoreNum cannot be 0.");
         return;
     }
     int64_t perCoreElements = (needCoreNum == 0) ? 0 : (totalLength_ / needCoreNum);

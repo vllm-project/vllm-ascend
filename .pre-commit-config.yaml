@@ -11,6 +11,17 @@ repos:
   - id: ruff-check
     args: [--output-format, github, --fix]
   - id: ruff-format
+- repo: https://github.com/codespell-project/codespell
+  rev: v2.4.1
+  hooks:
+    - id: codespell
+      args: [
+        --toml, pyproject.toml,
+        '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml',
+        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog'
+      ]
+      additional_dependencies:
+        - tomli
 - repo: https://github.com/crate-ci/typos
   rev: v1.32.0
   hooks:
