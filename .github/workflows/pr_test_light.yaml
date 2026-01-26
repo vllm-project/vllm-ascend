@@ -41,7 +41,7 @@ jobs:
   lint:
     uses: ./.github/workflows/_pre_commit.yml
     with:
-      vllm: dc917cceb877dfd13f98c538c4c96158047d98bd
+      vllm: 11b556878b958043e9c026919d4cba0236c85143
   changes:
     runs-on: linux-aarch64-a2-0
     outputs:
@@ -85,7 +85,7 @@ jobs:
     if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     strategy:
       matrix:
-        vllm_version: [dc917cceb877dfd13f98c538c4c96158047d98bd, v0.14.1]
+        vllm_version: [11b556878b958043e9c026919d4cba0236c85143, v0.14.1]
     uses: ./.github/workflows/_unit_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -97,7 +97,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [dc917cceb877dfd13f98c538c4c96158047d98bd, v0.14.1]
+        vllm_version: [11b556878b958043e9c026919d4cba0236c85143, v0.14.1]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
