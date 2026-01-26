@@ -838,8 +838,7 @@ class TestPCPDCPGraphParams(TestBase):
         out = torch.randn(2, 16, 128)
         lse = torch.randn(2, 16, 8)
 
-        num_computed_tokens_of_pcp_dcp = np.array([[[1, 1], [1, 1]],
-                                                   [[1, 1], [1, 1]]])
+        num_computed_tokens_of_pcp_dcp = torch.ones((2,2,2))
         decode = AscendMetadataForDecode(num_computed_tokens_of_pcp_dcp)
         metadata = AscendMetadata(num_actual_tokens_pcp_padded=[1, 1],
                                   actual_seq_lengths_q=actual_seq_lengths_q,
