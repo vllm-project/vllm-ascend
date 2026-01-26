@@ -14,11 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from typing import TYPE_CHECKING
 
-from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class AscendConfig:
@@ -233,7 +236,7 @@ class NpugraphExConfig:
     These configurations can directly impact the performance and behavior of models deployed on Ascend platforms.
     """
 
-    def __init__(self, vllm_config: VllmConfig, enable: bool = True, enable_static_kernel: bool = False, **kwargs):
+    def __init__(self, vllm_config: "VllmConfig", enable: bool = True, enable_static_kernel: bool = False, **kwargs):
         """
         Initialize the configuration.
 
