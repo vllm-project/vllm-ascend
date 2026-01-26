@@ -89,6 +89,7 @@ jobs:
         mkdir -p ${{ runner.temp }}/digests
         digest="${{ steps.build.outputs.digest }}"
         touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
     - name: Upload digest
       uses: actions/upload-artifact@v6
       with:
@@ -138,7 +139,7 @@ jobs:
             quay.io/ascend/vllm-ascend
           # Note for test case
           # https://github.com/marketplace/actions/docker-metadata-action#typeref
-          # 1. branch job pulish per main/*-dev branch commits
+          # 1. branch job publish per main/*-dev branch commits
           # 2. main and dev pull_request is build only, so the tag pr-N-openeuler is fine
           # 3. only pep440 matched tag will be published:
           #    - v0.7.1 --> v0.7.1-openeuler

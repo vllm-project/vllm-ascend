@@ -120,7 +120,7 @@ curl http://localhost:8000/v1/chat/completions \
             {"type": "text", "text": "What is the text in the illustrate?"}
         ]}
     ],
-    "max_tokens": 100
+    "max_completion_tokens": 100
     }'
 ```
 
@@ -182,7 +182,7 @@ curl http://localhost:8000/v1/chat/completions \
             {"type": "text", "text": "What is in this video?"}
         ]}
     ],
-    "max_tokens": 100
+    "max_completion_tokens": 100
     }'
 ```
 
