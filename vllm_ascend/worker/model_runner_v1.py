@@ -1710,6 +1710,11 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states, _ = hidden_states
         else:
             hidden_states = hidden_states
+        if get_forward_context().sp_enabled and not isinstance(
+                hidden_states, IntermediateTensors):
+            hidden_states = self._all_gather_hidden_states_and_aux(
+                hidden_states)
+        return hidden_states
         return hidden_states
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
