@@ -82,7 +82,7 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
   "temperature": 0.6,
   "top_p": 0.95,
   "top_k": 20,
-  "max_tokens": 4096
+  "max_completion_tokens": 4096
 }'
 ```
 
