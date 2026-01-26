@@ -209,8 +209,8 @@ class ProxyState:
         # Initialize priority queues for efficient server selection
         # Each entry is (priority_score, server_index, server_reference)
         # Lower priority score = higher priority (less loaded)
-        self.prefiller_heap = [(0, i, server) for i, server in enumerate(self.prefillers)]
-        self.decoder_heap = [(0, i, server) for i, server in enumerate(self.decoders)]
+        self.prefiller_heap = [(0.0, i, server) for i, server in enumerate(self.prefillers)]
+        self.decoder_heap = [(0.0, i, server) for i, server in enumerate(self.decoders)]
         heapq.heapify(self.prefiller_heap)
         heapq.heapify(self.decoder_heap)
 
@@ -221,7 +221,7 @@ class ProxyState:
         priority = server.active_tokens + server.active_kv_cache * 0.3
         # Remove old entry and add new one
         self.prefiller_heap = [(p, i, s) for p, i, s in self.prefiller_heap if i != server_idx]
-        heapq.heappush(self.prefiller_heap, (priority, server_idx, server))  # type: ignore
+        heapq.heappush(self.prefiller_heap, (priority, server_idx, server))
 
     def _update_decoder_priority(self, server_idx: int):
         """Update the priority of a decoder server in the heap."""
@@ -229,7 +229,7 @@ class ProxyState:
         priority = server.active_tokens
         # Remove old entry and add new one
         self.decoder_heap = [(p, i, s) for p, i, s in self.decoder_heap if i != server_idx]
-        heapq.heappush(self.decoder_heap, (priority, server_idx, server))  # type: ignore
+        heapq.heappush(self.decoder_heap, (priority, server_idx, server))
 
     def abort_prefiller_request(self, server_idx: int, request_id):  # Changed to synchronous
         """
