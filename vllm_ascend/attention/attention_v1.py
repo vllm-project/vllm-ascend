@@ -25,6 +25,18 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import (  # type: ignore
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionImpl,
+    AttentionLayer,
+    AttentionMetadataBuilder,
+    AttentionType,
+)
+from vllm.v1.attention.backends.registry import (  # type: ignore
+    AttentionBackendEnum,
+    register_backend,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
@@ -44,35 +56,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
-
-# isort: off
-if vllm_version_is("0.13.0"):
-    from vllm.v1.attention.backends.utils import AttentionCGSupport, AttentionMetadataBuilder
-    from vllm.attention.backends.abstract import (  # type: ignore
-        AttentionBackend,
-        AttentionImpl,
-        AttentionLayer,
-        AttentionType,
-    )
-    from vllm.attention.backends.registry import (  # type: ignore
-        AttentionBackendEnum,
-        register_backend,
-    )
-else:
-    from vllm.v1.attention.backend import (  # type: ignore
-        AttentionBackend,
-        AttentionCGSupport,
-        AttentionImpl,
-        AttentionLayer,
-        AttentionType,
-        AttentionMetadataBuilder,
-    )
-    from vllm.v1.attention.backends.registry import (  # type: ignore
-        AttentionBackendEnum,
-        register_backend,
-    )
-# isort: on
+from vllm_ascend.utils import weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -386,6 +370,144 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
+
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+    ):
+        if using_paged_attention(num_tokens, vllm_config):
+            # Paged Attention update logic
+            if forward_context.is_draft_model:
+                graph_params = get_draft_graph_params()
+            else:
+                graph_params = get_graph_params()
+            with torch.npu.stream(update_stream):
+                for key, param, handle, event in zip(
+                    forward_context.attn_metadata,
+                    graph_params.attn_params[num_tokens],
+                    graph_params.handles[num_tokens],
+                    graph_params.events[num_tokens],
+                ):
+                    (
+                        query,
+                        key_cache,
+                        value_cache,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
+                        block_table,
+                        seq_lens,
+                        output,
+                    ) = param
+                    seq_lens = forward_context.attn_metadata[key].seq_lens
+
+                    workspace = torch_npu._npu_paged_attention_get_workspace(
+                        query=query,
+                        key_cache=key_cache,
+                        value_cache=value_cache,
+                        num_kv_heads=num_kv_heads,
+                        num_heads=num_heads,
+                        scale_value=scale,
+                        block_table=block_table,
+                        context_lens=seq_lens,
+                        out=output,
+                    )
+                    torch.npu.graph_task_update_begin(update_stream, handle)
+                    torch_npu._npu_paged_attention(
+                        query=query,
+                        key_cache=key_cache,
+                        value_cache=value_cache,
+                        num_kv_heads=num_kv_heads,
+                        num_heads=num_heads,
+                        scale_value=scale,
+                        block_table=block_table,
+                        context_lens=seq_lens,
+                        out=output,
+                        workspace=workspace,
+                    )
+                    torch.npu.graph_task_update_end(update_stream)
+                    event.record(update_stream)
+        else:
+            # FIA update logic
+            if forward_context.is_draft_model:
+                graph_params = get_draft_graph_params()
+                attn_metadata = forward_context.draft_attn_metadatas
+                attn_keys = list(attn_metadata[0].keys())
+            else:
+                graph_params = get_graph_params()
+                attn_metadata = forward_context.attn_metadata
+                attn_keys = list(attn_metadata.keys())
+            # For Qwen3-next, since the kv_cache_config has already categorized
+            # linear_attn and self_attn, the attn_metadata is first arranged with
+            # self_attn followed by linear_attn. Therefore, using zip directly
+            # filters out the update operations for linear_attn.
+            # TODO: We use a new variable `attn_keys` to ensure the loop count is
+            # correct after get by `zip` because of the new structure of the attn_metadata
+            # when running with the merged full eagle-graph. Should check it with Qwen3-next.
+            num_layers = len(attn_keys)
+            if num_layers == 0:
+                return
+            if forward_context.is_draft_model:
+                attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+            attn_count = 0
+            with torch.npu.stream(update_stream):
+                for key, param, handle, event in zip(
+                    attn_keys,
+                    graph_params.attn_params[num_tokens],
+                    graph_params.handles[num_tokens],
+                    graph_params.events[num_tokens],
+                ):
+                    (
+                        query,
+                        key_cache,
+                        value,
+                        block_tables,
+                        attn_mask,
+                        block_size,
+                        seq_lens,
+                        query_start_loc,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
+                        attn_output,
+                        softmax_lse,
+                    ) = param
+
+                    if forward_context.is_draft_model:
+                        draft_step = attn_count // num_layers
+                        seq_lens = attn_metadata[draft_step][key].seq_lens_list
+                        actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
+                        attn_count = attn_count + 1
+                    else:
+                        seq_lens = attn_metadata[key].seq_lens_list
+                        actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+
+                    torch.npu.graph_task_update_begin(update_stream, handle)
+                    torch_npu.npu_fused_infer_attention_score.out(
+                        query=query,
+                        key=key_cache,
+                        value=value,
+                        block_table=block_tables,
+                        atten_mask=attn_mask,
+                        input_layout="TND",
+                        block_size=block_size,
+                        actual_seq_lengths=actual_seq_lengths_q,
+                        actual_seq_lengths_kv=seq_lens,
+                        num_key_value_heads=num_kv_heads,
+                        num_heads=num_heads,
+                        scale=scale,
+                        sparse_mode=3,
+                        workspace=graph_params.workspaces.get(num_tokens),
+                        out=[attn_output, softmax_lse],
+                    )
+                    torch.npu.graph_task_update_end(update_stream)
+
+                    event.record(update_stream)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)

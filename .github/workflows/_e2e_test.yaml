@@ -22,7 +22,7 @@ on:
 jobs:
   e2e:
     name: singlecard
-    runs-on: ${{ inputs.runner }}-1
+    runs-on: linux-aarch64-a2b3-1
     container:
       image: ${{ inputs.image }}
       env:
@@ -92,15 +92,16 @@ jobs:
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
           # basic 
+          pytest -sv --durations=0 tests/e2e/singlecard/test_auto_fit_max_mode_len.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_batch_invariant.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_batch_invariant.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
-          # xgrammar has parameter mismatching bug, please follows: https://github.com/vllm-project/vllm-ascend/issues/5524
-          # pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_llama32_lora.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_qwen3_multi_loras.py
@@ -145,11 +146,9 @@ jobs:
 
       - name: Config mirrors
         run: |
-          # Fix me: use nginx cache rather than the pypi
-          # sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          # pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          # pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
 
@@ -217,6 +216,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_fc1_tp2
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a4_distributed_tp2
 
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_weight_load.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_pipeline_parallel.py
@@ -226,6 +226,14 @@ jobs:
           # This test is broken, fix me
           #pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_shared_expert_dp.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_single_request_aclgraph.py
+
+      - name: Run vllm-project/vllm-ascend test (non triton)
+        if: ${{ inputs.type == 'full' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          python3 -m pip uninstall -y triton-ascend
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
 
   e2e-4-cards:
     name: multicard-4
@@ -246,8 +254,9 @@ jobs:
 
       - name: Config mirrors
         run: |
-          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git wget curl -y
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/

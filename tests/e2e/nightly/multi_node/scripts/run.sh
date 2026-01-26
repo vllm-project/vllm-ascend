@@ -125,13 +125,12 @@ install_extra_components() {
     echo "====> Extra components installation completed"
 }
 
-install_clang() {
-    echo "====> Installing clang-15"
-    apt-get update && apt-get install -y clang-15
-    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+show_triton_ascend_info() {
+    echo "====> Check triton ascend info"
     clang -v
-    echo "====> Clang-15 installation completed"
+    which bishengir-compile
+    pip show triton-ascend
 }
 
 kill_npu_processes() {
@@ -161,7 +160,7 @@ main() {
     check_npu_info
     check_and_config
     show_vllm_info
-    install_clang
+    show_triton_ascend_info
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
     fi
