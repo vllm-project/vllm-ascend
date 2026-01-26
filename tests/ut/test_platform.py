@@ -207,7 +207,6 @@ class TestNPUPlatform(TestBase):
         )
 
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("vllm_ascend.utils.update_default_aclgraph_sizes")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_unsupported_compilation_level(
