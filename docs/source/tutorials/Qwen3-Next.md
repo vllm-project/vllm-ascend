@@ -75,7 +75,7 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
   "temperature": 0.6,
   "top_p": 0.95,
   "top_k": 20,
-  "max_tokens": 32
+  "max_completion_tokens": 32
 }'
 ```
 
@@ -103,7 +103,7 @@ if __name__ == '__main__':
     prompts = [
         "Who are you?",
     ]
-    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_tokens=32)
+    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_completion_tokens=32)
     llm = LLM(model="Qwen/Qwen3-Next-80B-A3B-Instruct",
               tensor_parallel_size=4,
               enforce_eager=True,

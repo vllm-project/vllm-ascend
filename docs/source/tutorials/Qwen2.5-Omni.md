@@ -156,7 +156,7 @@ curl http://127.0.0.1:8000/v1/chat/completions   -H "Content-Type: application/j
         ]
       }
     ],
-    "max_tokens": 100,
+    "max_completion_tokens": 100,
     "temperature": 0.7
   }'
 

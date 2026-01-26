@@ -661,7 +661,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     -d '{
         "model": "deepseek_v3",
         "prompt": "The future of AI is",
-        "max_tokens": 50,
+        "max_completion_tokens": 50,
         "temperature": 0
     }'
 ```
