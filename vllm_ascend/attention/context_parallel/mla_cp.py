@@ -119,12 +119,12 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         pcp_metadata = common_attn_metadata.prefill_context_parallel_metadata
         assert pcp_metadata is not None
         return AscendPCPMetadata(
-            q_head_idx=pcp_metadata.q_head_idx_tensor,
-            q_tail_idx=pcp_metadata.q_tail_idx_tensor,
-            kv_with_q_head_nomask_idx=pcp_metadata.kv_with_q_head_nomask_idx_tensor,
-            kv_with_q_head_mask_idx=pcp_metadata.kv_with_q_head_mask_idx_tensor,
-            kv_with_q_tail_nomask_idx=pcp_metadata.kv_with_q_tail_nomask_idx_tensor,
-            kv_with_q_tail_mask_idx=pcp_metadata.kv_with_q_tail_mask_idx_tensor,
+            q_head_idx=pcp_metadata.q_head_idx,
+            q_tail_idx=pcp_metadata.q_tail_idx,
+            kv_with_q_head_nomask_idx=pcp_metadata.kv_with_q_head_nomask_idx,
+            kv_with_q_head_mask_idx=pcp_metadata.kv_with_q_head_mask_idx,
+            kv_with_q_tail_nomask_idx=pcp_metadata.kv_with_q_tail_nomask_idx,
+            kv_with_q_tail_mask_idx=pcp_metadata.kv_with_q_tail_mask_idx,
             attn_mask_seqlens=pcp_metadata.attn_mask_seqlens,
             head_attn_nomask_seqlens=pcp_metadata.head_attn_nomask_seqlens,
             tail_attn_nomask_seqlens=pcp_metadata.tail_attn_nomask_seqlens,
