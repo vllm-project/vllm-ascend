@@ -119,7 +119,7 @@ template <typename T, typename... Args> constexpr uint64_t RecursiveSum(T templa
 //     Format: Represents the Format supported by the current tiling key, using InputLayout enum, occupies one decimal digit
 //     Sparse: Represents whether the current tiling key supports Sparse, using SparseCapability enum, occupies one decimal digit
 //     For other specialized scenarios, define your own bit fields and values
-// usage: get tilingKey from inputed types
+// usage: get tilingKey from inputted types
 //     uint64_t tilingKey = GET_FLASHATTENTION_TILINGKEY(AxisEnum::AXIS_S1, AxisEnum::AXIS_S2, AxisEnum::AXIS_N2,
 //                                     SupportedDtype::FLOAT32, InputLayout::BSH, SparseCapability::SUPPORT_ALL)
 
@@ -129,7 +129,7 @@ template <typename... Args> constexpr uint64_t GET_TILINGKEY(Args... templateIds
     return TILINGKEYOFFSET + RecursiveSum(templateIds...);
 }
 
-// usage: get tilingKey from inputed types
+// usage: get tilingKey from inputted types
 //     uint64_t tilingKey = TILINGKEY(S2, S1, N2, FLOAT32, BSND, ALL)
 
 #define TILINGKEY(ub2, ub1, block, dtype, layout, sparse)                                                              \
