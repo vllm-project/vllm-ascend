@@ -17,6 +17,7 @@
 | Jie Wen| [@zzzzwwjj](https://github.com/zzzzwwjj) | 2025/12 |
 | Chao Lei| [@LCAIZJ](https://github.com/LCAIZJ) | 2025/12 |
 | JiaXu Liu| [@realliujiaxu](https://github.com/realliujiaxu) | 2025/12 |
+| HeXiang Wang| [@whx-sjtu](https://github.com/whx-sjtu) | 2026/01 |
 
 ## Contributors
 
