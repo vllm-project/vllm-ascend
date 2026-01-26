@@ -62,6 +62,28 @@ from vllm_ascend.utils import weak_ref_tensors
 SWA_INT_MAX = 2147483647
 
 
+def _pad_attention_seq_params(
+    actual_seq_lengths_q: list[int], seq_lens: list[int], runtime_shape: int
+) -> tuple[list[int], list[int]]:
+    if not actual_seq_lengths_q:
+        padded_actual_seq_lengths_q = [runtime_shape]
+    else:
+        last_val = actual_seq_lengths_q[-1]
+        if last_val >= runtime_shape:
+            padded_actual_seq_lengths_q = actual_seq_lengths_q
+        else:
+            interpolated = list(range(last_val + 1, runtime_shape + 1))
+            padded_actual_seq_lengths_q = actual_seq_lengths_q + interpolated
+
+    target_len = len(padded_actual_seq_lengths_q)
+    if len(seq_lens) >= target_len:
+        padded_seq_lens = seq_lens
+    else:
+        padded_seq_lens = seq_lens + [0] * (target_len - len(seq_lens))
+
+    return padded_actual_seq_lengths_q, padded_seq_lens
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -486,7 +508,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     else:
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
-
+                    actual_seq_lengths_q, seq_lens = _pad_attention_seq_params(
+                        actual_seq_lengths_q, seq_lens, num_tokens
+                    )
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
