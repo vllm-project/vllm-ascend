@@ -127,7 +127,7 @@ curl http://<IP>:<Port>/v1/completions \
     -d '{
         "model": "qwen-2.5-7b-instruct",
         "prompt": "Beijing is a",
-        "max_tokens": 5,
+        "max_completion_tokens": 5,
         "temperature": 0
     }'
 ```
