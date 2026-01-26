@@ -123,7 +123,7 @@ def main():
         temperature=0.6,
         top_p=0.95,
         top_k=20,
-        max_tokens=16384,
+        max_completion_tokens=16384,
     )
 
     processor = Qwen3OmniMoeProcessor.from_pretrained(MODEL_PATH)
@@ -243,7 +243,7 @@ evalscope eval \
     --datasets omni_bench, gsm8k, bbh \
     --dataset-args '{"omni_bench": { "extra_params": { "use_image": true, "use_audio": false}}}' \
     --eval-batch-size 1 \
-    --generation-config '{"max_tokens": 10000, "temperature": 0.6}' \
+    --generation-config '{"max_completion_tokens": 10000, "temperature": 0.6}' \
     --limit 100
 ```
 

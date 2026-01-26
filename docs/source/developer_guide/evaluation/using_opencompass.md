@@ -48,7 +48,7 @@ curl http://localhost:8000/v1/completions \
     -d '{
         "model": "Qwen/Qwen2.5-7B-Instruct",
         "prompt": "The future of AI is",
-        "max_tokens": 7,
+        "max_completion_tokens": 7,
         "temperature": 0
     }'
 ```
