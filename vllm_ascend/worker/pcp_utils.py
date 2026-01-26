@@ -648,8 +648,10 @@ class PCPManager:
             kv_with_q_tail_nomask_seqlens = chunk_seqlens * (self.pcp_size * 2 - 1 - self.pcp_rank)
 
             if self.vllm_config.model_config.use_mla:
-                kv_with_q_head_nomask_idx_tensor, kv_with_q_head_nomask_seqlens = split_indices(kv_with_q_head_nomask_idx, kv_with_q_head_nomask_seqlens)
-                kv_with_q_tail_nomask_idx_tensor, kv_with_q_tail_nomask_seqlens = split_indices(kv_with_q_tail_nomask_idx, kv_with_q_tail_nomask_seqlens)
+                long_seq_metadata.kv_with_q_head_nomask_idx_lst, kv_with_q_head_nomask_seqlens_lst = split_indices(kv_with_q_head_nomask_idx, kv_with_q_head_nomask_seqlens)
+                long_seq_metadata.kv_with_q_tail_nomask_idx_lst, kv_with_q_tail_nomask_seqlens_lst = split_indices(kv_with_q_tail_nomask_idx, kv_with_q_tail_nomask_seqlens)
+                long_seq_metadata.head_attn_nomask_seqlens_lst = [torch.stack([chunk_seqlens, lens]) for lens in kv_with_q_head_nomask_seqlens_lst]
+                long_seq_metadata.tail_attn_nomask_seqlens_lst = [torch.stack([chunk_seqlens, lens]) for lens in kv_with_q_tail_nomask_seqlens_lst]
 
             q_full_idx = torch.cat([q_head_idx, q_tail_idx])
             q_full_idx = q_full_idx.to(torch.float32).argsort().to(

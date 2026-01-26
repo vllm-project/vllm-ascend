@@ -24,6 +24,10 @@ class AscendPCPMetadata:
     attn_mask_seqlens: torch.Tensor = None
     head_attn_nomask_seqlens: torch.Tensor = None
     tail_attn_nomask_seqlens: torch.Tensor = None
+    kv_with_q_head_nomask_idx_lst: list[torch.Tensor] | None = None
+    kv_with_q_tail_nomask_idx_lst: list[torch.Tensor] | None = None
+    head_attn_nomask_seqlens_lst: list[torch.Tensor] | None = None
+    tail_attn_nomask_seqlens_lst: list[torch.Tensor] | None = None
     q_full_idx: torch.Tensor = None
     pcp_allgather_restore_idx: list[int] | None = None
 
