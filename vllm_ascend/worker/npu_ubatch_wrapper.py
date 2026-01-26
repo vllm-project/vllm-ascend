@@ -142,8 +142,9 @@ class UBatchWrapper(GPUUBatchWrapper):
 
         results: list[tuple[int, torch.Tensor]] = []
         compute_stream = ubatch_metadata[0].context.compute_stream
-        num_tokens = ubatch_metadata[0].num_tokens + \
-            ubatch_metadata[1].num_tokens
+        num_tokens = 0
+        for metadata in ubatch_metadata:
+            num_tokens += metadata.num_tokens
 
         # Ubatches will manually manage the forward context, so we override
         # it to None here so we can have it restored correctly later
@@ -307,8 +308,9 @@ class UBatchWrapper(GPUUBatchWrapper):
                 return self.aclgraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
-        num_tokens = (ubatch_slices[0].token_slice.stop -
-                      ubatch_slices[0].token_slice.start) * 2
+        num_tokens = 0
+        for ubatch_slice in ubatch_slices:
+            num_tokens += ubatch_slice.num_tokens
         input_ids = kwargs['input_ids']
         positions = kwargs['positions']
         intermediate_tensors = kwargs['intermediate_tensors']
