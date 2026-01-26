@@ -351,7 +351,7 @@ class NPUModelRunner(GPUModelRunner):
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
-        self.long_seq_metadata = None
+        self.pcp_metadata = None
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
@@ -940,7 +940,7 @@ class NPUModelRunner(GPUModelRunner):
                     slot_mapping[
                         total_num_scheduled_tokens:num_input_tokens].fill_(-1)
             if self.pcp_size * self.dcp_size > 1:
-                self.long_seq_metadata = self.pcp_manager.generate_pcp_metadata(
+                self.pcp_metadata = self.pcp_manager.generate_pcp_metadata(
                     total_num_scheduled_tokens, self.query_lens,
                     self.input_batch, num_scheduled_tokens)
                 blk_table.slot_mapping.gpu[maybe_pcp_full_tokens:].fill_(-1)
@@ -1010,7 +1010,7 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state=self.attn_state,
                 max_query_len=max_num_scheduled_tokens,
                 decode_token_per_req=self.decode_token_per_req,
-                prefill_context_parallel_metadata=self.long_seq_metadata,
+                prefill_context_parallel_metadata=self.pcp_metadata,
                 max_seq_len=0,
                 encoder_seq_lens=encoder_seq_lens,
                 encoder_seq_lens_cpu=encoder_seq_lens_cpu)
@@ -1042,13 +1042,13 @@ class NPUModelRunner(GPUModelRunner):
                         ori_query_lens[:num_decode_reqs], dim=0))
                 common_attn_metadata.block_table_tensor = \
                     blk_table_tensor[:num_decode_reqs_flatten + num_prefill_reqs]
-                assert self.long_seq_metadata is not None
-                self.long_seq_metadata.query_lens_pcp_full_cpu = ori_query_lens_cpu
+                assert self.pcp_metadata is not None
+                self.pcp_metadata.query_lens_pcp_full_cpu = ori_query_lens_cpu
 
                 if 'pad_size' in locals() and pad_size > 0:
                     ori_query_lens_cpu[-pad_size:] = \
                         torch.full([pad_size], ori_query_lens_cpu[-pad_size - 1].item())
-                self.long_seq_metadata.max_query_len_pcp_full = \
+                self.pcp_metadata.max_query_len_pcp_full = \
                     ori_query_lens_cpu.max().item()
 
 
@@ -1334,7 +1334,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 req_scheduled_tokens = scheduler_output.num_scheduled_tokens
                 if self.pcp_size * self.dcp_size > 1:
-                    long_seq_metadata = self.long_seq_metadata  # type: ignore
+                    pcp_metadata = self.pcp_metadata  # type: ignore
                     input_ids_pcp_full = self.pcp_manager.input_ids_pcp_full.gpu
                     query_start_loc_pcp_full = self.pcp_manager.query_start_loc_pcp_full.gpu
                     query_start_loc_pcp_full_cpu = self.pcp_manager.query_start_loc_pcp_full.cpu
@@ -1345,7 +1345,7 @@ class NPUModelRunner(GPUModelRunner):
                                         > self.decode_threshold).sum().item()
                     num_decode_reqs = num_reqs - num_prefill_reqs
                 else:
-                    long_seq_metadata = None  # type: ignore
+                    pcp_metadata = None  # type: ignore
                     num_prefill_reqs = 0
                     num_decode_reqs = 0
                 if spec_decode_metadata is None:
@@ -1420,7 +1420,7 @@ class NPUModelRunner(GPUModelRunner):
                     common_attn_metadata=common_attn_metadata,
                     sampling_metadata=sampling_metadata,
                     req_scheduled_tokens=req_scheduled_tokens,
-                    long_seq_metadata=long_seq_metadata,
+                    pcp_metadata=pcp_metadata,
                     num_prefill_reqs=num_prefill_reqs,
                     num_decode_reqs=num_decode_reqs,
                     scheduler_output=scheduler_output,
@@ -1933,16 +1933,16 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_group_id].get_device_tensor()
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
-                long_seq_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
+                pcp_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
                     num_tokens, self.query_lens, self.input_batch,
                     num_scheduled_tokens)
-                if long_seq_metadata is not None:
+                if pcp_metadata is not None:
                     pcp_world_size = get_pcp_group().world_size
                     dcp_world_size = get_dcp_group().world_size
                     num_computed_tokens_of_pcp_dcp = [[
                         [0] * dcp_world_size for _ in range(pcp_world_size)
                     ] for _ in range(num_tokens)]
-                    long_seq_metadata.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
+                    pcp_metadata.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
 
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
@@ -1961,7 +1961,7 @@ class NPUModelRunner(GPUModelRunner):
                     attn_state=self.attn_state,
                     max_query_len=max_query_len,
                     decode_token_per_req=self.decode_token_per_req,
-                    prefill_context_parallel_metadata=long_seq_metadata,
+                    prefill_context_parallel_metadata=pcp_metadata,
                     max_seq_len=0)
                 if self.pcp_size * self.dcp_size > 1:
                     common_attn_metadata.block_table_tensor = \

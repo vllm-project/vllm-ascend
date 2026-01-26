@@ -101,14 +101,14 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
     ):
-        long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-        if long_seq_metadata is None:
-            raise AssertionError("long_seq_metadata should not be None.")
+        pcp_metadata = common_attn_metadata.prefill_context_parallel_metadata
+        if pcp_metadata is None:
+            raise AssertionError("pcp_metadata should not be None.")
 
         # In dcp only spec decode graph padding case,
         # num_actual_tokens_pcp_padded may be less than num_actual_tokens
         self.num_actual_tokens = max(
-            long_seq_metadata.num_actual_tokens_pcp_padded, common_attn_metadata.num_actual_tokens
+            pcp_metadata.num_actual_tokens_pcp_padded, common_attn_metadata.num_actual_tokens
         )
 
     def build_cp_metadata(
@@ -116,20 +116,20 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
     ) -> AscendPCPMetadata | None:
-        common_long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-        assert common_long_seq_metadata is not None
+        pcp_metadata = common_attn_metadata.prefill_context_parallel_metadata
+        assert pcp_metadata is not None
         return AscendPCPMetadata(
-            q_head_idx=common_long_seq_metadata.q_head_idx_tensor,
-            q_tail_idx=common_long_seq_metadata.q_tail_idx_tensor,
-            kv_with_q_head_nomask_idx=common_long_seq_metadata.kv_with_q_head_nomask_idx_tensor,
-            kv_with_q_head_mask_idx=common_long_seq_metadata.kv_with_q_head_mask_idx_tensor,
-            kv_with_q_tail_nomask_idx=common_long_seq_metadata.kv_with_q_tail_nomask_idx_tensor,
-            kv_with_q_tail_mask_idx=common_long_seq_metadata.kv_with_q_tail_mask_idx_tensor,
-            attn_mask_seqlens=common_long_seq_metadata.attn_mask_seqlens,
-            head_attn_nomask_seqlens=common_long_seq_metadata.head_attn_nomask_seqlens,
-            tail_attn_nomask_seqlens=common_long_seq_metadata.tail_attn_nomask_seqlens,
-            q_full_idx=common_long_seq_metadata.q_full_idx,
-            pcp_allgather_restore_idx=common_long_seq_metadata.pcp_allgather_restore_idx,
+            q_head_idx=pcp_metadata.q_head_idx_tensor,
+            q_tail_idx=pcp_metadata.q_tail_idx_tensor,
+            kv_with_q_head_nomask_idx=pcp_metadata.kv_with_q_head_nomask_idx_tensor,
+            kv_with_q_head_mask_idx=pcp_metadata.kv_with_q_head_mask_idx_tensor,
+            kv_with_q_tail_nomask_idx=pcp_metadata.kv_with_q_tail_nomask_idx_tensor,
+            kv_with_q_tail_mask_idx=pcp_metadata.kv_with_q_tail_mask_idx_tensor,
+            attn_mask_seqlens=pcp_metadata.attn_mask_seqlens,
+            head_attn_nomask_seqlens=pcp_metadata.head_attn_nomask_seqlens,
+            tail_attn_nomask_seqlens=pcp_metadata.tail_attn_nomask_seqlens,
+            q_full_idx=pcp_metadata.q_full_idx,
+            pcp_allgather_restore_idx=pcp_metadata.pcp_allgather_restore_idx,
         )
 
     def build_chunked_metadata(
@@ -141,9 +141,9 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         if chunked_context_metadata is None:
             return None
 
-        long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-        assert long_seq_metadata is not None
-        num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
+        pcp_metadata = common_attn_metadata.prefill_context_parallel_metadata
+        assert pcp_metadata is not None
+        num_computed_tokens_of_pcp_dcp = pcp_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
         local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[self.num_decodes_flatten :]).reshape(
             -1, self.dcp_size * self.pcp_size
@@ -225,9 +225,9 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
     ) -> AscendMLADecodeMetadata:
         decode_metadata = super().build_decode_metadata(common_prefix_len, common_attn_metadata)
 
-        long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-        assert long_seq_metadata is not None
-        num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
+        pcp_metadata = common_attn_metadata.prefill_context_parallel_metadata
+        assert pcp_metadata is not None
+        num_computed_tokens_of_pcp_dcp = pcp_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
         # [bs, pcp_size, dcp_size]
         num_computed_tokens_of_cp_dcp_array = np.array(num_computed_tokens_of_pcp_dcp)[: self.num_decodes_flatten]
