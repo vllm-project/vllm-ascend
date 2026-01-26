@@ -766,11 +766,10 @@ def split_indices(
     num_chunks = cdiv(seq_lens.max(), chunk_size)
     if num_chunks <= 1:
         return [indices], [seq_lens]
-    cu_seq_lens = torch.cumsum(seq_lens, 0)
+    seq_ends = torch.cumsum(seq_lens, 0)
     seq_starts = torch.cat(
-        [torch.tensor([0]), cu_seq_lens[:-1]]
+        [torch.tensor([0]), seq_ends[:-1]]
     )
-    seq_ends = cu_seq_lens[1:]
     chunk_starts = min(
         seq_starts.unsqueeze(0) + torch.arange(num_chunks).unsqueeze(1) * chunk_size,
         seq_ends
@@ -788,4 +787,3 @@ def split_indices(
         for cidx in range(chunk_starts.shape[0])
     ]
     return chunked_indices, chunk_lens
-
