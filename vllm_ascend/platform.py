@@ -446,6 +446,13 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.enable_chunked_prefill = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
+        # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
+        from vllm_ascend import envs as envs_ascend
+        if envs_ascend.VLLM_ASCEND_PROFILING_CHUNK_ENABLED:
+            vllm_config.scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
+            )
+
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         if (
             vllm_config.kv_transfer_config is not None

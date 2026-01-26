@@ -19,6 +19,7 @@
 
 import math
 import sys
+import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
@@ -1244,6 +1245,8 @@ class NPUModelRunner(GPUModelRunner):
                 capturer.clear_buffer()
             else:
                 logger.warning("RoutedExpertsCapturer is not initialized.")
+
+        self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
@@ -1709,6 +1712,10 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 logger.warning("RoutedExpertsCapturer is not initialized.")
 
+        execution_time_ms = 0.0
+        if hasattr(self, '_execution_start_time'):
+            torch.npu.synchronize()
+            execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
@@ -1720,6 +1727,9 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
         )
+        # Set execution_time_ms as a dynamic attribute since the upstream
+        # ModelRunnerOutput dataclass does not define this field.
+        model_runner_output.execution_time_ms = execution_time_ms
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB update"):
@@ -2409,6 +2419,7 @@ class NPUModelRunner(GPUModelRunner):
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        profile_cpp: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -2439,6 +2450,9 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
+        elif profile_cpp:
+            num_reqs = 1
+            num_scheduled_tokens_list = [num_tokens] * num_reqs
         else:
             num_reqs = min(num_tokens, max_num_reqs)
             min_tokens_per_req = num_tokens // num_reqs
@@ -2579,16 +2593,20 @@ class NPUModelRunner(GPUModelRunner):
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
-                # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by
-                # tp_size; otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading
-                # to incorrect memory estimation and potentially causing OOM.
-                intermediate_tokens = num_tokens_padded
-                if enable_sp():
+                # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by tp_size;
+                # otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading to incorrect memory estimation and potentially causing OOM.
+                # actual_tokens = num_tokens
+                actual_tokens = num_tokens_padded
+                sp_will_be_enabled = enable_sp() and (
+                    is_moe_model(self.vllm_config) or num_tokens_padded > 1000
+                )
+                if sp_will_be_enabled:
                     tp_size = get_tensor_model_parallel_world_size()
                     intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
                 if self.intermediate_tensors is None:
                     max_actual_tokens = self.max_num_tokens
-                    if enable_sp():
+                    if sp_will_be_enabled:
+                        # max_actual_tokens = self.max_num_tokens // tp_size
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
                     self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                         batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
