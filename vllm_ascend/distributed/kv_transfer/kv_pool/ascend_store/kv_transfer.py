@@ -257,21 +257,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                          name="KVCacheStoreLayerSendingThread")
         self.final_layer_id = num_layers - 1
         self.put_step = put_step
-        self.stored_requests = defaultdict[str, int](int)
-    
-    def add_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            self.stored_requests[req_id] += 1
-
-    def dec_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
-
-    def delete_finished_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                del self.stored_requests[req_id]
 
     def add_request(  # type: ignore[override]
             self, req_meta: ReqMeta) -> torch.Tensor:
@@ -293,7 +278,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
         if not keys:
             if is_last_chunk:
-                self.dec_stored_request(req_meta.req_id)
+                self.set_finished_request(req_meta.req_id)
             return
 
         key_list = []
@@ -304,7 +289,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
         if skip_block_num == len(key_list):
             if is_last_chunk and layer_id == self.final_layer_id:
-                self.dec_stored_request(req_meta.req_id)
+                self.set_finished_request(req_meta.req_id)
             return
 
         starts = starts[skip_block_num:]
@@ -324,7 +309,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.m_store.put(key_list, addr_list, size_list)
 
         if layer_id == self.final_layer_id and is_last_chunk:
-            self.dec_stored_request(req_meta.req_id)
+            self.set_finished_request(req_meta.req_id)
         self.request_queue.task_done()
 
         logger.info(
