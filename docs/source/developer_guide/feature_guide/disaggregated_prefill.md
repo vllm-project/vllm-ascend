@@ -39,7 +39,7 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 #### Mooncake Connector
 
 1. The request is sent to the Proxy’s `_handle_completions` endpoint.
-2. The Proxy calls `select_prefiller` to choose a P node and forwards the request, configuring `kv_transfer_params` with `do_remote_decode=True`, `max_tokens=1`, and `min_tokens=1`.
+2. The Proxy calls `select_prefiller` to choose a P node and forwards the request, configuring `kv_transfer_params` with `do_remote_decode=True`, `max_completion_tokens=1`, and `min_tokens=1`.
 3. After the P node’s scheduler finishes prefill, `update_from_output` invokes the schedule connector’s `request_finished` to defer KV cache release, constructs `kv_transfer_params` with `do_remote_prefill=True`, and returns to the Proxy.
 4. The Proxy calls `select_decoder` to choose a D node and forwards the request.
 5. On the D node, the scheduler marks the request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, calls `kv_connector_no_forward` to pull the remote KV cache, then notifies the P node to release KV cache and proceeds with decoding to return the result.
@@ -49,7 +49,7 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 1. The request is sent to the Proxy’s `_handle_completions` endpoint.
 2. The Proxy calls `select_decoder` to choose a D node and forwards the request, configuring `kv_transfer_params` with `do_remote_prefill=True` and setting the `metaserver` endpoint.
 3. On the D node, the scheduler uses `kv_transfer_params` to mark the request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, then calls `kv_connector_no_forward` to send a request to the metaserver and waits for the KV cache transfer to complete.
-4. The Proxy’s `metaserver` endpoint receives the request, calls `select_prefiller` to choose a P node, and forwards it with `kv_transfer_params` set to `do_remote_decode=True`, `max_tokens=1`, and `min_tokens=1`.
+4. The Proxy’s `metaserver` endpoint receives the request, calls `select_prefiller` to choose a P node, and forwards it with `kv_transfer_params` set to `do_remote_decode=True`, `max_completion_tokens=1`, and `min_tokens=1`.
 5. During processing, the P node’s scheduler pushes KV cache layer-wise; once all layers pushing is complete, it releases the request and notifies the D node to begin decoding.
 6. The D node performs decoding and returns the result.
 

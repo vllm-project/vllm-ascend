@@ -66,7 +66,7 @@ curl http://localhost:8000/v1/completions \
 "C. Asset-Liability Ratio=65.22%, Current Ratio=1.75\n"\
 "D. Asset-Liability Ratio=68.00%, Current Ratio=2.50<|im_end|>\n"\
 "<|im_start|>assistant\n"'",
-        "max_tokens": 1,
+        "max_completion_tokens": 1,
         "temperature": 0,
         "stop": ["<|im_end|>"]
     }' | python3 -m json.tool

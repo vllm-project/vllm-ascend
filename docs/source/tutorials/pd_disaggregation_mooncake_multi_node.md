@@ -932,7 +932,7 @@ curl http://192.0.0.1:8080/v1/completions \
     -d '{
         "model": "qwen3-moe",
         "prompt": "Who are you?",
-        "max_tokens": 100,
+        "max_completion_tokens": 100,
         "temperature": 0
     }'
 ```
