@@ -15,31 +15,32 @@
 # limitations under the License.
 #
 
-from vllm.distributed.kv_transfer.kv_connector.factory import \
-    KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 
 def register_connector():
     KVConnectorFactory.register_connector(
-        "MooncakeConnectorV1",
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
-        "MooncakeConnector")
+        "MooncakeConnectorV1", "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector", "MooncakeConnector"
+    )
 
     KVConnectorFactory.register_connector(
         "MooncakeConnectorStoreV1",
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
-        "AscendStoreConnector")
+        "AscendStoreConnector",
+    )
 
     KVConnectorFactory.register_connector(
         "AscendStoreConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
-        "AscendStoreConnector")
+        "AscendStoreConnector",
+    )
 
     KVConnectorFactory.register_connector(
         "MooncakeLayerwiseConnector",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector",
-        "MooncakeLayerwiseConnector")
+        "MooncakeLayerwiseConnector",
+    )
 
     KVConnectorFactory.register_connector(
-        "UCMConnector", "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector",
-        "UCMConnectorV1")
+        "UCMConnector", "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector", "UCMConnectorV1"
+    )

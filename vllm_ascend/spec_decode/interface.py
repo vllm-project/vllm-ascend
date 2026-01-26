@@ -14,6 +14,7 @@ class SpecDcodeType(enum.Enum):
     EAGLE3 = 2
     MTP = 4
     SUFFIX = 5
+    MEDUSA = 6
 
 
 class Proposer:

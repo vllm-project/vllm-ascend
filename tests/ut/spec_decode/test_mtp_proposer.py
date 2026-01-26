@@ -42,6 +42,9 @@ class TestMtpProposer:
         config.model_config.max_model_len = 2048
         config.model_config.uses_mrope = False
         config.model_config.hf_text_config = None
+        config.model_config.hf_config = None
+        config.parallel_config.tensor_parallel_size = 1
+        config.speculative_config.draft_tensor_parallel_size = 1
 
         config.load_config = None
 
@@ -71,6 +74,7 @@ class TestMtpProposer:
         runner.max_num_reqs = 256
         runner._use_aclgraph.return_value = False
         runner.reserved_mc2_mask = None
+        runner.pin_memory = False
         return runner
 
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")

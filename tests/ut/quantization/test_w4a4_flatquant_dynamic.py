@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.nn as nn
 
-from vllm_ascend.quantization.w4a4_flatquant_dynamic import (
+from vllm_ascend.quantization.methods.w4a4_flatquant import (
     AscendW4A4FlatQuantDynamicLinearMethod, get_decompose_dim,
     pack_int4_weights)
 
@@ -33,7 +33,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         self.assertEqual(get_decompose_dim(100), (10, 10))
         self.assertEqual(get_decompose_dim(99), (9, 11))
 
-    @patch('vllm_ascend.quantization.w4a4_flatquant_dynamic.torch_npu')
+    @patch('vllm_ascend.quantization.methods.w4a4_flatquant.torch_npu')
     def test_pack_int4_weights_npu_success(self, mock_torch_npu):
         """
         Tests weight packing using the mocked NPU kernel.
@@ -119,7 +119,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         x = torch.randn(batch_size, self.input_size, dtype=self.params_dtype)
         return layer, x, m, n
 
-    @patch('vllm_ascend.quantization.w4a4_flatquant_dynamic.torch_npu')
+    @patch('vllm_ascend.quantization.methods.w4a4_flatquant.torch_npu')
     def test_apply_small_batch(self, mock_torch_npu):
         """Tests the apply method with a batch size smaller than MAX_BATCH_SIZE."""
         batch_size = 128
@@ -143,9 +143,9 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         self.assertEqual(output.shape, (batch_size, self.output_size))
 
     @patch(
-        'vllm_ascend.quantization.w4a4_flatquant_dynamic.KRONECKER_QUANT_MAX_BATCH_SIZE',
+        'vllm_ascend.quantization.methods.w4a4_flatquant.KRONECKER_QUANT_MAX_BATCH_SIZE',
         10)
-    @patch('vllm_ascend.quantization.w4a4_flatquant_dynamic.torch_npu')
+    @patch('vllm_ascend.quantization.methods.w4a4_flatquant.torch_npu')
     def test_apply_large_batch(self, mock_torch_npu):
         """Tests the apply method with a batch size larger than MAX_BATCH_SIZE."""
         batch_size = 25
@@ -178,7 +178,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
                 ValueError, "FlatQuant transform matrices dimension mismatch"):
             self.method.apply(layer, x)
 
-    @patch('vllm_ascend.quantization.w4a4_flatquant_dynamic.pack_int4_weights')
+    @patch('vllm_ascend.quantization.methods.w4a4_flatquant.pack_int4_weights')
     def test_process_weights_after_loading(self, mock_pack_weights):
         """Tests weight processing after loading, without transpose."""
         layer = nn.Module()

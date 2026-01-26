@@ -5,15 +5,15 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -23,26 +23,17 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.metadata import (
-    MetadataServer, MetadataServerProc, MLAConfig)
-from vllm_ascend.utils import vllm_version_is
-
-# isort: off
-if vllm_version_is('0.13.0'):
-    from vllm.attention.backends.abstract import AttentionType  # type: ignore
-else:
-    from vllm.v1.attention.backend import AttentionType  # type: ignore
+    MetadataServer,
+    MetadataServerProc,
+    MLAConfig,
+)
 
 if TYPE_CHECKING:
-    if vllm_version_is('0.13.0'):
-        from vllm.attention.backends.abstract import \
-            AttentionMetadata  # type: ignore
-    else:
-        from vllm.v1.attention.backend import AttentionType  #type: ignore
     from vllm.forward_context import ForwardContext
+    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
-# isort: on
 
 
 @dataclass
@@ -70,20 +61,15 @@ class CPUOffloadingConnectorMetadata(KVConnectorMetadata):
 
 
 class CPUOffloadingConnector(KVConnectorBase_V1):
-
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 role: KVConnectorRole,
-                 kv_cache_config: Optional["KVCacheConfig"] = None):
+    def __init__(
+        self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: Optional["KVCacheConfig"] = None
+    ):
         self._connector_metadata = CPUOffloadingConnectorMetadata(requests={}, finished_req_ids=set())
         if not vllm_config.cache_config.enable_prefix_caching:
-            self.connector_scheduler: Optional[
-                CPUOffloadingConnectorScheduler] = None
-            self.connector_worker: Optional[
-                CPUOffloadingConnectorWorker] = None
+            self.connector_scheduler: CPUOffloadingConnectorScheduler | None = None
+            self.connector_worker: CPUOffloadingConnectorWorker | None = None
         elif role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = CPUOffloadingConnectorScheduler(
-                vllm_config)
+            self.connector_scheduler = CPUOffloadingConnectorScheduler(vllm_config)
             self.connector_worker = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
@@ -93,11 +79,9 @@ class CPUOffloadingConnector(KVConnectorBase_V1):
     # Worker-side methods
     # ==============================
 
-    def bind_connector_metadata(
-            self, connector_metadata: KVConnectorMetadata) -> None:
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         if self.connector_worker is not None:
-            assert isinstance(connector_metadata,
-                              CPUOffloadingConnectorMetadata)
+            assert isinstance(connector_metadata, CPUOffloadingConnectorMetadata)
             self.connector_worker.bind_connector_metadata(connector_metadata)
 
     def clear_connector_metadata(self) -> None:
@@ -108,8 +92,7 @@ class CPUOffloadingConnector(KVConnectorBase_V1):
         if self.connector_worker is not None:
             self.connector_worker.register_kv_caches(kv_caches)
 
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         if self.connector_worker is not None:
             self.connector_worker.start_load_kv()
 
@@ -117,53 +100,42 @@ class CPUOffloadingConnector(KVConnectorBase_V1):
         if self.connector_worker is not None:
             self.connector_worker.wait_for_layer_load()
 
-    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+    def save_kv_layer(
+        self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs
+    ) -> None:
         pass
 
     def wait_for_save(self):
         pass
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str] | None, set[str] | None]:
         assert self.connector_worker is not None
         return self.connector_worker.get_finished(), None
 
     # Scheduler-side methods
     # ==============================
 
-    def get_num_new_matched_tokens(
-            self, request: "Request",
-            num_computed_tokens: int) -> tuple[int, bool]:
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         if self.connector_scheduler is not None:
-            return self.connector_scheduler.get_num_new_matched_tokens(
-                request, num_computed_tokens)
+            return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
         return 0, False
 
-    def update_state_after_alloc(self, request: "Request",
-                                 blocks: "KVCacheBlocks",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         if self.connector_scheduler is not None:
             return self.connector_scheduler.update_state_after_alloc(request)
 
-    def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         if self.connector_scheduler is not None:
-            return self.connector_scheduler.build_connector_meta(
-                scheduler_output)
+            return self.connector_scheduler.build_connector_meta(scheduler_output)
         return KVConnectorMetadata()
 
-    def request_finished(
-            self, request: "Request",
-            block_ids: list[int]) -> tuple[bool, Optional[dict[str, Any]]]:
+    def request_finished(self, request: "Request", block_ids: list[int]) -> tuple[bool, dict[str, Any] | None]:
         if self.connector_scheduler is not None:
             self.connector_scheduler.request_finished(request)
         return True, None
 
 
 class CPUOffloadingConnectorScheduler:
-
     def __init__(self, vllm_config: VllmConfig):
         logger.info("init CPUOffloadingConnectorScheduler")
         self.vllm_config = vllm_config
@@ -176,22 +148,17 @@ class CPUOffloadingConnectorScheduler:
         self.zmq_rpc_client = MetadataServer.ZMQRPCClient()
         self.zmq_rpc_client.call("post_init")
         if vllm_config.kv_transfer_config is not None:
-            self.swap_in_threshold = vllm_config.kv_transfer_config.get_from_extra_config(
-                "swap_in_threshold", 0)
+            self.swap_in_threshold = vllm_config.kv_transfer_config.get_from_extra_config("swap_in_threshold", 0)
         else:
             self.swap_in_threshold = 0
         logger.info(f"swap_in_threshold: {self.swap_in_threshold}")
 
-    def get_num_new_matched_tokens(
-            self, ori_request: "Request",
-            num_computed_tokens: int) -> tuple[int, bool]:
+    def get_num_new_matched_tokens(self, ori_request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         request = copy.deepcopy(ori_request)
         request.get_hash_new_full_blocks = None
-        num_cpu_computed_tokens, load_async = self.zmq_rpc_client.call(
-            "get_matched_num_and_touch", request)
+        num_cpu_computed_tokens, load_async = self.zmq_rpc_client.call("get_matched_num_and_touch", request)
         self.num_gpu_computed_tokens[request.request_id] = num_computed_tokens
-        self.num_cpu_computed_tokens[
-            request.request_id] = num_cpu_computed_tokens
+        self.num_cpu_computed_tokens[request.request_id] = num_cpu_computed_tokens
         if num_cpu_computed_tokens - num_computed_tokens >= self.swap_in_threshold:
             return num_cpu_computed_tokens - num_computed_tokens, load_async
         else:
@@ -200,29 +167,22 @@ class CPUOffloadingConnectorScheduler:
     def update_state_after_alloc(self, request: "Request"):
         self.allocated_req_ids.add(request.request_id)
 
-    def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         num_tokens = {}
         # process scheduled_new_reqs
         for req in scheduler_output.scheduled_new_reqs:
             req_id = req.req_id
-            num_tokens[req_id] = (
-                req.num_computed_tokens +
-                scheduler_output.num_scheduled_tokens[req_id])
+            num_tokens[req_id] = req.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
 
         # process scheduled_cached_reqs
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, req_id in enumerate(cached_reqs.req_ids):
-            num_tokens[req_id] = (
-                cached_reqs.num_computed_tokens[idx] +
-                scheduler_output.num_scheduled_tokens[req_id])
+            num_tokens[req_id] = cached_reqs.num_computed_tokens[idx] + scheduler_output.num_scheduled_tokens[req_id]
 
-        unallocated_req_ids = set(self.num_gpu_computed_tokens.keys() -
-                                  self.allocated_req_ids -
-                                  scheduler_output.num_scheduled_tokens.keys())
-        new_cpu_block_ids = self.zmq_rpc_client.call("allocate_slots",
-                                                     num_tokens,
-                                                     unallocated_req_ids)
+        unallocated_req_ids = set(
+            self.num_gpu_computed_tokens.keys() - self.allocated_req_ids - scheduler_output.num_scheduled_tokens.keys()
+        )
+        new_cpu_block_ids = self.zmq_rpc_client.call("allocate_slots", num_tokens, unallocated_req_ids)
         metadata = CPUOffloadingConnectorMetadata(
             requests={},
             finished_req_ids=set(self.finished_req_ids),
@@ -233,22 +193,22 @@ class CPUOffloadingConnectorScheduler:
             metadata.requests[req_id] = ReqMeta(
                 gpu_block_ids=[] if gpu_block_ids is None else gpu_block_ids,
                 cpu_block_ids=new_cpu_block_ids.get(req_id, []),
-                num_scheduled_tokens=scheduler_output.
-                num_scheduled_tokens[req_id],
+                num_scheduled_tokens=scheduler_output.num_scheduled_tokens[req_id],
                 num_computed_tokens=req.num_computed_tokens,
                 num_gpu_computed_tokens=self.num_gpu_computed_tokens[req_id],
-                num_cpu_computed_tokens=self.num_cpu_computed_tokens[req_id])
+                num_cpu_computed_tokens=self.num_cpu_computed_tokens[req_id],
+            )
 
         for idx, req_id in enumerate(cached_reqs.req_ids):
             gpu_block_ids = cached_reqs.new_block_ids[idx]
             metadata.requests[req_id] = ReqMeta(
                 gpu_block_ids=[] if gpu_block_ids is None else gpu_block_ids,
                 cpu_block_ids=new_cpu_block_ids.get(req_id, []),
-                num_scheduled_tokens=scheduler_output.
-                num_scheduled_tokens[req_id],
+                num_scheduled_tokens=scheduler_output.num_scheduled_tokens[req_id],
                 num_computed_tokens=cached_reqs.num_computed_tokens[idx],
                 num_gpu_computed_tokens=cached_reqs.num_computed_tokens[idx],
-                num_cpu_computed_tokens=cached_reqs.num_computed_tokens[idx])
+                num_cpu_computed_tokens=cached_reqs.num_computed_tokens[idx],
+            )
         self.num_gpu_computed_tokens.clear()
         self.num_cpu_computed_tokens.clear()
         self.allocated_req_ids.clear()
@@ -260,12 +220,10 @@ class CPUOffloadingConnectorScheduler:
         request.get_hash_new_full_blocks = None
         self.finished_req_ids.append(request.request_id)
         # inform metadata server to record request, and free it after finish sending
-        self.zmq_rpc_client.call("record_request_cache_and_free_slots",
-                                 request)
+        self.zmq_rpc_client.call("record_request_cache_and_free_slots", request)
 
 
 class CPUOffloadingConnectorWorker:
-
     def __init__(self, vllm_config: VllmConfig):
         logger.info("init CPUOffloadingConnectorWorker")
         self.vllm_config = vllm_config
@@ -300,7 +258,7 @@ class CPUOffloadingConnectorWorker:
     def init_metadata_server(self, vllm_config: VllmConfig):
         self.metadata_thread = threading.Thread(
             target=MetadataServerProc.run_metadata_server,
-            args=(vllm_config, ),
+            args=(vllm_config,),
         )
         self.metadata_thread.daemon = True
         self.metadata_thread.start()
@@ -315,18 +273,15 @@ class CPUOffloadingConnectorWorker:
                 logger.info(f"wait for metadata server to start, error: {e}")
                 time.sleep(1)
 
-    def bind_connector_metadata(
-            self, connector_metadata: CPUOffloadingConnectorMetadata) -> None:
+    def bind_connector_metadata(self, connector_metadata: CPUOffloadingConnectorMetadata) -> None:
         for req_id, req in connector_metadata.requests.items():
             if req_id in self.requests:
                 self.requests[req_id].update(req)
                 req = self.requests[req_id]
             else:
                 self.requests[req_id] = req
-            for i in range(req.num_gpu_computed_tokens // self.block_size,
-                           req.num_computed_tokens // self.block_size):
-                self.load_block_mapping.append(
-                    (req.cpu_block_ids[i], req.gpu_block_ids[i]))
+            for i in range(req.num_gpu_computed_tokens // self.block_size, req.num_computed_tokens // self.block_size):
+                self.load_block_mapping.append((req.cpu_block_ids[i], req.gpu_block_ids[i]))
         for req_id in connector_metadata.finished_req_ids:
             if req_id in self.requests:
                 self.save_input_queue.put((req_id, self.requests[req_id]))
@@ -337,11 +292,11 @@ class CPUOffloadingConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, Sequence[torch.Tensor]]):
         self.gpu_kv_caches = kv_caches
         model_config = self.vllm_config.model_config
-        mla_config: Optional[MLAConfig] = None
+        mla_config: MLAConfig | None = None
         if model_config.use_mla:
             mla_config = MLAConfig(
-                model_config.hf_text_config.kv_lora_rank,
-                model_config.hf_text_config.qk_rope_head_dim)
+                model_config.hf_text_config.kv_lora_rank, model_config.hf_text_config.qk_rope_head_dim
+            )
         self.cpu_kv_caches = list(
             self.zmq_rpc_client.call(
                 "init_cpu_kv_caches",
@@ -349,7 +304,8 @@ class CPUOffloadingConnectorWorker:
                 self.tp_rank,
                 get_kv_cache_spec(self.vllm_config),
                 mla_config,
-            ).values())
+            ).values()
+        )
 
     def start_load_kv(self) -> None:
         self.current_layer = 0
@@ -369,10 +325,8 @@ class CPUOffloadingConnectorWorker:
         cpu_kv_caches = self.cpu_kv_caches[layer]
         with torch.npu.stream(self.load_stream):
             for cpu_block_id, gpu_block_id in self.load_block_mapping:
-                for gpu_layer_part, cpu_layer_part in zip(
-                        gpu_kv_caches, cpu_kv_caches):
-                    gpu_layer_part[gpu_block_id].copy_(
-                        cpu_layer_part[cpu_block_id], non_blocking=True)
+                for gpu_layer_part, cpu_layer_part in zip(gpu_kv_caches, cpu_kv_caches):
+                    gpu_layer_part[gpu_block_id].copy_(cpu_layer_part[cpu_block_id], non_blocking=True)
 
     def get_finished(self) -> set[str]:
         done_sending: set[str] = set()
@@ -391,8 +345,7 @@ class CPUOffloadingConnectorWorker:
                 self.done_sending_count[req_id] += 1
             other_ranks_finished_ids: list[str] = []
             for i in range(1, self.tp_world_size):
-                other_ranks_finished_ids.extend(
-                    self.tp_group.recv_object(src=i))
+                other_ranks_finished_ids.extend(self.tp_group.recv_object(src=i))
             for req_id in other_ranks_finished_ids:
                 self.done_sending_count[req_id] += 1
             all_done_sending: set[str] = set()
@@ -402,8 +355,7 @@ class CPUOffloadingConnectorWorker:
                     all_done_sending.add(req_id)
             # release cpu_kv_cache after request sending finished
             # to avoid rpc blocking, use thread to call rpc asynchronously
-            sending_finished_thread = threading.Thread(
-                target=self._sending_finished, args=(all_done_sending, ))
+            sending_finished_thread = threading.Thread(target=self._sending_finished, args=(all_done_sending,))
             sending_finished_thread.daemon = True
             sending_finished_thread.start()
 
@@ -422,11 +374,10 @@ class CPUOffloadingConnectorWorker:
         while True:
             req_id, req = self.save_input_queue.get()
             for i in range(
-                    req.num_cpu_computed_tokens // self.block_size,
-                    min((req.num_computed_tokens + req.num_scheduled_tokens) //
-                        self.block_size, len(req.cpu_block_ids))):
-                save_block_mapping.append(
-                    (req.gpu_block_ids[i], req.cpu_block_ids[i]))
+                req.num_cpu_computed_tokens // self.block_size,
+                min((req.num_computed_tokens + req.num_scheduled_tokens) // self.block_size, len(req.cpu_block_ids)),
+            ):
+                save_block_mapping.append((req.gpu_block_ids[i], req.cpu_block_ids[i]))
             with torch.npu.stream(self.save_stream):
                 # MLA: kv_layer is tuple[tensor, tensor] means (rope, nope).
                 # non-MLA: kv_layer is list[tensor], typically means [k, v].
@@ -436,13 +387,9 @@ class CPUOffloadingConnectorWorker:
                     start, step = 0, 1
                 for i in range(start, len(save_block_mapping), step):
                     gpu_block_id, cpu_block_id = save_block_mapping[i]
-                    for cpu_kv_caches, gpu_kv_caches in zip(
-                            self.cpu_kv_caches, self.gpu_kv_caches.values()):
-                        for cpu_layer_part, gpu_layer_part in zip(
-                                cpu_kv_caches, gpu_kv_caches):
-                            cpu_layer_part[cpu_block_id].copy_(
-                                gpu_layer_part[gpu_block_id],
-                                non_blocking=True)
+                    for cpu_kv_caches, gpu_kv_caches in zip(self.cpu_kv_caches, self.gpu_kv_caches.values()):
+                        for cpu_layer_part, gpu_layer_part in zip(cpu_kv_caches, gpu_kv_caches):
+                            cpu_layer_part[cpu_block_id].copy_(gpu_layer_part[gpu_block_id], non_blocking=True)
             self.save_stream.synchronize()
             self.save_output_queue.put(req_id)
             save_block_mapping.clear()
@@ -464,13 +411,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     if vllm_config.cache_config.cache_dtype == "auto":
         kv_cache_dtype = vllm_config.model_config.dtype
     else:
-        kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-            vllm_config.cache_config.cache_dtype]
+        kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[vllm_config.cache_config.cache_dtype]
 
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     # NOTE: Must process Attention/MLAAttention before MambaBase to maintain
-    # ordering expected by acl_graph.py's _update_attn_fia_params.
+    # ordering expected by graph parameter update logic in attention backends.
     mamba_layers: dict[str, MambaBase] = {}
     for layer_name, attn_module in attn_layers.items():
         if isinstance(attn_module, Attention):
@@ -483,10 +429,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 # using DSA. Fix the spec in vLLM is the final way.
                 block_size = vllm_config.cache_config.block_size
                 kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=attn_module.head_size,
-                    dtype=kv_cache_dtype)
+                    block_size=block_size, num_kv_heads=1, head_size=attn_module.head_size, dtype=kv_cache_dtype
+                )
             elif spec := attn_module.get_kv_cache_spec(vllm_config):
                 kv_cache_spec[layer_name] = spec
 
@@ -495,8 +439,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
     if len(mamba_layers) > 0:
         if vllm_config.cache_config.enable_prefix_caching:
-            raise NotImplementedError(
-                "Prefix caching is not supported for Mamba yet.")
+            raise NotImplementedError("Prefix caching is not supported for Mamba yet.")
         for layer_name, mamba_module in mamba_layers.items():
             if spec := mamba_module.get_kv_cache_spec(vllm_config):
                 kv_cache_spec[layer_name] = spec

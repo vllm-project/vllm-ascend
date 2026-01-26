@@ -17,7 +17,7 @@ import os
 from typing import TYPE_CHECKING
 
 from vllm.logger import logger
-from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -62,10 +62,25 @@ class AscendConfig:
             additional_config.get("enable_shared_expert_dp", False)
             and vllm_config.parallel_config.enable_expert_parallel
         )
-        if self.enable_shared_expert_dp:
-            from vllm_ascend.utils import enable_sp
+        from vllm_ascend.utils import enable_sp
 
+        if self.enable_shared_expert_dp:
             assert enable_sp(vllm_config=vllm_config, enable_shared_expert_dp=True)
+
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vllm_config):
+            tp_pcp_size = (
+                vllm_config.parallel_config.tensor_parallel_size
+                * vllm_config.parallel_config.prefill_context_parallel_size
+            )
+            if vllm_config.scheduler_config.max_num_batched_tokens % tp_pcp_size != 0:
+                vllm_config.scheduler_config.max_num_batched_tokens = (
+                    cdiv(vllm_config.scheduler_config.max_num_batched_tokens, tp_pcp_size) * tp_pcp_size
+                )
+                logger.warning_once(
+                    f"When using FLASHCOMM1, the max_num_batched_tokens should be divisible"
+                    f"by tp_size * pcp_size ({tp_pcp_size}). It has been adjusted to"
+                    f"{vllm_config.scheduler_config.max_num_batched_tokens}."
+                )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
@@ -174,7 +189,7 @@ class AscendCompilationConfig:
     """
 
     def __init__(
-        self, fuse_norm_quant: bool = True, fuse_qknorm_rope: bool = False, fuse_allreduce_rms: bool = False, **kwargs
+        self, fuse_norm_quant: bool = True, fuse_qknorm_rope: bool = True, fuse_allreduce_rms: bool = False, **kwargs
     ):
         """
         Initialize the configuration.
@@ -184,13 +199,13 @@ class AscendCompilationConfig:
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
-                Default: False
+                Default: True
             fuse_allreduce_rms (bool): Whether to enable allreduce and addrmsnorm fusion optimization.
                 Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
-        self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
+        self.fuse_qknorm_rope = fuse_qknorm_rope
         self.fuse_allreduce_rms = fuse_allreduce_rms
 
 

@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from typing import Any
 
 import torch
 import torch_npu
@@ -23,8 +24,8 @@ from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder, bui
 from vllm_ascend._310p.attention.metadata_builder import AscendAttentionMetadataBuilder310P
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend as _BaseBackend
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl as _BaseImpl
-from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder, AscendAttentionState
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, aligned_16, nd_to_nz_2d
+from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder, AscendAttentionState, AscendMetadata
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d
 
 
 class AscendAttentionBackend310(_BaseBackend):
@@ -47,15 +48,21 @@ class AscendAttentionBackend310(_BaseBackend):
 
 
 class AscendAttentionBackendImpl310(_BaseImpl):
-    def forward_paged_attention(self, query, attn_metadata, output):
+    def forward_paged_attention(
+        self,
+        query: Any,
+        attn_metadata: AscendMetadata,
+        output: Any | None = None,
+    ) -> Any:
         if attn_metadata.seq_lens.device != query.device:
-            attn_metadata.seq_lens = attn_metadata.seq_lens.to(device=query.device, non_blocking=True)
+            attn_metadata.seq_lens = attn_metadata.seq_lens.to(
+                device=query.device,
+                non_blocking=True,
+            )
         return super().forward_paged_attention(query, attn_metadata, output)
 
     def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata, output):
         real_tokens = int(attn_metadata.seq_lens.sum().item())
-
-        query, key, value, output = (aligned_16(t) for t in (query, key, value, output))
 
         seq_len = attn_metadata.seq_lens
         if seq_len.dtype != torch.int32:

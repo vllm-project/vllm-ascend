@@ -28,8 +28,8 @@ def test_qwen3_w8a8_quant():
     ]
     vllm_target_outputs = [([
         85, 4086, 44, 374, 264, 1550, 42747, 628, 323, 4938, 72816, 44378, 323,
-        13480, 4712, 369, 444, 10994, 82, 13, 1084, 374, 6188, 311, 387
-    ], 'vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be'
+        13480, 4712, 369, 444, 10994, 82, 13, 1084, 374, 6188, 369, 3460
+    ], 'vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed for large'
                             )]
 
     with VllmRunner(

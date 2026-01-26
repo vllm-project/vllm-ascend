@@ -18,17 +18,19 @@ requires = [
     "setuptools>=64",
     "setuptools-scm>=8",
     "transformers<=4.57.1",
-    "torch-npu==2.8.0",
-    "torch==2.8.0",
+    "torch-npu==2.9.0",
+    "torch==2.9.0",
     "torchvision",
     "wheel",
     "msgpack",
     "quart",
     "numba",
+    "xgrammar>=0.1.30",
     "fastapi<0.124.0",
     "opencv-python-headless<=4.11.0.86", # Required to avoid numpy version conflict with vllm
     "compressed_tensors>=0.11.0",
-    "arctic-inference==0.1.1"
+    "arctic-inference==0.1.1",
+    "triton-ascend==3.2.0"
 ]
 build-backend = "setuptools.build_meta"
 
@@ -49,21 +51,36 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
-    "vllm_ascend/attention/mla_v1.py",
-    "vllm_ascend/attention/sfa_v1.py",
-    "vllm_ascend/core",
-    "vllm_ascend/distributed",
-    "vllm_ascend/eplb",
-    "vllm_ascend/kv_offload",
-    "vllm_ascend/lora",
-    "vllm_ascend/model_loader",
-    "vllm_ascend/ops",
-    "vllm_ascend/patch",
-    "vllm_ascend/quantization",
-    "vllm_ascend/sample",
-    "vllm_ascend/spec_decode",
-    "vllm_ascend/worker",
-    "vllm_ascend/xlite",
+    # (7)
+    "vllm_ascend/quantization/**",
+    "vllm_ascend/sample/*.py",
+    "vllm_ascend/worker/v2/**",
+    "vllm_ascend/worker/block_table.py",
+    "vllm_ascend/worker/npu_input_batch.py",
+    # (8)
+    "vllm_ascend/ops/__init__.py",
+    "vllm_ascend/ops/activation.py",
+    "vllm_ascend/ops/flashcomm2_oshard_manager.py",
+    "vllm_ascend/ops/layernorm.py",
+    "vllm_ascend/ops/mla.py",
+    "vllm_ascend/ops/mm_encoder_attention.py",
+    "vllm_ascend/ops/register_custom_ops.py",
+    "vllm_ascend/ops/rotary_embedding.py",
+    "vllm_ascend/ops/vocab_parallel_embedding.py",
+    "vllm_ascend/ops/weight_prefetch.py",
+    "vllm_ascend/spec_decode/**",
+    # (9)
+    "vllm_ascend/worker/model_runner_v1.py",
+    "vllm_ascend/worker/pcp_utils.py",
+    # (10)
+    "vllm_ascend/ops/*linear*.py",
+    "vllm_ascend/worker/worker.py",
+    "vllm_ascend/distributed/parallel_state.py",
+    "vllm_ascend/distributed/utils.py",
+    "vllm_ascend/xlite/*.py",
+    "vllm_ascend/patch/worker/patch_*.py",
+    # (11)
+    "vllm_ascend/ops/fused_moe/**",
 ]
 
 [tool.ruff.lint]

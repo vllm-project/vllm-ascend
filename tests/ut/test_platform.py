@@ -5,17 +5,11 @@ import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
+from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType, vllm_version_is
-
-# isort: off
-if vllm_version_is("0.13.0"):
-    from vllm.attention.selector import AttentionSelectorConfig  # type: ignore
-else:
-    from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
-# isort: on
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType 
 
 
 class TestNPUPlatform(TestBase):
@@ -57,8 +51,9 @@ class TestNPUPlatform(TestBase):
         self.assertTrue(self.platform.is_sleep_mode_available())
 
     @patch("vllm_ascend.utils.adapt_patch")
-    @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
-    def test_pre_register_and_update_with_parser(self, mock_quant_config, mock_adapt_patch):
+    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
+    def test_pre_register_and_update_with_parser(self, mock_quant_config,
+                                                 mock_adapt_patch):
         mock_parser = MagicMock()
         mock_action = MagicMock()
         mock_action.choices = ["awq", "gptq"]
@@ -72,15 +67,17 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(len(mock_action.choices), 3)  # original 2 + ascend
 
     @patch("vllm_ascend.utils.adapt_patch")
-    @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
-    def test_pre_register_and_update_without_parser(self, mock_quant_config, mock_adapt_patch):
+    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
+    def test_pre_register_and_update_without_parser(self, mock_quant_config,
+                                                    mock_adapt_patch):
         self.platform.pre_register_and_update(None)
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
 
     @patch("vllm_ascend.utils.adapt_patch")
-    @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
-    def test_pre_register_and_update_with_parser_no_quant_action(self, mock_quant_config, mock_adapt_patch):
+    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
+    def test_pre_register_and_update_with_parser_no_quant_action(
+            self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_parser._option_string_actions = {}
 
@@ -89,8 +86,9 @@ class TestNPUPlatform(TestBase):
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
 
     @patch("vllm_ascend.utils.adapt_patch")
-    @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
-    def test_pre_register_and_update_with_existing_ascend_quant(self, mock_quant_config, mock_adapt_patch):
+    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
+    def test_pre_register_and_update_with_existing_ascend_quant(
+            self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_action = MagicMock()
         mock_action.choices = ["awq", ASCEND_QUANTIZATION_METHOD]

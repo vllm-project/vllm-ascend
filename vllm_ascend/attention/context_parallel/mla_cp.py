@@ -12,7 +12,10 @@ from vllm.distributed import (
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
@@ -35,12 +38,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
-
-if vllm_version_is("0.13.0"):
-    from vllm.v1.attention.backends.utils import AttentionCGSupport
-else:
-    from vllm.v1.attention.backend import AttentionCGSupport
+from vllm_ascend.utils import weak_ref_tensors
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
@@ -70,10 +68,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
-        scheduler_config = vllm_config.scheduler_config
-        decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
-        max_num_seqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
-        self.batch_seq_mask_buf = torch.empty(max_num_seqs * self.decode_threshold, dtype=torch.uint8, device=device)
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
             self.block_size, self.cp_virtual_block_size
         )
@@ -240,12 +234,11 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
         cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank, self.dcp_rank]
         cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
-        batch_seq_mask = cp_seq_len == 0
-        self.batch_seq_mask_buf[: batch_seq_mask.shape[0]].copy_(batch_seq_mask, non_blocking=True)
-        batch_seq_mask = self.batch_seq_mask_buf[: batch_seq_mask.shape[0]]
-        cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
-        decode_metadata.cp_seq_len = cp_seq_len
-        decode_metadata.batch_seq_mask = batch_seq_mask
+        decode_metadata.cp_seq_len = cp_seq_len.tolist()
+
+        actual_seq_lengths_q = torch.arange(self.num_decodes_flatten) + 1
+        decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
+
         return decode_metadata
 
 
@@ -291,6 +284,85 @@ class AscendMlaCPImpl(AscendMLAImpl):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+    ):
+        if forward_context.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
+        # FIXME: Behold! We are using a temporary hack here to update the args
+        # for each layer's attention op in the graph.
+        with torch.npu.stream(update_stream):
+            for key, param, handle, event in zip(
+                forward_context.attn_metadata,
+                graph_params.attn_params[num_tokens],
+                graph_params.handles[num_tokens],
+                graph_params.events[num_tokens],
+            ):
+                (
+                    q_nope,
+                    k_nope,
+                    q_pe,
+                    k_pe,
+                    num_heads,
+                    num_kv_heads,
+                    input_layout,
+                    spec_attn_mask,
+                    sparse_mode,
+                    scale,
+                    block_table,
+                    block_size,
+                    actual_seq_lengths,
+                    actual_seq_lengths_kv,
+                    attn_output,
+                    softmax_lse,
+                ) = param
+
+                decode_meta = forward_context.attn_metadata[key].decode
+                seq_len = decode_meta.cp_seq_len
+                if isinstance(seq_len, torch.Tensor):
+                    seq_len = seq_len.tolist()
+                actual_seq_lengths_kv = seq_len
+
+                pad_length = num_tokens - len(actual_seq_lengths_kv)
+                if pad_length > 0:
+                    actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (num_tokens - len(actual_seq_lengths_kv))
+
+                torch.npu.graph_task_update_begin(update_stream, handle)
+
+                torch_npu.npu_fused_infer_attention_score.out(
+                    q_nope,
+                    k_nope,
+                    k_nope,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    num_heads=num_heads,
+                    num_key_value_heads=num_kv_heads,
+                    input_layout=input_layout,
+                    atten_mask=spec_attn_mask,
+                    sparse_mode=sparse_mode,
+                    scale=scale,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    softmax_lse_flag=True,
+                    block_table=block_table,
+                    block_size=block_size,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    actual_seq_lengths=actual_seq_lengths,
+                    workspace=graph_params.workspaces.get(num_tokens),
+                    out=[attn_output, softmax_lse],
+                )
+                torch.npu.graph_task_update_end(update_stream)
+
+                event.record(update_stream)
+
     def get_num_actual_tokens(self, attn_metadata: M):
         if self.pcp_size > 1:
             return attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
@@ -322,7 +394,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
         prefill_kv_no_split = kv_no_split[:num_actual_tokens]
         kv_c, k_pe = prefill_kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())  # type: ignore[misc]
         assert len(kv_cache) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
         kv_c_normed = kv_c_normed.view([num_actual_tokens, self.num_kv_heads, -1])
         k_pe = k_pe.unsqueeze(1)
@@ -535,18 +607,53 @@ class AscendMlaCPImpl(AscendMLAImpl):
             num_heads = self.num_heads * self.dcp_size
         else:
             num_heads = self.num_heads
-
-        k_nope = k_nope.view(-1, block_size, self.num_kv_heads, self.kv_lora_rank)
-        k_pe = k_pe.view(-1, block_size, self.num_kv_heads, self.qk_rope_head_dim)
-        q_nope = q_nope.view(num_tokens, num_heads, -1)
-        q_pe = q_pe.view(num_tokens, num_heads, -1)
         # use pcp & dcp split computed token nums from scheduler to compute actual seq_len and seq_mask
-        seq_len = decode_meta.cp_seq_len
+        k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
+        k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
+
+        actual_seq_lengths = None
+        input_layout = "BNSD"
+
+        if (
+            attn_metadata.attn_state
+            in [
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.ChunkedPrefill,
+                AscendAttentionState.DecodeOnly,
+            ]
+            and self.speculative_config is not None
+        ):
+            input_layout = "TND"
+            # TODO: If the driver is upgraded later, the contiguous function can be deleted.
+            q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
+            q_pe = q_pe.view(num_tokens, num_heads, -1)
+            sparse_mode = 3
+            spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
+            actual_seq_lengths = decode_meta.actual_seq_lengths_q
+        else:
+            q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
+            q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
+            sparse_mode = 0
+            spec_attn_mask = None
 
         common_kwargs = {
-            "return_lse": True,
-            "calc_type": "calc_type_ring",
+            "query_rope": q_pe,
+            "key_rope": k_pe,
+            "num_heads": num_heads,
+            "num_key_value_heads": self.num_kv_heads,
+            "input_layout": input_layout,
+            "atten_mask": spec_attn_mask,
+            "sparse_mode": sparse_mode,
+            "scale": self.scale,
+            "antiquant_mode": 0,
+            "antiquant_scale": None,
+            "block_table": decode_meta.block_table,
+            "block_size": block_size,
+            "actual_seq_lengths": actual_seq_lengths,
+            "actual_seq_lengths_kv": decode_meta.cp_seq_len,
+            "softmax_lse_flag": True,
         }
+
         forward_context: ForwardContext = get_forward_context()
         if forward_context.is_draft_model:
             graph_params = get_draft_graph_params()
@@ -560,75 +667,61 @@ class AscendMlaCPImpl(AscendMLAImpl):
             graph_params.events[num_tokens].append(event)
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
-                workspace = torch_npu.atb._npu_multi_head_latent_attention_get_workspace(
+                workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     q_nope,
-                    q_pe,
                     k_nope,
-                    k_pe,
-                    decode_meta.block_table,
-                    seq_len,
-                    num_heads,
-                    self.scale,
-                    self.num_kv_heads,
+                    k_nope,
                     **common_kwargs,
                 )
                 update_graph_params_workspaces(num_tokens, workspace)
             attn_output = torch.empty_like(q_nope)
-            softmax_lse = torch.empty((num_tokens, num_heads, 1), dtype=q_nope.dtype, device=q_nope.device)
+            if input_layout == "BNSD":
+                softmax_lse = torch.empty((num_tokens, num_heads, 1, 1), dtype=torch.float, device=q_nope.device)
+            else:
+                softmax_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=q_nope.device)
+
             graph_params.attn_params[num_tokens].append(
                 (
                     weak_ref_tensors(q_nope),
-                    weak_ref_tensors(q_pe),
                     weak_ref_tensors(k_nope),
+                    weak_ref_tensors(q_pe),
                     weak_ref_tensors(k_pe),
-                    decode_meta.block_table,
-                    seq_len,
                     num_heads,
-                    self.scale,
                     self.num_kv_heads,
+                    input_layout,
+                    weak_ref_tensors(spec_attn_mask) if spec_attn_mask is not None else None,
+                    sparse_mode,
+                    self.scale,
+                    weak_ref_tensors(decode_meta.block_table),
+                    block_size,
+                    actual_seq_lengths,
+                    decode_meta.cp_seq_len,
                     weak_ref_tensors(attn_output),
                     weak_ref_tensors(softmax_lse),
                 )
             )
             torch.npu.graph_task_group_begin(stream)
-            torch_npu.atb.npu_multi_head_latent_attention(
-                q_nope,
-                q_pe,
-                k_nope,
-                k_pe,
-                decode_meta.block_table,
-                seq_len,
-                num_heads,
-                self.scale,
-                self.num_kv_heads,
-                **common_kwargs,
-                workspace=workspace,
-                output=attn_output,
-                lse=softmax_lse,
+            torch_npu.npu_fused_infer_attention_score.out(
+                q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]
             )
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
-            attn_output = torch.empty_like(q_nope)
-            softmax_lse = torch.empty((num_tokens, num_heads, 1), dtype=q_nope.dtype, device=q_nope.device)
-            torch_npu.atb.npu_multi_head_latent_attention(
+            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score(
                 q_nope,
-                q_pe,
                 k_nope,
-                k_pe,
-                decode_meta.block_table,
-                seq_len,
-                num_heads,
-                self.scale,
-                self.num_kv_heads,
-                return_lse=True,
-                calc_type="calc_type_ring",
-                output=attn_output,
-                lse=softmax_lse,
+                k_nope,
+                **common_kwargs,
             )
+        if input_layout == "BNSD":
+            B_attn, N_attn, S, D = attn_output.shape
+            B_lse, N_lse, Q_S, _ = softmax_lse.shape
+
+            attn_output = attn_output.permute(0, 2, 1, 3).reshape(B_attn * S, N_attn, D)
+            softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
-        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse, decode_meta.batch_seq_mask)
+        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
         attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return self._v_up_proj(attn_output)
 

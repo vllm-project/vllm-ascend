@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
 
-import numpy as np
 import torch
 import torch_npu
 import vllm.envs as envs
@@ -19,8 +18,6 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
-
-from vllm_ascend.attention.utils import using_paged_attention
 
 from ..utils import weak_ref_tensors
 
@@ -191,7 +188,15 @@ class ACLGraphWrapper:
         # before the grph replay of iteration i-1.
         # To ensure proper ordering, we must call synchronize here before replaying,
         # so that update_attn_params only executes after the previous graph replay has fully completed.
-        torch.npu.synchronize()
+        # If we do not in main model and in full-graph mode when using merge-eagle-graph,
+        # we do not need to synchronize.
+        use_eagle = (
+            self.vllm_config.speculative_config.method in ("eagle", "eagle3")
+            if self.vllm_config.speculative_config
+            else False
+        )
+        if self.runtime_mode != CUDAGraphMode.FULL or not forward_context.is_draft_model or not use_eagle:
+            torch.npu.synchronize()
         entry.aclgraph.replay()
         return entry.output
 
@@ -205,331 +210,24 @@ def weak_ref_workspaces(params):
         params.workspaces[num_tokens] = weak_ref_tensors(params.workspaces[num_tokens])
 
 
-def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
-    graph_params = get_graph_params()
-    # FIXME: Behold! We are using a temporary hack here to update the args
-    # for each layer's attention op in the graph.
-    with torch.npu.stream(update_stream):
-        for key, param, handle, event in zip(
-            forward_context.attn_metadata,
-            graph_params.attn_params[runtime_shape],
-            graph_params.handles[runtime_shape],
-            graph_params.events[runtime_shape],
-        ):
-            (
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                num_heads,
-                scale,
-                block_table,
-                seq_lens,
-                output,
-            ) = param
-            seq_lens = forward_context.attn_metadata[key].seq_lens
-
-            # When using FULL_DECODE_ONLY, there are some rare bugs for FULL_DECODE_ONLY
-            # mode with GQA. This is triggered by getting workspace for _npu_paged_attention
-            # in torch_npu. On some rare cases, _npu_paged_attention with smaller seq_lens
-            # might encounter a bigger workspace, while currently we use max_model_len to
-            # calculate max workspace in capturing. So additional get_workspace is added
-            # here to avoid such bugs.
-            # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
-            # replaced by npu_fused_infer_attention_score which does not contain such bugs.
-            workspace = torch_npu._npu_paged_attention_get_workspace(
-                query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                num_kv_heads=num_kv_heads,
-                num_heads=num_heads,
-                scale_value=scale,
-                block_table=block_table,
-                context_lens=seq_lens,
-                out=output,
-            )
-            torch.npu.graph_task_update_begin(update_stream, handle)
-            torch_npu._npu_paged_attention(
-                query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                num_kv_heads=num_kv_heads,
-                num_heads=num_heads,
-                scale_value=scale,
-                block_table=block_table,
-                context_lens=seq_lens,
-                out=output,
-                workspace=workspace,
-            )
-            torch.npu.graph_task_update_end(update_stream)
-
-            event.record(update_stream)
-
-
-def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
-    if forward_context.is_draft_model:
-        graph_params = get_draft_graph_params()
-    else:
-        graph_params = get_graph_params()
-    # For Qwen3-next, since the kv_cache_config has already categorized
-    # linear_attn and self_attn, the attn_metadata is first arranged with
-    # self_attn followed by linear_attn. Therefore, using zip directly
-    # filters out the update operations for linear_attn.
-    with torch.npu.stream(update_stream):
-        for key, param, handle, event in zip(
-            forward_context.attn_metadata,
-            graph_params.attn_params[runtime_shape],
-            graph_params.handles[runtime_shape],
-            graph_params.events[runtime_shape],
-        ):
-            (
-                query,
-                key_cache,
-                value,
-                block_tables,
-                attn_mask,
-                block_size,
-                seq_lens,
-                query_start_loc,
-                num_kv_heads,
-                num_heads,
-                scale,
-                attn_output,
-                softmax_lse,
-            ) = param
-
-            seq_lens = forward_context.attn_metadata[key].seq_lens_list
-            actual_seq_lengths_q = forward_context.attn_metadata[key].actual_seq_lengths_q
-            torch.npu.graph_task_update_begin(update_stream, handle)
-            torch_npu.npu_fused_infer_attention_score.out(
-                query=query,
-                key=key_cache,
-                value=value,
-                block_table=block_tables,
-                atten_mask=attn_mask,
-                input_layout="TND",
-                block_size=block_size,
-                actual_seq_lengths=actual_seq_lengths_q,
-                actual_seq_lengths_kv=seq_lens,
-                num_key_value_heads=num_kv_heads,
-                num_heads=num_heads,
-                scale=scale,
-                sparse_mode=3,
-                workspace=graph_params.workspaces.get(runtime_shape),
-                out=[attn_output, softmax_lse],
-            )
-            torch.npu.graph_task_update_end(update_stream)
-
-            event.record(update_stream)
-
-
-def update_attn_params(update_stream, forward_context, runtime_shape, vllm_config):
-    if using_paged_attention(runtime_shape, vllm_config):
-        _update_attn_pa_params(update_stream, forward_context, runtime_shape)
-    else:
-        _update_attn_fia_params(update_stream, forward_context, runtime_shape)
-
-
-def update_mla_attn_params(update_stream, forward_context, runtime_shape, speculative_config):
-    if forward_context.is_draft_model:
-        graph_params = get_draft_graph_params()
-    else:
-        graph_params = get_graph_params()
-    # FIXME: Behold! We are using a temporary hack here to update the args
-    # for each layer's attention op in the graph.
-    with torch.npu.stream(update_stream):
-        for key, param, handle, event in zip(
-            forward_context.attn_metadata,
-            graph_params.attn_params[runtime_shape],
-            graph_params.handles[runtime_shape],
-            graph_params.events[runtime_shape],
-        ):
-            (
-                q_nope,
-                k_nope,
-                q_pe,
-                k_pe,
-                num_heads,
-                num_kv_heads,
-                input_layout,
-                attn_mask,
-                sparse_mode,
-                scale,
-                block_table,
-                block_size,
-                seq_lens_list,
-                actual_seq_lengths,
-                attn_output,
-                softmax_lse,
-            ) = param
-            seq_lens_list = forward_context.attn_metadata[key].decode.seq_lens_list
-            if speculative_config and speculative_config.method == "mtp" and not forward_context.is_draft_model:
-                actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
-                spec_multiple = speculative_config.num_speculative_tokens + 1
-                seq_lens_list = seq_lens_list + [0] * (runtime_shape // spec_multiple - len(seq_lens_list))
-                actual_seq_lengths = [spec_multiple * (i + 1) for i in range(runtime_shape // spec_multiple)]
-            elif forward_context.is_draft_model:
-                actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
-                block_table = forward_context.attn_metadata[key].decode.block_table
-                # TODO: This is a hack and should be fixed in the future.
-                if speculative_config.disable_padded_drafter_batch:
-                    block_table = block_table[: len(actual_seq_lengths)]
-                seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
-            else:
-                seq_lens_list = seq_lens_list + [0] * (runtime_shape - len(seq_lens_list))
-            torch.npu.graph_task_update_begin(update_stream, handle)
-
-            torch_npu.npu_fused_infer_attention_score.out(
-                q_nope,
-                k_nope,
-                k_nope,
-                query_rope=q_pe,
-                key_rope=k_pe,
-                num_heads=num_heads,
-                num_key_value_heads=num_kv_heads,
-                input_layout=input_layout,
-                atten_mask=attn_mask,
-                sparse_mode=sparse_mode,
-                scale=scale,
-                antiquant_mode=0,
-                antiquant_scale=None,
-                block_table=block_table,
-                block_size=block_size,
-                actual_seq_lengths_kv=seq_lens_list,
-                actual_seq_lengths=actual_seq_lengths,
-                workspace=graph_params.workspaces.get(runtime_shape),
-                out=[attn_output, softmax_lse],
-            )
-            torch.npu.graph_task_update_end(update_stream)
-
-            event.record(update_stream)
-
-
-def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
-    # FIXME: Behold! We are using a temporary hack here to update the args
-    # for each layer's attention op in the graph.
-    graph_params = get_graph_params()
-    with torch.npu.stream(update_stream):
-        for key, param, handle, event in zip(
-            forward_context.attn_metadata,
-            graph_params.attn_params[runtime_shape],
-            graph_params.handles[runtime_shape],
-            graph_params.events[runtime_shape],
-        ):
-            (
-                q_nope,
-                k_nope,
-                value,
-                num_heads,
-                num_kv_heads,
-                scale,
-                block_table,
-                block_size,
-                actual_seq_lengths_kv,
-                actual_seq_lengths_q,
-                attn_output,
-                softmax_lse,
-                dcp_size,
-                pcp_rank,
-                dcp_rank,
-            ) = param
-            attn_metadata = forward_context.attn_metadata[key]
-            actual_seq_lengths_kv = attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:, pcp_rank, dcp_rank]
-            pad_length = runtime_shape - len(actual_seq_lengths_kv)
-            if pad_length > 0:
-                pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
-                actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
-
-            actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
-
-            if dcp_size > 1:
-                num_heads = num_heads * dcp_size
-
-            torch.npu.graph_task_update_begin(update_stream, handle)
-
-            torch_npu.npu_fused_infer_attention_score.out(
-                q_nope,
-                k_nope,
-                value,
-                num_heads=num_heads,
-                num_key_value_heads=num_kv_heads,
-                input_layout="TND",
-                atten_mask=None,
-                scale=scale,
-                antiquant_mode=0,
-                antiquant_scale=None,
-                softmax_lse_flag=True,
-                block_table=block_table,
-                block_size=block_size,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
-                actual_seq_lengths=actual_seq_lengths_q,
-                workspace=graph_params.workspaces.get(runtime_shape),
-                out=[attn_output, softmax_lse],
-            )
-            torch.npu.graph_task_update_end(update_stream)
-
-            event.record(update_stream)
-
-
-def update_mla_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
-    if forward_context.is_draft_model:
-        graph_params = get_draft_graph_params()
-    else:
-        graph_params = get_graph_params()
-    # FIXME: Behold! We are using a temporary hack here to update the args
-    # for each layer's attention op in the graph.
-    with torch.npu.stream(update_stream):
-        for key, param, handle, event in zip(
-            forward_context.attn_metadata,
-            graph_params.attn_params[runtime_shape],
-            graph_params.handles[runtime_shape],
-            graph_params.events[runtime_shape],
-        ):
-            (
-                q_nope,
-                q_pe,
-                k_nope,
-                k_pe,
-                block_table,
-                seq_len,
-                num_heads,
-                scale,
-                num_kv_heads,
-                attn_output,
-                softmax_lse,
-            ) = param
-
-            decode_meta = forward_context.attn_metadata[key].decode
-            seq_len = decode_meta.cp_seq_len
-
-            # For pcp + spec decode, we flatten seq_lens
-            # to avoid irregular attn_mask shape,
-            # so there's no need to divide runtime_shape by spec_multiple
-            pad_length = runtime_shape - len(seq_len)
-            pad_tensor = torch.zeros(pad_length, dtype=seq_len.dtype, device=seq_len.device)
-            seq_len = torch.cat([seq_len, pad_tensor], dim=0)
-
-            torch.npu.graph_task_update_begin(update_stream, handle)
-
-            torch_npu.atb.npu_multi_head_latent_attention(
-                q_nope,
-                q_pe,
-                k_nope,
-                k_pe,
-                block_table,
-                seq_len,
-                num_heads,
-                scale,
-                num_kv_heads,
-                return_lse=True,
-                calc_type="calc_type_ring",
-                workspace=graph_params.workspaces.get(runtime_shape),
-                output=attn_output,
-                lse=softmax_lse,
-            )
-            torch.npu.graph_task_update_end(update_stream)
-
-            event.record(update_stream)
+def update_full_graph_params(
+    attn_backend,
+    update_stream,
+    forward_context,
+    num_tokens,
+    vllm_config,
+    speculative_config=None,
+    num_dcp_pcp_tokens=None,
+):
+    impl_cls = attn_backend.get_impl_cls()
+    impl_cls.update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config,
+        num_dcp_pcp_tokens,
+    )
 
 
 @dataclass
