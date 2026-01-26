@@ -81,3 +81,4 @@ def moe_load_async_stream() -> torch_npu.npu.Stream:
     if _MOE_LOAD_ASYNC_STREAM is None:
         _MOE_LOAD_ASYNC_STREAM = torch_npu.npu.Stream()
     return _MOE_LOAD_ASYNC_STREAM
+
