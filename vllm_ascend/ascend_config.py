@@ -253,11 +253,11 @@ class NpugraphExConfig:
                 Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
+        from vllm.config.compilation import CUDAGraphMode
+
         self.enable = enable
         self.enable_static_kernel = enable_static_kernel
 
-        from vllm.config.compilation import CUDAGraphMode
-        
         compilation_config = vllm_config.compilation_config
         if compilation_config.cudagraph_mode in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL):
             self.enable = self.enable and True
