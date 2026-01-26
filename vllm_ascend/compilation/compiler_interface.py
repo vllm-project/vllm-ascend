@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import copy
 import functools
 from collections.abc import Callable
 from typing import Any
@@ -129,6 +130,10 @@ class AscendCompiler(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
+        # inductor can inplace modify the graph, so we need to copy it
+        # see https://github.com/pytorch/pytorch/issues/138980
+        graph = copy.deepcopy(graph)
+
         npugraph_ex_config = get_ascend_config().npugraph_ex_config
         if npugraph_ex_config.enable:
             assert hasattr(self, "vllm_config")

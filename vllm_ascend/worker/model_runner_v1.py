@@ -103,7 +103,8 @@ from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type,
                                is_drafter_moe_model, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
-                               set_weight_prefetch_method)
+                               set_weight_prefetch_method,
+                               enable_flash_comm_v1)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
@@ -835,7 +836,7 @@ class NPUModelRunner(GPUModelRunner):
             # requiring a recalculation of the incoming data's shape.
             tp_size = get_tensor_model_parallel_world_size()
             num_input_tokens_with_flashcomm1 = num_input_tokens
-            if enable_sp():
+            if enable_flash_comm_v1():
                 num_input_tokens_with_flashcomm1 = (num_input_tokens +
                                                     tp_size - 1) // tp_size
             for k, v in intermediate_tensors.items():
@@ -1143,7 +1144,7 @@ class NPUModelRunner(GPUModelRunner):
                                      maybe_padded_num_tokens, self.vllm_config,
                                      self.vllm_config.speculative_config)
 
-        if get_forward_context().sp_enabled and not isinstance(
+        if get_forward_context().flash_comm_v1_enabled and not isinstance(
                 hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(
                 hidden_states)
@@ -2180,7 +2181,7 @@ class NPUModelRunner(GPUModelRunner):
                 # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by tp_size;
                 # otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading to incorrect memory estimation and potentially causing OOM.
                 actual_tokens = num_tokens
-                if enable_sp():
+                if enable_flash_comm_v1():
                     tp_size = get_tensor_model_parallel_world_size()
                     actual_tokens = num_tokens // tp_size
                 if self.intermediate_tensors is None:

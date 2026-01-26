@@ -25,9 +25,6 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
         return residual
 
     if x.size(0) != residual.size(0):
-        sp_enabled = forward_context.sp_enabled
-        assert sp_enabled is True, ("Currently, this situation only occurs "
-                                    "when sp is enabled")
         pad_size = forward_context.pad_size
         if pad_size > 0:
             residual = F.pad(residual, (0, 0, 0, pad_size))
@@ -47,8 +44,8 @@ def _maybe_all_gather_and_maybe_unpad_impl(
     except AssertionError:
         return x
 
-    sp_enabled = forward_context.sp_enabled
-    if sp_enabled and label:
+    flash_comm_v1_enabled = forward_context.flash_comm_v1_enabled
+    if flash_comm_v1_enabled and label:
         dp_metadata = forward_context.dp_metadata
         if dp_metadata is None or not is_ep_comm:
             x = tensor_model_parallel_all_gather(x, 0)
@@ -82,7 +79,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor,
     except AssertionError:
         return tensor_model_parallel_all_reduce(x)
 
-    if not getattr(forward_context, "sp_enabled", False):
+    if not getattr(forward_context, "flash_comm_v1_enabled", False):
         return tensor_model_parallel_all_reduce(x)
 
     dp_metadata = forward_context.dp_metadata
@@ -142,7 +139,7 @@ def _maybe_all_gather_and_maybe_unpad_fake(
         label: bool,
         is_ep_comm: bool = False) -> torch.Tensor:
 
-    if get_forward_context().sp_enabled and label:
+    if get_forward_context().flash_comm_v1_enabled and label:
         return torch.empty(
             (x.shape[0] * get_tensor_model_parallel_world_size(),
              *x.shape[1:]),
@@ -154,7 +151,7 @@ def _maybe_all_gather_and_maybe_unpad_fake(
 
 def _maybe_pad_and_reduce_fake(x: torch.Tensor,
                                is_ep_comm: bool = False) -> torch.Tensor:
-    if get_forward_context().sp_enabled:
+    if get_forward_context().flash_comm_v1_enabled:
         return torch.empty(
             (x.shape[0] // get_tensor_model_parallel_world_size(),
              *x.shape[1:]),
@@ -254,7 +251,7 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
     moe_comm_type = forward_context.moe_comm_type
     if moe_comm_type in {
             MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2
-    } or forward_context.sp_enabled:
+    } or forward_context.flash_comm_v1_enabled:
         return final_hidden_states
     else:
         return tensor_model_parallel_all_reduce(final_hidden_states)
@@ -276,7 +273,7 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
     forward_context = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     num_tokens = input_parallel.size(0)
-    if forward_context.sp_enabled:
+    if forward_context.flash_comm_v1_enabled:
         num_tokens = num_tokens // self.tp_size
     output = torch.empty(size=(num_tokens, self.output_size_per_partition),
                          device=input_parallel.device,
@@ -315,7 +312,7 @@ def _rope_forward_triton_fake(
 
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
-                          fake_impl=lambda x, residual: x,
+                          fake_impl=lambda x, residual: torch.empty_like(x),
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
