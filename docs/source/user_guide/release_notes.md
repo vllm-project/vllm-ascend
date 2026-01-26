@@ -2,7 +2,7 @@
 
 ## v0.13.0rc2 - 2026.01.24
 
-This is the second release candidate of v0.13.0 for vLLM Ascend. In this rc relesae, we fixed lots of bugs and improved the performance of many models. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.13.0/) to get started. Any feedback is welcome to help us to improve the final version of v0.13.0.
+This is the second release candidate of v0.13.0 for vLLM Ascend. In this rc release, we fixed lots of bugs and improved the performance of many models. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.13.0/) to get started. Any feedback is welcome to help us to improve the final version of v0.13.0.
 
 ### Highlights
 
@@ -19,7 +19,7 @@ We mainly focus on quality and performance improvement in this release. The spec
 
 ### Model Support
 
-- LongCat-Flash is supproted now.[#3833](https://github.com/vllm-project/vllm-ascend/pull/3833)
+- LongCat-Flash is supported now.[#3833](https://github.com/vllm-project/vllm-ascend/pull/3833)
 - minimax_m2 is supported now. [#5624](https://github.com/vllm-project/vllm-ascend/pull/5624)
 - Support for cross-attention and whisper models [#5592](https://github.com/vllm-project/vllm-ascend/pull/5592)
 
