@@ -374,7 +374,7 @@ ge::graphStatus LIInfoParser::GetHeadDim()
             dIndex = DIM_IDX_TWO;
             break;
         case DataLayout::BSND:
-            // BSND: [Batch, SeqLen, N, D] -> D is the 3nd dimension
+            // BSND: [Batch, SeqLen, N, D] -> D is the 3rd dimension
             dIndex = DIM_IDX_THREE;
             break;
         default:
