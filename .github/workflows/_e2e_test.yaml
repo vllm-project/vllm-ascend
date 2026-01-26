@@ -19,7 +19,7 @@ on:
 jobs:
   e2e:
     name: singlecard
-    runs-on: ${{ inputs.runner }}-1
+    runs-on: linux-aarch64-a2b3-1
     container:
       image: ${{ inputs.image }}
       env:
