@@ -16,12 +16,12 @@
 import os
 from typing import TYPE_CHECKING
 
-from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.compilation import CUDAGraphMode
 
 
 class AscendConfig:
