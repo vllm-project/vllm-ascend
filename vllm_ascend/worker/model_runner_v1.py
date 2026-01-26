@@ -1933,16 +1933,11 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_group_id].get_device_tensor()
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
-                long_seq_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
-                    num_tokens, self.query_lens, self.input_batch,
-                    num_scheduled_tokens)
-                if long_seq_metadata is not None:
-                    pcp_world_size = get_pcp_group().world_size
-                    dcp_world_size = get_dcp_group().world_size
-                    num_computed_tokens_of_pcp_dcp = [[
-                        [0] * dcp_world_size for _ in range(pcp_world_size)
-                    ] for _ in range(num_tokens)]
-                    long_seq_metadata.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
+                long_seq_metadata = None 
+                if self.pcp_size * self.dcp_size > 1:
+                    long_seq_metadata = self.pcp_manager.generate_pcp_metadata(
+                    num_tokens, self.query_lens, self.input_batch, num_scheduled_tokens)
+                    long_seq_metadata.num_computed_tokens_of_pcp_dcp = torch.zeros((num_reqs, self.pcp_size, self.dcp_size))
 
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
