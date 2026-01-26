@@ -17,8 +17,6 @@
 
 from __future__ import annotations
 
-from typing import Union
-
 import torch
 import torch_npu
 from vllm.logger import logger
