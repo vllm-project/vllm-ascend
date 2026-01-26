@@ -91,42 +91,7 @@ jobs:
         run: |
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
-          # basic 
-          pytest -sv --durations=0 tests/e2e/singlecard/test_auto_fit_max_mode_len.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_batch_invariant.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_batch_invariant.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_llama32_lora.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_qwen3_multi_loras.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_sampler.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_xlite.py
-
-          # compile
-          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
-  
-          # model_runner_v2
-          # pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
-
-          # pooling
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_embedding.py
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_scoring.py
-
-          # spec_decode
-          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
-          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
+          python3 .github/scripts/run_suite.py --suite e2e-singlecard
   
   e2e-2-cards:
     name: multicard-2
