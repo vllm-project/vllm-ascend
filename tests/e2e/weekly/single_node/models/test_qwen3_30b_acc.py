@@ -24,7 +24,6 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.conftest import RemoteOpenAIServer, MooncakeLauncher
 from tools.aisbench import run_aisbench_cases, maybe_download_from_modelscope
 
-
 MODELS = [
     "vllm-ascend/Qwen3-30B-A3B-W8A8",
 ]
@@ -93,30 +92,37 @@ async def test_models(model: str, tp_size: int) -> None:
         "kv_connector": "AscendStoreConnector",
         "kv_role": "kv_both",
         "kv_connector_extra_config": {
-                "register_buffer": True,
-                "use_layerwise": False,
-                "mooncake_rpc_port":"0"
+            "register_buffer": True,
+            "use_layerwise": False,
+            "mooncake_rpc_port": "0"
         }
     }
-    speculative_config = {"method": "eagle3","model": eagle_model, "num_speculative_tokens": 3}
+    speculative_config = {
+        "method": "eagle3",
+        "model": eagle_model,
+        "num_speculative_tokens": 3
+    }
     server_args = [
-        "--trust-remote-code", "--max-num-seqs", "100", "--max-model-len", "37364",
-        "--max-num-batched-tokens", "16384", "--tensor-parallel-size",
+        "--trust-remote-code", "--max-num-seqs", "100", "--max-model-len",
+        "37364", "--max-num-batched-tokens", "16384", "--tensor-parallel-size",
         str(tp_size), "--enable-expert-parallel", "--port",
-        str(port), "--distributed_executor_backend", "mp", "--async-scheduling", "True",
-        "--quantization", "ascend", "--compilation-config", '{"cudagraph_mode": "FULL_DECODE_ONLY"}',
-        "--gpu-memory-utilization", "0.95", "--speculative-config", json.dumps(speculative_config),
-        "--kv-transfer-config", json.dumps(kv_transfer_config)
+        str(port), "--distributed_executor_backend", "mp",
+        "--async-scheduling", "--quantization", "ascend",
+        "--compilation-config", '{"cudagraph_mode": "FULL_DECODE_ONLY"}',
+        "--gpu-memory-utilization", "0.95", "--speculative-config",
+        json.dumps(speculative_config), "--kv-transfer-config",
+        json.dumps(kv_transfer_config)
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with MooncakeLauncher(mooncake_port, mooncake_metrics_port) as mooncake_server:
+    with MooncakeLauncher(mooncake_port,
+                          mooncake_metrics_port) as mooncake_server:
         with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+                                server_args,
+                                server_port=port,
+                                env_dict=env_dict,
+                                auto_port=False) as server:
             client = server.get_async_client()
             for _ in range(2):
                 batch = await client.completions.create(
