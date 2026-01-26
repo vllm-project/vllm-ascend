@@ -1705,16 +1705,10 @@ class NPUModelRunner(GPUModelRunner):
             update_full_graph_params(self.attn_backend, self.update_stream, forward_context,
                                      num_tokens_padded, self.vllm_config,
                                      self.speculative_config, positions.shape[0])
-
-        if self.use_aux_hidden_state_outputs:
-            hidden_states, _ = hidden_states
-        else:
-            hidden_states = hidden_states
         if get_forward_context().sp_enabled and not isinstance(
                 hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(
                 hidden_states)
-        return hidden_states
         return hidden_states
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
