@@ -250,7 +250,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         moe_comm_method = get_forward_context().moe_comm_method
         if self.dynamic_eplb:
             w1 = layer.w13_weight_list
-            w1_scale = layer.w13_weight_scale_fp32_list
+            w1_scale = layer.w13_weight_scale_list
             w2 = layer.w2_weight_list
             w2_scale = layer.w2_weight_scale_list
         else:
@@ -315,7 +315,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w2_weight_list = [
                 weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)
             ]
-            layer.w13_weight_scale_fp32_list = [
+            layer.w13_weight_scale_list = [
                 weight.clone()
                 for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
             ]

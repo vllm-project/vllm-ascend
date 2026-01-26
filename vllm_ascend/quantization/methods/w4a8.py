@@ -367,15 +367,30 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         topk_weights = topk_weights.to(x.dtype)
 
+        if self.dynamic_eplb:
+            w1 = layer.w13_weight_list
+            w1_scale = layer.w13_weight_scale_list
+            w2 = layer.w2_weight_list
+            w2_scale = layer.w2_weight_scale_list
+            w1_scale_bias = layer.w13_scale_bias_list
+            w2_scale_bias = layer.w2_scale_bias_list            
+        else:
+            w1 = [layer.w13_weight]
+            w1_scale = [layer.w13_weight_scale_fp32]
+            w2 = [layer.w2_weight]
+            w2_scale = [layer.w2_weight_scale]
+            w1_scale_bias = [layer.w13_scale_bias]
+            w2_scale_bias = [layer.w2_scale_bias]
+
         moe_comm_method = get_forward_context().moe_comm_method
         return moe_comm_method.fused_experts(
             hidden_states=x,
-            w1=[layer.w13_weight],
-            w2=[layer.w2_weight],
-            w1_scale=[layer.w13_weight_scale],
-            w2_scale=[layer.w2_weight_scale],
-            w1_scale_bias=layer.w13_scale_bias,
-            w2_scale_bias=layer.w2_scale_bias,
+            w1=w1,
+            w2=w2,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_scale_bias=w1_scale_bias,
+            w2_scale_bias=w2_scale_bias,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             use_int4_w4a8=True,
@@ -473,3 +488,28 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
         layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
         layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
+
+        if self.dynamic_eplb:
+            layer.w13_weight_list = [
+                weight
+                for weight in layer.w13_weight.data.unbind(dim=0)
+            ]
+            layer.w2_weight_list = [
+                weight for weight in layer.w2_weight.data.unbind(dim=0)
+            ]
+            layer.w13_weight_scale_list = [
+                weight
+                for weight in layer.w13_weight_scale.data.unbind(dim=0)
+            ]
+            layer.w2_weight_scale_list = [
+                weight
+                for weight in layer.w2_weight_scale.data.unbind(dim=0)
+            ]
+            layer.w13_scale_bias_list = [
+                weight
+                for weight in layer.w13_scale_bias.data.unbind(dim=0)
+            ]
+            layer.w2_scale_bias_list = [
+                weight
+                for weight in layer.w2_scale_bias.data.unbind(dim=0)
+            ]
