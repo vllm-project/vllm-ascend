@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
+from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
-MODEL_PATH = "vllm-ascend/Qwen3-0.6B"
+MODEL_PATH = "Qwen/Qwen3-0.6B"
 LORA_NAME_PATH_MAP = {
-    "Alice": "vllm-ascend/self_cognition_Alice",
-    "Bob": "vllm-ascend/self_cognition_Bob",
-    "Cat": "vllm-ascend/self_cognition_Bob",  # same as Bob
+    "Alice": "charent/self_cognition_Alice",
+    "Bob": "charent/self_cognition_Bob",
+    "Cat": "charent/self_cognition_Bob",  # same as Bob
 }
 
 LORA_RANK = 8
@@ -37,9 +37,8 @@ def format_chatml_messages(prompt: str):
         },
     ]
 
-
+@patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
 def test_multi_loras_with_tp_sync():
-
     lora_name_id_map = {}
     increase_lora_id = 0
 
@@ -51,11 +50,11 @@ def test_multi_loras_with_tp_sync():
         return LoRARequest(
             lora_name=name,
             lora_int_id=increase_lora_id,
-            lora_path=snapshot_download(path),
+            lora_path=path,
         )
 
     vllm_model = VllmRunner(
-        snapshot_download(MODEL_PATH),
+        MODEL_PATH,
         enable_lora=True,
         # dtype="half",
         max_loras=2,  # ensure max_loras < max_cpu_loras
