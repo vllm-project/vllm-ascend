@@ -31,8 +31,7 @@ if HAS_TRITON:
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
-                               get_ascend_device_type, has_rope, is_vl_model,
-                               vllm_version_is)
+                               get_ascend_device_type, has_rope, is_vl_model)
 
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
 # However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
@@ -586,7 +585,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        if HAS_TRITON and positions.ndim == 2:
+        if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
             # todo: need cann update in 8.5.0
             return self.forward_triton(positions, query, key)
 
@@ -637,18 +636,8 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        if vllm_version_is('0.13.0'):
-            origin_shape = x.shape
-            origin_dtype = x.dtype
-            if len(origin_shape) == 3:
-                x = x.unsqueeze(0)
-            if self.enable_fp32_compute:
-                x = x.float()
-                cos = cos.float()
-                sin = sin.float()
-        else:
-            x, cos, sin, origin_shape, origin_dtype = self._pre_process(
-                x, cos, sin)
+        x, cos, sin, origin_shape, origin_dtype = self._pre_process(
+            x, cos, sin)
 
         head_dim = x.shape[-1]
         # cos, sin: [seq_len, head_dim // 2]
@@ -660,12 +649,6 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
 
         output = torch_npu.npu_rotary_mul(x, cos, sin)
 
-        if vllm_version_is('0.13.0'):
-            if len(origin_shape) == 3:
-                output = output.squeeze(0)
-            if self.enable_fp32_compute:
-                output = output.to(origin_dtype)
-        else:
-            output = self._post_process(output, origin_shape, origin_dtype)
+        output = self._post_process(output, origin_shape, origin_dtype)
 
         return output

@@ -48,36 +48,27 @@ def elastic_load(
     # Filter sources for the current device
     sources_this_device = []
     for s in sources:
-        if isinstance(
-                s, dict
-        ) and "device_id" in s and s["device_id"] == device_id and isinstance(
-                s["sources"], list):
+        if isinstance(s, dict) and "device_id" in s and s["device_id"] == device_id and isinstance(s["sources"], list):
             sources_this_device += s["sources"]
     if len(sources_this_device) == 0:
         return None
 
     try:
         # Initialize the interaction layer with the ElasticClient
-        with ElasticClient(sources_this_device, device_id, model_path, tp,
-                           pp) as client_interaction_layer:
+        with ElasticClient(sources_this_device, device_id, model_path, tp, pp) as client_interaction_layer:
             if client_interaction_layer.s is None or client_interaction_layer.server_addr is None:
-                raise RuntimeError(
-                    "Failed to initialize ElasticClient: socket or server_addr is None"
-                )
+                raise RuntimeError("Failed to initialize ElasticClient: socket or server_addr is None")
             ack = client_interaction_layer.ack
             if ack is None:
                 raise RuntimeError("ElasticClient.register did not return ack")
 
             t0 = time.perf_counter()
-            elastic_loader = P2PLoad(ack[0],
-                                     client_interaction_layer.server_addr,
-                                     ack[1])
+            elastic_loader = P2PLoad(ack[0], client_interaction_layer.server_addr, ack[1])
             model_loaded = elastic_loader.load(model=model)
             if model_loaded is None:
                 logger.error("Failed to load model")
                 return None
-            logger.info("Finish elastic load (duration: {}s)".format(
-                time.perf_counter() - t0))
+            logger.info("Finish elastic load (duration: {}s)".format(time.perf_counter() - t0))
             return model_loaded
     except Exception as e:
         logger.info(f"elastic_load error: {e}")

@@ -58,16 +58,13 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
                                enable_sp, get_ascend_device_type,
-                               register_ascend_customop, vllm_version_is)
+                               register_ascend_customop)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 
-if vllm_version_is("0.13.0"):
-    from vllm.model_executor.utils import set_random_seed
-else:
-    from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 
 torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
     ["torch.npu.current_stream"],
@@ -120,13 +117,6 @@ class NPUWorker(WorkerBase):
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
-
-        if vllm_version_is('0.13.0'):
-            if self.model_config.trust_remote_code:
-                # note: lazy import to avoid importing torch before initializing
-                from vllm.utils.import_utils import init_cached_hf_modules
-
-                init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
@@ -376,7 +366,6 @@ class NPUWorker(WorkerBase):
 
     def compile_or_warm_up_model(self) -> None:
         # Note: need to adapt for graph mode.
-        self.model_runner.eplb_warmup()
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
                         or []).copy()
         if not self.model_config.enforce_eager:
@@ -436,6 +425,19 @@ class NPUWorker(WorkerBase):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
+
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Update max_model_len after auto-fit to NPU memory.
+
+        This is called when max_model_len=-1 is used and the engine
+        automatically determines the maximum context length that fits
+        in GPU memory. Workers need to update their cached max_model_len
+        to match the engine's decision.
+        """
+        self.model_config.max_model_len = max_model_len
+        if self.model_runner is not None:
+            self.model_runner.update_max_model_len(max_model_len)
+        logger.debug("Updated max_model_len to %d", max_model_len)
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""

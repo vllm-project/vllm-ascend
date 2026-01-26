@@ -17,7 +17,6 @@ from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLAPrefillMetadata,
                                           ChunkedContextMetadata)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.utils import vllm_version_is
 
 
 class TestAscendMLABackend(TestBase):
@@ -138,7 +137,6 @@ class TestAscendMLADecodeMetadata(TestBase):
         seq_lens_list = [2, 3]
         attn_mask = None
         cp_seq_len = torch.tensor([2, 3])
-        batch_seq_mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
 
         metadata = AscendMLADecodeMetadata(input_positions=input_positions,
                                            block_table=block_table,
@@ -146,8 +144,7 @@ class TestAscendMLADecodeMetadata(TestBase):
                                            max_seq_lens=max_seq_lens,
                                            seq_lens_list=seq_lens_list,
                                            attn_mask=attn_mask,
-                                           cp_seq_len=cp_seq_len,
-                                           batch_seq_mask=batch_seq_mask)
+                                           cp_seq_len=cp_seq_len)
 
         self.assertIs(metadata.input_positions, input_positions)
         self.assertIs(metadata.block_table, block_table)
@@ -156,7 +153,6 @@ class TestAscendMLADecodeMetadata(TestBase):
         self.assertEqual(metadata.seq_lens_list, seq_lens_list)
         self.assertIsNone(attn_mask)
         self.assertIs(metadata.cp_seq_len, cp_seq_len)
-        self.assertIs(metadata.batch_seq_mask, batch_seq_mask)
 
 
 class TestAscendMLAMetadata(TestBase):
@@ -477,10 +473,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.mock_vllm_config.model_config = model_config
         self.kv_cache_spec = MagicMock()
         self.kv_cache_spec.num_layers = 32
-        if vllm_version_is('0.13.0'):
-            self.kv_cache_spec.head_size = 128
-        else:
-            self.kv_cache_spec.head_size = 64
+        self.kv_cache_spec.head_size = 64
         self.kv_cache_spec.num_heads = 32
 
     def tearDown(self):
@@ -764,12 +757,15 @@ class TestAscendMLAImpl(TestBase):
         vllm_config = MagicMock()
         speculative_config = MagicMock()
         model_config = MagicMock()
+        parallel_config = MagicMock()
+        parallel_config.prefill_context_parallel_size = 1
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
         model_config.dtype = torch.float16
         vllm_config.model_config = model_config
         get_current_vllm_config.return_value = vllm_config
         vllm_config.additional_config = {"refresh": True}
+        vllm_config.parallel_config = parallel_config
         init_ascend_config(vllm_config)
 
         num_heads = 256
