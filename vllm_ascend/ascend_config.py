@@ -125,8 +125,6 @@ class AscendConfig:
         # npu_fused_infer_attention_score performs better on all scenarios.
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
 
-        self.enable_async_exponential = bool(additional_config.get("enable_async_exponential", False))
-
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
             use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")

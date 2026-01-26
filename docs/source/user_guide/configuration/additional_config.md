@@ -34,7 +34,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `npugraph_ex_config`                | dict | `{}`    | Configuration options for npugraph_ex backend                                                             |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump(eager mode).                                                     |
-| `enable_async_exponential`          | bool | `False` | Whether to enable async exponential overlap. To enable async exponential, set this config to True.        |
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. Currently only DeepSeek series models are supported. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effect on MoE models with shared experts. |
 | `multistream_overlap_gate`          | bool | `False` | Whether to enable multistream overlap gate. This option only takes effect on MoE models with shared experts.  |
