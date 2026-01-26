@@ -1761,7 +1761,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return False, None, cudagraph_mode
 
-        if self._skip_all_reduce_across_dp_group(): 
+        if self._skip_all_reduce_across_dp_group():
             num_tokens_after_padding = torch.tensor([num_tokens_padded] *
                                                     self.dp_size,
                                                     device="cpu",
