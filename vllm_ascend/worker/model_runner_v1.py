@@ -84,7 +84,10 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_pag
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                set_draft_graph_params,
                                                set_graph_params,
-                                               update_full_graph_params)
+                                               update_attn_dcp_pcp_params,
+                                               update_attn_params,
+                                               update_mla_attn_dcp_pcp_params,
+                                               update_mla_attn_params)
 # yapf: enable
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
@@ -100,8 +103,7 @@ from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import MedusaProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
-                               enable_sp, get_ascend_device_type,
-                               is_drafter_moe_model, is_moe_model,
+                               enable_sp, get_ascend_device_type, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
                                set_weight_prefetch_method)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -391,24 +393,17 @@ class NPUModelRunner(GPUModelRunner):
     def _use_aclgraph(self) -> bool:
         return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.mode == CompilationMode.VLLM_COMPILE and not self.model_config.enforce_eager
 
-    def _skip_all_reduce_across_dp_group(self, is_draft_model=False) -> bool:
+    def _skip_all_reduce_across_dp_group(self) -> bool:
         """
         Decide whether to skip the all-reduce across the data-parallel (DP) group.
 
-        Skipping is applicable for all dense models and for moe models only on ranks
-        that act as KV consumers. We skip the DP all-reduce when either:
+        Skipping is only applicable for MoE models and only on ranks that act as
+        KV consumers. We skip the DP all-reduce when either:
         - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
         - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
         """
-        # For dense models, since we don't actually need dp communication, we simply skip it.
-        # This usually happens when main model is moe while eagle draft model is dense.
-        is_context_moe_model = is_drafter_moe_model(self.vllm_config) if is_draft_model \
-            else is_moe_model(self.vllm_config)
-        if not is_context_moe_model:
-            return True
-
-        # Only applicable to MoE models on KV consumer ranks.
-        if not self.is_kv_consumer:
+        # Only applicable to MoE models and KV consumer ranks.
+        if not is_moe_model(self.vllm_config) or not self.is_kv_consumer:
             return False
 
         def needs_mc2(num_tokens: int) -> bool:
@@ -436,11 +431,8 @@ class NPUModelRunner(GPUModelRunner):
             or self.ascend_config.recompute_scheduler_enable)
 
     def _sync_metadata_across_dp(
-        self,
-        num_tokens: int,
-        with_prefill: bool = False,
-        is_draft_model: bool = False
-    ) -> tuple[int, Optional[torch.Tensor], bool]:
+            self, num_tokens: int,
+            with_prefill: bool) -> tuple[int, Optional[torch.Tensor], bool]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
         # include them in the all_reduce operation, and more over, we CANNOT skip it
@@ -450,7 +442,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return num_tokens, None, with_prefill
 
-        if self._skip_all_reduce_across_dp_group(is_draft_model):
+        if self._skip_all_reduce_across_dp_group():
             num_tokens_after_padding = torch.tensor([num_tokens] *
                                                     self.dp_size,
                                                     device="cpu",
@@ -1139,9 +1131,26 @@ class NPUModelRunner(GPUModelRunner):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
             and not self.use_sparse:
             # TODO: maybe_padded_num_tokens will be removed, use num_input_tokens instead
-            update_full_graph_params(self.attn_backend, self.update_stream, forward_context,
-                                     maybe_padded_num_tokens, self.vllm_config,
-                                     self.vllm_config.speculative_config)
+            if self.vllm_config.model_config.use_mla:
+                if self.pcp_size * self.dcp_size > 1:
+                    # FIXME: Try using `auto_dispatch_capture=True`
+                    update_mla_attn_dcp_pcp_params(self.update_stream,
+                                                   forward_context,
+                                                   maybe_padded_num_tokens)
+                else:
+                    # FIXME: Try using `auto_dispatch_capture=True`
+                    update_mla_attn_params(self.update_stream, forward_context,
+                                           maybe_padded_num_tokens,
+                                           self.speculative_config)
+            else:
+                if self.pcp_size * self.dcp_size > 1:
+                    update_attn_dcp_pcp_params(self.update_stream,
+                                               forward_context,
+                                               maybe_padded_num_tokens)
+                else:
+                    update_attn_params(self.update_stream, forward_context,
+                                       maybe_padded_num_tokens,
+                                       self.vllm_config)
 
         if get_forward_context().sp_enabled and not isinstance(
                 hidden_states, IntermediateTensors):
@@ -2018,9 +2027,25 @@ class NPUModelRunner(GPUModelRunner):
         assert forward_context is not None
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
             not forward_context.capturing and not self.use_sparse:
-            update_full_graph_params(self.attn_backend, self.update_stream, forward_context,
-                                     num_tokens, self.vllm_config,
-                                     self.speculative_config, positions.shape[0])
+            if self.vllm_config.model_config.use_mla:
+                # FIXME: Try using `auto_dispatch_capture=True`
+                if self.pcp_size * self.dcp_size > 1:
+                    # FIXME: Try using `auto_dispatch_capture=True`
+                    update_mla_attn_dcp_pcp_params(self.update_stream,
+                                                   forward_context,
+                                                   positions.shape[0])
+                else:
+                    # FIXME: Try using `auto_dispatch_capture=True`
+                    update_mla_attn_params(self.update_stream, forward_context,
+                                           num_tokens, self.speculative_config)
+            else:
+                if self.pcp_size * self.dcp_size > 1:
+                    update_attn_dcp_pcp_params(self.update_stream,
+                                               forward_context,
+                                               positions.shape[0])
+                else:
+                    update_attn_params(self.update_stream, forward_context,
+                                       num_tokens, self.vllm_config)
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, _ = hidden_states
@@ -2863,7 +2888,7 @@ class NPUModelRunner(GPUModelRunner):
         attn_layers = get_layers_from_vllm_config(self.vllm_config,
                                                   AttentionLayerBase)
         # NOTE: Must process Attention/MLAAttention before MambaBase to maintain
-        # ordering expected by graph parameter update logic in attention backends.
+        # ordering expected by acl_graph.py's _update_attn_fia_params.
         mamba_layers: dict[str, MambaBase] = {}
         for layer_name, attn_module in attn_layers.items():
             if isinstance(attn_module, Attention):

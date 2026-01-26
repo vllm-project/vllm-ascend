@@ -25,7 +25,7 @@ from vllm_ascend._310p.attention.metadata_builder import AscendAttentionMetadata
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend as _BaseBackend
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl as _BaseImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder, AscendAttentionState, AscendMetadata
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, aligned_16, nd_to_nz_2d
 
 
 class AscendAttentionBackend310(_BaseBackend):
@@ -63,6 +63,8 @@ class AscendAttentionBackendImpl310(_BaseImpl):
 
     def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata, output):
         real_tokens = int(attn_metadata.seq_lens.sum().item())
+
+        query, key, value, output = (aligned_16(t) for t in (query, key, value, output))
 
         seq_len = attn_metadata.seq_lens
         if seq_len.dtype != torch.int32:

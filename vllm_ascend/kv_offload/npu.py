@@ -1,40 +1,48 @@
 from collections.abc import Iterator
+from typing import Optional
 
 import torch
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandler
 
 
 class NPUOffloadingSpec(OffloadingSpec):
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None = None):
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 kv_cache_config: Optional[KVCacheConfig] = None):
         super().__init__(vllm_config, kv_cache_config)
 
         num_cpu_blocks = self.extra_config.get("num_cpu_blocks")
         if not num_cpu_blocks:
-            raise Exception("num_cpu_blocks must be specified in kv_connector_extra_config")
+            raise Exception(
+                "num_cpu_blocks must be specified in kv_connector_extra_config"
+            )
         self.num_cpu_blocks: int = num_cpu_blocks
 
         # scheduler-side
-        self._manager: OffloadingManager | None = None
+        self._manager: Optional[OffloadingManager] = None
 
         # worker-side
-        self._handler: OffloadingHandler | None = None
+        self._handler: Optional[OffloadingHandler] = None
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
             kv_events_config = self.vllm_config.kv_events_config
-            enable_events = kv_events_config is not None and kv_events_config.enable_kv_cache_events
+            enable_events = (kv_events_config is not None
+                             and kv_events_config.enable_kv_cache_events)
             self._manager = LRUOffloadingManager(
-                CPUBackend(block_size=self.offloaded_block_size, num_blocks=self.num_cpu_blocks),
+                CPUBackend(block_size=self.offloaded_block_size,
+                           num_blocks=self.num_cpu_blocks),
                 enable_events=enable_events,
             )
         return self._manager
@@ -43,7 +51,8 @@ class NPUOffloadingSpec(OffloadingSpec):
         self,
         kv_caches: dict[str, torch.Tensor],
         attn_backends: dict[str, type[AttentionBackend]],
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
+    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec],
+                        OffloadingHandler]]:
         if not self._handler:
             self._handler = CpuNpuOffloadingHandler(
                 attn_backends=attn_backends,

@@ -116,12 +116,6 @@ def matmul_persistent(x, y, bias=None):
     assert y.dim() == 2, "y must be a 2D tensor"
     assert x.shape[1] == y.shape[0], f"Matrix dimension mismatch: x.shape[1]={x.shape[1]}, y.shape[0]={y.shape[0]}"
 
-    # Convert tensors to contiguous memory layout.
-    # This prevents transposed tensors from causing incorrect stride() values,
-    # which would lead to miscalculated data transfer volumes in subsequent operations.
-    x = x.contiguous()
-    y = y.contiguous()
-
     M, K = x.shape
     _, N = y.shape
     # Validate bias shape (if not None)
@@ -135,7 +129,7 @@ def matmul_persistent(x, y, bias=None):
     output = torch.empty((M, N), dtype=x.dtype, device=x.device)
 
     # Define block sizes (can be adjusted based on hardware)
-    BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 64
+    BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 128
 
     # Calculate grid size (one thread per block)
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))

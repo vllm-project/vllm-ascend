@@ -36,7 +36,10 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
-                                               update_full_graph_params)
+                                               update_attn_dcp_pcp_params,
+                                               update_attn_params,
+                                               update_mla_attn_dcp_pcp_params,
+                                               update_mla_attn_params)
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.utils import \
     prepare_inputs_padded_kernel
@@ -379,17 +382,10 @@ class EagleProposer(VllmEagleProposer):
         model_previous_hidden_states = self.hidden_states[:num_tokens]
 
         batch_size = num_tokens // (self.num_speculative_tokens + 1)
-        (
-            num_tokens,
-            num_tokens_across_dp,
-            _,
-        ) = self.runner._sync_metadata_across_dp(num_tokens,
-                                                 is_draft_model=True)
         with set_ascend_forward_context(
                 multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
                 self.vllm_config,
                 num_tokens=num_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
                 num_actual_tokens=0,
                 in_profile_run=is_profile,
                 batch_descriptor=batch_descriptor,
@@ -535,17 +531,10 @@ class EagleProposer(VllmEagleProposer):
         self.last_token_indices[:last_token_indices_len].copy_(
             last_token_indices)
 
-        (
-            num_input_tokens,
-            num_tokens_across_dp,
-            _,
-        ) = self.runner._sync_metadata_across_dp(num_input_tokens,
-                                                 is_draft_model=True)
         with set_ascend_forward_context(
                 multi_steps_attn_metadata[0],
                 self.vllm_config,
                 num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
                 num_actual_tokens=num_tokens,
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=aclgraph_runtime_mode,
@@ -1178,9 +1167,21 @@ class EagleProposer(VllmEagleProposer):
 
     # update full-graph params for one spec token
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
-        update_full_graph_params(
-            self.runner.attn_backend, self.update_stream, forward_context, num_tokens,
-            self.vllm_config, self.vllm_config.speculative_config)
+        if self.vllm_config.model_config.use_mla:
+            if self.pcp_size * self.dcp_size > 1:
+                update_mla_attn_dcp_pcp_params(self.update_stream,
+                                               forward_context, num_tokens)
+            else:
+                update_mla_attn_params(self.update_stream, forward_context,
+                                       num_tokens,
+                                       self.vllm_config.speculative_config)
+        else:
+            if self.pcp_size * self.dcp_size > 1:
+                update_attn_dcp_pcp_params(self.update_stream, forward_context,
+                                           num_tokens)
+            else:
+                update_attn_params(self.update_stream, forward_context,
+                                   num_tokens, self.vllm_config, draft_attn_metadatas)
 
     # padding tensor into desired size
     def _pad_tensor(self, tensor, pad_size):

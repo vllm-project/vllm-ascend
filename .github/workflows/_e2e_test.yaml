@@ -22,7 +22,7 @@ on:
 jobs:
   e2e:
     name: singlecard
-    runs-on: linux-aarch64-a2b3-1
+    runs-on: ${{ inputs.runner }}-1
     container:
       image: ${{ inputs.image }}
       env:
@@ -92,9 +92,7 @@ jobs:
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
           # basic 
-          pytest -sv --durations=0 tests/e2e/singlecard/test_auto_fit_max_mode_len.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_batch_invariant.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_batch_invariant.py

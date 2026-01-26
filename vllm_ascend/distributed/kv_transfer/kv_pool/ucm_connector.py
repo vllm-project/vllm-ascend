@@ -4,9 +4,11 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 from ucm.integration.vllm.ucm_connector import UCMConnector
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+
 
 logger = init_logger(__name__)
 
@@ -14,11 +16,7 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-        KVConnectorPromMetrics,
-        KVConnectorStats,
-        PromMetric,
-        PromMetricT,
-    )
+        KVConnectorPromMetrics, KVConnectorStats, PromMetric, PromMetricT)
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -27,13 +25,16 @@ if TYPE_CHECKING:
 
 
 class UCMConnectorV1(KVConnectorBase_V1):
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig",
     ):
-        super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
+        super().__init__(vllm_config=vllm_config,
+                         role=role,
+                         kv_cache_config=kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
 
         ImplCls = UCMConnector
@@ -42,14 +43,6 @@ class UCMConnectorV1(KVConnectorBase_V1):
     # ==============================
     # Worker-side methods
     # ==============================
-    def has_connector_metadata(self) -> bool:
-        """Check whether the connector metadata is currently set.
-
-        Returns:
-            bool: True if connector metadata exists, False otherwise.
-        """
-        return self._ucm_engine.has_connector_metadata()
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """
         Initialize with the KV caches. Useful for pre-registering the
@@ -59,7 +52,8 @@ class UCMConnectorV1(KVConnectorBase_V1):
         """
         self._ucm_engine.register_kv_caches(kv_caches)
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext",
+                      **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -108,7 +102,8 @@ class UCMConnectorV1(KVConnectorBase_V1):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        self._ucm_engine.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
+        self._ucm_engine.save_kv_layer(layer_name, kv_layer, attn_metadata,
+                                       **kwargs)
 
     def wait_for_save(self) -> None:
         """
@@ -128,7 +123,8 @@ class UCMConnectorV1(KVConnectorBase_V1):
         """
         self._ucm_engine.clear_connector_metadata()
 
-    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+    def bind_connector_metadata(
+            self, connector_metadata: KVConnectorMetadata) -> None:
         """Set the connector metadata from the scheduler.
 
         This function should be called by the model runner every time
@@ -171,15 +167,20 @@ class UCMConnectorV1(KVConnectorBase_V1):
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
-        return self._ucm_engine.get_num_new_matched_tokens(request, num_computed_tokens)
+        return self._ucm_engine.get_num_new_matched_tokens(
+            request, num_computed_tokens)
 
-    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int) -> None:
+    def update_state_after_alloc(self, request: "Request",
+                                 blocks: "KVCacheBlocks",
+                                 num_external_tokens: int) -> None:
         """
         Update KVConnector state after block allocation.
         """
-        self._ucm_engine.update_state_after_alloc(request, blocks, num_external_tokens)
+        self._ucm_engine.update_state_after_alloc(request, blocks,
+                                                  num_external_tokens)
 
-    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+    def build_connector_meta(
+            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """
         Build the connector metadata for this step.
 
@@ -213,7 +214,10 @@ class UCMConnectorV1(KVConnectorBase_V1):
     # ==============================
 
     @classmethod
-    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> Optional["KVConnectorStats"]:
+    def build_kv_connector_stats(
+            cls,
+            data: dict[str, Any] | None = None
+    ) -> Optional["KVConnectorStats"]:
         """
         KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
