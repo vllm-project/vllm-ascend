@@ -161,7 +161,8 @@ class NPUModelRunner310(NPUModelRunner):
                     kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     tensor_size = kv_cache_sizes[layer_name]
-                    tensor_element_size = 2
+                    dtype = kv_cache_spec.dtype
+                    tensor_element_size = torch.tensor([], dtype=dtype).element_size()
                     raw_tensor = torch.zeros(tensor_size // tensor_element_size, dtype=dtype, device=self.device)
                     assert tensor_size is not None
                     assert tensor_size % kv_cache_spec.page_size_bytes == 0
