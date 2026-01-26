@@ -14,6 +14,10 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MLAA
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.triton_utils import HAS_TRITON
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.batch_invariant.mla_attention import decode_attention_fwd
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -720,6 +724,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
         register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
+        if vllm_is_batch_invariant() and HAS_TRITON:
+            self._forward_decode = self._forward_decode_triton
+        else:
+            self._forward_decode = self._forward_decode_default
+
     def _v_up_proj(self, x):
         # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
         x = x.view(self.num_heads, -1, self.kv_lora_rank)
@@ -1069,7 +1078,69 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
-    def _forward_decode(
+    def _forward_decode_triton(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        block_size: int,
+        attn_metadata: AscendMLAMetadata,
+    ) -> torch.Tensor:
+        decode_meta = attn_metadata.decode
+        assert decode_meta is not None
+
+        q =  torch.cat([q_nope, q_pe], dim=-1)
+        kv_c_and_k_pe_cache = torch.cat([k_nope, k_pe], dim=-1)
+
+        B = q.shape[0]
+        q_num_heads = q.shape[1]
+        attn_output = torch.zeros(
+            B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
+        )
+
+        # For batch invariance, use only 1 split to ensure deterministic reduction
+        num_kv_splits = 1
+
+        # TODO(lucas) Allocate ahead of time
+        attn_logits = torch.empty(
+            (
+                B,
+                q_num_heads,
+                num_kv_splits,
+                # NOTE(lucas) idk why the +1 is here but sglang has it so we
+                # just mirror that
+                self.kv_lora_rank + 1,
+            ),
+            dtype=torch.float32,
+            device=q.device,
+        )
+
+        # Add a head dim of 1
+        kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
+        PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
+
+        seq_lens = attn_metadata.decode.seq_lens
+        seq_lens = seq_lens.to(q.device)
+
+        decode_attention_fwd(
+            q,
+            kv_c_and_k_pe_cache,
+            kv_c_cache,
+            attn_output,
+            attn_metadata.decode.block_table,
+            seq_lens,
+            attn_logits,
+            num_kv_splits,
+            self.scale,
+            PAGE_SIZE,
+        )
+
+        attn_output = attn_output.unsqueeze(2).permute(1, 0, 2, 3)
+
+        return self._v_up_proj(attn_output)
+
+    def _forward_decode_default(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
