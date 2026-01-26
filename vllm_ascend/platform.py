@@ -216,10 +216,6 @@ class NPUPlatform(Platform):
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
-        # There are cases where default cudagraph_capture_sizes are not friendly
-        # to ascend ops && hardwares. We update these sizes here to improve
-        # default performance.
-        update_default_aclgraph_sizes(vllm_config)
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
         if vllm_config.parallel_config.tensor_parallel_size > 1 and not vllm_config.model_config.enforce_eager and \
