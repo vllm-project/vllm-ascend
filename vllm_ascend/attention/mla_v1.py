@@ -720,6 +720,88 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
         register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+    ):
+        if forward_context.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
+        # FIXME: Behold! We are using a temporary hack here to update the args
+        # for each layer's attention op in the graph.
+        with torch.npu.stream(update_stream):
+            for key, param, handle, event in zip(
+                forward_context.attn_metadata,
+                graph_params.attn_params[num_tokens],
+                graph_params.handles[num_tokens],
+                graph_params.events[num_tokens],
+            ):
+                (
+                    q_nope,
+                    k_nope,
+                    q_pe,
+                    k_pe,
+                    num_heads,
+                    num_kv_heads,
+                    input_layout,
+                    attn_mask,
+                    sparse_mode,
+                    scale,
+                    block_table,
+                    block_size,
+                    seq_lens_list,
+                    actual_seq_lengths,
+                    attn_output,
+                    softmax_lse,
+                ) = param
+                seq_lens_list = forward_context.attn_metadata[key].decode.seq_lens_list
+                if speculative_config and speculative_config.method == "mtp" and not forward_context.is_draft_model:
+                    actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
+                    spec_multiple = speculative_config.num_speculative_tokens + 1
+                    seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
+                    actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
+                elif forward_context.is_draft_model:
+                    actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
+                    block_table = forward_context.attn_metadata[key].decode.block_table
+                    # TODO: This is a hack and should be fixed in the future.
+                    if speculative_config.disable_padded_drafter_batch:
+                        block_table = block_table[: len(actual_seq_lengths)]
+                    seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
+                else:
+                    seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
+                torch.npu.graph_task_update_begin(update_stream, handle)
+
+                torch_npu.npu_fused_infer_attention_score.out(
+                    q_nope,
+                    k_nope,
+                    k_nope,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    num_heads=num_heads,
+                    num_key_value_heads=num_kv_heads,
+                    input_layout=input_layout,
+                    atten_mask=attn_mask,
+                    sparse_mode=sparse_mode,
+                    scale=scale,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    block_table=block_table,
+                    block_size=block_size,
+                    actual_seq_lengths_kv=seq_lens_list,
+                    actual_seq_lengths=actual_seq_lengths,
+                    workspace=graph_params.workspaces.get(num_tokens),
+                    out=[attn_output, softmax_lse],
+                )
+                torch.npu.graph_task_update_end(update_stream)
+
+                event.record(update_stream)
+
     def _v_up_proj(self, x):
         # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
         x = x.view(self.num_heads, -1, self.kv_lora_rank)
