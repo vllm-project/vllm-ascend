@@ -79,25 +79,27 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              use_grouped_topk: bool,
-              top_k: int,
-              router_logits: torch.Tensor,
-              renormalize: bool,
-              topk_group: Optional[int] = None,
-              num_expert_group: Optional[int] = None,
-              custom_routing_function: Optional[Callable] = None,
-              scoring_func: str = "softmax",
-              routed_scaling_factor: float = 1.0,
-              e_score_correction_bias: Optional[torch.Tensor] = None,
-              global_num_experts: int = -1,
-              expert_map: Optional[torch.Tensor] = None,
-              apply_router_weight_on_input: bool = False,
-              enable_force_load_balance: bool = False,
-              log2phy: torch.Tensor = None,
-              **kwargs) -> torch.Tensor:
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
+        custom_routing_function: Callable | None = None,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+        e_score_correction_bias: torch.Tensor | None = None,
+        global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
+        apply_router_weight_on_input: bool = False,
+        enable_force_load_balance: bool = False,
+        log2phy: torch.Tensor = None,
+        **kwargs,
+    ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         topk_weights, topk_ids = select_experts(
@@ -143,7 +145,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             apply_router_weight_on_input=apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb,
             log2phy=log2phy,
-            mc2_mask=kwargs.get("mc2_mask", None))
+            mc2_mask=kwargs.get("mc2_mask"),
+        )
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
         return final_hidden_states
@@ -370,8 +373,11 @@ class AscendFusedMoE(FusedMoE):
             assert expert_tokens is not None and group_list_type is not None, (
                 "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
             )
-            local_load = expert_tokens if group_list_type == 1 else \
-                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+            local_load = (
+                expert_tokens
+                if group_list_type == 1
+                else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+            )
             self.moe_load.add_(local_load)
         routed_out = forward_context.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
