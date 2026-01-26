@@ -1033,8 +1033,10 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(
                 hidden_states)
-        return hidden_states if self.pcp_size == 1 else self.pcp_manager.get_restore_hidden_states(
-            hidden_states)
+        if self.pcp_size > 1 and get_pp_group().is_last_rank:
+            hidden_states = self.pcp_manager.get_restore_hidden_states(
+                hidden_states)
+        return hidden_states
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
@@ -2071,19 +2073,24 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by tp_size;
                 # otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading to incorrect memory estimation and potentially causing OOM.
-                actual_tokens = num_tokens
+                intermediate_tokens = num_tokens_padded
                 if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
-                    actual_tokens = num_tokens // tp_size
+                    intermediate_tokens = (num_tokens_padded + tp_size -
+                                           1) // tp_size
                 if self.intermediate_tensors is None:
+                    max_actual_tokens = self.max_num_tokens
+                    if enable_sp():
+                        max_actual_tokens = (self.max_num_tokens + tp_size -
+                                             1) // tp_size
                     self.intermediate_tensors = (
                         self.model.make_empty_intermediate_tensors(
-                            batch_size=actual_tokens,
+                            batch_size=max_actual_tokens,
                             dtype=self.dtype,
                             device=self.device))
                 intermediate_tensors = IntermediateTensors({
                     k:
-                    v[:num_tokens_padded]
+                    v[:intermediate_tokens]
                     for k, v in self.intermediate_tensors.items()
                 })
 
