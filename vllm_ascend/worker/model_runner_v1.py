@@ -1471,7 +1471,6 @@ class NPUModelRunner(GPUModelRunner):
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
-            ec_connector_output=ec_connector_output,
             kv_connector_output=kv_connector_output,
             pooler_output=[],
             ec_connector_output=ec_connector_output
