@@ -75,17 +75,17 @@ class AscendPrefillContextParallelMetadata:
 
     num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None
 
-    q_head_idx_tensor: torch.Tensor = None
+    q_head_idx: torch.Tensor = None
 
-    q_tail_idx_tensor: torch.Tensor = None
+    q_tail_idx: torch.Tensor = None
 
-    kv_with_q_head_nomask_idx_tensor: torch.Tensor = None
+    kv_with_q_head_nomask_idx: torch.Tensor = None
 
-    kv_with_q_head_mask_idx_tensor: torch.Tensor = None
+    kv_with_q_head_mask_idx: torch.Tensor = None
 
-    kv_with_q_tail_nomask_idx_tensor: torch.Tensor = None
+    kv_with_q_tail_nomask_idx: torch.Tensor = None
 
-    kv_with_q_tail_mask_idx_tensor: torch.Tensor = None
+    kv_with_q_tail_mask_idx: torch.Tensor = None
 
     attn_mask_seqlens: torch.Tensor = None
 

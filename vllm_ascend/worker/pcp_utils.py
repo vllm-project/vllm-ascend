@@ -574,6 +574,7 @@ class PCPManager:
         num_prefills = num_reqs - num_decodes
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_world_size
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
+        pcp_metadata = None
         if self.pcp_world_size * self.dcp_world_size > 1:
             decode_context_lens = input_batch.num_computed_tokens_cpu[:
                                                                       num_decodes] + num_scheduled_tokens[:
@@ -687,25 +688,25 @@ class PCPManager:
                     q_req_offset += seq_len
                     kv_req_offset += seq_len * self.pcp_world_size
 
-                q_head_idx_tensor = self._list_to_tensor(
+                q_head_idx = self._list_to_tensor(
                     q_head_idx, self.device)
-                q_tail_idx_tensor = self._list_to_tensor(
+                q_tail_idx = self._list_to_tensor(
                     q_tail_idx, self.device)
-                self.q_head_idx_tensor = q_head_idx_tensor
-                self.q_tail_idx_tensor = q_tail_idx_tensor
+                self.q_head_idx = q_head_idx
+                self.q_tail_idx = q_tail_idx
 
-                q_full_idx = torch.cat([q_head_idx_tensor, q_tail_idx_tensor])
+                q_full_idx = torch.cat([q_head_idx, q_tail_idx])
                 q_full_idx = q_full_idx.to(torch.float32).argsort().to(
                     torch.int32)
                 self.q_full_idx = q_full_idx
 
                 self.kv_idx_names = {
-                    'kv_with_q_head_nomask_idx_tensor':
+                    'kv_with_q_head_nomask_idx':
                     kv_with_q_head_nomask_idx,
-                    'kv_with_q_head_mask_idx_tensor': kv_with_q_head_mask_idx,
-                    'kv_with_q_tail_nomask_idx_tensor':
+                    'kv_with_q_head_mask_idx': kv_with_q_head_mask_idx,
+                    'kv_with_q_tail_nomask_idx':
                     kv_with_q_tail_nomask_idx,
-                    'kv_with_q_tail_mask_idx_tensor': kv_with_q_tail_mask_idx
+                    'kv_with_q_tail_mask_idx': kv_with_q_tail_mask_idx
                 }
                 for key, value in self.kv_idx_names.items():
                     tensor_npu = self._list_to_tensor(value, self.device)
@@ -720,7 +721,7 @@ class PCPManager:
                     [chunk_seqlens, kv_with_q_tail_nomask_seqlens],
                     dtype=torch.int32)
                 if self.vllm_config.model_config.use_mla:
-                    split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list, head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = self._split_nomask_idx_tensor_list(
+                    split_q_head_nomask_idx_list, split_q_tail_nomask_idx_list, head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = self._split_nomask_idx_list(
                         split_with_q_head_nomask_idx_reqs,
                         split_kv_with_q_tail_nomask_idx_reqs,
                         head_attn_nomask_seqlens, chunk_seqlens)
@@ -732,17 +733,17 @@ class PCPManager:
                 }
                 pcp_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:
                                                                                                  num_actual_tokens_pcp_padded]
-                pcp_metadata.q_head_idx_tensor = self.q_head_idx_tensor
-                pcp_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
+                pcp_metadata.q_head_idx = self.q_head_idx
+                pcp_metadata.q_tail_idx = self.q_tail_idx
                 pcp_metadata.q_full_idx = self.q_full_idx
-                pcp_metadata.kv_with_q_head_nomask_idx_tensor = self.kv_idx_names[
-                    'kv_with_q_head_nomask_idx_tensor']
-                pcp_metadata.kv_with_q_head_mask_idx_tensor = self.kv_idx_names[
-                    'kv_with_q_head_mask_idx_tensor']
-                pcp_metadata.kv_with_q_tail_nomask_idx_tensor = self.kv_idx_names[
-                    'kv_with_q_tail_nomask_idx_tensor']
-                pcp_metadata.kv_with_q_tail_mask_idx_tensor = self.kv_idx_names[
-                    'kv_with_q_tail_mask_idx_tensor']
+                pcp_metadata.kv_with_q_head_nomask_idx = self.kv_idx_names[
+                    'kv_with_q_head_nomask_idx']
+                pcp_metadata.kv_with_q_head_mask_idx = self.kv_idx_names[
+                    'kv_with_q_head_mask_idx']
+                pcp_metadata.kv_with_q_tail_nomask_idx = self.kv_idx_names[
+                    'kv_with_q_tail_nomask_idx']
+                pcp_metadata.kv_with_q_tail_mask_idx = self.kv_idx_names[
+                    'kv_with_q_tail_mask_idx']
                 pcp_metadata.attn_mask_seqlens = self.extra_pcp_kwargs[
                     'attn_mask_seqlens']
                 pcp_metadata.head_attn_nomask_seqlens = self.extra_pcp_kwargs[
@@ -750,8 +751,8 @@ class PCPManager:
                 pcp_metadata.tail_attn_nomask_seqlens = self.extra_pcp_kwargs[
                     'tail_attn_nomask_seqlens']
                 if self.vllm_config.model_config.use_mla:
-                    pcp_metadata.kv_with_q_head_nomask_idx_tensor = split_q_head_nomask_idx_tensor_list
-                    pcp_metadata.kv_with_q_tail_nomask_idx_tensor = split_q_tail_nomask_idx_tensor_list
+                    pcp_metadata.kv_with_q_head_nomask_idx = split_q_head_nomask_idx_list
+                    pcp_metadata.kv_with_q_tail_nomask_idx = split_q_tail_nomask_idx_list
                     pcp_metadata.head_attn_nomask_seqlens = head_attn_nomask_seqlens_list
                     pcp_metadata.tail_attn_nomask_seqlens = tail_attn_nomask_seqlens_list
         self.pcp_metadata = pcp_metadata
@@ -762,10 +763,10 @@ class PCPManager:
         tensor_npu.copy_(torch.tensor(lst, dtype=dtype), non_blocking=True)
         return tensor_npu
 
-    def _split_nomask_idx_tensor_list(self, split_with_q_head_nomask_idx_reqs,
+    def _split_nomask_idx_list(self, split_with_q_head_nomask_idx_reqs,
                                       split_kv_with_q_tail_nomask_idx_reqs,
                                       head_attn_nomask_seqlens, chunk_seqlens):
-        split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list= [], []
+        split_q_head_nomask_idx_list, split_q_tail_nomask_idx_list= [], []
         head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = [], []
         if split_with_q_head_nomask_idx_reqs:
             #In long-sequence scenarios, the computational cost and latency
@@ -774,7 +775,7 @@ class PCPManager:
             split_size = 16 * 1024
             if self.pcp_world_rank == 0:
                 split_q_head_nomask_idx_list = [
-                    self.kv_idx_names['kv_with_q_head_nomask_idx_tensor']
+                    self.kv_idx_names['kv_with_q_head_nomask_idx']
                 ]
             else:
                 split_q_head_nomask_idx_list, split_q_head_nomask_lens_list = self._split_multi_batch_kv_idx(
@@ -783,11 +784,11 @@ class PCPManager:
                 split_kv_with_q_tail_nomask_idx_reqs, split_size)
 
             for q_head_nomask_idx in split_q_head_nomask_idx_list:
-                split_q_head_nomask_idx_tensor_list.append(
+                split_q_head_nomask_idx_list.append(
                     self._list_to_tensor(q_head_nomask_idx, self.device))
 
             for q_tail_nomask_idx in split_q_tail_nomask_idx_list:
-                split_q_tail_nomask_idx_tensor_list.append(
+                split_q_tail_nomask_idx_list.append(
                     self._list_to_tensor(q_tail_nomask_idx, self.device))
 
             if self.pcp_world_rank == 0:
@@ -801,7 +802,7 @@ class PCPManager:
                 tail_attn_nomask_seqlens_list.append(
                     torch.tensor([chunk_seqlens, q_tail_nomask_lens],
                                  dtype=torch.int32))
-        return split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list, head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list
+        return split_q_head_nomask_idx_list, split_q_tail_nomask_idx_list, head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list
 
     def _split_multi_batch_kv_idx(
         self,
