@@ -168,7 +168,7 @@ curl http://localhost:8000/v1/completions \
     -d '{
         "model": "Qwen/Qwen2.5-0.5B-Instruct",
         "prompt": "Beijing is a",
-        "max_tokens": 5,
+        "max_completion_tokens": 5,
         "temperature": 0
     }' | python3 -m json.tool
 ```
