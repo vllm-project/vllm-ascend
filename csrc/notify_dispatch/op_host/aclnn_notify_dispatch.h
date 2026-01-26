@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-/* funtion: aclnnNotifyDispatchGetWorkspaceSize
+/* function: aclnnNotifyDispatchGetWorkspaceSize
  * parameters :
  * sendData : required
  * tokenPerExpertData : required
@@ -40,7 +40,7 @@ aclnnStatus aclnnNotifyDispatchGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-/* funtion: aclnnNotifyDispatch
+/* function: aclnnNotifyDispatch
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).
