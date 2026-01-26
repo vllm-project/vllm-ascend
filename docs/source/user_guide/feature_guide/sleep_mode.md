@@ -51,7 +51,7 @@ The following is a simple example of how to use sleep mode.
         # record npu memory use baseline in case other process is running
         used_bytes_baseline = total - free
         llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
-        sampling_params = SamplingParams(temperature=0, max_tokens=10)
+        sampling_params = SamplingParams(temperature=0, max_completion_tokens=10)
         output = llm.generate(prompt, sampling_params)
 
         llm.sleep(level=1)
@@ -110,7 +110,7 @@ The following is a simple example of how to use sleep mode.
         -d '{
             "model": "Qwen/Qwen2.5-0.5B-Instruct",
             "prompt": "The future of AI is",
-            "max_tokens": 7,
+            "max_completion_tokens": 7,
             "temperature": 0
         }'
     ```

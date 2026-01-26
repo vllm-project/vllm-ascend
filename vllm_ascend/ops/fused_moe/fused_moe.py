@@ -43,14 +43,10 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (AllGatherCommImpl,
                                                        FusedExpertsResult,
                                                        setup_moe_comm_method)
 from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
-from vllm_ascend.quantization.w4a8_dynamic import \
-    AscendW4A8DynamicFusedMoEMethod
-from vllm_ascend.quantization.w8a8_dynamic import \
-    AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                get_ascend_device_type, maybe_trans_nz,
                                npu_stream_switch, shared_expert_dp_enabled,
-                               shared_experts_calculation_stream, vllm_version_is)
+                               shared_experts_calculation_stream)
 
 @dataclass
 class FusedMoEResult:
@@ -106,6 +102,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               expert_map: Optional[torch.Tensor] = None,
               apply_router_weight_on_input: bool = False,
               enable_force_load_balance: bool = False,
+              log2phy: torch.Tensor = None,
               **kwargs) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -150,10 +147,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            global_num_experts=global_num_experts,
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb,
+            log2phy=log2phy,
             mc2_mask=kwargs.get("mc2_mask", None))
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
@@ -202,10 +199,8 @@ class AscendFusedMoE(FusedMoE):
 
         # init moe
         eplb_config = ascend_config.eplb_config
-        self.global_expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
+        self.global_expert_map, self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
             eplb_config, self.moe_instance_id, self.moe_config)
-        if self.global_expert_map is not None:
-            self._expert_map = self.global_expert_map[self.ep_rank].npu()
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy
                                                           is not None)
@@ -254,12 +249,16 @@ class AscendFusedMoE(FusedMoE):
 
         method = quant_method.quant_method
 
-        if isinstance(method, AscendW8A8DynamicFusedMoEMethod):
-            return QuantType.W8A8
-        elif isinstance(method, AscendW4A8DynamicFusedMoEMethod):
-            return QuantType.W4A8
-        else:
-            return QuantType.NONE
+        if hasattr(method, "quant_type"):
+            from vllm_ascend.quantization.methods.base import \
+                QuantType as SchemeQuantType
+            scheme_quant_type = method.quant_type
+            if scheme_quant_type == SchemeQuantType.W8A8:
+                return QuantType.W8A8
+            elif scheme_quant_type == SchemeQuantType.W4A8:
+                return QuantType.W4A8
+
+        return QuantType.NONE
 
     def update_expert_map(self, new_expert_map):
         self._expert_map = new_expert_map
@@ -454,12 +453,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # Qwen3-Next specific gating mechanism
         if hasattr(self._shared_experts, "expert_gate") and \
             self._shared_experts.expert_gate is not None:
-            if vllm_version_is('0.13.0'):
-                # TODO(jianzs): remove this branch after vLLM new version is
-                # released
-                gate_out = self._shared_experts.expert_gate(hidden_states)  # type: ignore
-            else:
-                gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
+            gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
             shared_out = F.sigmoid(gate_out) * shared_out
         return shared_out
 

@@ -669,7 +669,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
+    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
         AscendMergedColumnParallelLinear,
@@ -715,21 +715,23 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
+        "RMSNormGated": AscendRMSNormGated,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
+        from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
         from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
-        from vllm_ascend._310p.ops.rotary_embedding import (
-            AscendMRotaryEmbedding310,
-        )
+        from vllm_ascend._310p.ops.rotary_embedding import AscendMRotaryEmbedding310
 
         REGISTERED_ASCEND_OPS.update(
             {
                 "SiluAndMul": AscendSiluAndMul310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
+                "RMSNorm": AscendRMSNorm310,
+                "GemmaRMSNorm": AscendGemmaRMSNorm310,
             }
         )
 
@@ -868,13 +870,22 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
 
 
 def speculative_enable_dispatch_gmm_combine_decode(vllm_config: VllmConfig) -> bool:
+    """When draft contains MOE Arch and non-w8a8, disable dispatch_gmm_combine_decode."""
     if vllm_config.speculative_config is None:
         return True
     speculative_method = getattr(vllm_config.speculative_config, "method", None)
     if speculative_method in [None, "ngram", "suffix"]:
         return True
     if speculative_method in ["eagle", "eagle3"]:
-        return False
+        if is_drafter_moe_model(vllm_config):
+            draft_model_config = vllm_config.speculative_config.draft_model_config
+            hf_text_config = draft_model_config.hf_text_config
+            quant_type = getattr(hf_text_config, "moe_quantize", None)
+            if quant_type is None:
+                quant_type = getattr(hf_text_config, "quantize", None)
+            return quant_type == "w8a8_dynamic"
+        else:
+            return True
     if speculative_method == "mtp":
         mtp_quant_type = getattr(vllm_config.model_config.hf_text_config, "mtp_quantize", None)
         return mtp_quant_type == "w8a8_dynamic"

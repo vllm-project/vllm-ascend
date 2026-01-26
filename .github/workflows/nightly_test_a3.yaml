@@ -86,6 +86,9 @@ jobs:
           - name: multi-node-kimi-k2-instruct-w8a8
             config_file_path: Kimi-K2-Instruct-W8A8.yaml
             size: 2
+          - name: multi-node-deepseek-v3.1
+            config_file_path: DeepSeek-V3.1-BF16.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -150,16 +153,15 @@ jobs:
           - name: kimi-k2-thinking
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/single_node/models/test_kimi_k2_thinking.py
-          # TODO: Replace deepseek3.2-exp with deepseek3.2 after nightly tests pass
-          # - name: deepseek3_2-exp-w8a8
-          #   os: linux-aarch64-a3-16
-          #   tests: tests/e2e/nightly/single_node/models/test_deepseek_v3_2_exp_w8a8.py
-          - name: deepseek-r1-w8a8-hmb
+          - name: deepseek-r1-w8a8-hbm
             os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/single_node/models/test_deepseek_r1_w8a8_hmb.py
+            tests: tests/e2e/nightly/single_node/models/test_deepseek_r1_w8a8_hbm.py
+          - name: deepseek3_2-w8a8
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/single_node/models/test_deepseek_v3_2_w8a8.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: v0.13.0
+      vllm: v0.14.1
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
@@ -179,7 +181,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      vllm: v0.13.0
+      vllm: v0.14.1
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}

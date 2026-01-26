@@ -31,6 +31,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `eplb_config`                       | dict | `{}`    | Configuration options for ascend compilation |
+| `npugraph_ex_config`                | dict | `{}`    | Configuration options for npugraph_ex backend                                                             |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump(eager mode).                                                     |
 | `enable_async_exponential`          | bool | `False` | Whether to enable async exponential overlap. To enable async exponential, set this config to True.        |
@@ -75,7 +76,8 @@ The details of each configuration option are as follows:
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
-| `fuse_qknorm_rope` | bool | `False` | Whether to enable fuse_qknorm_rope pass. It's set to True by default when Triton is installed. |
+| `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
+| `fuse_allreduce_rms` | bool | `False` | Whether to enable fuse_allreduce_rms pass. It's set to False because of conflict with SP. |
 
 **eplb_config**
 
@@ -87,6 +89,13 @@ The details of each configuration option are as follows:
 | `algorithm_execution_interval`   | int | `30`   | The forward iterations when the EPLB worker will finish CPU tasks. |
 | `expert_map_record_path`         | str | `None` | Save the expert load calculation results to a new expert table in the specified directory.|
 | `num_redundant_experts`          | int | `0`    | Specify redundant experts during initialization. |
+
+**npugraph_ex_config**
+
+| Name                   | Type | Default | Description                                                                            |
+|------------------------| ---- |---------|----------------------------------------------------------------------------------------|
+| `enable`               | bool | `False` | Whether to enable npugraph_ex backend.                                                 |
+| `enable_static_kernel` | bool | `False` | Whether to enable static kernel. Suitable for scenarios where shape changes are minimal and some time is available for static kernel compilation. |
 
 ### Example
 

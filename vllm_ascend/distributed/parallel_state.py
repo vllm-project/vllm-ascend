@@ -7,7 +7,7 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_tp_group,
                                              init_model_parallel_group)
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import enable_dsa_cp, flashcomm2_enable
+from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
@@ -238,7 +238,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                 FC2_group_ranks = torch.tensor(
                     flashcomm2_otp_group_ranks).squeeze(0)
             _SHARD_WEIGHT = create_shard_weight_group(FC2_group_ranks)
-        elif enable_dsa_cp():
+        elif enable_dsa_cp_with_layer_shard():
             # For dsa_cp, all shard layers are replicated.
             _SHARD_WEIGHT = create_shard_weight_group(None)
         else:

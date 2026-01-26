@@ -177,7 +177,7 @@ Mooncake is the serving platform for Kimi, a leading LLM service provided by Moo
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
-git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+git clone -b v0.3.8.post1 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 ```
 
 (Optional) Replace go install url if the network is poor
@@ -370,7 +370,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=600
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -429,7 +428,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=600
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -615,7 +613,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=600
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -674,7 +671,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=600
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -936,7 +932,7 @@ curl http://192.0.0.1:8080/v1/completions \
     -d '{
         "model": "qwen3-moe",
         "prompt": "Who are you?",
-        "max_tokens": 100,
+        "max_completion_tokens": 100,
         "temperature": 0
     }'
 ```

@@ -48,6 +48,12 @@ def setup_moe_comm_method(moe_config):
     _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
 
 
+def set_gmmswigluquant_method():
+    from vllm_ascend.ascend_config import get_ascend_config
+    ascend_config = get_ascend_config()
+    return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant
+
+
 @dataclass
 class FusedExpertsResult:
     routed_out: torch.Tensor
@@ -69,6 +75,7 @@ class MoECommMethod(ABC):
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
+        self.use_fusion_ops = set_gmmswigluquant_method()
 
     def prepare(
         self,
@@ -105,7 +112,6 @@ class MoECommMethod(ABC):
             use_int8_w8a8: bool = False,
             use_int4_w4a8: bool = False,
             use_int4_w4a16: bool = False,
-            global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
             w1_scale: Optional[list[torch.Tensor]] = None,
             w2_scale: Optional[list[torch.Tensor]] = None,
@@ -128,12 +134,15 @@ class MoECommMethod(ABC):
         assert moe_comm_method is not None, "Missing communication context"
 
         before_dispatch_evt = torch.npu.current_stream().record_event()
+        # Apply log2phy if needed
+        if log2phy is not None:
+            topk_ids = log2phy[topk_ids]
+
         dispatch_results = self.token_dispatcher.token_dispatch(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            log2phy=log2phy,
             global_redundant_expert_num=self.moe_config.
             global_redundant_expert_num,
             mc2_mask=mc2_mask,
@@ -157,7 +166,7 @@ class MoECommMethod(ABC):
             w2_offset=w2_offset,
             topk_scales=dispatch_results.topk_scales,
             with_quant=use_int8_w8a8 or use_int4_w4a8 or use_int4_w4a16,
-            fusion=use_int8_w8a8,
+            fusion=use_int8_w8a8 and self.use_fusion_ops,
             need_trans=need_trans,
             dynamic_eplb=dynamic_eplb)
 
@@ -278,7 +287,6 @@ class FusedMC2CommImpl(MoECommMethod):
             use_int8_w8a8: bool = False,
             use_int4_w4a8: bool = False,
             use_int4_w4a16: bool = False,
-            global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
             w1_scale: Optional[list[torch.Tensor]] = None,
             w2_scale: Optional[list[torch.Tensor]] = None,
@@ -335,7 +343,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 ep_rank_size=self.token_dispatcher.ep_world_size,
                 ep_rank_id=self.token_dispatcher.ep_rank_id,
                 moe_expert_num=self.moe_config.num_experts,
-                global_bs=self.token_dispatcher.fused_global_bs)
+                global_bs=self.token_dispatcher.global_bs)
         else:
             raise ValueError(
                 f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")

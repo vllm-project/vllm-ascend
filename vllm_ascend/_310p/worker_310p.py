@@ -18,7 +18,7 @@
 import torch_npu
 from vllm.logger import logger
 
-from vllm_ascend._310p.modelrunner_310p import NPUModelRunner310
+from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
@@ -33,5 +33,5 @@ class NPUWorker310(NPUWorker):
         self.model_runner = NPUModelRunner310(self.vllm_config, self.device)
 
     def _warm_up_atb(self):
-        # 310p device donot support torch_npu._npu_matmul_add_fp32 atb ops
-        logger.info("Skip warm-up atb ops for 310P device")
+        # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops
+        logger.info("Skip warm-up atb ops for 310P device.")

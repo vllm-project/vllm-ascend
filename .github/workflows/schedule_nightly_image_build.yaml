@@ -4,6 +4,7 @@ on:
   schedule:
     # UTC+8: 20pm, 23pm
     - cron: '0 12,15 * * *'
+  workflow_dispatch: 
 
 # This workflow builds and pushes Docker images for nightly-ci
 # It will be built base on the quay.io/ascend/vllm-ascend:main
@@ -46,7 +47,7 @@ jobs:
             --network host \
             --platform linux/arm64 \
             -f .github/Dockerfile.nightly.${TARGET} \
-            --build-arg CANN_VERSION="8.3.rc2" \
+            --build-arg CANN_VERSION="8.5.0" \
             --build-arg UBUNTU_VERSION="22.04" \
             --build-arg PYTHON_VERSION="3.11" \
             -t "$IMAGE_TAG" .
