@@ -30,11 +30,12 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
-from vllm_ascend.utils import (
-    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD,
-    COMPILATION_PASS_KEY, AscendDeviceType, enable_sp, get_ascend_device_type,
-    update_aclgraph_sizes, update_cudagraph_capture_sizes,
-    update_default_aclgraph_sizes, check_kv_extra_config)
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
+                               COMPRESSED_TENSORS_METHOD, COMPILATION_PASS_KEY,
+                               AscendDeviceType, enable_sp,
+                               get_ascend_device_type, update_aclgraph_sizes,
+                               update_cudagraph_capture_sizes,
+                               check_kv_extra_config)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
