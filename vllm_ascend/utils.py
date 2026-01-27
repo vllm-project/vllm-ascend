@@ -427,53 +427,6 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
     vllm_config.compilation_config.post_init_cudagraph_sizes()
 
 
-def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
-    """
-    Check whether it is vLLM default capture sizes.
-    """
-
-    max_cudagraph_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
-    cudagraph_capture_sizes = [i for i in [1, 2, 4] if i <= max_cudagraph_capture_size]
-    if max_cudagraph_capture_size >= 8:
-        # Step size 8 for small batch sizes, up to 256(not included)
-        cudagraph_capture_sizes += list(range(8, min(max_cudagraph_capture_size + 1, 256), 8))
-    if max_cudagraph_capture_size >= 256:
-        # Step size 16 for larger batch sizes
-        cudagraph_capture_sizes += list(range(256, max_cudagraph_capture_size + 1, 16))
-    # in newer version, vLLM use ascending order of cudagraph_capture_sizes.
-    target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes)
-    return target_cudagraph_capture_sizes == vllm_config.compilation_config.cudagraph_capture_sizes
-
-
-def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
-    """
-    Update ACL graph default capture sizes, so that new sizes
-    are more friendly to ascend ops && hardware.
-    """
-
-    if (
-        vllm_config.model_config is None
-        or vllm_config.model_config.enforce_eager
-        or not _is_default_capture_sizes(vllm_config)
-    ):
-        return
-
-    # modify the default capture_sizes for Qwen3-MoE models on dp settings.
-    # this is mainly because performance of _npu_paged_attention might degrades
-    # on special shapes.
-    # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
-    # replaced by npu_fused_infer_attention_score which does not contain such bugs.
-    if (
-        vllm_config.model_config
-        and vllm_config.model_config.hf_text_config.model_type == "qwen3_moe"
-        and vllm_config.parallel_config.tensor_parallel_size == 1
-        and vllm_config.parallel_config.data_parallel_size > 1
-    ):
-        max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
-        new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [i for i in range(24, max_capture_size + 1, 8)]
-        update_cudagraph_capture_sizes(vllm_config, new_cudagraph_capture_sizes)
-
-
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
     # NOTE: Currently, we can only capture 1800 graphs at most,
