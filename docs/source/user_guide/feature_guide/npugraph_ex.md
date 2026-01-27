@@ -40,6 +40,7 @@ vllm serve Qwen/Qwen2-7B-Instruct
 - For the original input parameters of the model, if they include in-place operators, Dynamo's Functionalize process will replace the in-place operators with a form of non-in-place operators + copy operators. npugraph_ex will reverse this process, restoring the in-place operators and reducing memory movement.
 
 ### Fx default fusion pass
+
 npugraph_ex provides three default operator fusion passes. Operator combinations that meet the replacement rules can be replaced with the corresponding fused operators.
 
 | replacement pattern                                                                                                 | Corresponding fusion operator                                                    |
