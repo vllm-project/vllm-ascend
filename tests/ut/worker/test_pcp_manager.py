@@ -39,9 +39,9 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
     vllm_config.parallel_config.cp_kv_cache_interleave_size = 64
     vllm_config.speculative_config.num_speculative_tokens = 0
 
-    pcp_manager = PCPManager(pcp_world_size=pcp_size,
+    pcp_manager = PCPManager(pcp_size=pcp_size,
                              pcp_rank=0,
-                             dcp_world_size=dcp_size,
+                             dcp_size=dcp_size,
                              dcp_rank=0,
                              max_buffer_num_tokens=10000,
                              max_num_reqs=1000,
@@ -125,9 +125,9 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
     vllm_config.speculative_config.num_speculative_tokens = 0
     vllm_config.scheduler_config.max_num_seqs = 1000
 
-    pcp_manager = PCPManager(pcp_world_size=pcp_size,
+    pcp_manager = PCPManager(pcp_size=pcp_size,
                              pcp_rank=0,
-                             dcp_world_size=1,
+                             dcp_size=1,
                              dcp_rank=0,
                              max_buffer_num_tokens=10000,
                              max_num_reqs=1000,
@@ -154,7 +154,7 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
 
 # yapf: disable
 @pytest.mark.parametrize(
-    "seq_lens, pcp_world_size, dcp_world_size, cp_kv_cache_interleave_size, target",
+    "seq_lens, pcp_size, dcp_size, cp_kv_cache_interleave_size, target",
     [
         # without pcp and dcp
         (torch.tensor([1, 2, 128, 129]), 1, 1, 1,
@@ -183,17 +183,17 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
 # yapf: enable
 def test_get_cp_local_seq_lens(
     seq_lens,
-    pcp_world_size,
-    dcp_world_size,
+    pcp_size,
+    dcp_size,
     cp_kv_cache_interleave_size,
     target,
 ):
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
     vllm_config.speculative_config.num_speculative_tokens = 0
-    pcp_manager = PCPManager(pcp_world_size=pcp_world_size,
+    pcp_manager = PCPManager(pcp_size=pcp_size,
                              pcp_rank=0,
-                             dcp_world_size=dcp_world_size,
+                             dcp_size=dcp_size,
                              dcp_rank=0,
                              max_buffer_num_tokens=10000,
                              max_num_reqs=1000,
@@ -201,8 +201,8 @@ def test_get_cp_local_seq_lens(
                              vllm_config=vllm_config,
                              use_async_scheduling=False,
                              pin_memory=False)
-    ret = pcp_manager._get_cp_local_seq_lens(seq_lens, pcp_world_size,
-                                             dcp_world_size,
+    ret = pcp_manager._get_cp_local_seq_lens(seq_lens, pcp_size,
+                                             dcp_size,
                                              cp_kv_cache_interleave_size)
     assert torch.equal(ret, target)
 
@@ -275,9 +275,9 @@ def test_generate_pcp_mtp_input(
     vllm_config.speculative_config.num_speculative_tokens = 1
     vllm_config.scheduler_config.max_num_seqs = max_num_reqs
     vllm_config.scheduler_config.max_num_batched_tokens = max_model_len
-    pcp_manager = PCPManager(pcp_world_size=2,
+    pcp_manager = PCPManager(pcp_size=2,
                              pcp_rank=0,
-                             dcp_world_size=1,
+                             dcp_size=1,
                              dcp_rank=0,
                              max_buffer_num_tokens=max_num_tokens,
                              max_num_reqs=max_num_reqs,
