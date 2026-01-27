@@ -90,28 +90,28 @@ def test_SiluAndMul_forward(
 @patch("torch.nn.functional.silu", side_effect=lambda x: x + 1)
 @patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
 @patch("torch.ops.vllm.maybe_prefetch_mlp_down_proj", side_effect=lambda x: None)
-def test_SiluAndMul_forward(
+def test_SiluAndMul_forward_310p(
     mock_maybe_prefetch_mlp_down_proj,
     mock_maybe_wait_prefetch_done,
-    mock_swiglu,
+    mock_silu,
     device_type,
     dummy_tensor,
     default_vllm_config,
 ):
     layer = SiluAndMul()
     out = layer.forward(dummy_tensor)
-    expected_arg = dummy_tensor
+    expected_arg = dummy_tensor[..., :h]
 
     # assert mock_maybe_prefetch_mlp_down_proj.call_count == 1
     mock_maybe_prefetch_mlp_down_proj.assert_called_once()
 
     # assert mock_swiglu.call_count == 1
-    mock_swiglu.assert_called_once()
+    mock_silu.assert_called_once()
 
     # assert mock_maybe_wait_prefetch_done.call_count == 1
     mock_maybe_wait_prefetch_done.assert_called_once()
 
-    actual_arg = mock_swiglu.call_args[0][0]
+    actual_arg = mock_silu.call_args[0][0]
     assert torch.allclose(actual_arg, expected_arg), "swiglu called with unexpected input"
 
     h = dummy_tensor.shape[-1] // 2
