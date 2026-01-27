@@ -4,20 +4,25 @@ import torch
 import copy
 import torchair
 from torchair._acl_concrete_graph import graph_pass
-from torchair.configs.compiler_config import CompilerConfig
-
-from torchair._acl_concrete_graph.graph_pass import (
-    _apply_fusion_passes as original_func,
-)
 
 
 def create_fusion_pass_wrapper(assert_func):
-    if original_func is None:
-
-        def wrapper(*args, **kwargs):
-            return None
-
-        return wrapper
+    """
+    Create a wrapper for fusion pass to capture FX graphs before and after replacement.
+    The wrapper will deepcopy the graph module in advance and post fusion,
+    then call the custom assertion function to verify fusion effect.
+    """
+    try:
+        from torchair._acl_concrete_graph.graph_pass import (
+            _apply_fusion_passes as original_func,
+        )
+    except ImportError:
+        try:
+            from torchair._acl_concrete_graph.graph_pass import (
+                _run_fusion_passes as original_func,
+            )
+        except ImportError:
+            original_func = None
 
     def wrapper(gm, *args, **kwargs):
         graph_before = copy.deepcopy(gm)
@@ -30,8 +35,12 @@ def create_fusion_pass_wrapper(assert_func):
 
 
 class TestGraphEXQKNormRopeFusion(unittest.TestCase):
+    # Explicitly declare class attributes to resolve mypy attr-defined error
     _patterns_registered = False
+    vllm_config = None
+    original_get_layers = None
 
+    # Core hyper-parameters for QKNormRope fusion (only head_dim=128 triggers fusion)
     HEAD_DIM = 128
     NUM_HEADS = 32
     NUM_KV_HEADS = 8
@@ -43,7 +52,6 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-
         cls._setup_forward_context_mock()
         if not cls._patterns_registered:
             cls._setup_vllm_config()
@@ -52,9 +60,7 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
 
     @classmethod
     def _setup_vllm_config(cls):
-        def mock_get_layers(*args, **kwargs):
-            return {"mock_attn": MockAttentionLayer()}
-
+        """Setup mock VllmConfig and monkey-patch get_layers_from_vllm_config"""
         try:
             from vllm.config import VllmConfig, ModelConfig
 
@@ -65,13 +71,16 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
                 num_heads = cls.NUM_HEADS
                 num_kv_heads = cls.NUM_KV_HEADS
 
-            from vllm.config import get_layers_from_vllm_config
+            def mock_get_layers(*args, **kwargs):
+                """Mock function for get_layers_from_vllm_config"""
+                return {"mock_attn": MockAttentionLayer()}
 
+            from vllm.config import get_layers_from_vllm_config
             cls.original_get_layers = get_layers_from_vllm_config
             get_layers_from_vllm_config = mock_get_layers
         except ImportError:
             from types import SimpleNamespace
-
+            cls.original_get_layers = None
             cls.vllm_config = SimpleNamespace()
             cls.vllm_config.model_config = SimpleNamespace()
             cls.vllm_config.model_config.dtype = torch.float16
@@ -79,6 +88,7 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
 
     @classmethod
     def _setup_forward_context_mock(cls):
+        """Mock VLLM global ForwardContext to avoid fake tensor runtime errors"""
         try:
             import vllm.forward_context as fc_module
 
@@ -103,63 +113,84 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
 
     @classmethod
     def _register_patterns(cls):
-        """Initialize and register QKNormRope fusion patterns"""
+        """Initialize and register QKNormRope fusion patterns to TorchAir"""
         from vllm_ascend.compilation.npugraph_ex_passes.graphex_qknorm_rope_fusion_pass import (
             GraphEXQKNormRopeFusionPass,
         )
-
         GraphEXQKNormRopeFusionPass(cls.vllm_config)
 
     def setUp(self):
+        """Initialize test environment for each case"""
         self.dtype = torch.bfloat16
         self.device = "npu"
 
     def _create_backend_with_wrapper(self, assert_func):
-        """Helper to create backend with fusion pass wrapper"""
+        """
+        Create TorchAir NPU backend and replace fusion pass with wrapped version
+        Args:
+            assert_func: Custom assertion function to verify fusion effect
+        Returns:
+            TorchAir NPU backend instance
+        """
         try:
             from torchair._acl_concrete_graph.graph_pass import _apply_fusion_passes
-
             self._original_pass = _apply_fusion_passes
             graph_pass._apply_fusion_passes = create_fusion_pass_wrapper(assert_func)
         except (ImportError, AttributeError):
             self._original_pass = None
 
-        config = CompilerConfig()
+        config = torchair.CompilerConfig()
         config.mode = "reduce-overhead"
-        config.debug.run_eagerly = True
 
         return torchair.get_npu_backend(compiler_config=config)
 
     def tearDown(self):
-        """Cleanup: restore original function"""
+        """Clean up and restore original functions after each test case"""
+        # Restore original fusion pass function
         if hasattr(self, "_original_pass") and self._original_pass:
             graph_pass._apply_fusion_passes = self._original_pass
+        # Restore original get_layers_from_vllm_config to avoid attribute pollution
+        if (hasattr(self.__class__, "original_get_layers") and 
+            self.__class__.original_get_layers is not None):
+            try:
+                from vllm.config import get_layers_from_vllm_config
+                get_layers_from_vllm_config = self.__class__.original_get_layers
+            except (ImportError, AttributeError):
+                pass
 
     def _get_input_tensors(self, with_bias=False):
+        """
+        Generate input tensors for QKNormRope fusion test
+        Args:
+            with_bias: Whether to include q_bias and k_bias in input tensors
+        Returns:
+            List of input tensors with specified dtype and device
+        """
         total_qkv_dim = self.Q_SIZE + 2 * self.KV_SIZE
         inputs = [
             torch.randn(
                 self.SEQ_LEN, total_qkv_dim, dtype=self.dtype, device=self.device
-            ),  # qkv
+            ),  # qkv concatenated tensor
             torch.randn(
                 self.HEAD_DIM, dtype=self.dtype, device=self.device
-            ),  # q_weight
+            ),  # q RMSNorm weight
             torch.randn(
                 self.HEAD_DIM, dtype=self.dtype, device=self.device
-            ),  # k_weight
+            ),  # k RMSNorm weight
         ]
         if with_bias:
             inputs.extend(
                 [
                     torch.randn(
                         self.HEAD_DIM, dtype=self.dtype, device=self.device
-                    ),  # q_bias
+                    ),  # q RMSNorm bias
                     torch.randn(
                         self.HEAD_DIM, dtype=self.dtype, device=self.device
-                    ),  # k_bias
+                    ),  # k RMSNorm bias
                 ]
             )
 
+        # Rotary position embedding tensors (cos/sin)
         inputs.extend(
             [
                 torch.randn(
@@ -169,7 +200,7 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
                     self.HEAD_DIM,
                     dtype=self.dtype,
                     device=self.device,
-                ),  # cos
+                ),  # cos for RoPE
                 torch.randn(
                     1,
                     self.SEQ_LEN,
@@ -177,16 +208,16 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
                     self.HEAD_DIM,
                     dtype=self.dtype,
                     device=self.device,
-                ),  # sin
+                ),  # sin for RoPE
             ]
         )
         return inputs
 
-    @unittest.skipIf(torch.__version__ < "2.2", "torch.compile requires torch >= 2.2")
     def test_qk_norm_rope_fusion_basic(self):
         """
-        Test GraphEXQKNormRopeFusionPattern:
+        Test basic GraphEXQKNormRopeFusionPattern:
         qkv.split + npu_rms_norm(q/k) + npu_apply_rotary_pos_emb -> vllm.qkv_rmsnorm_rope
+        Verify fusion effect without bias terms
         """
 
         def f(qkv, q_weight, k_weight, cos, sin):
@@ -215,8 +246,7 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
             return q_rope, k_rope, v
 
         def assert_basic_fusion(graph_before, graph_after):
-            """Verify fusion happened"""
-
+            """Verify basic QKNormRope fusion is successful"""
             has_split = any(
                 "split" in str(n.target)
                 for n in graph_before.graph.nodes
@@ -247,7 +277,7 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
             if has_split and has_rms_norm and has_rope and has_contiguous:
                 self.assertTrue(
                     has_fused_op,
-                    "qkv.split + npu_rms_norm + rope should be fused to vllm.qkv_rmsnorm_rope",
+                    "qkv.split + npu_rms_norm + npu_apply_rotary_pos_emb should be fused to vllm.qkv_rmsnorm_rope",
                 )
 
         backend = self._create_backend_with_wrapper(assert_basic_fusion)
@@ -259,11 +289,11 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
         finally:
             self.tearDown()
 
-    @unittest.skipIf(torch.__version__ < "2.2", "torch.compile requires torch >= 2.2")
     def test_qk_norm_rope_fusion_with_bias(self):
         """
         Test GraphEXQKNormRopeFusionPatternWithBias:
-        qkv.split + npu_rms_norm(q/k) + add(bias) + npu_apply_rotary_pos_emb -> vllm.qkv_rmsnorm_rope(with bias)
+        qkv.split + npu_rms_norm(q/k) + add(bias) + npu_apply_rotary_pos_emb -> vllm.qkv_rmsnorm_rope
+        Verify fusion effect with q_bias and k_bias terms
         """
 
         def f(qkv, q_weight, k_weight, q_bias, k_bias, cos, sin):
@@ -294,8 +324,7 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
             return q_rope, k_rope, v
 
         def assert_bias_fusion(graph_before, graph_after):
-            """Verify fusion happened with bias"""
-
+            """Verify QKNormRope fusion with bias terms is successful"""
             has_split = any(
                 "split" in str(n.target)
                 for n in graph_before.graph.nodes
@@ -326,7 +355,7 @@ class TestGraphEXQKNormRopeFusion(unittest.TestCase):
             if has_split and has_rms_norm and has_rope and has_bias_add:
                 self.assertTrue(
                     has_fused_op,
-                    "qkv.split + npu_rms_norm + add(bias) + rope should be fused to vllm.qkv_rmsnorm_rope",
+                    "qkv.split + npu_rms_norm + add(bias) + npu_apply_rotary_pos_emb should be fused to vllm.qkv_rmsnorm_rope",
                 )
 
         backend = self._create_backend_with_wrapper(assert_bias_fusion)

@@ -3,13 +3,14 @@ import torch
 import copy
 import torchair
 from torchair._acl_concrete_graph import graph_pass
-from torchair.configs.compiler_config import CompilerConfig
 import sys
 
 
 def create_fusion_pass_wrapper(assert_func):
     """
     Create a wrapper for fusion pass to capture FX graphs before and after replacement.
+    The wrapper will deepcopy the graph module in advance and post fusion,
+    then call the custom assertion function to verify fusion effect.
     """
     try:
         from torchair._acl_concrete_graph.graph_pass import (
@@ -23,14 +24,10 @@ def create_fusion_pass_wrapper(assert_func):
         except ImportError:
             original_func = None
 
-    if original_func is None:
-
-        def wrapper(*args, **kwargs):
-            return None
-
-        return wrapper
-
+    # Refactor: single wrapper definition to resolve no-redef error
     def wrapper(gm, *args, **kwargs):
+        if original_func is None:
+            return None
         graph_before = copy.deepcopy(gm)
         ret = original_func(gm, *args, **kwargs)
         graph_after = copy.deepcopy(gm)
@@ -41,7 +38,9 @@ def create_fusion_pass_wrapper(assert_func):
 
 
 class TestGraphEXAddRMSNormFusion(unittest.TestCase):
+    # Explicitly declare class attributes to resolve mypy attr-defined error
     _patterns_registered = False
+    vllm_config = None
 
     @classmethod
     def setUpClass(cls):
@@ -55,7 +54,7 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
 
     @classmethod
     def _setup_vllm_config(cls):
-        """Create mock VllmConfig"""
+        """Create mock VllmConfig for fusion pass initialization"""
         try:
             from vllm.config import VllmConfig, ModelConfig
 
@@ -69,6 +68,7 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
 
     @classmethod
     def _setup_forward_context_mock(cls):
+        """Mock VLLM global ForwardContext to avoid fake tensor runtime errors"""
         try:
             import vllm.forward_context as fc_module
 
@@ -78,6 +78,7 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
                 ep_size = 1
                 virtual_engine = 0
                 attn_metadata = None
+                valid_runtime_modes = set()  # Add missing attr to avoid runtime error
 
             fc_module._forward_context = MockForwardContext()
             print("[INFO] Mocked _forward_context set", file=sys.stderr)
@@ -89,7 +90,7 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
 
     @classmethod
     def _register_patterns(cls):
-        """Initialize and register fusion patterns"""
+        """Initialize and register AddRMSNorm fusion patterns to TorchAir"""
         from vllm_ascend.compilation.npugraph_ex_passes.graphex_norm_quant_fusion_pass import (
             GraphEXAddRMSNormFusionPass,
         )
@@ -97,11 +98,18 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
         GraphEXAddRMSNormFusionPass(cls.vllm_config)
 
     def setUp(self):
+        """Initialize test environment for each case"""
         self.dtype = torch.bfloat16
         self.device = "npu"
 
     def _create_backend_with_wrapper(self, assert_func):
-        """Helper to create backend with fusion pass wrapper"""
+        """
+        Create TorchAir NPU backend and replace fusion pass with wrapped version
+        Args:
+            assert_func: Custom assertion function to verify fusion effect
+        Returns:
+            TorchAir NPU backend instance
+        """
         try:
             from torchair._acl_concrete_graph.graph_pass import _apply_fusion_passes
 
@@ -110,31 +118,37 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
         except (ImportError, AttributeError):
             self._original_pass = None
 
-        config = CompilerConfig()
+        config = torchair.CompilerConfig()
         config.mode = "reduce-overhead"
         config.debug.run_eagerly = True
 
         return torchair.get_npu_backend(compiler_config=config)
 
     def tearDown(self):
-        """Cleanup: restore original function"""
+        """Clean up and restore original fusion pass function after each test case"""
         if hasattr(self, "_original_pass") and self._original_pass:
             graph_pass._apply_fusion_passes = self._original_pass
 
     def _get_input_tensors(self, with_bias=False):
+        """
+        Generate input tensors for AddRMSNorm fusion test
+        Args:
+            with_bias: Whether to include bias tensor in input list
+        Returns:
+            List of input tensors with specified dtype and NPU device
+        """
         inputs = [
             torch.randn(2, 4, dtype=self.dtype, device=self.device),  # rms_norm_input
             torch.randn(2, 4, dtype=self.dtype, device=self.device),  # residual
-            torch.randn(4, dtype=self.dtype, device=self.device),  # rms_norm_weight
-            torch.ones(4, dtype=self.dtype, device=self.device),  # scale
-            torch.ones(4, dtype=self.dtype, device=self.device),  # scale_reciprocal
-            torch.zeros(4, dtype=self.dtype, device=self.device),  # offset
+            torch.randn(4, dtype=self.dtype, device=self.device),     # rms_norm_weight
+            torch.ones(4, dtype=self.dtype, device=self.device),      # scale
+            torch.ones(4, dtype=self.dtype, device=self.device),      # scale_reciprocal
+            torch.zeros(4, dtype=self.dtype, device=self.device),     # offset
         ]
         if with_bias:
             inputs.append(torch.randn(4, dtype=self.dtype, device=self.device))  # bias
         return inputs
 
-    @unittest.skipIf(torch.__version__ < "2.2", "torch.compile requires torch >= 2.2")
     def test_add_rms_norm_quant_basic(self):
         """
         Test GraphEXAddRMSNormQuantPattern:
@@ -155,7 +169,7 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
             return quantized_output, out1
 
         def assert_basic_fusion(graph_before, graph_after):
-            """Verify fusion happened"""
+            """Verify basic AddRMSNorm+Quant fusion is successful"""
             has_rms_norm_before = any(
                 "npu_add_rms_norm" in str(n.target) and "quant" not in str(n.target)
                 for n in graph_before.graph.nodes
@@ -188,7 +202,6 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
         finally:
             self.tearDown()
 
-    @unittest.skipIf(torch.__version__ < "2.2", "torch.compile requires torch >= 2.2")
     def test_add_rms_norm_quant_with_bias(self):
         """
         Test GraphEXAddRMSNormQuantPatternWithBias:
@@ -216,6 +229,7 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
             return quantized_output, out1
 
         def assert_bias_fusion(graph_before, graph_after):
+            """Verify AddRMSNorm+Quant fusion with bias term is successful"""
             has_fused_op = False
             has_beta_param = False
 
@@ -252,7 +266,6 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
         finally:
             self.tearDown()
 
-    @unittest.skipIf(torch.__version__ < "2.2", "torch.compile requires torch >= 2.2")
     def test_add_rms_norm_quant_sp(self):
         """
         Test GraphEXAddRMSNormQuantSPPattern (Sequence Parallel):
@@ -274,6 +287,7 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
             return quantized_output, out1
 
         def assert_sp_fusion(graph_before, graph_after):
+            """Verify AddRMSNorm+Quant fusion in Sequence Parallel mode"""
             has_fused_op = False
             correct_order = False
 
@@ -301,10 +315,9 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
         finally:
             self.tearDown()
 
-    @unittest.skipIf(torch.__version__ < "2.2", "torch.compile requires torch >= 2.2")
     def test_add_rms_norm_quant_sp_with_bias(self):
         """
-        Test GraphEXAddRMSNormQuantSPPatternWithBias
+        Test GraphEXAddRMSNormQuantSPPatternWithBias in Sequence Parallel mode
         """
 
         def f(
@@ -329,6 +342,7 @@ class TestGraphEXAddRMSNormFusion(unittest.TestCase):
             return quantized_output, out1
 
         def assert_sp_bias_fusion(graph_before, graph_after):
+            """Verify AddRMSNorm+Quant fusion with bias in Sequence Parallel mode"""
             has_fused_op = False
             has_beta = False
             correct_order = False
