@@ -109,8 +109,6 @@ def _run_worker_process(
             quantization="ascend" if "W8A8" in model_path else None,
             enable_expert_parallel=True if "DeepSeek" in model_path else False,
             trust_remote_code=True,
-            # vllm enables async scheduling by default, remove below when vllm >= 0.14.0
-            async_scheduling=False,
         )
 
         # Expose model config to the main test process
@@ -206,7 +204,8 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     # 2. Generation steps (max_tokens)
     # 3. Final step (likely EOS/idle step), no replay here
     total_steps = max_tokens + 1  # this includes the 1 and 2 above
-    expected_exec_model = (total_steps + 1) * dp_size
+    # vllm default enables Async scheduler, this will take 1 more steps
+    expected_exec_model = (total_steps + 1 + 1) * dp_size
 
     assert (
         num_execute_model == expected_exec_model
