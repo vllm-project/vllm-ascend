@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import time
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -469,13 +470,22 @@ def run_once(local_rank_id,
         fused_ops = torch.compile(fused_ops, backend=npu_backend)
     
     # test performance
+    start_time = time.perf_counter()
     for _ in range(100):
         small_op_token_output, small_op_count_output, small_debug_info = small_ops(*input_datas)
     torch_npu.npu.synchronize(device_id)
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+    elapsed_time_us = elapsed_time * 1000000
+    print(f"rank-{global_rank_id} small {elapsed_time_us} us")
+    start_time = time.perf_counter()
     for _ in range(100):
         fused_op_token_output, fused_op_count_output, fused_debug_info = fused_ops(*input_datas)
     torch_npu.npu.synchronize(device_id)
-
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+    elapsed_time_us = elapsed_time * 1000000
+    print(f"rank-{global_rank_id} fused {elapsed_time_us} us")
     small_op_token_output, small_op_count_output, small_debug_info = small_ops(*input_datas)
     torch_npu.npu.synchronize(device_id)
     print(f"rank-{global_rank_id} Small op End")
