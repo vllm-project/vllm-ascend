@@ -479,7 +479,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 for msg in reasons:
                     logger.warning_once(msg)
             else:
-                self._process_weights_for_fused_mlapo(act_dtype)
+                self._process_weights_for_fused_mlapo_v3(act_dtype)
         if not self.enable_mlapo:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
@@ -651,6 +651,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
 
+    def _process_weights_for_fused_mlapo_v3(self, act_dtype: torch.dtype):
+        pass
+
     def _sfa_preprocess_decode(
         self,
         hidden_states: torch.Tensor,
@@ -710,6 +713,48 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         return hidden_states, ql_nope, q_pe, q_c
 
+    def _sfa_preprocess_decode_v3(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        attn_metadata: M,
+        need_gather_q_kv: bool,
+        num_input_tokens: int,
+    ):
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), need_gather_q_kv)
+
+        query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = torch_npu.npu_mla_prolog_v3(
+            hidden_states, 
+            weight_dq, 
+            weight_uq_qr, 
+            weight_uk, 
+            weight_dkv_kr, 
+            rmsnorm_gamma_cq, 
+            rmsnorm_gamma_ckv, 
+            rope_sin, 
+            rope_cos, 
+            kv_cache, 
+            kr_cache, 
+            cache_index=None, 
+            dequant_scale_x=None, 
+            dequant_scale_w_dq=None, 
+            dequant_scale_w_uq_qr=None, 
+            dequant_scale_w_dkv_kr=None, 
+            quant_scale_ckv=None, 
+            quant_scale_ckr=None, 
+            smooth_scales_cq=None, 
+            actual_seq_len=None, 
+            k_nope_clip_alpha=None, 
+            rmsnorm_epsilon_cq=1e-05, 
+            rmsnorm_epsilon_ckv=1e-05, 
+            cache_mode='PA_BSND', 
+            query_norm_flag=False, 
+            weight_quant_mode=0, 
+            kv_cache_quant_mode=0, query_quant_mode=0, 
+            ckvkr_repo_mode=0, quant_scale_repo_mode=0, 
+            tile_size=128, qc_qr_scale=1.0, kc_scale=1.0)
+
+
     def forward(
         self,
         layer_name,
@@ -749,7 +794,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         }
 
         if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
-            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode(
+            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode_v3(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
