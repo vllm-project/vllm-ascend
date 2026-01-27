@@ -770,7 +770,7 @@ def split_indices(
     seq_starts = torch.cat(
         [torch.tensor([0]), seq_ends[:-1]]
     )
-    chunk_starts = min(
+    chunk_starts = torch.min(
         seq_starts.unsqueeze(0) + torch.arange(num_chunks).unsqueeze(1) * chunk_size,
         seq_ends
     )
