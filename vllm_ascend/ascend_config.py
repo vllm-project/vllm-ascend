@@ -118,7 +118,7 @@ class AscendConfig:
 
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)
         npugraph_ex_config = additional_config.get("npugraph_ex_config", {})
-        self.npugraph_ex_config = NpugraphExConfig(**npugraph_ex_config)
+        self.npugraph_ex_config = NpugraphExConfig(vllm_config, **npugraph_ex_config)
         # We find that _npu_paged_attention still performs better than
         # npu_fused_infer_attention_score in some cases. We allow to execute
         # _npu_paged_attention in this cases. This should be removed once
@@ -235,7 +235,7 @@ class NpugraphExConfig:
     These configurations can directly impact the performance and behavior of models deployed on Ascend platforms.
     """
 
-    def __init__(self, enable: bool = False, enable_static_kernel: bool = False, **kwargs):
+    def __init__(self, vllm_config: "VllmConfig", enable: bool = True, enable_static_kernel: bool = False, **kwargs):
         """
         Initialize the configuration.
 
@@ -253,8 +253,16 @@ class NpugraphExConfig:
                 Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
+        from vllm.config.compilation import CUDAGraphMode
+
         self.enable = enable
         self.enable_static_kernel = enable_static_kernel
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.cudagraph_mode in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL):
+            self.enable = self.enable and True
+        else:
+            self.enable = False
 
 
 class XliteGraphConfig:
