@@ -15,22 +15,21 @@
 # limitations under the License.
 #
 import torch
-import torch._inductor.pattern_matcher as pm
-from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+import torchair
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.logger import logger
+
+from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THREHOLD = 512
 
 
-class MiddleLayerMatmulAllReduceAddRMSNormPattern:
+class GraphEXMiddleLayerMatmulAllReduceAddRMSNormPattern:
     """
-    recognizing the Matmul+AllReduce+AddRMSNorm computation pattern
+    recognizing the Matmul + AllReduce + AddRMSNorm computation pattern
     AllReduce is optimized in the fusion operator to a two-stage communication of ReduceScatter+AllGather
     """
 
@@ -52,7 +51,7 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern:
         rms_norm_weight = torch.randn(hidden_size, device="npu")
         return [x, weight, residual, rms_norm_weight]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register(self):
         def pattern(x, weight, residual, rms_norm_weight):
             mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
             all_reduce_ = tensor_model_parallel_all_reduce(mm)
@@ -77,10 +76,15 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern:
             )
             return out0, out1
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+        torchair.register_replacement(
+            search_fn=pattern,
+            replace_fn=replacement,
+            example_inputs=self.get_inputs(),
+            extra_check=extra_stream_scope_check,
+        )
 
 
-class LastLayerMatmulAllReduceAddRMSNormPattern:
+class GraphEXLastLayerMatmulAllReduceAddRMSNormPattern:
     def __init__(self, vllm_config, eps=1e-6):
         self.vllm_config = vllm_config
         self.eps = eps
@@ -99,7 +103,7 @@ class LastLayerMatmulAllReduceAddRMSNormPattern:
         rms_norm_weight = torch.randn(hidden_size, device="npu")
         return [x, weight, residual, rms_norm_weight]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register(self):
         def pattern(x, weight, residual, rms_norm_weight):
             mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
             all_reduce_ = tensor_model_parallel_all_reduce(mm)
@@ -122,28 +126,21 @@ class LastLayerMatmulAllReduceAddRMSNormPattern:
             )
             return out0
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+        torchair.register_replacement(
+            search_fn=pattern,
+            replace_fn=replacement,
+            example_inputs=self.get_inputs(),
+            extra_check=extra_stream_scope_check,
+        )
 
 
-class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
+class GraphEXMatmulAllReduceAddRMSNormPass:
     def __init__(self, vllm_config: VllmConfig):
-        super().__init__(vllm_config)
-        self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(pass_name="allreduce_rmsnorm_fusion_pass")
-
-        MiddleLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register(self.pattern_match_passes)
-        LastLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register(self.pattern_match_passes)
+        GraphEXMiddleLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register()
+        GraphEXLastLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register()
 
     def __call__(self, graph: torch.fx.Graph):
-        self.begin()
-        self.matched_count = self.pattern_match_passes.apply(graph)
-        pattern_idx = 0
-        for pattern_entry in self.pattern_match_passes.patterns.values():
-            for p in pattern_entry:
-                p_str = PatternPrettyPrinter.run(p.pattern)
-                logger.debug("Pattern %d: %s", pattern_idx, p_str)
-                pattern_idx += 1
-        logger.debug("Replaced %s patterns", self.matched_count)
-        self.end_and_log()
+        pass
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         """
