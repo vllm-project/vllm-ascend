@@ -20,7 +20,7 @@
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
+from vllm.v1.sample.metadata import SamplingMetadata
 
 
 @triton.jit
