@@ -103,7 +103,7 @@ from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type,
                                is_drafter_moe_model, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
-                               set_weight_prefetch_method)
+                               set_weight_prefetch_method, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
@@ -587,8 +587,12 @@ class NPUModelRunner(GPUModelRunner):
         if (self.use_aclgraph and total_num_scheduled_tokens
                 <= self.cudagraph_batch_sizes[-1]):
             # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                total_num_scheduled_tokens)
+            if vllm_version_is('0.14.1'):
+                num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                    total_num_scheduled_tokens)
+            else:
+                num_input_tokens = self.cudagraph_dispatcher._bs_to_padded_graph_size[
+                    total_num_scheduled_tokens]
         elif self.use_aclgraph and enable_sp(self.vllm_config):
             # When using aclgraph, if total_num_scheduled_tokens exceeds the maximum graph size,
             # the model will fall back to running its FX graph in eager mode.
@@ -1406,9 +1410,17 @@ class NPUModelRunner(GPUModelRunner):
                 head_dim=self.model_config.get_vocab_size(),
                 generators=self.input_batch.sampling_metadata.generators)
 
+        # Encoder-decoder models can only compile the pure decode steps where no
+        # encoder inputs are present. Use eager for the first pass.
+        num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
+        has_encoder_input = (
+            self.model_config.is_encoder_decoder and num_encoder_reqs > 0
+        )
+
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
-            with set_ascend_forward_context(
+            with (
+                set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_input_tokens,
@@ -1417,26 +1429,18 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=scheduler_output.
                     total_num_scheduled_tokens,
-                    model_instance=self.model):
-                self.maybe_setup_kv_connector(scheduler_output)
-
+                    model_instance=self.model,
+                    skip_compiled=has_encoder_input),
+                self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
+            ):
                 hidden_states = self._generate_process_reqs_hidden_states(
                     num_input_tokens, input_ids, positions,
                     intermediate_tensors, inputs_embeds, model_kwargs)
-
-            self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = self.get_finished_kv_transfer(
-                scheduler_output)
 
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
 
-        kv_connector_output = KVConnectorOutput(
-            finished_sending=finished_sending,
-            finished_recving=finished_recving)
-        finished_sending = None
-        finished_recving = None
         with ProfileExecuteDuration().capture_async("post process"):
             # Broadcast PP output for external_launcher (torchrun)
             # to make sure we are synced across pp ranks

@@ -19,6 +19,8 @@ from vllm.v1.executor.multiproc_executor import (
     set_multiprocessing_worker_envs,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class AscendMultiprocExecutor(MultiprocExecutor):
     def _init_executor(self) -> None:
@@ -29,16 +31,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
-        self.world_size = self.parallel_config.world_size
-        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
-            f"global world_size ({self.parallel_config.world_size}) must be "
-            f"divisible by nnodes_within_dp "
-            f"({self.parallel_config.nnodes_within_dp}). "
-        )
-        self.local_world_size = self.parallel_config.local_world_size
-        tensor_parallel_size = self.parallel_config.tensor_parallel_size
-        pp_parallel_size = self.parallel_config.pipeline_parallel_size
-        pcp_parallel_size = self.parallel_config.prefill_context_parallel_size
+        tensor_parallel_size, pp_parallel_size, pcp_parallel_size = self._get_parallel_sizes()
         assert self.world_size == tensor_parallel_size * pp_parallel_size * pcp_parallel_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
@@ -77,6 +70,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
+                is_driver_worker = self._is_driver_worker(global_rank)
                 unready_workers.append(
                     AscendWorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
@@ -85,6 +79,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
+                        is_driver_worker=is_driver_worker,
                     )
                 )
 
@@ -120,6 +115,9 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
+            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+            self._post_init_executor()
+
             success = True
         finally:
             if not success:
@@ -130,9 +128,26 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                         uw.death_writer.close()
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
-        self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
-
         self.output_rank = self._get_output_rank()
+
+    def _get_parallel_sizes(self) -> tuple[int, int, int]:
+        self.world_size = self.parallel_config.world_size
+        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
+            f"global world_size ({self.parallel_config.world_size}) must be "
+            f"divisible by nnodes_within_dp "
+            f"({self.parallel_config.nnodes_within_dp}). "
+        )
+        self.local_world_size = self.parallel_config.local_world_size
+        tp_size = self.parallel_config.tensor_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        pcp_size = self.parallel_config.prefill_context_parallel_size
+        return tp_size, pp_size, pcp_size
+
+    def _post_init_executor(self) -> None:
+        pass
+
+    def _is_driver_worker(self, rank: int) -> bool:
+        return rank % self.parallel_config.tensor_parallel_size == 0
 
 
 class AscendWorkerProc(WorkerProc):
@@ -144,6 +159,7 @@ class AscendWorkerProc(WorkerProc):
         distributed_init_method: str,
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
+        is_driver_worker: bool = False,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # (reader, writer)
@@ -162,6 +178,8 @@ class AscendWorkerProc(WorkerProc):
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
         }
+        if not vllm_version_is("0.14.1"):
+            process_kwargs["is_driver_worker"] = is_driver_worker
         # Run EngineCore busy loop in background process.
         proc = context.Process(
             target=WorkerProc.worker_main,

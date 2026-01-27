@@ -235,7 +235,15 @@ class NpugraphExConfig:
     These configurations can directly impact the performance and behavior of models deployed on Ascend platforms.
     """
 
-    def __init__(self, enable: bool = False, enable_static_kernel: bool = False, **kwargs):
+    def __init__(
+        self,
+        enable: bool = False,
+        enable_static_kernel: bool = False,
+        fuse_norm_quant: bool = True,
+        fuse_qknorm_rope: bool = True,
+        fuse_allreduce_rms: bool = False,
+        **kwargs,
+    ):
         """
         Initialize the configuration.
 
@@ -251,10 +259,20 @@ class NpugraphExConfig:
                 binary files with the corresponding shapes based on the current batch_size,
                 which usually takes some time.
                 Default: False
+            fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
+                When set to True, the system will optimize norm and quant operations.
+                Default: True
+            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: True
+            fuse_allreduce_rms (bool): Whether to enable allreduce and addrmsnorm fusion optimization.
+                Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.enable = enable
         self.enable_static_kernel = enable_static_kernel
+        self.fuse_norm_quant = fuse_norm_quant
+        self.fuse_qknorm_rope = fuse_qknorm_rope
+        self.fuse_allreduce_rms = fuse_allreduce_rms
 
 
 class XliteGraphConfig:
