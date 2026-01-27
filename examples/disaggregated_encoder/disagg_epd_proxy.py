@@ -112,6 +112,8 @@ async def _encode_fanout(
             "max_tokens": 1,
             "stream": False,
         }
+        if encode_session is None:
+            raise HTTPException(status_code=500, detail="Encode session not initialized")
         tasks.append(
             encode_session.post(
                 f"{target_url}/v1/chat/completions",
@@ -132,8 +134,13 @@ async def _encode_fanout(
                 r,
                 exc_info=r,
             )
-            raise HTTPException(status_code=502, detail=f"Encoder request failed: {str(r)}")
-        if r.status != 200:
+            error_detail = str(r)
+            if hasattr(r, "status"):
+                error_detail = f"Status: {r.status}, Error: {error_detail}"
+            elif hasattr(r, "status_code"):
+                error_detail = f"Status: {r.status_code}, Error: {error_detail}"
+            raise HTTPException(status_code=502, detail=f"Encoder request failed: {error_detail}")
+        if hasattr(r, "status") and r.status != 200:
             try:
                 detail = await r.text()
             except Exception:
@@ -174,6 +181,9 @@ async def _encode_single_request(
         request_data["max_completion_tokens"] = 1
 
     try:
+        if encode_session is None:
+            raise HTTPException(status_code=500, detail="Encode session not initialized")
+
         encode_response = await encode_session.post(f"{e_url}/v1/chat/completions", json=request_data, headers=headers)
         encode_response.raise_for_status()
 
@@ -265,6 +275,9 @@ async def process_prefill_stage(
 
     headers = {"x-request-id": req_id}
     try:
+        if prefill_session is None:
+            raise HTTPException(status_code=500, detail="Prefill session not initialized")
+
         prefill_response = await prefill_session.post(
             f"{p_url}/v1/chat/completions", json=prefill_request, headers=headers
         )
@@ -405,6 +418,9 @@ async def forward_non_stream(req_data: dict, req_id: str, p_url: str, d_url: str
             headers = {"x-request-id": req_id}
 
             # Non-streaming response
+            if decode_session is None:
+                raise HTTPException(status_code=500, detail="Decode session not initialized")
+
             async with decode_session.post(f"{d_url}/v1/chat/completions", json=req_data, headers=headers) as resp:
                 resp.raise_for_status()
                 return await resp.json()
@@ -483,6 +499,9 @@ async def forward_stream(req_data: dict, req_id: str, p_url: str, d_url: str) ->
             headers = {"x-request-id": req_id}
 
             # Streaming response
+            if decode_session is None:
+                raise HTTPException(status_code=500, detail="Decode session not initialized")
+
             async with decode_session.post(
                 f"{d_url}/v1/chat/completions",
                 json=req_data,
@@ -539,6 +558,8 @@ async def chat_completions(request: Request):
 
 @app.get("/v1/models")
 async def list_models():
+    if decode_session is None:
+        raise HTTPException(status_code=500, detail="Decode session not initialized")
     async with decode_session.get(f"{app.state.d_urls[0]}/v1/models") as resp:
         resp.raise_for_status()
         return await resp.json()
@@ -546,11 +567,13 @@ async def list_models():
 
 @app.get("/health")
 async def health_check():
-    async def healthy(urls):
+    async def healthy(urls, session):
         if not urls:
             return "empty"
         for u in urls:
             try:
+                if session is None:
+                    return "unhealthy"
                 async with encode_session.get(f"{u}/health") as resp:
                     resp.raise_for_status()
             except Exception:
@@ -558,7 +581,9 @@ async def health_check():
         return "healthy"
 
     e_status, p_status, d_status = await asyncio.gather(
-        healthy(app.state.e_urls), healthy(app.state.p_urls), healthy(app.state.d_urls)
+        healthy(app.state.e_urls, encode_session),
+        healthy(app.state.p_urls, prefill_session),
+        healthy(app.state.d_urls, decode_session),
     )
 
     overall_healthy = all(status != "unhealthy" for status in (e_status, p_status, d_status))
@@ -597,6 +622,8 @@ async def _post_if_available(
     • Raises for anything else.
     """
     try:
+        if session is None:
+            return None
         resp = await session.post(url, json=payload, headers=headers)
         if resp.status == 404:  # profiling disabled on that server
             logger.warning("Profiling endpoint missing on %s", url)
