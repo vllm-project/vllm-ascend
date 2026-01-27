@@ -80,6 +80,8 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'light' }}
         run: |
+          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_graphex_norm_quant_fusion.py
+          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_graphex_split_qknorm_fusion.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
           pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
 
