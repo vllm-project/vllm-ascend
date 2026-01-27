@@ -344,7 +344,7 @@ def generate_datas(batch_size,
     gmm1_output_dim = moe_intermediate_size * 2
     gmm2_input_dim = moe_intermediate_size
     gmm2_output_dim = token_hidden_size
-    x = torch.rand([actual_bs, token_hidden_size]) * 10 - 5
+    x = torch.rand([actual_bs, token_hidden_size]) * 0.5 - 0.5
     expert_ids = torch.arange(
         global_rank_id * batch_size * top_k,
         global_rank_id * batch_size * top_k + actual_bs * top_k).to(
@@ -386,10 +386,10 @@ def generate_datas(batch_size,
                 local_expert_num, gmm2_input_dim, gmm2_output_dim
             ]).to(torch.bfloat16 if test_bfloat16 else torch.float16) * 0.5
         else:
-            gmm1_weight = torch.rand([local_expert_num, gmm1_input_dim, gmm1_output_dim]).to(torch.bfloat16 if test_bfloat16 else torch.float16)
-            gmm2_weight = torch.rand([local_expert_num, gmm2_input_dim, gmm2_output_dim]).to(torch.bfloat16 if test_bfloat16 else torch.float16)
-        gmm1_weight[:, :, ::2] = gmm1_weight[:, :, ::2] * -1
-        gmm2_weight[:, :, ::2] = gmm2_weight[:, :, ::2] * -1
+            gmm1_weight = torch.rand([local_expert_num, gmm1_input_dim, gmm1_output_dim]).to(torch.bfloat16 if test_bfloat16 else torch.float16) * 0.25
+            gmm2_weight = torch.rand([local_expert_num, gmm2_input_dim, gmm2_output_dim]).to(torch.bfloat16 if test_bfloat16 else torch.float16) * 0.25
+        gmm1_weight[:, ::2, :] = gmm1_weight[:, ::2, :] * -1
+        gmm2_weight[:, ::2, :] = gmm2_weight[:, ::2, :] * -1
     expert_scales = torch.rand(actual_bs, top_k)
     if test_bfloat16:
         x = x.bfloat16()
@@ -467,6 +467,15 @@ def run_once(local_rank_id,
         config.mode = "reduce-overhead"
         npu_backend = torchair.get_npu_backend(compiler_config=config)
         fused_ops = torch.compile(fused_ops, backend=npu_backend)
+    
+    # test performance
+    for _ in range(100):
+        small_op_token_output, small_op_count_output, small_debug_info = small_ops(*input_datas)
+    torch_npu.npu.synchronize(device_id)
+    for _ in range(100):
+        fused_op_token_output, fused_op_count_output, fused_debug_info = fused_ops(*input_datas)
+    torch_npu.npu.synchronize(device_id)
+
     small_op_token_output, small_op_count_output, small_debug_info = small_ops(*input_datas)
     torch_npu.npu.synchronize(device_id)
     print(f"rank-{global_rank_id} Small op End")

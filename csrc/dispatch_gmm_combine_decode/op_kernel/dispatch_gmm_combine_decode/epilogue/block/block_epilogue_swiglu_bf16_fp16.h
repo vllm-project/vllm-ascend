@@ -174,6 +174,7 @@ public:
                     GemmCoord const &actualBlockShapeMNK, AscendC::GlobalTensor<ElementC> const &gmBlockC,
                     LayoutC const &layoutBlockC, Callback &&callback = Callback{})
     {
+        ubListId = 0;
         if (0 == actualBlockShapeMNK.k()) {
             return;
         }

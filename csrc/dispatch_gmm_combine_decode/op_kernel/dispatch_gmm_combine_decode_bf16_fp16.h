@@ -425,7 +425,7 @@ __aicore__ inline void DispatchGmmCombineDecodeBf16Fp16<TemplateMC2TypeFunc>::Pr
     } else {
         Arch::CrossCoreWaitFlag(gmm1AivFinished);
     }
-    return; // for debug 
+    // return; // for debug
 
     MoeDistributeCombineImpl::CamMoeDistributeCombine<TemplateMC2TypeFunc> combiner;
     if (g_coreType == AscendC::AIV) {
