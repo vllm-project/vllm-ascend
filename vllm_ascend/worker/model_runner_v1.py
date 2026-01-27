@@ -51,9 +51,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata, AttentionType  # type: ignore
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata, split_attn_metadata, AttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec,
@@ -2057,12 +2057,7 @@ class NPUModelRunner(GPUModelRunner):
                     spec_decode_common_attn_metadata = cm
 
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
-                if ubatch_slices is not None:
-                    for ubid, _cm in enumerate(split_attn_metadata(ubatch_slices, cm)):
-                        _build_attn_group_metadata(kv_cache_gid, attn_gid, _cm, ubid)
-
-                else:
-                    _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
+                _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
