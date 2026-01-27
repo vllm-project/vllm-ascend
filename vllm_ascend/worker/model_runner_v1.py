@@ -78,7 +78,6 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.utils import AttentionGroup
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
-    check_ubatch_thresholds,
     maybe_create_ubatch_slices,
 )
 
