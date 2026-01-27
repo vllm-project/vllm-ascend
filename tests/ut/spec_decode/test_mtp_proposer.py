@@ -33,6 +33,7 @@ class TestMtpProposer:
         config.speculative_config.method = "mtp"
         config.speculative_config.draft_model_config = MagicMock()
         config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
+        config.speculative_config.draft_model_config.uses_mrope = False
         config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
         ])
