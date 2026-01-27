@@ -23,6 +23,9 @@ jobs:
   e2e:
     name: singlecard
     runs-on: linux-aarch64-a2b3-1
+    strategy:
+      matrix:
+        part: [0, 1]
     container:
       image: ${{ inputs.image }}
       env:
@@ -78,10 +81,10 @@ jobs:
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-        if: ${{ inputs.type == 'light' }}
+        # Run light test in part 0, there is no need to make an auto-partition for the light test
+        if: ${{ inputs.type == 'light' && matrix.part == 0 }}
         run: |
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
-          pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
+          python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
 
       - name: Run e2e test
         env:
@@ -89,11 +92,14 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'full' }}
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard
-  
+          python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
+
   e2e-2-cards:
     name: multicard-2
     runs-on: linux-aarch64-a3-2
+    strategy:
+      matrix:
+        part: [0]
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
       env:
@@ -149,7 +155,7 @@ jobs:
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-        if: ${{ inputs.type == 'light' }}
+        if: ${{ inputs.type == 'light' && matrix.part == 0 }}
         run: |
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep
@@ -159,39 +165,10 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'full' }}
         run: |
-          # this test fail with triton. Fix me.
-          # pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_qwen3_performance.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_data_parallel.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_expert_parallel.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_full_graph_mode.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/spec_decode/test_spec_decode.py
-
-          # To avoid oom, we need to run the test in a single process.
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a8_dynamic_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_sp_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_w4a8_accuracy_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_fc2_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_v2_lite_fc1_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_fc1_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a4_distributed_tp2
-
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_weight_load.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_pipeline_parallel.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_prefix_caching.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_quantization.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_qwen3_moe.py
-          # This test is broken, fix me
-          #pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_shared_expert_dp.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_single_request_aclgraph.py
+          python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-2-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
 
       - name: Run vllm-project/vllm-ascend test (non triton)
-        if: ${{ inputs.type == 'full' }}
+        if: ${{ inputs.type == 'full' && matrix.part == 0 }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
@@ -203,6 +180,9 @@ jobs:
     needs: [e2e-2-cards]
     if: ${{ needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
+    strategy:
+      matrix:
+        part: [0]
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
       env:
@@ -262,19 +242,8 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_data_parallel_tp2.py
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_kimi_k2.py
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_qwen3_next.py 
-
-          # recover once aclgraph stream bug fixed.
-          # long_sequence
-          # pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py
-          # pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_basic.py
-          # pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_chunked_prefill.py
-          # pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_mtp.py
-
-          # # spec_decode
-          # pytest -sv --durations=0 tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py
+          
+          python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-4-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
 
   e2e_310p:
     name: 310p singlecard
