@@ -51,7 +51,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - vllm_branch: v0.14.1
+          - vllm_branch: releases/v0.15.0
             vllm_ascend_branch: main
       max-parallel: 1
     container:
