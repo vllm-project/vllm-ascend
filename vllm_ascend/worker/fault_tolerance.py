@@ -20,8 +20,9 @@ class FaultTolerance:
     _recovery_group = None
     _sync_group = None
 
-    def __init__(self,vllm_config:VllmConfig,model_runner):
+    def __init__(self,vllm_config:VllmConfig,model_runner,execute_model_func):
         self.model_runner = model_runner
+        self.execute_model_func = execute_model_func
         self.vllm_config = vllm_config
 
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
@@ -142,7 +143,8 @@ class FaultTolerance:
                     ft_action = self._handle_exception(recovery_context)
                     if torch.equal(ft_action, FaultAction.RECOMPUTE):
                         self.aware_event.set()
-                        self.execute_model_decorator(*ctx.back_up['args'], **ctx.back_up['kwargs'])
+                        logger.info(f"Begin re-execute model at rank {self.rank}")
+                        self.execute_model_func(*self.state_backup['args'], **self.state_backup['kwargs'])
                         logger.info(f"Begin token re-inference at rank {self.rank}")
                         continue
                     elif torch.equal(ft_action, FaultAction.RAISE_EXCEPTION):
@@ -171,7 +173,7 @@ class FaultTolerance:
         if not torch.equal(recover_action,FaultAction.RECOMPUTE):
             return recover_action
         #Begin to recover
-        logger.info("Begin to recover exception")
+        logger.info("Begin to recover error")
         recovery_status = handler.recover(ctx)
         recovery_action = self._coordinate_recovery(recovery_status)
         return recovery_action

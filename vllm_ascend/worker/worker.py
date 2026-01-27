@@ -322,9 +322,10 @@ class NPUWorker(WorkerBase):
             self.fault_tolerance = FaultTolerance(
                 vllm_config = self.vllm_config,
                 model_runner = self.model_runner,
+                execute_model_func = self.execute_model,
             )
             self.execute_model = self.fault_tolerance.execute_model_decorator(self.execute_model)
-            self.execute_dummy_batch = self.fault_tolerance.execute_dummy_decorator(self.execute_dummy_batch)
+            self.execute_dummy_batch = self.fault_tolerance.execute_dummy_decorator(self.execute_dummy_batch,3)
             self.sample_tokens = self.fault_tolerance.sample_token_decorator(self.sample_tokens,3)
 
     @torch.inference_mode()
