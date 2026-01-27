@@ -53,7 +53,6 @@ def test_QuickGELU_forward(mock_gelu, dummy_tensor, default_vllm_config):
 
 
 @pytest.mark.skipif(is_310p_hw(), reason="non_310P device unittest case.")
-@patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
 @patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
 @patch("torch.ops.vllm.maybe_prefetch_mlp_down_proj", side_effect=lambda x: None)
@@ -61,7 +60,6 @@ def test_SiluAndMul_forward(
     mock_maybe_prefetch_mlp_down_proj,
     mock_maybe_wait_prefetch_done,
     mock_swiglu,
-    device_type,
     dummy_tensor,
     default_vllm_config,
 ):
@@ -86,7 +84,6 @@ def test_SiluAndMul_forward(
 
 
 @pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
-@patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P)
 @patch("torch.nn.functional.silu", side_effect=lambda x: x + 1)
 @patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
 @patch("torch.ops.vllm.maybe_prefetch_mlp_down_proj", side_effect=lambda x: None)
@@ -94,7 +91,6 @@ def test_SiluAndMul_forward_310p(
     mock_maybe_prefetch_mlp_down_proj,
     mock_maybe_wait_prefetch_done,
     mock_silu,
-    device_type,
     dummy_tensor,
     default_vllm_config,
 ):
