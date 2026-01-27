@@ -22,7 +22,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
@@ -31,6 +30,12 @@ from vllm.v1.worker.gpu.cudagraph_utils import \
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is('0.14.1'):
+    from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+else:
+    from vllm.v1.attention.backend import AttentionMetadataBuilder
 
 
 class AclGraphManager(CudaGraphManager):
