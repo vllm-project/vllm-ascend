@@ -1286,7 +1286,7 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_desc,
                     num_actual_tokens=scheduler_output.
                     total_num_scheduled_tokens,
-                    model_instance=self.model):
+                    model_instance=self.model)):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._model_forward(
