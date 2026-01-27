@@ -3,8 +3,9 @@ from unittest.mock import Mock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.w4a16 import (AscendW4A16FusedMoEMethod,
-                                            pack_to_int32, unpack_from_int32)
+from vllm_ascend.quantization.methods.w4a16 import (AscendW4A16FusedMoEMethod,
+                                                    pack_to_int32,
+                                                    unpack_from_int32)
 
 
 class TestUnpackFromInt32(TestBase):
@@ -42,7 +43,7 @@ class TestUnpackFromInt32(TestBase):
 class TestPackToInt32(TestBase):
 
     @patch(
-        "vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack"
+        "vllm_ascend.quantization.methods.w4a16.torch_npu.npu_convert_weight_to_int4pack"
     )
     def test_pack_to_int32_int8(self, mock_npu_convert_weight_to_int4pack):
         mock_npu_convert_weight_to_int4pack.return_value = torch.zeros(
@@ -57,7 +58,7 @@ class TestPackToInt32(TestBase):
         self.assertEqual(result.shape, torch.Size([2, 8, 4]))
 
     @patch(
-        "vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack"
+        "vllm_ascend.quantization.methods.w4a16.torch_npu.npu_convert_weight_to_int4pack"
     )
     def test_pack_to_int32_int32(self, mock_npu_convert_weight_to_int4pack):
 
@@ -97,12 +98,12 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
     output_size = 128
     group_size = 32
 
-    @patch("vllm_ascend.quantization.w4a16.get_ascend_config")
-    @patch("vllm_ascend.quantization.w4a16.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a16.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w4a16.get_current_vllm_config")
     def setUp(self, mock_get_current_vllm_config, mock_get_ascend_config):
         mock_ascend_config = Mock()
-        mock_ascend_config.dynamic_eplb = False
-        mock_ascend_config.expert_map_record_path = None
+        mock_ascend_config.eplb_config.dynamic_eplb = False
+        mock_ascend_config.eplb_config.expert_map_record_path = None
         mock_get_ascend_config.return_value = mock_ascend_config
 
         mock_vllm_config = Mock()
@@ -218,7 +219,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         return layer
 
     @patch(
-        "vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack"
+        "vllm_ascend.quantization.methods.w4a16.torch_npu.npu_convert_weight_to_int4pack"
     )
     def test_process_weights_after_loading_with_transpose(
             self, mock_npu_convert_weight_to_int4pack):

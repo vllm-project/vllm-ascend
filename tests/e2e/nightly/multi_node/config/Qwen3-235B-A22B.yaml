@@ -3,9 +3,12 @@ model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 16
 env_common:
+  HCCL_OP_EXPANSION_MODE: AIV
+  TASK_QUEUE_ENABLE: 1
   VLLM_USE_MODELSCOPE: true
   OMP_PROC_BIND: false
-  OMP_NUM_THREADS: 100
+  OMP_NUM_THREADS: 1
+  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
   NUMEXPR_MAX_THREADS: 128

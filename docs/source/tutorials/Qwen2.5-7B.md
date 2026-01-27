@@ -98,7 +98,7 @@ Qwen2.5-7B-Instruct supports single-node single-card deployment on the 910B4 pla
 
 ```shell
 #!/bin/sh
-export ASCEBD_RT_VISIBLE_DEVICES=0
+export ASCEND_RT_VISIBLE_DEVICES=0
 export MODEL_PATH="Qwen/Qwen2.5-7B-Instruct"
 
 vllm serve ${MODEL_PATH} \
@@ -127,7 +127,7 @@ curl http://<IP>:<Port>/v1/completions \
     -d '{
         "model": "qwen-2.5-7b-instruct",
         "prompt": "Beijing is a",
-        "max_tokens": 5,
+        "max_completion_tokens": 5,
         "temperature": 0
     }'
 ```
@@ -153,11 +153,13 @@ Results and logs are saved to `benchmark/outputs/default/`. A sample accuracy re
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
+
 Run performance evaluation of `Qwen2.5-7B-Instruct` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

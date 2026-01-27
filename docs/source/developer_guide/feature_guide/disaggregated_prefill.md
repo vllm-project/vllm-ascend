@@ -15,11 +15,12 @@ This feature addresses the need to optimize the **Time Per Output Token (TPOT)**
 ## Usage
 
 vLLM Ascend currently supports two types of connectors for handling KV cache management:  
+
 - **MooncakeConnector**: D nodes pull KV cache from P nodes.
 - **MooncakeLayerwiseConnector**: P nodes push KV cache to D nodes in a layered manner.  
 
 For step-by-step deployment and configuration, refer to the following guide:  
-[https://vllm-ascend.readthedocs.io/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html](https://vllm-ascend.readthedocs.io/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html)
+[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html)
 
 ---
 
@@ -35,26 +36,27 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 ![alt text](../../assets/disaggregated_prefill_pull.png)
 ![alt text](../../assets/disaggregated_prefill_push.png)
 
-#### Mooncake Connector:
+#### Mooncake Connector
 
 1. The request is sent to the Proxy’s `_handle_completions` endpoint.
-2. The Proxy calls `select_prefiller` to choose a P node and forwards the request, configuring `kv_transfer_params` with `do_remote_decode=True`, `max_tokens=1`, and `min_tokens=1`.
+2. The Proxy calls `select_prefiller` to choose a P node and forwards the request, configuring `kv_transfer_params` with `do_remote_decode=True`, `max_completion_tokens=1`, and `min_tokens=1`.
 3. After the P node’s scheduler finishes prefill, `update_from_output` invokes the schedule connector’s `request_finished` to defer KV cache release, constructs `kv_transfer_params` with `do_remote_prefill=True`, and returns to the Proxy.
 4. The Proxy calls `select_decoder` to choose a D node and forwards the request.
 5. On the D node, the scheduler marks the request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, calls `kv_connector_no_forward` to pull the remote KV cache, then notifies the P node to release KV cache and proceeds with decoding to return the result.
 
-#### Mooncake Layerwise Connector:
+#### Mooncake Layerwise Connector
 
 1. The request is sent to the Proxy’s `_handle_completions` endpoint.
 2. The Proxy calls `select_decoder` to choose a D node and forwards the request, configuring `kv_transfer_params` with `do_remote_prefill=True` and setting the `metaserver` endpoint.
 3. On the D node, the scheduler uses `kv_transfer_params` to mark the request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, then calls `kv_connector_no_forward` to send a request to the metaserver and waits for the KV cache transfer to complete.
-4. The Proxy’s `metaserver` endpoint receives the request, calls `select_prefiller` to choose a P node, and forwards it with `kv_transfer_params` set to `do_remote_decode=True`, `max_tokens=1`, and `min_tokens=1`.
+4. The Proxy’s `metaserver` endpoint receives the request, calls `select_prefiller` to choose a P node, and forwards it with `kv_transfer_params` set to `do_remote_decode=True`, `max_completion_tokens=1`, and `min_tokens=1`.
 5. During processing, the P node’s scheduler pushes KV cache layer-wise; once all layers pushing is complete, it releases the request and notifies the D node to begin decoding.
 6. The D node performs decoding and returns the result.
 
 ### 3. Interface Design
 
 Taking MooncakeConnector as an example, the system is organized into three primary classes:
+
 - **MooncakeConnector**: Base class that provides core interfaces.
 - **MooncakeConnectorScheduler**: Interface for scheduling the connectors within the engine core, responsible for managing KV cache transfer requirements and completion.
 - **MooncakeConnectorWorker**: Interface for managing KV cache registration and transfer in worker processes.

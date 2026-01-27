@@ -1,12 +1,14 @@
 Here is an example guiding how to use `launch_online_dp.py` to launch external dp vllm servers. User can easily launch external dp servers following the steps below:
 
 ### Modify parameters in `run_dp_template.sh`
+
 `run_dp_template.sh` is an template script used to launch each dp vllm instance separately. It will be called by `launch_online_dp.py` in multi threads and most of its configurations are set by `launch_online_dp.py`. Parameters you need to set manually include:
 
 1. The IP and socket_ifname of your machine. If running on multi-nodes, please make sure the scripts on each node has been set with correct IP and socket_ifname of that node.
-2. vLLM serving related parameters including model_path and other configurations. Note that port, dp-related parammeters and tp_size is set by `launch_online_dp.py`, all the other vLLM parameters in this file only serve as an example and you are free to modify them according to your purpose.
+2. vLLM serving related parameters including model_path and other configurations. Note that port, dp-related parameters and tp_size is set by `launch_online_dp.py`, all the other vLLM parameters in this file only serve as an example and you are free to modify them according to your purpose.
 
 ### Run `launch_online_dp.py` with CL arguments
+
 All the arguments that can be set by users are:
 
 1. `--dp-size`: global data parallel size, must be set
@@ -18,6 +20,7 @@ All the arguments that can be set by users are:
 7. `--vllm-start-port`: Starting port of vLLM serving instances, default 9000
 
 An example of running external DP in one single node:
+
 ```(python)
 cd examples/external_online_dp
 # running DP4 TP4 in a node with 16 NPUs
@@ -25,6 +28,7 @@ python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-s
 ```
 
 An example of running external DP in two nodes:
+
 ```(python)
 cd examples/external_online_dp
 # running DP4 TP4 in two nodes with 8 NPUs each
@@ -37,6 +41,7 @@ python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-s
 ```
 
 ### (Optional) Run `dp_load_balance_proxy_server.py` to load balance requests between external dp servers
+
 External dp server means that you need to handle load balance between multiple dp instances out of vllm by implementing your custom proxy server. Here we provide an example of request-length-aware dp load-balance proxy server for you. The arguments of `dp_load_balance_proxy_server.py` include:
 
 1. `--port`: port of proxy server, default 8000

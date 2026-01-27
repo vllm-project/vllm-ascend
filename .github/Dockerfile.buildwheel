@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 ARG PY_VERSION=3.11
-FROM quay.io/ascend/manylinux:8.3.rc2-910b-manylinux_2_28-py${PY_VERSION}
+FROM quay.io/ascend/manylinux:8.5.0-910b-manylinux_2_28-py${PY_VERSION}
 
 ARG SOC_VERSION="ascend910b1"
 
@@ -32,7 +32,7 @@ COPY . /workspace/vllm-ascend/
 
 # Install req
 RUN python3 -m pip install -r vllm-ascend/requirements.txt --extra-index https://download.pytorch.org/whl/cpu/ && \
-    python3 -m pip install twine
+    python3 -m pip install twine attrs psutil
 
 # Install vllm-ascend
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \

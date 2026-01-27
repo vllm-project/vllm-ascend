@@ -3,14 +3,14 @@ from unittest.mock import Mock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.w4a8_dynamic import (
+from vllm_ascend.quantization.methods.w4a8 import (
     AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod)
 
 
 class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch('vllm.distributed.get_tensor_model_parallel_world_size')
-    @patch('vllm_ascend.quantization.w4a8_dynamic.get_current_vllm_config')
+    @patch('vllm_ascend.quantization.methods.w4a8.get_current_vllm_config')
     def setUp(self, mock_get_current_vllm_config, mock_get_tp_world_size):
         mock_get_tp_world_size.return_value = 1
         mock_vllm_config = Mock()
@@ -127,16 +127,16 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     output_size = 56
     group_size = 2
 
-    @patch('vllm_ascend.quantization.w4a8_dynamic.get_ascend_config')
-    @patch('vllm_ascend.quantization.w4a8_dynamic.get_current_vllm_config')
-    @patch('vllm_ascend.quantization.w4a8_dynamic.get_ep_group')
-    @patch('vllm_ascend.quantization.w4a8_dynamic.get_mc2_group')
+    @patch('vllm_ascend.quantization.methods.w4a8.get_ascend_config')
+    @patch('vllm_ascend.quantization.methods.w4a8.get_current_vllm_config')
+    @patch('vllm_ascend.quantization.methods.w4a8.get_ep_group')
+    @patch('vllm_ascend.quantization.methods.w4a8.get_mc2_group')
     @patch('torch.distributed.get_rank', return_value=0)
     def setUp(self, mock_get_rank, mock_get_mc2_group, mock_get_ep_group,
               get_current_vllm_config, mock_get_ascend_config):
         # Mock ascend config
         mock_ascend_config = Mock()
-        mock_ascend_config.dynamic_eplb = False
+        mock_ascend_config.eplb_config.dynamic_eplb = False
         mock_get_ascend_config.return_value = mock_ascend_config
 
         mock_vllm_config = Mock()

@@ -1,8 +1,11 @@
 # Using lm-eval
+
 This document guides you to conduct accuracy testing using [lm-eval][1].
 
 ## Online Server
+
 ### 1. Start the vLLM server
+
 You can run docker container to start the vLLM server on a single NPU:
 
 ```{code-block} bash
@@ -34,7 +37,7 @@ vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 4096 &
 
 The vLLM server is started successfully, if you see logs as below:
 
-```
+```shell
 INFO:     Started server process [9446]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -44,7 +47,7 @@ INFO:     Application startup complete.
 
 You can query the result with input prompts:
 
-```
+```shell
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -63,7 +66,7 @@ curl http://localhost:8000/v1/completions \
 "C. Asset-Liability Ratio=65.22%, Current Ratio=1.75\n"\
 "D. Asset-Liability Ratio=68.00%, Current Ratio=2.50<|im_end|>\n"\
 "<|im_start|>assistant\n"'",
-        "max_tokens": 1,
+        "max_completion_tokens": 1,
         "temperature": 0,
         "stop": ["<|im_end|>"]
     }' | python3 -m json.tool
@@ -71,7 +74,7 @@ curl http://localhost:8000/v1/completions \
 
 The output format matches the following:
 
-```
+```json
 {
     "id": "cmpl-2f678e8bdf5a4b209a3f2c1fa5832e25",
     "object": "text_completion",
@@ -108,7 +111,7 @@ pip install lm-eval[api]
 
 Run the following command:
 
-```
+```shell
 # Only test gsm8k dataset in this demo
 lm_eval \
   --model local-completions \
@@ -119,7 +122,7 @@ lm_eval \
 
 After 30 minutes, the output is as shown below:
 
-```
+```shell
 The markdown format results is as below:
 
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
@@ -130,6 +133,7 @@ The markdown format results is as below:
 ```
 
 ## Offline Server
+
 ### 1. Run docker container
 
 You can run docker container on a single NPU:
@@ -161,6 +165,7 @@ docker run --rm \
 ```
 
 ### 2. Run GSM8K using lm-eval for accuracy testing
+
 Install lm-eval in the container:
 
 ```bash
@@ -170,7 +175,7 @@ pip install lm-eval
 
 Run the following command:
 
-```
+```shell
 # Only test gsm8k dataset in this demo
 lm_eval \
   --model vllm \
@@ -181,7 +186,7 @@ lm_eval \
 
 After 1 to 2 minutes, the output is shown below:
 
-```
+```shell
 The markdown format results is as below:
 
 Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|

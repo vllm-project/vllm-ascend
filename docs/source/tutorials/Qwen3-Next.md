@@ -27,7 +27,10 @@ If the machine environment is an Atlas 800I A3(64G*16), the deployment approach 
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# For Atlas A2 machines:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# For Atlas A3 machines:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
 --shm-size=1g \
 --name vllm-ascend-qwen3 \
@@ -50,33 +53,7 @@ docker run --rm \
 
 The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
 
-### Install Triton Ascend
-
-The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required when you run Qwen3 Next, please follow the instructions below to install it and its dependency.
-
-Install the Ascend BiSheng toolkit, execute the command:
-
-```bash
-BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20251225.run"
-BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
-```
-
-Install Triton Ascend:
-
-```bash
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -i).manylinux_2_28_$(uname -i).whl
-pip install triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -i).manylinux_2_28_$(uname -i).whl
-```
-
 ### Inference
-
-Please make sure you have already executed the command:
-
-```bash
-source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
-```
 
 :::::{tab-set}
 ::::{tab-item} Online Inference
@@ -98,7 +75,7 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
   "temperature": 0.6,
   "top_p": 0.95,
   "top_k": 20,
-  "max_tokens": 32
+  "max_completion_tokens": 32
 }'
 ```
 
@@ -126,7 +103,7 @@ if __name__ == '__main__':
     prompts = [
         "Who are you?",
     ]
-    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_tokens=32)
+    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_completion_tokens=32)
     llm = LLM(model="Qwen/Qwen3-Next-80B-A3B-Instruct",
               tensor_parallel_size=4,
               enforce_eager=True,
@@ -178,6 +155,7 @@ Run performance evaluation of `Qwen3-Next` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

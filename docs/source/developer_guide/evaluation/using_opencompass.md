@@ -1,4 +1,5 @@
 # Using OpenCompass
+
 This document guides you to conduct accuracy testing using [OpenCompass](https://github.com/open-compass/opencompass).
 
 ## 1. Online Server
@@ -33,7 +34,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
 
 The vLLM server is started successfully, if you see information as below:
 
-```
+```shell
 INFO:     Started server process [6873]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -41,18 +42,19 @@ INFO:     Application startup complete.
 
 Once your server is started, you can query the model with input prompts in a new terminal.
 
-```
+```shell
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "Qwen/Qwen2.5-7B-Instruct",
         "prompt": "The future of AI is",
-        "max_tokens": 7,
+        "max_completion_tokens": 7,
         "temperature": 0
     }'
 ```
 
 ## 2. Run C-Eval using OpenCompass for accuracy testing
+
 Install OpenCompass and configure the environment variables in the container:
 
 ```bash
@@ -107,13 +109,13 @@ models = [
 
 Run the following command:
 
-```
+```shell
 python3 run.py opencompass/configs/eval_vllm_ascend_demo.py --debug
 ```
 
 After 1 to 2 minutes, the output is shown below:
 
-```
+```shell
 The markdown format results is as below:
 
 | dataset | version | metric | mode | Qwen2.5-7B-Instruct-vLLM-API |

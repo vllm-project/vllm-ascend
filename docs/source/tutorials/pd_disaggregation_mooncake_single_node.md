@@ -27,7 +27,7 @@ for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
 for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
 ```
 
-2. Check NPU network configuration:
+2. Check NPU HCCN Configuration:
 
 Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
@@ -41,7 +41,22 @@ cat /etc/hccn.conf
 for i in {0..7}; do hccn_tool -i $i -ip -g;done
 ```
 
+4. Cross-Node PING Test
+
+```bash
+# Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
+for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
+```
+
+5. Check NPU TLS Configuration
+
+```bash
+# The tls settings should be consistent across all nodes
+for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
+```
+
 ## Run with Docker
+
 Start a Docker container.
 
 ```{code-block} bash
@@ -79,7 +94,7 @@ docker run --rm \
 
 ## Install Mooncake
 
-Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.
+Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
@@ -159,7 +174,6 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   "kv_role": "kv_producer",
   "kv_port": "30000",
   "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 1,
@@ -202,7 +216,6 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   "kv_role": "kv_consumer",
   "kv_port": "30100",
   "engine_id": "1",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 1,
@@ -258,7 +271,7 @@ curl http://192.0.0.1:8080/v1/chat/completions \
                 {"type": "text", "text": "What is the text in the illustrate?"}
             ]}
             ],
-        "max_tokens": 100,
+        "max_completion_tokens": 100,
         "temperature": 0
     }'
 ```

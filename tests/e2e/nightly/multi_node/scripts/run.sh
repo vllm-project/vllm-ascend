@@ -26,7 +26,7 @@ print_section() {
 }
 
 print_failure() {
-    echo -e "${RED}${FAIL_TAG} ✗ ERROR: $1${NC}"
+    echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: $1${NC}"
     exit 1
 }
 
@@ -125,6 +125,14 @@ install_extra_components() {
     echo "====> Extra components installation completed"
 }
 
+
+show_triton_ascend_info() {
+    echo "====> Check triton ascend info"
+    clang -v
+    which bishengir-compile
+    pip show triton-ascend
+}
+
 kill_npu_processes() {
   pgrep python3 | xargs -r kill -9
   pgrep VLLM | xargs -r kill -9
@@ -142,8 +150,8 @@ run_tests_with_log() {
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            print_failure "Some tests failed, please check the error stack above for details.\
-            If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
+            print_failure "Some tests failed, please check the error stack above for details. \
+If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
         fi
     fi
 }
@@ -152,6 +160,7 @@ main() {
     check_npu_info
     check_and_config
     show_vllm_info
+    show_triton_ascend_info
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
     fi

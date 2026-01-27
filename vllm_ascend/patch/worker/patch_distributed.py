@@ -23,7 +23,8 @@ from torch.distributed import Backend
 from vllm.distributed.parallel_state import (GroupCoordinator,
                                              _get_unique_name, _register_group)
 
-from vllm_ascend.distributed.communicator import NPUCommunicator
+from vllm_ascend.distributed.device_communicators.npu_communicator import \
+    NPUCommunicator
 from vllm_ascend.utils import create_hccl_pg_options
 
 
@@ -110,6 +111,11 @@ class GroupCoordinatorPatch(GroupCoordinator):
         return self.device_communicator.all_to_all(input_, scatter_dim,
                                                    gather_dim, scatter_sizes,
                                                    gather_sizes)
+
+    def all_reduce(self, input_):
+        if self.world_size == 1:
+            return input_
+        return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
 
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch

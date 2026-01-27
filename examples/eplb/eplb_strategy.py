@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import json
 import os
@@ -21,10 +20,7 @@ def save_matrix_to_json(output_path, file_name, deployment):
         layer = {"layer_id": i, "device_count": num_cards}
         device_list = []
         for j in range(num_cards):
-            device = {
-                "device_id": j,
-                "device_expert": deployment[i, j].tolist()
-            }
+            device = {"device_id": j, "device_expert": deployment[i, j].tolist()}
             device_list.append(device)
         layer["device_list"] = device_list
         layer_list.append(layer)
@@ -34,7 +30,7 @@ def save_matrix_to_json(output_path, file_name, deployment):
 
     # Save as JSON file
     try:
-        with open(file_name, 'w') as f:
+        with open(file_name, "w") as f:
             json.dump(data, f, indent=4)
     except Exception as e:
         print(f"write {file_name} failed: {e}")
@@ -63,21 +59,17 @@ def calculate_average(lst):
     return total / count
 
 
-def layer_imblance_polt(y_list, label_names, device_num, output_path,
-                        file_name):
-
-    plt.rcParams['font.sans-serif'] = ['Arial']
-    plt.rcParams['axes.unicode_minus'] = False
+def layer_imblance_polt(y_list, label_names, device_num, output_path, file_name):
+    plt.rcParams["font.sans-serif"] = ["Arial"]
+    plt.rcParams["axes.unicode_minus"] = False
     x = [i for i in range(58)]
     for index, y in enumerate(y_list):
-        plt.plot(x,
-                 y,
-                 label=rf'{label_names[index]}，avg={calculate_average(y)}')
+        plt.plot(x, y, label=rf"{label_names[index]}，avg={calculate_average(y)}")
 
     plt.legend()
-    plt.title(rf'Load Distribution (num_gpus={device_num})')
-    plt.xlabel('layer')
-    plt.ylabel('Device Load')
+    plt.title(rf"Load Distribution (num_gpus={device_num})")
+    plt.xlabel("layer")
+    plt.ylabel("Device Load")
 
     # Show grid lines
     plt.grid(True)
@@ -88,27 +80,23 @@ def layer_imblance_polt(y_list, label_names, device_num, output_path,
     plt.close()
 
 
-def deepseek_deploy(workload, num_redundancy_expert, num_groups, num_nodes,
-                    num_gpus, num_original_expert):
+def deepseek_deploy(workload, num_redundancy_expert, num_groups, num_nodes, num_gpus, num_original_expert):
     from eplb_deepseek import rebalance_experts
+
     num_replicas = num_original_expert + num_redundancy_expert
-    hy2log, log2phy, logcnt = rebalance_experts(workload, num_replicas,
-                                                num_groups, num_nodes,
-                                                num_gpus)
+    hy2log, log2phy, logcnt = rebalance_experts(workload, num_replicas, num_groups, num_nodes, num_gpus)
 
     # Convert to global_deployment
     workload = workload.cpu().numpy()
     global_deployment = []
     layer_num = log2phy.shape[0]
-    num_physical_experts_local = (num_original_expert +
-                                  num_redundancy_expert) // num_gpus
+    num_physical_experts_local = (num_original_expert + num_redundancy_expert) // num_gpus
     for layer_idx in range(layer_num):
         layer_deployment = []
         for gpu_idx in range(num_gpus):
-            local_deployment = hy2log[layer_idx][gpu_idx *
-                                                 num_physical_experts_local:
-                                                 (gpu_idx + 1) *
-                                                 num_physical_experts_local]
+            local_deployment = hy2log[layer_idx][
+                gpu_idx * num_physical_experts_local : (gpu_idx + 1) * num_physical_experts_local
+            ]
             local_deployment = local_deployment.flatten()
             layer_deployment.append(local_deployment.tolist())
         global_deployment.append(layer_deployment)
@@ -122,18 +110,15 @@ def deepseek_deploy(workload, num_redundancy_expert, num_groups, num_nodes,
         new_value = workload[layer_idx].reshape(num_gpus, -1)
         row_sum = np.sum(new_value, axis=1)
         original_weights.append(row_sum.max())
-        average_weights.append((np.sum(workload[layer_idx]) / num_gpus))
+        average_weights.append(np.sum(workload[layer_idx]) / num_gpus)
 
-        opt_workload = np.zeros((num_original_expert + num_redundancy_expert),
-                                dtype=np.float64)
+        opt_workload = np.zeros((num_original_expert + num_redundancy_expert), dtype=np.float64)
         for expert_idx in range(num_original_expert):
             physical_expert_idxs = log2phy[layer_idx][expert_idx]
             physical_expert_idxs = physical_expert_idxs.flatten()
-            physical_expert_idxs = physical_expert_idxs[
-                physical_expert_idxs != -1]
+            physical_expert_idxs = physical_expert_idxs[physical_expert_idxs != -1]
             for physical_expert_idx in physical_expert_idxs:
-                opt_workload[physical_expert_idx] += workload[layer_idx][
-                    expert_idx] / len(physical_expert_idxs)
+                opt_workload[physical_expert_idx] += workload[layer_idx][expert_idx] / len(physical_expert_idxs)
         opt_workload = opt_workload.reshape(num_gpus, -1)
         row_sum = np.sum(opt_workload, axis=1)
         max_weights.append(row_sum.max())
@@ -142,8 +127,9 @@ def deepseek_deploy(workload, num_redundancy_expert, num_groups, num_nodes,
     return global_deployment, y_list
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp_name", type=str, default="gsm8k_temp0.0")
     parser.add_argument("--num_original_expert", type=int, default=256)
@@ -165,19 +151,13 @@ if __name__ == '__main__':
     num_nodes = args.num_nodes
 
     # NOTE: assume input workload format: [layer_num, num_experts]
-    workload = torch.load(input_path, map_location=torch.device('cpu'))
-    global_deployment, y_list = deepseek_deploy(workload,
-                                                num_redundancy_expert,
-                                                num_groups, num_nodes,
-                                                num_devices,
-                                                num_original_expert)
+    workload = torch.load(input_path, map_location=torch.device("cpu"))
+    global_deployment, y_list = deepseek_deploy(
+        workload, num_redundancy_expert, num_groups, num_nodes, num_devices, num_original_expert
+    )
 
     file_name = f"{exp_name}_{num_devices}_{num_redundancy_expert}"
     save_matrix_to_json(output_path, file_name, np.array(global_deployment))
-    label_names = [
-        'default deployment max load', 'balanced load max load',
-        'balanced load avg load'
-    ]
+    label_names = ["default deployment max load", "balanced load max load", "balanced load avg load"]
     new_file_name = f"{exp_name}_{num_devices}_{num_redundancy_expert}.png"
-    layer_imblance_polt(y_list, label_names, num_devices, output_path,
-                        new_file_name)
+    layer_imblance_polt(y_list, label_names, num_devices, output_path, new_file_name)

@@ -29,7 +29,7 @@ def find_free_port():
     - A free port number.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
+        s.bind(("", 0))
         return s.getsockname()[1]
 
 
@@ -47,20 +47,17 @@ def is_valid_path_prefix(path_prefix):
         return False
 
     if re.search(r'[<>:"|?*]', path_prefix):
-        logger.warning(
-            f'The path prefix {path_prefix} contains illegal characters.')
+        logger.warning(f"The path prefix {path_prefix} contains illegal characters.")
         return False
 
-    if path_prefix.startswith('/') or path_prefix.startswith('\\'):
+    if path_prefix.startswith("/") or path_prefix.startswith("\\"):
         if not os.path.exists(os.path.dirname(path_prefix)):
-            logger.warning(
-                f'The directory for the path prefix {os.path.dirname(path_prefix)} does not exist.'
-            )
+            logger.warning(f"The directory for the path prefix {os.path.dirname(path_prefix)} does not exist.")
             return False
     else:
         if not os.path.exists(os.path.dirname(os.path.abspath(path_prefix))):
             logger.warning(
-                f'The directory for the path prefix {os.path.dirname(os.path.abspath(path_prefix))} does not exist.'
+                f"The directory for the path prefix {os.path.dirname(os.path.abspath(path_prefix))} does not exist."
             )
             return False
     return True

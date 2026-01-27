@@ -18,7 +18,6 @@
 import torch
 from einops import rearrange
 from torch import nn
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import (
@@ -29,6 +28,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.models.qwen3_next import (Qwen3NextGatedDeltaNet,
                                                    fused_gdn_gating)
 from vllm.triton_utils import triton
+from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \

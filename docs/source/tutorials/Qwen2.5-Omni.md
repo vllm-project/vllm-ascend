@@ -156,7 +156,7 @@ curl http://127.0.0.1:8000/v1/chat/completions   -H "Content-Type: application/j
         ]
       }
     ],
-    "max_tokens": 100,
+    "max_completion_tokens": 100,
     "temperature": 0.7
   }'
 
@@ -196,6 +196,7 @@ Run performance evaluation of `Qwen2.5-Omni-7B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

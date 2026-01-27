@@ -56,7 +56,6 @@ async def test_models(model: str) -> None:
         "OMP_NUM_THREADS": "100",
         "OMP_PROC_BIND": "false",
         "HCCL_BUFFSIZE": "200",
-        "VLLM_ASCEND_ENABLE_MLAPO": "1",
         "VLLM_RPC_TIMEOUT": "3600000",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000",
         "DISABLE_L2_CACHE": "1",
@@ -70,11 +69,12 @@ async def test_models(model: str) -> None:
     additional_config: dict[str, Any] = {
         "enable_shared_expert_dp": False,
         "multistream_overlap_shared_expert": False,
-        "dynamic_eplb": True,
-        "num_iterations_eplb_update": 14000,
-        "num_wait_worker_iterations": 30,
-        "init_redundancy_expert": 0,
-        "gate_eplb": False
+        "eplb_config": {
+            "dynamic_eplb": True,
+            "expert_heat_collection_interval": 512,
+            "algorithm_execution_interval": 100,
+            "num_redundant_experts": 0
+        }
     }
     server_args = [
         "--quantization", "ascend", "--seed", "1024",
