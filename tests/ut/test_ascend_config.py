@@ -16,6 +16,7 @@
 from unittest.mock import patch
 
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, get_ascend_config, init_ascend_config
@@ -79,8 +80,9 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
-    def test_init_ascend_config_enable_npugraph_ex(self, mock_fix_incompatible_config):
+    def test_init_ascend_config_enable_npugraph_ex_when_FULL_DECODE_ONLY(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
+        test_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         test_vllm_config.additional_config = {
             "npugraph_ex_config": {
                 "enable": True,
@@ -91,6 +93,22 @@ class TestAscendConfig(TestBase):
         npugraph_ex_config = init_ascend_config(
             test_vllm_config).npugraph_ex_config
         self.assertTrue(npugraph_ex_config.enable)
+        self.assertTrue(npugraph_ex_config.enable_static_kernel)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_init_ascend_config_enable_npugraph_ex_when_PIECEWISE(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "npugraph_ex_config": {
+                "enable": True,
+                "enable_static_kernel": True
+            },
+            "refresh": True
+        }
+        npugraph_ex_config = init_ascend_config(
+            test_vllm_config).npugraph_ex_config
+        self.assertFalse(npugraph_ex_config.enable)
         self.assertTrue(npugraph_ex_config.enable_static_kernel)
 
     @_clean_up_ascend_config
