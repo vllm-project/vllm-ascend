@@ -41,9 +41,7 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_builder_cls(),
                          AscendAttentionMetadataBuilder)
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType.A3)
-    def test_get_kv_cache_shape_not_310p(self, mock_soc_version):
+    def test_get_kv_cache_shape_not(self):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 20, 30, 40))
 
@@ -92,9 +90,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertFalse(result)
 
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
-    @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType.A3)
-    def test_build_non_310p(self, mock_soc_version, mock_ascend_metadata):
+    def test_build(self, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),
             query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
