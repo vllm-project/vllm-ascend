@@ -26,6 +26,9 @@ from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check im
 
 
 class GraphEXAddRMSNormQuantPattern:
+    # Track registered eps values for this pattern type
+    _registered_eps: set = set()
+
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
@@ -44,6 +47,11 @@ class GraphEXAddRMSNormQuantPattern:
         return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset]
 
     def register(self):
+        # Skip if already registered for this eps value
+        if self.eps in self._registered_eps:
+            logger.debug(f"Pattern {self.__class__.__name__} with eps={self.eps} already registered")
+            return
+
         def pattern(
             rms_norm_input: torch.Tensor,
             residual: torch.Tensor,
@@ -85,9 +93,13 @@ class GraphEXAddRMSNormQuantPattern:
             example_inputs=self.get_inputs(),
             extra_check=extra_stream_scope_check,
         )
+        self._registered_eps.add(self.eps)
 
 
 class GraphEXAddRMSNormQuantPatternWithBias:
+    # Track registered eps values for this pattern type
+    _registered_eps: set = set()
+
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
@@ -108,6 +120,11 @@ class GraphEXAddRMSNormQuantPatternWithBias:
 
     # The replacement registered here will be actually executed after AOT.
     def register(self):
+        # Skip if already registered for this eps value
+        if self.eps in self._registered_eps:
+            logger.debug(f"Pattern {self.__class__.__name__} with eps={self.eps} already registered")
+            return
+
         def pattern(
             rms_norm_input: torch.Tensor,
             residual: torch.Tensor,
@@ -152,9 +169,13 @@ class GraphEXAddRMSNormQuantPatternWithBias:
             example_inputs=self.get_inputs(),
             extra_check=extra_stream_scope_check,
         )
+        self._registered_eps.add(self.eps)
 
 
 class GraphEXAddRMSNormQuantSPPattern:
+    # Track registered eps values for this pattern type
+    _registered_eps: set = set()
+
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
@@ -174,6 +195,11 @@ class GraphEXAddRMSNormQuantSPPattern:
 
     # The replacement registered here will be actually executed after AOT.
     def register(self):
+        # Skip if already registered for this eps value
+        if self.eps in self._registered_eps:
+            logger.debug(f"Pattern {self.__class__.__name__} with eps={self.eps} already registered")
+            return
+
         def pattern(
             rms_norm_input: torch.Tensor,
             residual: torch.Tensor,
@@ -217,9 +243,13 @@ class GraphEXAddRMSNormQuantSPPattern:
             example_inputs=self.get_inputs(),
             extra_check=extra_stream_scope_check,
         )
+        self._registered_eps.add(self.eps)
 
 
 class GraphEXAddRMSNormQuantSPPatternWithBias:
+    # Track registered eps values for this pattern type
+    _registered_eps: set = set()
+
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
@@ -240,6 +270,11 @@ class GraphEXAddRMSNormQuantSPPatternWithBias:
 
     # The replacement registered here will be actually executed after AOT.
     def register(self):
+        # Skip if already registered for this eps value
+        if self.eps in self._registered_eps:
+            logger.debug(f"Pattern {self.__class__.__name__} with eps={self.eps} already registered")
+            return
+
         def pattern(
             rms_norm_input: torch.Tensor,
             residual: torch.Tensor,
@@ -286,6 +321,7 @@ class GraphEXAddRMSNormQuantSPPatternWithBias:
             example_inputs=self.get_inputs(),
             extra_check=extra_stream_scope_check,
         )
+        self._registered_eps.add(self.eps)
 
 
 class GraphEXAddRMSNormFusionPass:
@@ -299,6 +335,8 @@ class GraphEXAddRMSNormFusionPass:
             logger.debug("Quant fusion not enabled: unsupported dtype %s", dtype)
             return
 
+        # Register each pattern type with both eps values.
+        # Each pattern tracks registered eps values internally to avoid duplicates.
         common_epsilons = [1e-5, 1e-6]
         for eps in common_epsilons:
             GraphEXAddRMSNormQuantPattern(vllm_config, eps=eps).register()
