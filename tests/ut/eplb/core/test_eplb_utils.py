@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoE
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.utils import vllm_version_is
 # isort: on
 
 
@@ -20,8 +21,24 @@ class TestAscendConfig(unittest.TestCase):
             "refresh": True,
             "eplb_config": {"dynamic_eplb": True, "num_redundant_experts": 2},
         }
-        moe_parallel_config = FusedMoEParallelConfig(2, 0, 1, 2, 1, 1, 1, 1, True, "hccl")
-        moe_config = FusedMoEConfig(8, 8, 8192, 5, moe_parallel_config, torch.float16)
+        if vllm_version_is('0.14.1'):
+            moe_parallel_config = FusedMoEParallelConfig(2, 0, 1, 2, 1, 1, 1, 1, True, "hccl")
+            moe_config = FusedMoEConfig(8, 8, 8192, 5, moe_parallel_config, torch.float16)
+        else:
+            from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+            moe_parallel_config = FusedMoEParallelConfig(2, 0, 1, 2, 1, 1, 1, 1, True, "hccl", enable_eplb=True)
+            moe_config = FusedMoEConfig(
+                num_experts=8,
+                experts_per_token=8,
+                hidden_dim=8192,
+                intermediate_size_per_partition=5,
+                num_local_experts=8,
+                activation="silu",
+                device="npu",
+                routing_method=RoutingMethodType.Simulated,
+                moe_parallel_config=moe_parallel_config,
+                in_dtype=torch.float16,
+            )
         moe_config.supports_eplb = True
         self.vllm_config = vllm_config
         self.moe_config = moe_config
