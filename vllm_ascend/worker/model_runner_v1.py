@@ -1401,9 +1401,12 @@ class NPUModelRunner(GPUModelRunner):
         aclgraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
-        if self.ascend_config.enable_async_exponential:
+        if self.ascend_config.enable_async_exponential and \
+            not self.input_batch.sampling_metadata.all_greedy:
+            b_s = logits_indices.shape[0] if spec_decode_metadata is None \
+                    else spec_decode_metadata.bonus_logits_indices.shape[0]
             self.sampler.do_async_exponential(
-                b_s=logits_indices.shape[0],
+                b_s=b_s,
                 head_dim=self.model_config.get_vocab_size(),
                 generators=self.input_batch.sampling_metadata.generators)
 
