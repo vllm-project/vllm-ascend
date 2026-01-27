@@ -1,14 +1,16 @@
+import contextlib
 import logging
 import os
 import re
+import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sglang.srt.utils.common import kill_process_tree
-from sglang.test.ci.ci_register import CIRegistry
+import psutil
 
 # Configure logger to output to stdout
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 class TestFile:
     name: str
     estimated_time: float = 60
+    is_skipped: bool = False
 
 
 # Patterns that indicate retriable accuracy/performance failures
@@ -109,8 +112,43 @@ def write_github_step_summary(content: str):
             f.write(content)
 
 
-def run_unittest_files(
-    files: list[TestFile] | list[CIRegistry],
+def kill_process_tree(parent_pid, include_parent: bool = True, skip_pid: int = None):
+    """Kill the process and all its child processes."""
+    # Remove sigchld handler to avoid spammy logs.
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+
+    if parent_pid is None:
+        parent_pid = os.getpid()
+        include_parent = False
+
+    try:
+        itself = psutil.Process(parent_pid)
+    except psutil.NoSuchProcess:
+        return
+
+    children = itself.children(recursive=True)
+    for child in children:
+        if child.pid == skip_pid:
+            continue
+        with contextlib.suppress(psutil.NoSuchProcess):
+            child.kill()
+
+    if include_parent:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            if parent_pid == os.getpid():
+                itself.kill()
+                sys.exit(0)
+
+            itself.kill()
+
+            # Sometime processes cannot be killed with SIGKILL (e.g, PID=1 launched by kubernetes),
+            # so we send an additional signal to kill them.
+            itself.send_signal(signal.SIGQUIT)
+
+
+def run_e2e_files(
+    files: list[TestFile],
     timeout_per_file: float,
     continue_on_error: bool = False,
     enable_retry: bool = False,
@@ -137,26 +175,22 @@ def run_unittest_files(
     retried_tests = []  # Track which tests were retried
 
     for i, file in enumerate(files):
-        if isinstance(file, CIRegistry):
-            filename, estimated_time = file.filename, file.est_time
-        else:
-            # FIXME: remove this branch after migrating all tests to use CIRegistry
-            filename, estimated_time = file.name, file.estimated_time
+        filename, estimated_time = file.name, file.estimated_time
 
         process = None
         output_lines = []
 
-        def run_one_file(filename, capture_output=False):
+        def run_one_file(filename, estimated_time, idx, total_files, capture_output=False):
             nonlocal process, output_lines
 
             full_path = os.path.join(os.getcwd(), filename)
-            logger.info(f".\n.\nBegin ({i}/{len(files) - 1}):\npython3 {full_path}\n.\n.\n")
+            logger.info(f".\n.\nBegin ({idx}/{total_files - 1}):\npytest -sv {full_path}\n.\n.\n")
             file_tic = time.perf_counter()
 
             if capture_output:
                 # Capture output for retry decision
                 process = subprocess.Popen(
-                    ["python3", full_path],
+                    ["pytest -sv --durations=0", full_path],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     env=os.environ,
@@ -169,12 +203,14 @@ def run_unittest_files(
                     output_lines.append(line)
                 process.wait()
             else:
-                process = subprocess.Popen(["python3", full_path], stdout=None, stderr=None, env=os.environ)
+                process = subprocess.Popen(
+                    ["pytest -sv --durations=0", full_path], stdout=None, stderr=None, env=os.environ
+                )
                 process.wait()
 
             elapsed = time.perf_counter() - file_tic
 
-            logger.info(f".\n.\nEnd ({i}/{len(files) - 1}):\n{filename=}, {elapsed=:.0f}, {estimated_time=}\n.\n.\n")
+            logger.info(f".\n.\nEnd ({idx}/{total_files - 1}):\n{filename=}, {elapsed=:.0f}, {estimated_time=}\n.\n.\n")
             return process.returncode
 
         # Retry loop for each file
@@ -190,9 +226,8 @@ def run_unittest_files(
             try:
                 ret_code = run_with_timeout(
                     run_one_file,
-                    args=(filename,),
+                    args=(filename, estimated_time, i, len(files)),
                     kwargs={"capture_output": enable_retry},
-                    timeout=timeout_per_file,
                 )
 
                 if ret_code == 0:
