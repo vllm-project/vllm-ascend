@@ -119,10 +119,10 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
-        pcp_metadata = common_attn_metadata.prefill_context_parallel_metadata
-        num_actual_tokens_pcp_padded = pcp_metadata.num_actual_tokens_pcp_padded if pcp_metadata else None
-        if num_actual_tokens_pcp_padded is None:
-            num_actual_tokens_pcp_padded = num_actual_tokens
+        common_pcp_metadata = common_attn_metadata.prefill_context_parallel_metadata
+        num_actual_tokens_pcp_padded = (
+            common_pcp_metadata.num_actual_tokens_pcp_padded if common_pcp_metadata else num_actual_tokens
+        )
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens_pcp_padded]
         attn_mask = self.attn_mask_builder.get_attention_mask(self.model_config)
@@ -133,16 +133,14 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
         prefill_metadata = None
         decode_metadata = None
-        if pcp_metadata is None:
-            raise AssertionError("pcp_metadata should not be None.")
-        num_computed_tokens_of_pcp_dcp = pcp_metadata.num_computed_tokens_of_pcp_dcp
+        assert common_pcp_metadata is not None
+        num_computed_tokens_of_pcp_dcp = common_pcp_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
         chunked_context_metadata = None
         if num_prefills > 0:
             query_lens = query_lens[num_decode_tokens:]
             context_lens_cpu = num_computed_tokens_cpu[num_decodes:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
-            pcp_size = get_pcp_group().world_size
             if self.chunked_prefill_enabled and max_context_len_cpu > 0:
                 local_context_lens_allranks = (
                     torch.tensor(num_computed_tokens_of_pcp_dcp)[num_decodes:num_reqs]
@@ -159,8 +157,9 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 # Note(qcs): we only do restore and recover for pcp, and set these vars to None
                 # when only using dcp.
                 if self.pcp_size > 1:
+                    assert common_pcp_metadata.pcp_allgather_restore_idx is not None
                     kv_inverse_idx_for_chunk = torch.argsort(
-                        pcp_metadata.pcp_allgather_restore_idx[pcp_size * num_decode_tokens :].to(
+                        common_pcp_metadata.pcp_allgather_restore_idx[pcp_size * num_decode_tokens :].to(
                             torch.float32
                         )
                     )
@@ -177,7 +176,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                     self.device
                 )
                 chunked_context_metadata = AscendMetadataForPrefill.ChunkedContextMetadata(
-                    actual_chunk_seq_lengths=torch.cumsum(query_lens * pcp_size, dim=0),
+                    actual_chunk_seq_lengths=torch.cumsum(query_lens * self.pcp_size, dim=0),
                     actual_seq_lengths_kv=actual_seq_lengths_kv,
                     chunked_req_mask=chunked_req_mask,
                     starts=local_chunk_starts,
@@ -188,26 +187,29 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                     chunk_seq_mask_filtered_indices=chunk_seq_mask_filtered_indices,
                     local_total_toks=local_total_toks.item(),
                 )
-            attn_mask_seqlens = pcp_metadata.attn_mask_seqlens
-            head_attn_nomask_seqlens = pcp_metadata.head_attn_nomask_seqlens
-            tail_attn_nomask_seqlens = pcp_metadata.tail_attn_nomask_seqlens
-            if pcp_size > 1:
+            attn_mask_seqlens = common_pcp_metadata.attn_mask_seqlens
+            head_attn_nomask_seqlens = common_pcp_metadata.head_attn_nomask_seqlens
+            tail_attn_nomask_seqlens = common_pcp_metadata.tail_attn_nomask_seqlens
+            assert head_attn_nomask_seqlens is not None
+            assert tail_attn_nomask_seqlens is not None
+            assert attn_mask_seqlens is not None
+            if self.pcp_size > 1:
                 attn_mask_seqlens = torch.cumsum(attn_mask_seqlens[0], dim=0).tolist()
                 head_attn_nomask_seqlens = torch.cumsum(head_attn_nomask_seqlens[1], dim=0).tolist()
                 tail_attn_nomask_seqlens = torch.cumsum(tail_attn_nomask_seqlens[1], dim=0).tolist()
 
             pcp_metadata = AscendPCPMetadata(
-                q_head_idx=pcp_metadata.q_head_idx,
-                q_tail_idx=pcp_metadata.q_tail_idx,
-                kv_with_q_head_nomask_idx=pcp_metadata.kv_with_q_head_nomask_idx,
-                kv_with_q_head_mask_idx=pcp_metadata.kv_with_q_head_mask_idx,
-                kv_with_q_tail_nomask_idx=pcp_metadata.kv_with_q_tail_nomask_idx,
-                kv_with_q_tail_mask_idx=pcp_metadata.kv_with_q_tail_mask_idx,
+                q_head_idx=common_pcp_metadata.q_head_idx,
+                q_tail_idx=common_pcp_metadata.q_tail_idx,
+                kv_with_q_head_nomask_idx=common_pcp_metadata.kv_with_q_head_nomask_idx,
+                kv_with_q_head_mask_idx=common_pcp_metadata.kv_with_q_head_mask_idx,
+                kv_with_q_tail_nomask_idx=common_pcp_metadata.kv_with_q_tail_nomask_idx,
+                kv_with_q_tail_mask_idx=common_pcp_metadata.kv_with_q_tail_mask_idx,
                 attn_mask_seqlens=attn_mask_seqlens,
                 head_attn_nomask_seqlens=head_attn_nomask_seqlens,
                 tail_attn_nomask_seqlens=tail_attn_nomask_seqlens,
-                q_full_idx=pcp_metadata.q_full_idx,
-                pcp_allgather_restore_idx=pcp_metadata.pcp_allgather_restore_idx,
+                q_full_idx=common_pcp_metadata.q_full_idx,
+                pcp_allgather_restore_idx=common_pcp_metadata.pcp_allgather_restore_idx,
             )
 
             prefill_metadata = AscendMetadataForPrefill(

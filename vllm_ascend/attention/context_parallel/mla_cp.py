@@ -107,9 +107,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
         # In dcp only spec decode graph padding case,
         # num_actual_tokens_pcp_padded may be less than num_actual_tokens
-        self.num_actual_tokens = max(
-            pcp_metadata.num_actual_tokens_pcp_padded, common_attn_metadata.num_actual_tokens
-        )
+        self.num_actual_tokens = max(pcp_metadata.num_actual_tokens_pcp_padded, common_attn_metadata.num_actual_tokens)
 
     def build_cp_metadata(
         self,
