@@ -2778,7 +2778,8 @@ class NPUModelRunner(GPUModelRunner):
                     get_supported_block_size = getattr(backend, "get_supported_block_size", None)
                     # If the backend has the method, call it.
                     if get_supported_block_size:
-                        kernel_block_size_list = get_supported_block_size()
+                        if supported_sizes := get_supported_block_size():
+                            kernel_block_size_list = supported_sizes
                 kernel_block_sizes.append(kernel_block_size_list)
             else:
                 # This is likely Mamba or other non-attention cache,
