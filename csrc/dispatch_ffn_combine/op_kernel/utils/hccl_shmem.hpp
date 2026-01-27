@@ -5,13 +5,22 @@
 #include "kernel_operator.h"
 #include "const_args.hpp"
 
+#ifdef HCCL_COMM
 #include "moe_distribute_base.h"
+using namespace AscendC::HcclContextDef;
 
-#ifndef HCCL_COMM
+#else
 #include "shmem_api.h"
 #endif
 
 #define FORCE_INLINE_AICORE inline __attribute__((always_inline)) __aicore__
+constexpr int32_t MAX_RANK_SIZE = 32;
+constexpr int32_t SHMEM_MEM = 700 * MB_SIZE;
+
+FORCE_INLINE_AICORE void AicSyncAll() {
+    AscendC::CrossCoreSetFlag<0x0, PIPE_FIX>(8);
+    AscendC::CrossCoreWaitFlag<0x0>(8);
+}
 
 template<typename T>
 FORCE_INLINE_AICORE void gm_store(__gm__ T *addr, T val) {
@@ -23,10 +32,11 @@ FORCE_INLINE_AICORE T gm_load(__gm__ T *cache) {
     return *((__gm__ T *)cache);
 }
 
-FORCE_INLINE_AICORE void gm_dcci(__gm__ uint8_t * addr) {
+template<typename T>
+FORCE_INLINE_AICORE void gm_dcci(__gm__ T * addr) {
     using namespace AscendC;
     GlobalTensor<uint8_t> global;
-    global.SetGlobalBuffer(addr);
+    global.SetGlobalBuffer(reinterpret_cast<GM_ADDR>(addr));
 
     // Important: add hint to avoid dcci being optimized by compiler
     __asm__ __volatile__("");
@@ -37,26 +47,20 @@ FORCE_INLINE_AICORE void gm_dcci(__gm__ uint8_t * addr) {
 FORCE_INLINE_AICORE int32_t gm_signal_wait_until_eq_for_barrier(__gm__ int32_t *sig_addr, int32_t cmp_val) {
     do {
         gm_dcci((__gm__ uint8_t *)sig_addr);
-
         if (*sig_addr == cmp_val) {
             return *sig_addr;
         }
-
-        // in case when peer pe enters next barrier
         if (*sig_addr == cmp_val + 1) {
             return *sig_addr;
         }
     } while (true);
-
-    // never reach
     return -1;
 }
-
 
 FORCE_INLINE_AICORE void gm_signal_wait_until_ne(__gm__ int32_t *sig_addr, int32_t cmp_val) {
     do {
         AscendC::LocalTensor<int32_t> ub;
-        ub.address_.logicPos = static_cast<uint8_t>(TPosition::VECIN);
+        ub.address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::VECIN);
         ub.address_.bufferAddr = 0;
         AscendC::GlobalTensor<int32_t> sig;
         sig.SetGlobalBuffer(sig_addr);
@@ -136,14 +140,27 @@ public:
             return (GM_ADDR)((rankId == m_rank) ? WinContext_->localWindowsIn :
                                     ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[rankId].nextDevicePtr))->windowsIn) + offset;
         #else
-            return shmem_ptr(shmemi_get_state()->heap_base + offset, rankId);
+            return reinterpret_cast<GM_ADDR>(shmem_ptr((symmetricPtr + offset), rankId));
         #endif
+    }
+
+
+
+    FORCE_INLINE_AICORE
+    size_t SegmentSize() const {
+        return m_segmentSize;
+    }
+
+    FORCE_INLINE_AICORE
+    int32_t RankSize() const {
+        return m_rankSize;
     }
 
 
     FORCE_INLINE_AICORE
     ~HcclShmem() {
     }
+
 
     FORCE_INLINE_AICORE
     void CrossRankSync() {
@@ -170,7 +187,15 @@ public:
         uint64_t flag_offset = (m_segmentSize - MB_SIZE) / sizeof(int32_t);
         return (__gm__ int32_t*)(*this)() + flag_offset + 2048;
     }
+
+private:
+    GM_ADDR symmetricPtr;
+    int32_t m_rank;
+    int32_t m_rankSize;
+    size_t m_segmentSize;
 };
+
+
 
 
 #endif
