@@ -1,6 +1,5 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from llmcompressor import oneshot
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 MODEL_ID = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 

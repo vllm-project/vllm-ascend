@@ -187,8 +187,9 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 AscendUnquantizedFusedMoEMethod
 
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
+            layer_name = prefix + ".0.gate_proj"
             # Get the scheme for this layer
-            moe_scheme = self._get_moe_scheme(layer=layer, layer_name=prefix)
+            moe_scheme = self._get_moe_scheme(layer=layer, layer_name=layer_name)
 
             # Return unquantized method if no scheme found
             if moe_scheme is None:
