@@ -67,6 +67,7 @@ DEFAULT_CONDA_PATTERNS = {
     "transformers",
     "zmq",
     "pynvml",
+    "triton-ascend",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -79,6 +80,7 @@ DEFAULT_PIP_PATTERNS = {
     "transformers",
     "zmq",
     "pynvml",
+    "triton-ascend",
 }
 
 
