@@ -38,6 +38,7 @@ vllm serve Qwen/Qwen2-7B-Instruct
 
 - For the intermediate nodes of the model, replace the non-in-place operators contained in the nodes with in-place operators to reduce memory movement during computation and improve performance.
 - For the original input parameters of the model, if they include in-place operators, Dynamo's Functionalize process will replace the in-place operators with a form of non-in-place operators + copy operators. npugraph_ex will reverse this process, restoring the in-place operators and reducing memory movement.
+
 ### Fx default fusion pass
 npugraph_ex provides three default operator fusion passes. Operator combinations that meet the replacement rules can be replaced with the corresponding fused operators.
 
@@ -63,7 +64,6 @@ register_replacement(search_fn, replace_fn, example_inputs, trace_fn=fwd_only, e
 |trace_fn|Input|By default, only the forward computation graph is tracked, which is suitable for optimization during the inference phase; if training scenarios need to be supported, a function that supports backward tracking can be provided.|No|
 |extra_check|Input|Find the extra verification function after operator fusion. The function's input parameter must be a Match object from torch._inductor.pattern_matcher, and it is used for further custom checks on the matching result, such as checking whether the fused operators are on the same stream, checking the device type, checking the input shapes, and so on.|No|
 |search_fn_pattern|Input|A custom pattern object is generally unnecessary to provide. Its definition follows the rules of the native PyTorch MultiOutputPattern object. After passing this parameter, search_fn will no longer be used to match operator combinations; instead, this parameter will be used directly as the matching rule.|No|
-
 
 Usage Example
 
@@ -122,4 +122,3 @@ with fake_mode:
 ### DFX
 
 By reusing the TORCH_COMPILE_DEBUG environment variable from the PyTorch community, when TORCH_COMPILE_DEBUG=1 is set, it will output the FX graphs throughout the entire process.
-
