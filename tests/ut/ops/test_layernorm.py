@@ -70,7 +70,7 @@ def test_RMSNorm_forward(
 @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P)
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
 def test_RMSNorm_forward_310p(
-    mock_add_rms_norm_bias, mock_add_rmsnorm, mock_rmsnorm, device_type, residual, dummy_tensor, default_vllm_config
+    mock_rmsnorm, device_type, residual, dummy_tensor, default_vllm_config
 ):
     layer = RMSNorm(hidden_size=8, eps=1e-05)
     if residual is not None:

@@ -105,7 +105,7 @@ def test_SiluAndMul_forward_310p(
     # assert mock_maybe_prefetch_mlp_down_proj.call_count == 1
     mock_maybe_prefetch_mlp_down_proj.assert_called_once()
 
-    # assert mock_swiglu.call_count == 1
+    # assert mock_silu.call_count == 1
     mock_silu.assert_called_once()
 
     # assert mock_maybe_wait_prefetch_done.call_count == 1
