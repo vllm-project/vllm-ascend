@@ -100,6 +100,7 @@ def test_SiluAndMul_forward_310p(
 ):
     layer = SiluAndMul()
     out = layer.forward(dummy_tensor)
+    h = dummy_tensor.shape[-1] // 2
     expected_arg = dummy_tensor[..., :h]
 
     # assert mock_maybe_prefetch_mlp_down_proj.call_count == 1
@@ -114,6 +115,5 @@ def test_SiluAndMul_forward_310p(
     actual_arg = mock_silu.call_args[0][0]
     assert torch.allclose(actual_arg, expected_arg), "swiglu called with unexpected input"
 
-    h = dummy_tensor.shape[-1] // 2
     expected_out = (dummy_tensor[..., :h] + 1) * dummy_tensor[..., h:]
     assert torch.allclose(out, expected_out)
