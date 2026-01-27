@@ -157,13 +157,19 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                     (len(local_context_lens_allranks)),
                     dtype=torch.int32,
                     device=self.device)
-                kv_inverse_idx_for_chunk = torch.argsort(
-                    common_long_seq_metadata.
-                    pcp_allgather_restore_idx[pcp_size *
-                                              num_decode_tokens:].to(
-                                                  torch.float32))
-                cp_kv_recover_idx_for_chunk = torch.argsort(
-                    kv_inverse_idx_for_chunk)
+                # Note(qcs): we only do restore and recover for pcp, and set these vars to None
+                # when only using dcp.
+                if self.pcp_size > 1:
+                    kv_inverse_idx_for_chunk = torch.argsort(
+                        common_long_seq_metadata.
+                        pcp_allgather_restore_idx[pcp_size *
+                                                  num_decode_tokens:].to(
+                                                      torch.float32))
+                    cp_kv_recover_idx_for_chunk = torch.argsort(
+                        kv_inverse_idx_for_chunk)
+                else:
+                    kv_inverse_idx_for_chunk = None
+                    cp_kv_recover_idx_for_chunk = None
 
                 batch_chunk_seq_mask = (
                     local_context_lens_allranks[:, self.pcp_rank,
