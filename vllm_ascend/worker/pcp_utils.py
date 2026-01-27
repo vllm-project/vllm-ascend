@@ -75,11 +75,13 @@ class PCPManager:
             dtype=torch.int32,
             device=device,
         )
+        self.pcp_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.total_num_sampled_tokens_pcp = 0
         self.num_pcp_pads_cpu_tensor = torch.zeros((max_num_reqs, ),
                                                    device="cpu",
                                                    dtype=torch.int64)
         self.num_pcp_pads_cpu = self.num_pcp_pads_cpu_tensor.numpy()
-        self.pcp_unpad_mask_cpu_tensor = torch.zeros(
+        self.pcp_unpad_mask_cpu_tensor = torch.ones(
             (max_buffer_num_tokens, ),
             device="cpu",
             dtype=torch.bool,
@@ -292,6 +294,8 @@ class PCPManager:
             all_positions.argsort())
         self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
 
+        self.pcp_tokens[:num_reqs] = pcp_tokens[:num_reqs]
+        self.total_num_sampled_tokens_pcp = pcp_tokens[:num_reqs].sum()
         return (
             pcp_tokens[:num_reqs],
             positions,
@@ -312,17 +316,16 @@ class PCPManager:
                 num_scheduled_tokens * self.pcp_world_size -
                 self.num_pcp_pads_cpu[:num_reqs]) < num_tokens_np
 
-    def get_padded_slot_mapping(self, num_tokens: int,
+    def get_padded_slot_mapping(self, num_tokens: int, num_tokens_padded: int,
                                 slot_mapping: torch.Tensor):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
-        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[:num_tokens *
-                                                               self.
-                                                               pcp_world_size]
+        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[:num_tokens_padded * self.pcp_world_size]
+
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[:num_tokens *
                                                        self.pcp_world_size]
         pcp_padded_slot_mapping.fill_(-1)
-        pcp_padded_slot_mapping[cp_unpad_mask] = slot_mapping
+        pcp_padded_slot_mapping[:num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping
         return pcp_padded_slot_mapping
 
     def get_restore_hidden_states(

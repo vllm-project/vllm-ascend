@@ -123,6 +123,7 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
     vllm_config.speculative_config.num_speculative_tokens = 0
+    vllm_config.scheduler_config.max_num_seqs = 1000
 
     pcp_manager = PCPManager(pcp_world_size=pcp_size,
                              pcp_rank=0,
