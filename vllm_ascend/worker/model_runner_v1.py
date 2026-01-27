@@ -1078,15 +1078,6 @@ class NPUModelRunner(GPUModelRunner):
 
         return draft_token_ids
 
-    @staticmethod
-    def get_finished_kv_transfer(
-        scheduler_output: "SchedulerOutput",
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
-        if has_kv_transfer_group():
-            return get_kv_transfer_group().get_finished(
-                scheduler_output.finished_req_ids)
-        return None, None
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1285,21 +1276,13 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_desc,
                     num_actual_tokens=scheduler_output.
                     total_num_scheduled_tokens,
-                    model_instance=self.model)):
-                self.maybe_setup_kv_connector(scheduler_output)
-
+                    model_instance=self.model,
+                    skip_compiled=has_encoder_input),
+                self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
+            ):
                 hidden_states = self._model_forward(
                     num_tokens_padded, input_ids, positions,
                     intermediate_tensors, inputs_embeds, **model_kwargs)
-            self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = self.get_finished_kv_transfer(
-                scheduler_output)
-
-        kv_connector_output = KVConnectorOutput(
-            finished_sending=finished_sending,
-            finished_recving=finished_recving)
-        finished_sending = None
-        finished_recving = None
         with (ProfileExecuteDuration().capture_async("post process")):
             if self.pcp_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
