@@ -130,8 +130,10 @@ class KVPoolWorker:
         self.token_database = ChunkedTokenDatabase(self.metadata, self.block_size, self.use_mla, partitions)
 
         backend = backend_map.get(self.backend.lower())
+        assert backend is not None
         backend_path = backend.get("path")
         backend_name = backend.get("name")
+        assert backend_path is not None and backend_name is not None
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
