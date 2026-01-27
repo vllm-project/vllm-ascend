@@ -115,7 +115,7 @@ class TestModelWithBias(nn.Module):
                                         dtype=dtype,
                                         device=device)
 
-    def forward(self, x): 
+    def forward(self, x):
         """
         Forward pass:
           1. Perform npu_add_rms_norm
