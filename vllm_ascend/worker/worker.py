@@ -561,7 +561,7 @@ class NPUWorker(WorkerBase):
                 aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
                 l2_cache=False,
                 op_attr=False,
-                data_simplification=False,
+                data_simplification=True,
                 record_op_args=False,
                 gc_detect_threshold=None,
             )
@@ -571,9 +571,11 @@ class NPUWorker(WorkerBase):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU,
                 ],
-                with_stack=profiler_config.torch_profiler_with_stack,
+                with_stack=False,
                 profile_memory=profiler_config.torch_profiler_with_memory,
-                with_modules=False,
+                # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
+                # The with_stack option in torch_npu.profiler introduces significant time overhead.
+                with_modules=profiler_config.torch_profiler_with_stack,
                 experimental_config=experimental_config,
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir))
