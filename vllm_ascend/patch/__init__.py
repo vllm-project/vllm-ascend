@@ -67,19 +67,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
 #
-# ** 5. File: platform/patch_sched_yield.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.utils.USE_SCHED_YIELD`
-#    Why:
-#       os.sched_yield() doesn't work on Arm systems.
-#    How：
-#       avoid using os.sched_yield() on Arm systems.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/30228
-#    Future Plan:
-#       Remove this patch when vLLM merge the PR.
-#
-# ** 6. File: platform/patch_balance_schedule.py**
+# ** 5. File: platform/patch_balance_schedule.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
 #      `vllm.v1.core.sched.scheduler.Scheduler`
