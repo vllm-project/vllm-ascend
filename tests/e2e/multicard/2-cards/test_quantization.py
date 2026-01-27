@@ -65,3 +65,24 @@ def test_qwen3_moe_w8a8_dynamic_llm_compressor():
     for i in range(len(vllm_output)):
         assert golden_results[i] == vllm_output[i][1]
         print(f"Generated text: {vllm_output[i][1]!r}")
+
+def test_qwen3_moe_w4a8_dynamic_llm_compressor():
+    example_prompts = [
+        "The president of the United States is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+            "vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w4a8",
+            tensor_parallel_size=2,
+            max_model_len=4096,
+            gpu_memory_utilization=0.8,
+    ) as vllm_model:
+        vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+    golden_results = [
+        'The president of the United States is the head of state and',
+    ]
+
+    for i in range(len(vllm_output)):
+        assert golden_results[i] == vllm_output[i][1]
+        print(f"Generated text: {vllm_output[i][1]!r}")
