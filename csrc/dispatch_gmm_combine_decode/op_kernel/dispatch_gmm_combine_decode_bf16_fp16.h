@@ -110,9 +110,9 @@ CATLASS_DEVICE void GmmDeqSwigluQuant(GemmCoord problemShape, uint32_t groupCoun
 
     using GemmKernel = typename std::conditional<
         (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE),
-        Gemm::Kernel::GroupedMatmulSliceMSwigluQuantMultiStageWorkspace<
+        Gemm::Kernel::GroupedMatmulSliceMSwigluMultiStageWorkspace<
             TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>,
-        Gemm::Kernel::GroupedMatmulSliceMSwigluQuantMultiStageWorkspaceWithShallowDispatch<
+        Gemm::Kernel::GroupedMatmulSliceMSwigluMultiStageWorkspaceWithShallowDispatch<
             TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>>::type;
 
     if constexpr (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) {
@@ -314,7 +314,7 @@ __aicore__ inline void DispatchGmmCombineDecodeBf16Fp16<TemplateMC2TypeFunc>::In
     gmScale2_ = nullptr;
     gmOutput_ = output;
     gmExpertTokenNums_ = expertTokenNums;
-    workspaceGM_ = expert_smooth_scales; // for debug 
+    workspaceGM_ = workspaceGM;
     gmexpertScales_ = expert_scales;
     xActiveMask_ = x_active_mask;
     tilingData_ = tilingData;
@@ -425,7 +425,6 @@ __aicore__ inline void DispatchGmmCombineDecodeBf16Fp16<TemplateMC2TypeFunc>::Pr
     } else {
         Arch::CrossCoreWaitFlag(gmm1AivFinished);
     }
-    // return; // for debug
 
     MoeDistributeCombineImpl::CamMoeDistributeCombine<TemplateMC2TypeFunc> combiner;
     if (g_coreType == AscendC::AIV) {

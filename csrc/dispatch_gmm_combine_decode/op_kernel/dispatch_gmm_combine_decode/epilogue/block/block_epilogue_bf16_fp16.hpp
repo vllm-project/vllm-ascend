@@ -48,13 +48,13 @@ public:
     using LayoutD = typename DType_::Layout;
 
     // Check data infos
-    // static_assert(std::is_same_v<ElementC, int32_t> &&
-    //                   (std::is_same_v<ElementD, half> || std::is_same_v<ElementD, bfloat16_t>),
-    //               "The element type template parameters of BlockEpilogue are wrong");
-    // static_assert(std::is_same_v<LayoutC, layout::RowMajor> && std::is_same_v<LayoutScale, layout::VectorLayout> &&
-    //                   std::is_same_v<LayoutPerTokenScale, layout::VectorLayout> &&
-    //                   std::is_same_v<LayoutD, layout::RowMajor>,
-    //               "The layout template parameters of BlockEpilogue are wrong");
+    static_assert(std::is_same_v<ElementC, float> &&
+                      (std::is_same_v<ElementD, half> || std::is_same_v<ElementD, bfloat16_t>),
+                  "The element type template parameters of BlockEpilogue are wrong");
+    static_assert(std::is_same_v<LayoutC, layout::RowMajor> && std::is_same_v<LayoutScale, layout::VectorLayout> &&
+                      std::is_same_v<LayoutPerTokenScale, layout::VectorLayout> &&
+                      std::is_same_v<LayoutD, layout::RowMajor>,
+                  "The layout template parameters of BlockEpilogue are wrong");
 
     // Tile compute ops
     using TileRowBroadcastMul = TileRowBroadcastMul_;
@@ -75,14 +75,10 @@ public:
                       std::is_same_v<TileShape, typename TileOneBlkColumnBroadcastMul::TileShape>,
                   "TileShape must be consistent for all tile compute ops");
 
-    // static_assert((UB_STAGES * (TileShape::COUNT * sizeof(ElementC) +
-    //                             (std::is_same_v<ElementRawScale, ElementFp32Scale> ?
-    //                                 0 : TileShape::COLUMN * sizeof(ElementRawScale)) +
-    //                             TileShape::COLUMN * sizeof(ElementFp32Scale) +
-    //                             TileShape::ROW * sizeof(ElementPerTokenScale) + TileShape::COUNT * sizeof(ElementD)) +
-    //                (TileShape::COUNT + TileShape::COUNT) * sizeof(float) + TileShape::ROW * BYTE_PER_BLK) <=
-    //                   ArchTag::UB_SIZE,
-    //               "TileShape is too large to fit in UB");
+    static_assert((UB_STAGES * (TileShape::COUNT * sizeof(ElementC) + TileShape::COUNT * sizeof(ElementD)) +
+                   TileShape::ROW * BYTE_PER_BLK) <= ArchTag::UB_SIZE,
+                  "TileShape is too large to fit in UB");
+
     struct Params {
         __gm__ ElementRawScale *ptrScale{nullptr};
         LayoutScale layoutScale{};
@@ -123,14 +119,6 @@ public:
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
             ubCList[i] = resource.ubBuf.template GetBufferByByte<ElementC>(ubOffset);
             ubOffset += TileShape::COUNT * sizeof(ElementC);
-            if constexpr (!std::is_same_v<ElementRawScale, ElementFp32Scale>) {
-                ubRawScaleList[i] = resource.ubBuf.template GetBufferByByte<ElementRawScale>(ubOffset);
-                ubOffset += TileShape::COLUMN * sizeof(ElementRawScale);
-            }
-            ubFp32ScaleList[i] = resource.ubBuf.template GetBufferByByte<ElementFp32Scale>(ubOffset);
-            ubOffset += TileShape::COLUMN * sizeof(ElementFp32Scale);
-            ubPerTokenScaleList[i] = resource.ubBuf.template GetBufferByByte<ElementPerTokenScale>(ubOffset);
-            ubOffset += TileShape::ROW * sizeof(ElementPerTokenScale);
             ubDList[i] = resource.ubBuf.template GetBufferByByte<ElementD>(ubOffset);
             ubOffset += TileShape::COUNT * sizeof(ElementD);
 
@@ -315,9 +303,6 @@ private:
     MoeDistributeCombineImpl::CombineCalcInfo calcInfo;
 
     AscendC::LocalTensor<ElementC> ubCList[UB_STAGES];
-    AscendC::LocalTensor<ElementRawScale> ubRawScaleList[UB_STAGES];
-    AscendC::LocalTensor<ElementFp32Scale> ubFp32ScaleList[UB_STAGES];
-    AscendC::LocalTensor<ElementPerTokenScale> ubPerTokenScaleList[UB_STAGES];
     AscendC::LocalTensor<ElementD> ubDList[UB_STAGES];
 
     int32_t eventUbCVMTE2List[UB_STAGES];
