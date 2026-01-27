@@ -19,6 +19,7 @@ from vllm_ascend.worker.recovery_context import RecoveryContext
 class FaultTolerance:
     _recovery_group = None
     _sync_group = None
+
     def __init__(self,vllm_config:VllmConfig,model_runner):
         self.model_runner = model_runner
         self.vllm_config = vllm_config
@@ -32,6 +33,7 @@ class FaultTolerance:
         self._init_recovery_group()
         self._init_sync_group()
 
+        self.state_backup = {}
         self.aware_event = threading.Event()
         FaultAware(
             self.rank,self.world_size,self.fault_queue,aware_event=self.aware_event
@@ -74,16 +76,56 @@ class FaultTolerance:
 
         return recovery_handler_manager
 
-    def fault_tolerance_decorator(self, func: Callable,max_retries: int) -> Callable:
+    def execute_dummy_decorator(self,func:Callable,max_retries: int) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries + 1):
+                dummy_backup = self._create_essential_state_backup(*args, **kwargs)
+                try:
+                    output = func(*args, **kwargs)
+                    self._all_gather_for_sync_group()
+                    return output
+                except Exception as e:
+                    if attempt >= max_retries:
+                        logger.warning(f"Max retries {max_retries} exceeded at rank {self.rank}，raising exception: {e}")
+                        raise e
+                    # Encapsulate the context information required for fault recovery.
+                    recovery_context = RecoveryContext(
+                        exception=e,
+                        fault_queue=self.fault_queue,
+                        back_up=dummy_backup
+                    )
+                    ft_action = self._handle_exception(recovery_context)
+                    if torch.equal(ft_action, FaultAction.RECOMPUTE):
+                        self.aware_event.set()
+                        self.execute_model_decorator(*ctx.back_up['args'], **ctx.back_up['kwargs'])
+                        logger.info(f"Begin token re-inference at rank {self.rank}")
+                        continue
+                    elif torch.equal(ft_action, FaultAction.RAISE_EXCEPTION):
+                        logger.info(f"Raise exception at rank {self.rank}")
+                        raise e
+                    elif torch.equal(ft_action, FaultAction.RETURN):
+                        logger.info(f"Abort current batch at rank {self.rank}")
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+            return EMPTY_MODEL_RUNNER_OUTPUT
+        return wrapper
+
+    def execute_model_decorator(self, func: Callable) -> Callable:
         """fault tolerance decorator is used to modify the execute_model for exception handling."""
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            self.state_backup = self._create_essential_state_backup(*args,**kwargs)
+            output = func(*args, **kwargs)
+            return output
+        return wrapper
+
+    def sample_token_decorator(self,func:Callable,max_retries: int) -> Callable:
+        def wrapper(*args, **kwargs):
             # Enable fault tolerance
-            for attempt in range(max_retries):
-                state_backup = self._create_essential_state_backup()
+            for attempt in range(max_retries + 1):
                 try:
                     output = func(*args, **kwargs)
-                    torch.npu.synchronize()
+                    # TODO:这里的跳过逻辑要细看一下，感觉可以根据是否调度了token来跳过（scheduler_output)
                     if output is not EMPTY_MODEL_RUNNER_OUTPUT:
                         self._all_gather_for_sync_group()
                     return output
@@ -95,17 +137,18 @@ class FaultTolerance:
                     recovery_context = RecoveryContext(
                         exception=e,
                         fault_queue=self.fault_queue,
-                        back_up=state_backup
+                        back_up=self.state_backup
                     )
                     ft_action = self._handle_exception(recovery_context)
-                    if torch.equal(ft_action,FaultAction.RECOMPUTE):
+                    if torch.equal(ft_action, FaultAction.RECOMPUTE):
                         self.aware_event.set()
+                        self.execute_model_decorator(*ctx.back_up['args'], **ctx.back_up['kwargs'])
                         logger.info(f"Begin token re-inference at rank {self.rank}")
                         continue
-                    elif torch.equal(ft_action,FaultAction.RAISE_EXCEPTION):
+                    elif torch.equal(ft_action, FaultAction.RAISE_EXCEPTION):
                         logger.info(f"Raise exception at rank {self.rank}")
                         raise e
-                    elif torch.equal(ft_action,FaultAction.RETURN):
+                    elif torch.equal(ft_action, FaultAction.RETURN):
                         logger.info(f"Abort current batch at rank {self.rank}")
                         return EMPTY_MODEL_RUNNER_OUTPUT
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -165,6 +208,7 @@ class FaultTolerance:
         Restart device and reinit process group
         """
         try:
+            # TODO: 在这里加入一个threading.event，由FaultAware唤醒，防止极端情况下全部卡都抛异常，导致restart逻辑在stop前
             torch_npu.npu.restart_device(torch.npu.current_device())
             torch.distributed.reinit_process_group(group=None, rebuild_link=False)
             self.model_runner.execute_model_state = None
@@ -284,10 +328,17 @@ class FaultTolerance:
         return recv_ft_action
 
 
-    def _create_essential_state_backup(self):
+    def _create_essential_state_backup(self,*args,**kwargs) -> None:
         backup = {}
         if not hasattr(self.model_runner,'requests') or not hasattr(self.model_runner,'input_batch'):
             return backup
+        # Backup input for execute_model
+        backup['args'] = args
+        backup['kwargs'] = kwargs
+
+        # Backup common state
+        backup['generator_state'] = torch_npu.npu.get_rng_state()
+
         # Backup requests
         requests_backup = {}
         for req_id,state in self.model_runner.requests.items():
@@ -300,6 +351,7 @@ class FaultTolerance:
             requests_backup[req_id] = req_backup
 
         backup['requests_essential'] = requests_backup
+        # TODO:Update this when using ModelRunnerV2
         # Backup input_batch
         ib = self.model_runner.input_batch
 
@@ -316,17 +368,44 @@ class FaultTolerance:
 
         if hasattr(ib,'prev_sampled_token_ids') and ib.prev_sampled_token_ids is not None:
             backup['prev_sampled_token_ids'] = ib.prev_sampled_token_ids.clone()
+
+        # Backup eplb updator
+        if hasattr(self.model_runner,'eplb_updator'):
+            eplb = self.model_runner.eplb_updator
+            backup['update_info_all'] = (
+                eplb.update_info_all.copy()
+                if hasattr(eplb,'update_info_all')
+                else None
+            )
+            backup['reqs'] = (
+                eplb.reqs.copy()
+                if hasattr(eplb,'reqs')
+                else None
+            )
+            backup['cur_iterations'] = (
+                eplb.cur_iterations
+                if hasattr(eplb,'cur_iterations')
+                else None
+            )
+
         return backup
 
     def _restore_essential_state(self,backup):
         if not backup:
             return
+        # Rollback common state
+        if 'generator_state' in backup:
+            torch_npu.npu.set_rng_state(backup['generator_state'])
+
+        # Rollback request state
         if 'requests_essential' in backup and hasattr(self.model_runner,'requests'):
             for req_id,req_backup in backup['requests_essential'].items():
                 if req_id in self.model_runner.requests:
                     state = self.model_runner.requests[req_id]
                     state.output_token_ids = req_backup['output_token_ids']
                     state.num_computed_tokens = req_backup['num_computed_tokens']
+
+        # Rollback inputbatch state
         if hasattr(self.model_runner,'input_batch'):
             ib = self.model_runner.input_batch
 
@@ -346,3 +425,16 @@ class FaultTolerance:
                         target[:] = backup[attr_name]
             if 'prev_sampled_token_ids' in backup and hasattr(ib,'prev_sampled_token_ids'):
                 ib.prev_sampled_token_ids = backup['prev_sampled_token_ids']
+
+        # Rollback eplb state
+        if hasattr(self.model_runner,'eplb_updator'):
+            eplb = self.model_runner.eplb_updator
+
+            if 'update_info_all' in backup:
+                eplb.update_info_all = backup['update_info_all']
+
+            if 'reqs' in backup:
+                eplb.reqs = backup['reqs']
+
+            if 'cur_iterations' in backup:
+                eplb.cur_iterations = backup['cur_iterations']
