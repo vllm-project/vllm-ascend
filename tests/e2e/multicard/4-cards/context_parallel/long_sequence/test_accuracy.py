@@ -17,7 +17,7 @@
 """
 Compare the outputs of vLLM with and without context parallel.
 
-Run `pytest tests/e2e/multicard/long_sequence/test_accuracy.py`.
+Run `pytest tests/e2e/multicard/context_parallel/test_accuracy.py`.
 """
 
 import pytest
@@ -33,7 +33,7 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [10])
-def test_models_long_sequence_output_between_tp_and_cp(
+def test_accuracy_between_tp_and_cp(
     model: str,
     max_tokens: int,
 ) -> None:
@@ -214,7 +214,7 @@ def test_accuracy_pcp_only(max_tokens: int, ) -> None:
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [10])
-def test_models_long_sequence_cp_kv_interleave_size_output_between_tp_and_cp(
+def test_accuracy_with_cp_kv_interleave_size_output_between_tp_and_cp(
     model: str,
     max_tokens: int,
 ) -> None:
