@@ -41,7 +41,7 @@ from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.utils import \
     prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, shared_expert_dp_enabled
+from vllm_ascend.utils import enable_sp, shared_expert_dp_enabled, lmhead_tp_enable
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -395,7 +395,8 @@ class EagleProposer(VllmEagleProposer):
                 in_profile_run=is_profile,
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=aclgraph_runtime_mode,
-                is_draft_model=True):
+                is_draft_model=True,
+                draft_attn_metadatas=multi_steps_attn_metadata):
 
             self._runnable(
                 num_input_tokens=num_tokens,
@@ -405,6 +406,7 @@ class EagleProposer(VllmEagleProposer):
                 target_positions=model_positions,
                 inputs_embeds=None,
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
+                is_dummy=True,
             )
             forward_context = get_forward_context()
             if (forward_context.cudagraph_runtime_mode
@@ -551,7 +553,8 @@ class EagleProposer(VllmEagleProposer):
                 num_actual_tokens=num_tokens,
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=aclgraph_runtime_mode,
-                is_draft_model=True):
+                is_draft_model=True,
+                draft_attn_metadatas=multi_steps_attn_metadata):
 
             draft_token_ids = self._runnable(
                 num_input_tokens=num_input_tokens,
@@ -575,6 +578,7 @@ class EagleProposer(VllmEagleProposer):
                           target_positions,
                           inputs_embeds,
                           multi_steps_attn_metadata,
+                          is_dummy=False,
     ) -> torch.Tensor:
         # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all speculative tokens' proposings.
         # `model_input_ids`, `model_positions` and `model_hidden_states` are used to represent the inputs of speculative model.
@@ -600,8 +604,21 @@ class EagleProposer(VllmEagleProposer):
         last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
             last_hidden_states, model_positions, hidden_states)
 
+        num_indices = last_token_indices.shape[0]
+        if lmhead_tp_enable() and not is_dummy:
+            max_num_reqs_across_dp = (
+                self.vllm_config.scheduler_config.max_num_seqs *
+                self.runner.uniform_decode_query_len)
+            last_token_indices = nn.functional.pad(
+                last_token_indices, (0, max_num_reqs_across_dp - num_indices))
+
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
+
+        if lmhead_tp_enable() and num_indices < logits.shape[0] and not is_dummy:
+            logits = logits[:num_indices]
+            last_token_indices = last_token_indices[:num_indices]
+
         draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
@@ -699,10 +716,25 @@ class EagleProposer(VllmEagleProposer):
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
                 last_hidden_states, model_positions, hidden_states)
 
-            hidden_states = hidden_states[:batch_size]
-            logits = self.model.compute_logits(last_hidden_states[:batch_size])
+            num_indices = last_token_indices.shape[0]
+            if lmhead_tp_enable() and not is_dummy:
+                max_num_reqs_across_dp = (
+                    self.vllm_config.scheduler_config.max_num_seqs *
+                    self.runner.uniform_decode_query_len)
+                last_token_indices = nn.functional.pad(
+                    last_token_indices,
+                    (0, max_num_reqs_across_dp - num_indices),
+                )
+
+            sample_hidden_states = last_hidden_states[last_token_indices]
+            logits = self.model.compute_logits(sample_hidden_states)
+
+            if lmhead_tp_enable() and num_indices < logits.shape[0] and not is_dummy:
+                logits = logits[:num_indices]
+                last_token_indices = last_token_indices[:num_indices]
 
             # TODO(wenlong): get more than one token for tree attention
+            hidden_states = hidden_states[:batch_size]
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_tensor[draft_step + 1] = draft_token_ids
 
