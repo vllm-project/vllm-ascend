@@ -120,7 +120,7 @@ class NPUPlatform(Platform):
         Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
         """
-        return "vllm_ascend.compilation.npu_graph_ex_pass_manager.NpuGraphEXPassManager"
+        return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
 
     @classmethod
     def get_compile_backend(self) -> str:

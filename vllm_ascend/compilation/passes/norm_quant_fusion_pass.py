@@ -25,6 +25,7 @@ from vllm.logger import logger
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 
+
 class AddRMSNormQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
@@ -58,6 +59,7 @@ class AddRMSNormQuantPattern(BasePattern):
             out1 = output[2]
             quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
+
         return pattern
 
     def get_replacement(self):
@@ -78,7 +80,8 @@ class AddRMSNormQuantPattern(BasePattern):
             quantized_output = output[0]
             out1 = output[2]
             return quantized_output, out1
-        return replacement 
+
+        return replacement
 
 
 class AddRMSNormQuantPatternWithBias(BasePattern):
@@ -118,6 +121,7 @@ class AddRMSNormQuantPatternWithBias(BasePattern):
             out1 = output[2]
             quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
+
         return pattern
 
     def get_replacement(self):
@@ -139,6 +143,7 @@ class AddRMSNormQuantPatternWithBias(BasePattern):
             quantized_output = output[0]
             out1 = output[2]
             return quantized_output, out1
+
         return replacement
 
 
@@ -176,9 +181,9 @@ class AddRMSNormQuantSPPattern(BasePattern):
             out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
             quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
+
         return pattern
-    
-    
+
     def get_replacement(self):
         def replacement(
             rms_norm_input: torch.Tensor,
@@ -198,6 +203,7 @@ class AddRMSNormQuantSPPattern(BasePattern):
             out1 = output[2]
             quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(quantized_output, True)
             return quantized_output, out1
+
         return replacement
 
 
@@ -239,6 +245,7 @@ class AddRMSNormQuantSPPatternWithBias(BasePattern):
             out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
             quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
+
         return pattern
 
     def get_replacement(self):
@@ -261,6 +268,7 @@ class AddRMSNormQuantSPPatternWithBias(BasePattern):
             out1 = output[2]
             quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(quantized_output, True)
             return quantized_output, out1
+
         return replacement
 
 

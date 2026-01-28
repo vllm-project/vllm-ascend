@@ -24,6 +24,7 @@ from vllm.config.compilation import Range
 from vllm.logger import logger
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 
+
 class QKNormRopeFusionPattern(BasePattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
         super().__init__(vllm_config, eps)
@@ -64,6 +65,7 @@ class QKNormRopeFusionPattern(BasePattern):
             q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
 
             return q_rope, k_rope, v
+
         return pattern
 
     def get_replacement(self):
@@ -85,6 +87,7 @@ class QKNormRopeFusionPattern(BasePattern):
             )
 
             return results
+
         return replacement
 
 
@@ -139,6 +142,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
             q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
 
             return q_rope, k_rope, v
+
         return pattern
 
     def get_replacement(self):
@@ -165,6 +169,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
                 sin=sin,
             )
             return results
+
     return replacement
 
 
