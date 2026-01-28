@@ -354,18 +354,7 @@ class NPUModelRunner(GPUModelRunner):
                                         device="cpu",
                                         pin_memory=True)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
-        self.pcp_allgather_restore_idx = torch.zeros(
-            self.max_num_tokens + 2 * self.pcp_size * self.max_num_reqs,
-            dtype=torch.int32,
-            device=self.device)
-        self.pcp_fa_query_idx = torch.zeros(
-            self.max_num_tokens + 2 * self.max_num_reqs,
-            dtype=torch.int32,
-            device=self.device)
-        self.pcp_enter_fa_restore_idx = torch.zeros(
-            self.max_num_tokens + 2 * self.pcp_size * self.max_num_reqs,
-            dtype=torch.int32,
-            device=self.device)
+
         self.pcp_use_hybrid_attn = self.model_config.hf_config.model_type == "qwen3_next"
         self.cp_kv_recover_idx_for_chunk: list[list[int]] = [
             [] for _ in range(self.pcp_size)
@@ -1075,8 +1064,8 @@ class NPUModelRunner(GPUModelRunner):
                 if self.pcp_size > 1:
                     if self.pcp_use_hybrid_attn:
                         maybe_pcp_full_tokens = sum(num_scheduled_tokens_padded) * self.pcp_size - total_num_pcp_pads
-                        print(f"sum(num_scheduled_tokens_padded)={sum(num_scheduled_tokens_padded)}, self.pcp_size={self.pcp_size}, total_num_pcp_pads={total_num_pcp_pads}")
-                        print(f"maybe_pcp_full_tokens={maybe_pcp_full_tokens}")
+                        # print(f"sum(num_scheduled_tokens_padded)={sum(num_scheduled_tokens_padded)}, self.pcp_size={self.pcp_size}, total_num_pcp_pads={total_num_pcp_pads}")
+                        # print(f"maybe_pcp_full_tokens={maybe_pcp_full_tokens}")
                     else:
                         maybe_pcp_full_tokens = total_num_scheduled_tokens * self.pcp_size - total_num_pcp_pads
                 else:

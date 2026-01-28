@@ -295,7 +295,7 @@ class PCPManager:
         pcp_head_chunk_mask = pcp_arange < np.repeat(pcp_chunk_sizes,
                                                      pcp_tokens)
 
-        def get_current_rank_positions(positions_start_loc: int | np.ndarray,
+        def get_current_rank_positions(cu_tokens: np.ndarray,
                                        rank: int):
             """
             Compute flattened positions for the given rank with a given start
@@ -307,7 +307,11 @@ class PCPManager:
             - For decode requests: no tail chunks; their positions are filled from the
               contiguous (unpadded) `tokens` arange instead (handled after).
             """
+            # positions = np.zeros(len(pcp_head_chunk_mask), dtype=np.int32)
+            positions_start_loc = np.zeros_like(cu_tokens)
+            positions_start_loc[1:] = cu_tokens[:-1]
             positions = np.zeros(len(pcp_head_chunk_mask), dtype=np.int32)
+
             head_start_loc = positions_start_loc + rank * pcp_chunk_sizes
             tail_start_loc = (
                 positions_start_loc +
@@ -322,7 +326,8 @@ class PCPManager:
                 np.repeat(tail_start_loc, pcp_chunk_sizes)[num_decode_tokens:])
             return positions
 
-        positions = get_current_rank_positions(0, self.pcp_world_rank)
+        positions = get_current_rank_positions(
+            np.zeros(num_reqs, dtype=np.int32), self.pcp_world_rank)
         # Decode tokens are duplicated only after AG. But their positions are
         # same without prefill context parallel.
         if num_decode_reqs > 0:
@@ -430,7 +435,7 @@ class PCPManager:
                 self.pcp_fa_query_idx[:pcp_fa_query_idx_tensor.shape[0]].copy_(
                     pcp_fa_query_idx_tensor.long(), non_blocking=True)
 
-            return num_padded_scheduled_tokens, pcp_tokens, max_scheduled_tokens, positions_linear, self.pcp_unpad_mask_cpu
+            return num_padded_scheduled_tokens, pcp_tokens, max_scheduled_tokens, positions_linear, self.pcp_unpad_mask_cpu[:pcp_padded_arange.shape[0]]
         else:
             # Build the restore index used after allgather.
             padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
@@ -444,7 +449,7 @@ class PCPManager:
                 all_positions.argsort())
             self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
 
-            return pcp_tokens[:num_reqs], None, sum(pcp_tokens), positions, self.pcp_unpad_mask_cpu
+            return pcp_tokens[:num_reqs], None, sum(pcp_tokens), positions, self.pcp_unpad_mask_cpu[:pcp_padded_arange.shape[0]]
 
     def get_logits_indices(self, cu_num_tokens: np.ndarray, num_reqs: int):
         return (torch.from_numpy(cu_num_tokens) * self.pcp_world_size -
@@ -915,6 +920,9 @@ class PCPManager:
                 else:
                     long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:
                                                                                                      total_num_scheduled_tokens - num_decodes]
+
+                long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[: num_actual_tokens_pcp_padded // self.pcp_world_size - num_decodes]
+                long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[: sum(pcp_unpad_mask) + num_decodes * (self.pcp_world_size - 1)]
 
                 long_seq_metadata.cp_kv_recover_idx_for_chunk = self.cp_kv_recover_idx_for_chunk
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor

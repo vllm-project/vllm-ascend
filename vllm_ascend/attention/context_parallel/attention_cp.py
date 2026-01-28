@@ -381,21 +381,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         output = output.view(T, N, D)
         return output
 
-    def _forward_prefill_cp(
-        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata
-    ) -> torch.Tensor:
-        data_head, data_tail = self._forward_prefill_cp_pre(query, key, value, attn_metadata)
-
-        output_head, lse_head = self._forward_prefill_cp_attn(data_head, True, attn_metadata)
-        output_tail, lse_tail = self._forward_prefill_cp_attn(data_tail, False, attn_metadata)
-
-        output, attn_lse = self._forward_prefill_cp_post(
-            [output_head, output_tail],
-            [lse_head, lse_tail],
-            attn_metadata,
-        )
-        return output, attn_lse
-
     def _forward_prefill_cp_pre(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata
     ) -> torch.Tensor:
@@ -692,9 +677,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         output: torch.Tensor
     ):
         num_tokens = query.shape[0]
+        if attn_metadata is None:
+            return output.fill_(0)
         num_decode_tokens = attn_metadata.num_decode_tokens
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
+        output_padded = output
 
         if len(kv_cache) > 1:
             if self.key_cache is None:
