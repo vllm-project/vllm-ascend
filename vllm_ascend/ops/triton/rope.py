@@ -19,6 +19,173 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
+# q *= torch.rsqrt(q.square().mean(-1, keepdim=True) + eps)
+# q_nope, q_pe = q.split([nope_dim, rope_dim], dim=-1)
+# q_pe = interleave_rope(q_pe, cos, sin)
+# q = torch.cat([q_nope, q_pe], dim=-1)
+
+
+@triton.jit
+def _norm_and_rope(
+    q_ptr,
+    q_row_stride,
+    cos,
+    cos_row_stride,
+    sin,
+    sin_row_stride,
+    n_tokens,
+    eps: tl.constexpr,
+    head_dim: tl.constexpr,
+    rope_dim: tl.constexpr,
+    pad_rope_dim: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    IS_NEOX_STYLE: tl.constexpr,
+):
+    """
+    This kernel performs normalization and rotary embedding to input.
+    """
+    pid = tl.program_id(0).to(tl.int64)
+    row_block_size = tl.num_programs(0)
+
+    for row_idx in tl.range(pid, n_tokens, row_block_size):
+        q_start_ptr = q_ptr + row_idx * q_row_stride
+        col_offsets = tl.arange(0, BLOCK_SIZE)
+        col_mask = col_offsets < head_dim * row_block_size
+        q = (
+            tl.load(q_start_ptr + col_offsets, mask=col_mask, other=0)
+            .to(tl.float32)
+            .reshape(BLOCK_SIZE // head_dim, head_dim)
+        )
+        # Normilzation
+        q_square = q * q
+        square_sum = tl.sum(q_square, axis=1)
+        q_rsqrt = (1 / tl.sqrt(square_sum + eps)).reshape(BLOCK_SIZE // head_dim, 1)
+        q_norm = q * q_rsqrt
+
+        # ####################################################################
+        # get the cos(mθ_{i...d}) and sin(mθ_{i...d}) for token position
+        # m of this program instance
+        # here sin and cos are repeated over last dim
+        # ####################################################################
+        cos_start_ptr = cos + row_idx * cos_row_stride
+        sin_start_ptr = sin + row_idx * sin_row_stride
+
+        cos_offsets = tl.arange(0, pad_rope_dim // 2)
+        cos_mask = cos_offsets < rope_dim // 2
+        cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+        sin_row = tl.load(sin_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+
+        # ####################################################################
+        # Load the left and right half of q and k for the current
+        # program instance (i.e. for the current token) separately
+        # ####################################################################
+        # left half of the head
+        if IS_NEOX_STYLE:
+            x1 = tl.extract_slice(
+                q_norm,
+                offsets=(0, 0),
+                sizes=(BLOCK_SIZE // head_dim, rope_dim // 2),
+                strides=(1, 1),
+            )
+            x2 = tl.extract_slice(
+                q_norm,
+                offsets=(0, rope_dim // 2),
+                sizes=(BLOCK_SIZE // head_dim, rope_dim // 2),
+                strides=(1, 1),
+            )
+        else:
+            x1 = tl.extract_slice(
+                q_norm,
+                offsets=(0, 0),
+                sizes=(BLOCK_SIZE // head_dim, rope_dim // 2),
+                strides=(1, 2),
+            )
+            x2 = tl.extract_slice(
+                q_norm,
+                offsets=(0, 1),
+                sizes=(BLOCK_SIZE // head_dim, rope_dim // 2),
+                strides=(1, 2),
+            )
+
+        # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
+        q1 = x1 * cos_row - x2 * sin_row
+        q2 = x2 * cos_row + x1 * sin_row
+
+        if IS_NEOX_STYLE:
+            tl.insert_slice(
+                q_norm,
+                q1,
+                offsets=(0, 0),
+                sizes=(BLOCK_SIZE // head_dim, rope_dim // 2),
+                strides=(1, 1),
+            )
+            tl.insert_slice(
+                q_norm,
+                q2,
+                offsets=(0, rope_dim // 2),
+                sizes=(BLOCK_SIZE // head_dim, rope_dim // 2),
+                strides=(1, 1),
+            )
+        else:
+            tl.insert_slice(
+                q_norm,
+                q1,
+                offsets=(0, 0),
+                sizes=(BLOCK_SIZE // head_dim, rope_dim // 2),
+                strides=(1, 2),
+            )
+            tl.insert_slice(
+                q_norm,
+                q2,
+                offsets=(0, 1),
+                sizes=(BLOCK_SIZE // head_dim, rope_dim // 2),
+                strides=(1, 2),
+            )
+        tl.store(q_start_ptr + col_offsets, q_norm.reshape(BLOCK_SIZE), mask=col_mask)
+
+
+def q_norm_rope_triton(
+    q: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    eps: float,
+    rope_dim: int = -1,
+    is_neox_style: bool = True,
+) -> torch.Tensor:
+    if not q.is_contiguous():
+        q = q.contiguous()
+
+    num_tokens, n_head, head_dim = q.shape
+    cos = cos.view(num_tokens, -1)
+    sin = sin.view(num_tokens, -1)
+    if rope_dim == -1:
+        # If rope_dim is not specified, we assume that input cos/sin is not
+        # duplicated to rope_dim, which means rope_dim == cos.shape[-1] * 2
+        rope_dim = cos.shape[-1] * 2
+    assert rope_dim <= head_dim
+    assert rope_dim == triton.next_power_of_2(rope_dim)
+
+    BLOCK_SIZE = n_head * head_dim
+    num_vectorcore = get_vectorcore_num()
+    n_row = min(num_tokens, num_vectorcore)
+
+    _norm_and_rope[(n_row,)](
+        q,
+        q.stride(0),
+        cos,
+        cos.stride(0),
+        sin,
+        sin.stride(0),
+        num_tokens,
+        eps,
+        head_dim,
+        rope_dim,
+        rope_dim,
+        BLOCK_SIZE=BLOCK_SIZE,
+        IS_NEOX_STYLE=is_neox_style,
+    )
+    return q
+
 
 # TODO(whx-sjtu): Add tiling of n_q_head and n_kv_head to support more models.
 # I only have tested this kernel on Deepseek V3.2 and Qwen3-Next.
