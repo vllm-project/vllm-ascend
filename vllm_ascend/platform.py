@@ -30,11 +30,12 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
-from vllm_ascend.utils import (
-    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD,
-    COMPILATION_PASS_KEY, AscendDeviceType, enable_sp, get_ascend_device_type,
-    update_aclgraph_sizes, update_cudagraph_capture_sizes,
-    update_default_aclgraph_sizes, check_kv_extra_config)
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
+                               COMPRESSED_TENSORS_METHOD, COMPILATION_PASS_KEY,
+                               AscendDeviceType, enable_sp,
+                               get_ascend_device_type, update_aclgraph_sizes,
+                               update_cudagraph_capture_sizes,
+                               check_kv_extra_config)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -216,10 +217,6 @@ class NPUPlatform(Platform):
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
-        # There are cases where default cudagraph_capture_sizes are not friendly
-        # to ascend ops && hardwares. We update these sizes here to improve
-        # default performance.
-        update_default_aclgraph_sizes(vllm_config)
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
         if vllm_config.parallel_config.tensor_parallel_size > 1 and not vllm_config.model_config.enforce_eager and \
