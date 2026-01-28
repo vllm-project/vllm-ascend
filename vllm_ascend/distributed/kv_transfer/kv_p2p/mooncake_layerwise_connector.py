@@ -1224,7 +1224,7 @@ class MooncakeLayerwiseConnectorWorker:
             "Sending done sending signal for request %s to %s:%d",
             external_req_id,
             req_meta.remote_host,
-            req_meta.remote_port
+            req_meta.remote_port,
         )
         try:
             path = make_zmq_path("tcp", req_meta.remote_host, req_meta.remote_port)
