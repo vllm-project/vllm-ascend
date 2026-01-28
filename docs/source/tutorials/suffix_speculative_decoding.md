@@ -4,7 +4,7 @@
 
 Suffix Decoding is an optimization technique for speculative decoding based on pattern matching. It simultaneously retrieves repetitive sequences from both the prompt and the generated content, using frequency statistics to predict the most likely token continuations. Unlike traditional speculative decoding methods, Suffix Decoding runs entirely on the CPU, eliminating the need for additional GPU resources or draft models, which results in superior acceleration for repetitive tasks such as AI agents and code generation.
 
-This document provides step-by-step guidance on how to deploy and benchmark the Suffix Decoding speculative inference technology supported by `vllm-ascend` on Altas A2 hardware. The setup utilizes a single Atlas 800T A2 node with a 4-card deployment of the Qwen3-32B model instance. Benchmarking is conducted using authentic open-source datasets covering the following categories:
+This document provides step-by-step guidance on how to deploy and benchmark the Suffix Decoding speculative inference technology supported by `vllm-ascend` on Atlas A2 hardware. The setup utilizes a single Atlas 800T A2 node with a 4-card deployment of the Qwen3-32B model instance. Benchmarking is conducted using authentic open-source datasets covering the following categories:
 
 | **Dataset Category**           | **Dataset Name** |
 | ------------------------------ | ---------------- |
@@ -151,29 +151,29 @@ Below are the detailed test results of the six open-source datasets in this eval
 
 Below is the raw detailed test results:
 
-| Concurrency           | Avg Input | Avg Output | Requests | Base TPOT(ms) | Base Throughput(TPS) | Suffix TPOT(ms) | Suffix Throughput(TPS) | Accept Rate | TPOT Gain | TPS Gain |
-| --------------------- | --------- | ---------- | -------- | ------------- | -------------------- | --------------- | ---------------------- | ----------- | --------- | -------- |
-| **📊 Humaneval**       |           |            |          |               |                      |                 |                        |             |           |          |
-| 1                     | 150       | 2700       | 100      | 55.1          | 18.1                 | 37.9            | 26.3                   | 27.0%       | 45.2%     | 45.1%    |
-| 15                    | 150       | 2700       | 100      | 61.6          | 233.8                | 45.8            | 318.2                  | 27.0%       | 34.6%     | 36.1%    |
-| 26                    | 150       | 2700       | 100      | 64.7          | 403.8                | 50.9            | 519.2                  | 27.0%       | 27.2%     | 28.6%    |
-| **📊 ARC**             |           |            |          |               |                      |                 |                        |             |           |          |
-| 1                     | 76        | 960        | 100      | 52.8          | 18.9                 | 39.5            | 25.4                   | 23.9%       | 33.7%     | 34.6%    |
-| 8                     | 76        | 960        | 100      | 59.1          | 125.4                | 47.0            | 163.1                  | 23.9%       | 25.7%     | 30.0%    |
-| 15                    | 76        | 960        | 100      | 59.8          | 245.8                | 48.9            | 311.7                  | 23.9%       | 22.3%     | 26.8%    |
-| **📊 GSM8K**           |           |            |          |               |                      |                 |                        |             |           |          |
-| 1                     | 67        | 1570       | 100      | 55.5          | 18.0                 | 35.7            | 28.5                   | 31.1%       | 55.6%     | 58.4%    |
-| 17                    | 67        | 1570       | 100      | 61.5          | 279.8                | 45.4            | 403.0                  | 31.1%       | 35.6%     | 44.0%    |
-| 26                    | 67        | 1570       | 100      | 63.9          | 396.4                | 50.0            | 527.6                  | 31.1%       | 27.8%     | 33.1%    |
-| **📊 ShareGPT**        |           |            |          |               |                      |                 |                        |             |           |          |
-| 1                     | 666       | 231        | 327      | 54.1          | 18.3                 | 39.2            | 24.1                   | 23.9%       | 37.9%     | 31.5%    |
-| 8                     | 666       | 231        | 327      | 58.8          | 125.0                | 46.2            | 153.2                  | 23.9%       | 27.1%     | 22.5%    |
-| 14                    | 666       | 231        | 327      | 61.8          | 227.0                | 49.9            | 273.9                  | 23.9%       | 23.8%     | 20.7%    |
-| **📊 SuperGLUE_BoolQ** |           |            |          |               |                      |                 |                        |             |           |          |
-| 1                     | 207       | 314        | 100      | 54.1          | 18.4                 | 36.1            | 26.8                   | 33.4%       | 49.8%     | 45.6%    |
-| 16                    | 207       | 314        | 100      | 60.0          | 229.7                | 43.5            | 303.9                  | 33.4%       | 38.0%     | 32.3%    |
-| 32                    | 207       | 314        | 100      | 62.7          | 396.4                | 47.8            | 507.5                  | 33.4%       | 31.3%     | 28.0%    |
-| **📊 Agieval**         |           |            |          |               |                      |                 |                        |             |           |          |
-| 1                     | 735       | 1880       | 100      | 53.1          | 18.7                 | 31.8            | 34.1                   | 50.3%       | 66.8%     | 81.9%    |
-| 24                    | 735       | 1880       | 100      | 64.0          | 381.2                | 43.3            | 629.0                  | 50.3%       | 47.8%     | 65.0%    |
-| 34                    | 735       | 1880       | 100      | 70.0          | 494.6                | 50.2            | 768.4                  | 50.3%       | 39.4%     | 55.3%    |
+| Concurrency         | Avg Input | Avg Output | Requests | Base TPOT(ms) | Base Throughput(TPS) | Suffix TPOT(ms) | Suffix Throughput(TPS) | Accept Rate | TPOT Gain | TPS Gain |
+| ------------------- | --------- | ---------- | -------- | ------------- | -------------------- | --------------- | ---------------------- | ----------- | --------- | -------- |
+| **Humaneval**       |           |            |          |               |                      |                 |                        |             |           |          |
+| 1                   | 150       | 2700       | 100      | 55.1          | 18.1                 | 37.9            | 26.3                   | 27.0%       | 45.2%     | 45.1%    |
+| 15                  | 150       | 2700       | 100      | 61.6          | 233.8                | 45.8            | 318.2                  | 27.0%       | 34.6%     | 36.1%    |
+| 26                  | 150       | 2700       | 100      | 64.7          | 403.8                | 50.9            | 519.2                  | 27.0%       | 27.2%     | 28.6%    |
+| **ARC**             |           |            |          |               |                      |                 |                        |             |           |          |
+| 1                   | 76        | 960        | 100      | 52.8          | 18.9                 | 39.5            | 25.4                   | 23.9%       | 33.7%     | 34.6%    |
+| 8                   | 76        | 960        | 100      | 59.1          | 125.4                | 47.0            | 163.1                  | 23.9%       | 25.7%     | 30.0%    |
+| 15                  | 76        | 960        | 100      | 59.8          | 245.8                | 48.9            | 311.7                  | 23.9%       | 22.3%     | 26.8%    |
+| **GSM8K**           |           |            |          |               |                      |                 |                        |             |           |          |
+| 1                   | 67        | 1570       | 100      | 55.5          | 18.0                 | 35.7            | 28.5                   | 31.1%       | 55.6%     | 58.4%    |
+| 17                  | 67        | 1570       | 100      | 61.5          | 279.8                | 45.4            | 403.0                  | 31.1%       | 35.6%     | 44.0%    |
+| 26                  | 67        | 1570       | 100      | 63.9          | 396.4                | 50.0            | 527.6                  | 31.1%       | 27.8%     | 33.1%    |
+| **ShareGPT**        |           |            |          |               |                      |                 |                        |             |           |          |
+| 1                   | 666       | 231        | 327      | 54.1          | 18.3                 | 39.2            | 24.1                   | 23.9%       | 37.9%     | 31.5%    |
+| 8                   | 666       | 231        | 327      | 58.8          | 125.0                | 46.2            | 153.2                  | 23.9%       | 27.1%     | 22.5%    |
+| 14                  | 666       | 231        | 327      | 61.8          | 227.0                | 49.9            | 273.9                  | 23.9%       | 23.8%     | 20.7%    |
+| **SuperGLUE_BoolQ** |           |            |          |               |                      |                 |                        |             |           |          |
+| 1                   | 207       | 314        | 100      | 54.1          | 18.4                 | 36.1            | 26.8                   | 33.4%       | 49.8%     | 45.6%    |
+| 16                  | 207       | 314        | 100      | 60.0          | 229.7                | 43.5            | 303.9                  | 33.4%       | 38.0%     | 32.3%    |
+| 32                  | 207       | 314        | 100      | 62.7          | 396.4                | 47.8            | 507.5                  | 33.4%       | 31.3%     | 28.0%    |
+| **Agieval**         |           |            |          |               |                      |                 |                        |             |           |          |
+| 1                   | 735       | 1880       | 100      | 53.1          | 18.7                 | 31.8            | 34.1                   | 50.3%       | 66.8%     | 81.9%    |
+| 24                  | 735       | 1880       | 100      | 64.0          | 381.2                | 43.3            | 629.0                  | 50.3%       | 47.8%     | 65.0%    |
+| 34                  | 735       | 1880       | 100      | 70.0          | 494.6                | 50.2            | 768.4                  | 50.3%       | 39.4%     | 55.3%    |
