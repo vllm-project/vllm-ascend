@@ -28,7 +28,6 @@ class BasePattern(ABC):
         pattern_fn = self.get_pattern()
         replacement_fn = self.get_replacement()
         example_inputs = self.get_example_inputs()
-        extra_check = self.get_extra_check()
         
         pm.register_replacement(
             pattern_fn, replacement_fn, example_inputs, 
