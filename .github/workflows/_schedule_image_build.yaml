@@ -78,8 +78,7 @@ jobs:
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
         # only trigger when tag, branch/main push
         push: ${{ inputs.should_push }}
-        tags: quay.io/ascend/vllm-ascend
-        outputs: type=image,push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
+        outputs: type=image,name=quay.io/ascend/vllm-ascend,push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
         provenance: false
