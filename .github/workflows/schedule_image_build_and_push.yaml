@@ -55,7 +55,7 @@ concurrency:
 
 jobs:
   image_build:
-    if: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ready') }}
+    if: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'image-build') }}
     name: Image Build and Push
     strategy:
       matrix:
