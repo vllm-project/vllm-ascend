@@ -113,6 +113,7 @@ def test_accuracy_dcp_only_graph(max_tokens: int, ) -> None:
         "decode_context_parallel_size": 2,
         "prefill_context_parallel_size": 1,
         "enable_expert_parallel": True,
+        'long_prefill_token_threshold': 4,
         "compilation_config": {
             "cudagraph_mode": "FULL_DECODE_ONLY",
             "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
