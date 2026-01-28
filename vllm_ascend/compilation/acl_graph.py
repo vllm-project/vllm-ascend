@@ -14,7 +14,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
@@ -261,8 +261,11 @@ def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
 
 
 def _pad_attention_seq_params(
-        actual_seq_lengths_q: list[int], seq_lens: list[int],
-        runtime_shape: int) -> tuple[list[int], list[int]]:
+    actual_seq_lengths_q: list[int],
+    seq_lens: list[int],
+    runtime_shape: int,
+    num_speculative_tokens: Optional[int] = None
+) -> tuple[list[int], list[int]]:
     if not actual_seq_lengths_q:
         padded_actual_seq_lengths_q = [runtime_shape]
     else:
@@ -270,10 +273,9 @@ def _pad_attention_seq_params(
         if last_val >= runtime_shape:
             padded_actual_seq_lengths_q = actual_seq_lengths_q
         else:
-            vllm_config = get_current_vllm_config()
             step = 1
-            if vllm_config and vllm_config.speculative_config:
-                step += vllm_config.speculative_config.num_speculative_tokens
+            if num_speculative_tokens is not None:
+                step += num_speculative_tokens
             interpolated = list(range(last_val + 1, runtime_shape + 1, step))
             if interpolated and interpolated[-1] < runtime_shape:
                 interpolated.append(runtime_shape)
@@ -293,7 +295,8 @@ def _pad_attention_seq_params(
 def _update_attn_fia_params(update_stream,
                             forward_context,
                             runtime_shape,
-                            draft_attn_metadatas=None):
+                            draft_attn_metadatas=None,
+                            vllm_config=None):
     if forward_context.is_draft_model:
         graph_params = get_draft_graph_params()
         attn_metadata = draft_attn_metadatas
@@ -333,8 +336,12 @@ def _update_attn_fia_params(update_stream,
                 actual_seq_lengths_q = attn_metadata[draft_step][
                     key].actual_seq_lengths_q
                 attn_count = attn_count + 1
+                num_speculative_tokens = None
+                if vllm_config and vllm_config.speculative_config:
+                    num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
                 actual_seq_lengths_q, seq_lens = _pad_attention_seq_params(
-                    actual_seq_lengths_q, seq_lens, runtime_shape)
+                    actual_seq_lengths_q, seq_lens, runtime_shape,
+                    num_speculative_tokens)
             else:
                 seq_lens = attn_metadata[key].seq_lens_list
                 actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
@@ -371,7 +378,7 @@ def update_attn_params(update_stream,
         _update_attn_pa_params(update_stream, forward_context, runtime_shape)
     else:
         _update_attn_fia_params(update_stream, forward_context, runtime_shape,
-                                draft_attn_metadatas)
+                                draft_attn_metadatas, vllm_config)
 
 
 def update_mla_attn_params(update_stream, forward_context, runtime_shape,
