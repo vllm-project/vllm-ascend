@@ -14,7 +14,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
@@ -260,6 +260,34 @@ def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
             event.record(update_stream)
 
 
+def _pad_attention_seq_params(
+        actual_seq_lengths_q: list[int], seq_lens: list[int],
+        runtime_shape: int) -> tuple[list[int], list[int]]:
+    if not actual_seq_lengths_q:
+        padded_actual_seq_lengths_q = [runtime_shape]
+    else:
+        last_val = actual_seq_lengths_q[-1]
+        if last_val >= runtime_shape:
+            padded_actual_seq_lengths_q = actual_seq_lengths_q
+        else:
+            vllm_config = get_current_vllm_config()
+            step = vllm_config.speculative_config.num_speculative_tokens + 1
+            interpolated = list(range(last_val + 1, runtime_shape + 1, step))
+            if interpolated and interpolated[-1] < runtime_shape:
+                interpolated.append(runtime_shape)
+            elif not interpolated and last_val < runtime_shape:
+                interpolated = [runtime_shape]
+            padded_actual_seq_lengths_q = actual_seq_lengths_q + interpolated
+
+    target_len = len(padded_actual_seq_lengths_q)
+    if len(seq_lens) >= target_len:
+        padded_seq_lens = seq_lens
+    else:
+        padded_seq_lens = seq_lens + [0] * (target_len - len(seq_lens))
+
+    return padded_actual_seq_lengths_q, padded_seq_lens
+
+
 def _update_attn_fia_params(update_stream,
                             forward_context,
                             runtime_shape,
@@ -303,6 +331,8 @@ def _update_attn_fia_params(update_stream,
                 actual_seq_lengths_q = attn_metadata[draft_step][
                     key].actual_seq_lengths_q
                 attn_count = attn_count + 1
+                actual_seq_lengths_q, seq_lens = _pad_attention_seq_params(
+                    actual_seq_lengths_q, seq_lens, runtime_shape)
             else:
                 seq_lens = attn_metadata[key].seq_lens_list
                 actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
