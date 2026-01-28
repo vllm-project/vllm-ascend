@@ -218,6 +218,7 @@ def update_full_graph_params(
     vllm_config,
     speculative_config=None,
     num_dcp_pcp_tokens=None,
+    draft_attn_metadatas=None,
 ):
     impl_cls = attn_backend.get_impl_cls()
     impl_cls.update_graph_params(
@@ -227,6 +228,7 @@ def update_full_graph_params(
         vllm_config,
         speculative_config,
         num_dcp_pcp_tokens,
+        draft_attn_metadatas,
     )
 
 
