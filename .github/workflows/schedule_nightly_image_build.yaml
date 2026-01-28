@@ -4,8 +4,17 @@ on:
   schedule:
     # UTC+8: 20pm, 23pm
     - cron: '0 12,15 * * *'
-  workflow_dispatch: 
+  workflow_dispatch:
+  # Only run this workflow when the pull request to ensure the image build is ok
+  pull_request:
+    paths:
+      - '.github/workflows/schedule_nightly_image_build.yaml'
+      - '.github/Dockerfile.nightly.a2'
+      - '.github/Dockerfile.nightly.a3'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 # This workflow builds and pushes Docker images for nightly-ci
 # It will be built base on the quay.io/ascend/vllm-ascend:main
 # And have some customizations for nightly testing, pushing to Huawei Cloud SWR
@@ -22,6 +31,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: releases/v0.13.0
 
       - name: Show build target
         run: |
@@ -56,7 +67,6 @@ jobs:
             -t "$IMAGE_TAG" .
 
           echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-
       # To avoid pushing images from forks, only push when the repository owner is 'vllm-project'
       - name: Push image to SWR
         if: ${{ github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
