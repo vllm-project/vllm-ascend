@@ -22,6 +22,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, fields
 
+import numpy as np
 from vllm._bc_linter import bc_linter_include
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
@@ -117,13 +118,6 @@ class RecomputeScheduler(Scheduler):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
-            # do not schedule another step for the same request while it still has
-            # output placeholders for PP.
-            # TODO: support PP + async scheduling without this limit
-            if self.use_pp and request.num_output_placeholders > 0:
-                req_index += 1
-                continue
-
             if (
                 request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
@@ -169,9 +163,6 @@ class RecomputeScheduler(Scheduler):
                     shift_computed_tokens=1 if self.use_eagle else 0,
                 )
 
-            if self.need_mamba_block_aligned_split:
-                num_new_tokens = self._mamba_block_aligned_split(request, num_new_tokens)
-
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
@@ -182,8 +173,6 @@ class RecomputeScheduler(Scheduler):
                 #    its max_total_tokens or max_model_len.
                 # 2. The encoder budget is exhausted.
                 # 3. The encoder cache is exhausted.
-                # 4. Insufficient budget for a block-aligned chunk in hybrid
-                #    models with mamba cache mode \"align\".
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
@@ -338,13 +327,6 @@ class RecomputeScheduler(Scheduler):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
-                # Streaming: skip request if still waiting for next streaming req.
-                if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
-                    assert not request.streaming_queue
-                    self.waiting.pop_request()
-                    skipped_waiting_requests.prepend_request(request)
-                    continue
-
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if (
@@ -441,16 +423,6 @@ class RecomputeScheduler(Scheduler):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
-
-                if self.need_mamba_block_aligned_split:
-                    num_new_tokens = self._mamba_block_aligned_split(
-                        request,
-                        num_new_tokens,
-                        num_new_local_computed_tokens,
-                        num_external_computed_tokens,
-                    )
-                    if num_new_tokens == 0:
-                        break
 
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an
@@ -735,17 +707,27 @@ class RecomputeScheduler(Scheduler):
                 stopped = True
 
             routed_experts = None
-            finish_reason = None
             if stopped:
-                routed_experts = self._get_routed_experts(request)
+                if self.vllm_config.model_config.enable_return_routed_experts:
+                    kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
+                    block_ids = kv_blocks.get_block_ids()[0]
+                    num_tokens = request.num_tokens - 1
 
-                # Capture finish_reason BEFORE _handle_stopped_request, which may
-                # reset the status to WAITING for streaming requests that continue.
-                finish_reason = request.get_finished_reason()
-                finished = self._handle_stopped_request(request)
-                if finished:
-                    kv_transfer_params = self._free_request(request)
+                    # compute slot mapping
+                    block_ids_array = np.array(block_ids, dtype=np.int32)
+                    num_blocks = len(block_ids)
+                    block_size = self.block_size
 
+                    # generate block offsets
+                    block_offsets = np.arange(0, block_size)
+
+                    # compute slot mapping: slot = block_id * block_size + offset
+                    slot_mapping = (
+                        block_offsets.reshape((1, block_size)) + block_ids_array.reshape((num_blocks, 1)) * block_size
+                    ).flatten()[:num_tokens]
+
+                    routed_experts = self.routed_experts_reader.get_routed_experts(indices=slot_mapping)
+                kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
                 else:
@@ -772,13 +754,13 @@ class RecomputeScheduler(Scheduler):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or pooler_output is not None or kv_transfer_params or stopped:
+            if new_token_ids or pooler_output is not None or kv_transfer_params:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
                         new_token_ids=new_token_ids,
-                        finish_reason=finish_reason,
+                        finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,
