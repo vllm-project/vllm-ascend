@@ -737,6 +737,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def reshape_and_cache(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
@@ -758,7 +759,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
-        return key, value
+        return query, key, value
 
     def forward_impl(
         self,

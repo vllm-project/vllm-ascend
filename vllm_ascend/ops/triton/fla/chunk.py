@@ -15,6 +15,7 @@ import torch
 from einops import rearrange
 from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 from vllm.forward_context import get_forward_context
+from vllm.distributed import get_pcp_group
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
@@ -26,13 +27,8 @@ from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
 from .utils import input_guard
 from .wy_fast import recompute_w_u_fwd
-from vllm_ascend.utils import prefill_context_parallel_enable
 
 from .utils import prepare_final_chunk_indices
-
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import get_pcp_group, get_tp_group
 
 
 def chunk_gated_delta_rule_fwd(q: torch.Tensor,

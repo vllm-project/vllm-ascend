@@ -14,9 +14,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 from vllm.forward_context import get_forward_context
-from vllm_ascend.utils import prefill_context_parallel_enable
-if prefill_context_parallel_enable():
-    from vllm.distributed import get_pcp_group, get_tp_group
+from vllm.distributed import get_pcp_group
 from vllm_ascend.utils import vllm_version_is
 
 # isort: off

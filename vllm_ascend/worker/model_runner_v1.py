@@ -1064,8 +1064,6 @@ class NPUModelRunner(GPUModelRunner):
                 if self.pcp_size > 1:
                     if self.pcp_use_hybrid_attn:
                         maybe_pcp_full_tokens = sum(num_scheduled_tokens_padded) * self.pcp_size - total_num_pcp_pads
-                        # print(f"sum(num_scheduled_tokens_padded)={sum(num_scheduled_tokens_padded)}, self.pcp_size={self.pcp_size}, total_num_pcp_pads={total_num_pcp_pads}")
-                        # print(f"maybe_pcp_full_tokens={maybe_pcp_full_tokens}")
                     else:
                         maybe_pcp_full_tokens = total_num_scheduled_tokens * self.pcp_size - total_num_pcp_pads
                 else:
