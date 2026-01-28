@@ -379,6 +379,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         vllm_config,
         speculative_config=None,
         num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
     ):
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
@@ -436,7 +437,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # FIA update logic
             if forward_context.is_draft_model:
                 graph_params = get_draft_graph_params()
-                attn_metadata = forward_context.draft_attn_metadatas
+                attn_metadata = draft_attn_metadatas
                 attn_keys = list(attn_metadata[0].keys())
             else:
                 graph_params = get_graph_params()
