@@ -36,9 +36,9 @@ MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
 DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 
 
+@wait_until_npu_memory_free
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "500"})
-@wait_until_npu_memory_free
 def test_qwen3_external_launcher(model):
     script = Path(
         __file__
@@ -79,9 +79,9 @@ def test_qwen3_external_launcher(model):
     assert proc.returncode == 0
 
 
+@wait_until_npu_memory_free
 @pytest.mark.skip(reason="CANN8.5 failed, capture stream failed, fix me")
 @pytest.mark.parametrize("model", MOE_MODELS)
-@wait_until_npu_memory_free
 def test_qwen3_moe_external_launcher_ep_tp2(model):
     script = Path(
         __file__
@@ -112,8 +112,8 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
     assert proc.returncode == 0
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 @wait_until_npu_memory_free
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_qwen3_external_launcher_with_sleepmode():
     script = Path(
         __file__
@@ -158,8 +158,8 @@ def test_qwen3_external_launcher_with_sleepmode():
     assert proc.returncode == 0
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 @wait_until_npu_memory_free
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_qwen3_external_launcher_with_sleepmode_level2():
     script = Path(
         __file__
@@ -207,6 +207,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
     assert proc.returncode == 0
 
 
+@wait_until_npu_memory_free
 @pytest.mark.skipif(
     DEVICE_NAME != "Ascend910B",
     reason="This test is only for Ascend910B devices.",
@@ -216,7 +217,6 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
     "HCCL_BUFFSIZE": "500"
 })
-@wait_until_npu_memory_free
 def test_qwen3_external_launcher_with_matmul_allreduce(model):
     script = Path(
         __file__
