@@ -77,6 +77,8 @@ jobs:
               - '.github/workflows/pr_test_light.yaml'
             _310_tracker:
               - 'vllm_ascend/_310p/**'
+              - 'vllm_ascend/worker/model_runner_v1.py'
+              - 'CMakeLists.txt'
 
   ut:
     needs: [lint, changes]
