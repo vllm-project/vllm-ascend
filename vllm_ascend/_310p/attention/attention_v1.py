@@ -101,14 +101,17 @@ class AscendAttentionBackendImpl310(_BaseImpl):
             out=output,
         )
 
-        out_real = output[:real_tokens, :, :]
-        return out_real
+        return output[:aligned_tokens, :, :]
 
     def _forward_chunked_prefill_310p(self, query, attn_metadata, output):
         assert attn_metadata is not None
 
         if query.dtype == torch.float32:
             query = query.to(torch.float16)
+
+        num_actual_tokens = int(attn_metadata.num_actual_tokens)
+        query = query[:num_actual_tokens]
+        output = output[:num_actual_tokens]
 
         qsl_cpu = attn_metadata.query_start_loc.detach().to("cpu", dtype=torch.int32)
         qlens = (qsl_cpu[1:] - qsl_cpu[:-1]).to(torch.int32)
@@ -163,8 +166,7 @@ class AscendAttentionBackendImpl310(_BaseImpl):
             k = key[:num_tokens]
             v = value[:num_tokens]
             out = self._forward_prefill_310p_fallback(q, k, v, attn_metadata, output)
-            output[:num_tokens] = out
-            return output
+            return out
 
         if state == AscendAttentionState.ChunkedPrefill:
             self._forward_chunked_prefill_310p(query, attn_metadata, output)
