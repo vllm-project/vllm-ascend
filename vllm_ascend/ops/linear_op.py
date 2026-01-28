@@ -139,7 +139,7 @@ class CustomRowParallelOp(CustomLinearOp):
     def apply(self, input_):
         output, output_bias = self.apply_impl(input_)
         if envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP:
-            torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
+            output = torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
         if not self.return_bias:
             return output
         return output, output_bias

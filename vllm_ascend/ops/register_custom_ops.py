@@ -111,14 +111,14 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor,
 
 
 def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
-                                          prefix: str) -> None:
+                                          prefix: str) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        return
+        return x_dependency
 
     if not getattr(forward_context, 'prefetch_mlp_enabled', False):
-        return
+        return x_dependency
     model_instance = forward_context.model_instance
     weight_prefetch_stream = prefetch_stream()
     layer_idx = int(prefix.split('.')[2])
@@ -134,7 +134,7 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
             torch_npu.npu_prefetch(
                 model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight,
                 x_dependency, mlp_gate_up_prefetch_size)
-    return
+    return x_dependency
 
 
 def _maybe_all_gather_and_maybe_unpad_fake(
@@ -165,18 +165,18 @@ def _maybe_pad_and_reduce_fake(x: torch.Tensor,
 
 
 def _maybe_prefetch_mlp_gate_up_proj_impl_fake(x_dependency: torch.Tensor,
-                                               prefix: str) -> None:
-    return
+                                               prefix: str) -> torch.Tensor:
+    return x_dependency
 
 
-def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
+def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        return
+        return x_dependency
 
     if not getattr(forward_context, 'prefetch_mlp_enabled', False):
-        return
+        return x_dependency
     forward_context.prefetch_mlp_down_proj = True
     model_instance = forward_context.model_instance
     weight_prefetch_stream = prefetch_stream()
@@ -191,19 +191,19 @@ def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
             model_instance.model.layers[layer_idx].mlp.down_proj.weight,
             x_dependency, mlp_down_prefetch_size)
     forward_context.layer_idx += 1
-    return
+    return x_dependency
 
 
 def _maybe_prefetch_mlp_down_proj_impl_fake(
-        x_dependency: torch.Tensor) -> None:
-    return
+        x_dependency: torch.Tensor) -> torch.Tensor:
+    return x_dependency
 
 
-def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
+def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        return
+        return x
 
     if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
@@ -214,11 +214,11 @@ def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
         torch.npu.current_stream().wait_stream(weight_prefetch_stream)
         forward_context.prefetch_mlp_gate_up_proj = False
         forward_context.prefetch_mlp_down_proj = False
-    return
+    return x
 
 
-def _maybe_wait_prefetch_done_impl_fake(x: torch.Tensor) -> None:
-    return
+def _maybe_wait_prefetch_done_impl_fake(x: torch.Tensor) -> torch.Tensor:
+    return x
 
 
 def _prefetch_preprocess_impl(weight: torch.Tensor, start_flag: torch.Tensor,
