@@ -726,27 +726,23 @@ class AscendMLAImpl(MLAAttentionImpl):
         register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
     @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config=None,
-        speculative_config=None,
-        num_dcp_pcp_tokens=None,
-        draft_attn_metadatas=None,
-    ):
+    def get_graph_params(forward_context):
         if forward_context.is_draft_model:
-            graph_params = get_draft_graph_params()
-        else:
-            graph_params = get_graph_params()
+            return get_draft_graph_params()
+        return get_graph_params()
+
+    @staticmethod
+    def update_graph_params(update_ctx):
+        if update_ctx.graph_params is None:
+            raise ValueError("graph_params must be provided for MLA update")
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
-        with torch.npu.stream(update_stream):
+        with torch.npu.stream(update_ctx.update_stream):
             for key, param, handle, event in zip(
-                forward_context.attn_metadata,
-                graph_params.attn_params[num_tokens],
-                graph_params.handles[num_tokens],
-                graph_params.events[num_tokens],
+                update_ctx.forward_context.attn_metadata,
+                update_ctx.graph_params.attn_params[update_ctx.num_tokens],
+                update_ctx.graph_params.handles[update_ctx.num_tokens],
+                update_ctx.graph_params.events[update_ctx.num_tokens],
             ):
                 (
                     q_nope,
@@ -766,22 +762,30 @@ class AscendMLAImpl(MLAAttentionImpl):
                     attn_output,
                     softmax_lse,
                 ) = param
-                seq_lens_list = forward_context.attn_metadata[key].decode.seq_lens_list
-                if speculative_config and speculative_config.method == "mtp" and not forward_context.is_draft_model:
-                    actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
-                    spec_multiple = speculative_config.num_speculative_tokens + 1
-                    seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
-                    actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
-                elif forward_context.is_draft_model:
-                    actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
-                    block_table = forward_context.attn_metadata[key].decode.block_table
+                seq_lens_list = update_ctx.forward_context.attn_metadata[key].decode.seq_lens_list
+                if (
+                    update_ctx.speculative_config
+                    and update_ctx.speculative_config.method == "mtp"
+                    and not update_ctx.forward_context.is_draft_model
+                ):
+                    actual_seq_lengths = update_ctx.forward_context.attn_metadata[key].decode.actual_seq_lengths_q
+                    spec_multiple = update_ctx.speculative_config.num_speculative_tokens + 1
+                    seq_lens_list = seq_lens_list + [0] * (
+                        update_ctx.num_tokens // spec_multiple - len(seq_lens_list)
+                    )
+                    actual_seq_lengths = [
+                        spec_multiple * (i + 1) for i in range(update_ctx.num_tokens // spec_multiple)
+                    ]
+                elif update_ctx.forward_context.is_draft_model:
+                    actual_seq_lengths = update_ctx.forward_context.attn_metadata[key].decode.actual_seq_lengths_q
+                    block_table = update_ctx.forward_context.attn_metadata[key].decode.block_table
                     # TODO: This is a hack and should be fixed in the future.
-                    if speculative_config.disable_padded_drafter_batch:
+                    if update_ctx.speculative_config.disable_padded_drafter_batch:
                         block_table = block_table[: len(actual_seq_lengths)]
                     seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
                 else:
-                    seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
-                torch.npu.graph_task_update_begin(update_stream, handle)
+                    seq_lens_list = seq_lens_list + [0] * (update_ctx.num_tokens - len(seq_lens_list))
+                torch.npu.graph_task_update_begin(update_ctx.update_stream, handle)
 
                 torch_npu.npu_fused_infer_attention_score.out(
                     q_nope,
@@ -801,12 +805,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     block_size=block_size,
                     actual_seq_lengths_kv=seq_lens_list,
                     actual_seq_lengths=actual_seq_lengths,
-                    workspace=graph_params.workspaces.get(num_tokens),
+                    workspace=update_ctx.graph_params.workspaces.get(update_ctx.num_tokens),
                     out=[attn_output, softmax_lse],
                 )
-                torch.npu.graph_task_update_end(update_stream)
+                torch.npu.graph_task_update_end(update_ctx.update_stream)
 
-                event.record(update_stream)
+                event.record(update_ctx.update_stream)
 
     def _v_up_proj(self, x):
         # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)

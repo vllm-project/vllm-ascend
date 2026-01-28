@@ -372,27 +372,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
 
     @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config=None,
-        num_dcp_pcp_tokens=None,
-        draft_attn_metadatas=None,
-    ):
-        if using_paged_attention(num_tokens, vllm_config):
+    def get_graph_params(forward_context):
+        if forward_context.is_draft_model:
+            return get_draft_graph_params()
+        return get_graph_params()
+
+    @staticmethod
+    def update_graph_params(update_ctx):
+        if using_paged_attention(update_ctx.num_tokens, update_ctx.vllm_config):
             # Paged Attention update logic
-            if forward_context.is_draft_model:
-                graph_params = get_draft_graph_params()
-            else:
-                graph_params = get_graph_params()
-            with torch.npu.stream(update_stream):
+            if update_ctx.graph_params is None:
+                raise ValueError("graph_params must be provided for paged attention update")
+            with torch.npu.stream(update_ctx.update_stream):
                 for key, param, handle, event in zip(
-                    forward_context.attn_metadata,
-                    graph_params.attn_params[num_tokens],
-                    graph_params.handles[num_tokens],
-                    graph_params.events[num_tokens],
+                    update_ctx.forward_context.attn_metadata,
+                    update_ctx.graph_params.attn_params[update_ctx.num_tokens],
+                    update_ctx.graph_params.handles[update_ctx.num_tokens],
+                    update_ctx.graph_params.events[update_ctx.num_tokens],
                 ):
                     (
                         query,
@@ -405,7 +401,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens,
                         output,
                     ) = param
-                    seq_lens = forward_context.attn_metadata[key].seq_lens
+                    seq_lens = update_ctx.forward_context.attn_metadata[key].seq_lens
 
                     workspace = torch_npu._npu_paged_attention_get_workspace(
                         query=query,
@@ -418,7 +414,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         context_lens=seq_lens,
                         out=output,
                     )
-                    torch.npu.graph_task_update_begin(update_stream, handle)
+                    torch.npu.graph_task_update_begin(update_ctx.update_stream, handle)
                     torch_npu._npu_paged_attention(
                         query=query,
                         key_cache=key_cache,
@@ -431,18 +427,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         out=output,
                         workspace=workspace,
                     )
-                    torch.npu.graph_task_update_end(update_stream)
-                    event.record(update_stream)
+                    torch.npu.graph_task_update_end(update_ctx.update_stream)
+                    event.record(update_ctx.update_stream)
         else:
             # FIA update logic
-            if forward_context.is_draft_model:
-                graph_params = get_draft_graph_params()
-                attn_metadata = draft_attn_metadatas
-                attn_keys = list(attn_metadata[0].keys())
-            else:
-                graph_params = get_graph_params()
-                attn_metadata = forward_context.attn_metadata
-                attn_keys = list(attn_metadata.keys())
+            if (
+                update_ctx.graph_params is None
+                or update_ctx.attn_metadata is None
+                or update_ctx.attn_keys is None
+            ):
+                raise ValueError("graph_params and attn_metadata/attn_keys must be provided for FIA update")
             # For Qwen3-next, since the kv_cache_config has already categorized
             # linear_attn and self_attn, the attn_metadata is first arranged with
             # self_attn followed by linear_attn. Therefore, using zip directly
@@ -450,18 +444,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # TODO: We use a new variable `attn_keys` to ensure the loop count is
             # correct after get by `zip` because of the new structure of the attn_metadata
             # when running with the merged full eagle-graph. Should check it with Qwen3-next.
-            num_layers = len(attn_keys)
+            num_layers = len(update_ctx.attn_keys)
             if num_layers == 0:
                 return
-            if forward_context.is_draft_model:
-                attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+            attn_keys = update_ctx.attn_keys
+            if update_ctx.forward_context.is_draft_model:
+                attn_keys = attn_keys * (
+                    len(update_ctx.graph_params.attn_params[update_ctx.num_tokens]) // num_layers
+                )
             attn_count = 0
-            with torch.npu.stream(update_stream):
+            with torch.npu.stream(update_ctx.update_stream):
                 for key, param, handle, event in zip(
                     attn_keys,
-                    graph_params.attn_params[num_tokens],
-                    graph_params.handles[num_tokens],
-                    graph_params.events[num_tokens],
+                    update_ctx.graph_params.attn_params[update_ctx.num_tokens],
+                    update_ctx.graph_params.handles[update_ctx.num_tokens],
+                    update_ctx.graph_params.events[update_ctx.num_tokens],
                 ):
                     (
                         query,
@@ -479,16 +476,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         softmax_lse,
                     ) = param
 
-                    if forward_context.is_draft_model:
+                    if update_ctx.forward_context.is_draft_model:
                         draft_step = attn_count // num_layers
-                        seq_lens = attn_metadata[draft_step][key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
+                        seq_lens = update_ctx.attn_metadata[draft_step][key].seq_lens_list
+                        actual_seq_lengths_q = update_ctx.attn_metadata[draft_step][key].actual_seq_lengths_q
                         attn_count = attn_count + 1
                     else:
-                        seq_lens = attn_metadata[key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        seq_lens = update_ctx.attn_metadata[key].seq_lens_list
+                        actual_seq_lengths_q = update_ctx.attn_metadata[key].actual_seq_lengths_q
 
-                    torch.npu.graph_task_update_begin(update_stream, handle)
+                    torch.npu.graph_task_update_begin(update_ctx.update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
                         key=key_cache,
@@ -503,12 +500,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_heads=num_heads,
                         scale=scale,
                         sparse_mode=3,
-                        workspace=graph_params.workspaces.get(num_tokens),
+                        workspace=update_ctx.graph_params.workspaces.get(update_ctx.num_tokens),
                         out=[attn_output, softmax_lse],
                     )
-                    torch.npu.graph_task_update_end(update_stream)
+                    torch.npu.graph_task_update_end(update_ctx.update_stream)
 
-                    event.record(update_stream)
+                    event.record(update_ctx.update_stream)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
