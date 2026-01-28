@@ -47,7 +47,6 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
-    update_default_aclgraph_sizes,
     is_310p,
 )
 
@@ -151,8 +150,7 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
-        from vllm_ascend.quantization.compressed_tensors.compressed_tensors import AscendCompressedTensorsConfig  # noqa: F401
-        from vllm_ascend.quantization.quant_config import AscendQuantConfig  # noqa: F401
+        from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendModelSlimConfig  # noqa: F401
 
         config_deprecated_logging()
 
@@ -248,10 +246,6 @@ class NPUPlatform(Platform):
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
-        # There are cases where default cudagraph_capture_sizes are not friendly
-        # to ascend ops && hardwares. We update these sizes here to improve
-        # default performance.
-        update_default_aclgraph_sizes(vllm_config)
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
         if (
@@ -654,14 +648,15 @@ class NPUPlatform(Platform):
         If GPU-specific or currently unsupported parameters are set by the user,
         log a warning and reset them to safe values.
         """
+        model_config = vllm_config.model_config
         # ==================== 1. Model Config ====================
-        if vllm_config.model_config:
+        if model_config:
             # Disable Cascade Attention (GPU feature)
-            if getattr(vllm_config.model_config, "disable_cascade_attn", False):
+            if getattr(model_config, "disable_cascade_attn", False):
                 logger.warning(
                     "Parameter '--disable-cascade-attn' is a GPU-specific feature. Resetting to False for Ascend."
                 )
-                vllm_config.model_config.disable_cascade_attn = False
+                model_config.disable_cascade_attn = False
 
         # ==================== 2. Parallel Config ====================
         if vllm_config.parallel_config:
@@ -685,14 +680,15 @@ class NPUPlatform(Platform):
                 vllm_config.cache_config.cpu_kvcache_space_bytes = None
 
         # ==================== 4. MultiModal Config ====================
-        if vllm_config.model_config.multimodal_config:
+        multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
+        if multimodal_config:
             # Ascend uses a different mechanism for Multi-Modal attention
-            if getattr(vllm_config.model_config.multimodal_config, "mm_encoder_attn_backend", None) is not None:
+            if getattr(multimodal_config, "mm_encoder_attn_backend", None) is not None:
                 logger.warning(
                     "Parameter '--mm-encoder-attn-backend' is set but Ascend uses "
                     "a plugin mechanism for multi-modal attention. Resetting to None."
                 )
-                vllm_config.model_config.multimodal_config.mm_encoder_attn_backend = None
+                multimodal_config.mm_encoder_attn_backend = None
 
         # ==================== 5. Observability Config ====================
         if vllm_config.observability_config:

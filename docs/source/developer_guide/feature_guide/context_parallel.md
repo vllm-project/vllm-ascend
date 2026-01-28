@@ -38,7 +38,7 @@ Given that PCP and DCP behave similarly for KV cache sharding, we refer to them 
 
 As illustrated, a virtual block is defined in the block table, where blocks within the same CP device group form a virtual block. The virtual block size is `virtual_block_size = block_size * cp_size`.
 
-For any token `x`, referencing the folloing figure, its (virtual) block index is `x // virtual_block_size`, and the offset within the virtual block is `offset_within_virtual_block = x % virtual_block_size`.
+For any token `x`, referencing the following figure, its (virtual) block index is `x // virtual_block_size`, and the offset within the virtual block is `offset_within_virtual_block = x % virtual_block_size`.
 The local block index is `local_block_index = offset_within_virtual_block // cp_kv_cache_interleave_size`, and the device number is `target_rank = local_block_index % cp_size`.
 The offset within the local block is `(local_block_index // cp_size) * cp_kv_cache_interleave_size + offset_within_virtual_block % cp_kv_cache_interleave_size`.
 

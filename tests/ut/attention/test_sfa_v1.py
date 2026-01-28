@@ -5,6 +5,7 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm.distributed.parallel_state import GroupCoordinator
 
 if 'torch_npu._inductor' not in sys.modules:
     sys.modules['torch_npu._inductor'] = MagicMock()
@@ -12,7 +13,7 @@ if 'torch_npu._inductor' not in sys.modules:
 from vllm_ascend.attention.sfa_v1 import (AscendSFABackend, AscendSFAImpl,
                                           AscendSFAMetadata,
                                           AscendSFAMetadataBuilder)
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import enable_dsa_cp, vllm_version_is
 
 
 class TestAscendSFABackend(TestBase):
@@ -81,7 +82,13 @@ class TestAscendSFAMetadata(TestBase):
 
 class TestAscendSFAMetadataBuilder(TestBase):
 
-    def setUp(self):
+    @patch('vllm.distributed.parallel_state._TP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    def setUp(self, mock_tp):
+        mock_tp.world_size = 2
+        mock_tp.rank_in_group = MagicMock()
+        mock_tp.device_group = MagicMock()
+
         self.mock_cfg = MagicMock()
 
         self.mock_cfg.parallel_config = MagicMock()
@@ -117,7 +124,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
             )
 
         self.parent_init_patcher = patch(
-            "vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__",
+            ("vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__"
+ if vllm_version_is('0.14.1') else
+ "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__"),
             mock_parent_init)
         self.parent_init_patcher.start()
 

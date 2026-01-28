@@ -41,7 +41,7 @@ jobs:
           lscpu
       
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -98,7 +98,7 @@ jobs:
         ls dist
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: ${{ matrix.python-version }}
 
@@ -122,7 +122,10 @@ jobs:
           --exclude "libascend*.so" \
           --exclude "libtorch*.so" \
           --exclude "libopapi.so" \
-          --exclude "liberror_manager.so"
+          --exclude "liberror_manager.so" \
+          --exclude "libruntime.so" \
+          --exclude "libmmpa.so"
+
         done
         rm -f dist/*.whl
         mv dist/repaired/*.whl dist/

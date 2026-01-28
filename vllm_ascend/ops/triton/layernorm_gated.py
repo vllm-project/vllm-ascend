@@ -9,6 +9,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+
 @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
 @triton.jit
@@ -131,11 +132,7 @@ def layer_norm_fwd_npu(
     else:
         out = torch.empty_like(x)
     assert out.stride(-1) == 1
-    mean = (
-        torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
-        if not is_rms_norm
-        else None
-    )
+    mean = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
 
     MAX_FUSED_SIZE = 65536 // x.element_size()

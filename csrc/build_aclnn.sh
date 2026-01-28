@@ -11,11 +11,11 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     exit 0
 elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     # ASCEND910B (A2) series
-    # depdendency: catlass
+    # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
     CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
     if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "depdendency catlass is missing, try to fetch it..."
+        echo "dependency catlass is missing, try to fetch it..."
         if ! git submodule update --init --recursive; then
             echo "fetch failed"
             exit 1
@@ -24,21 +24,21 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
     export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
 
-    CUSTOM_OPS="grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;"
+    CUSTOM_OPS="grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;add_rms_norm_bias;apply_top_k_top_p_custom;"
     SOC_ARG="ascend910b"
 elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     # ASCEND910C (A3) series
-    # depdendency: catlass
+    # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
     CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
     if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "depdendency catlass is missing, try to fetch it..."
+        echo "dependency catlass is missing, try to fetch it..."
         if ! git submodule update --init --recursive; then
             echo "fetch failed"
             exit 1
         fi
     fi
-    # depdendency: cann-toolkit file moe_distribute_base.h
+    # dependency: cann-toolkit file moe_distribute_base.h
     HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
     if [ -z "$HCCL_STRUCT_FILE_PATH" ]; then
         echo "cannot find moe_distribute_base.h file in CANN env"
@@ -79,6 +79,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "notify_dispatch"
         "moe_init_routing_custom"
         "moe_gating_top_k"
+        "add_rms_norm_bias"
+        "apply_top_k_top_p_custom"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"

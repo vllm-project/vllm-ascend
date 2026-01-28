@@ -12,6 +12,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -37,12 +38,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
-
-if vllm_version_is("0.13.0"):
-    from vllm.v1.attention.backends.utils import AttentionCGSupport
-else:
-    from vllm.v1.attention.backend import AttentionCGSupport
+from vllm_ascend.utils import weak_ref_tensors
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
@@ -72,10 +68,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
-        scheduler_config = vllm_config.scheduler_config
-        decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
-        max_num_seqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
-        self.batch_seq_mask_buf = torch.empty(max_num_seqs * self.decode_threshold, dtype=torch.uint8, device=device)
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
             self.block_size, self.cp_virtual_block_size
         )
@@ -242,12 +234,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
         cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank, self.dcp_rank]
         cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
-        batch_seq_mask = cp_seq_len == 0
-        self.batch_seq_mask_buf[: batch_seq_mask.shape[0]].copy_(batch_seq_mask, non_blocking=True)
-        batch_seq_mask = self.batch_seq_mask_buf[: batch_seq_mask.shape[0]]
-        cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
         decode_metadata.cp_seq_len = cp_seq_len.tolist()
-        decode_metadata.batch_seq_mask = batch_seq_mask
 
         actual_seq_lengths_q = torch.arange(self.num_decodes_flatten) + 1
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
@@ -297,6 +284,85 @@ class AscendMlaCPImpl(AscendMLAImpl):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+    ):
+        if forward_context.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
+        # FIXME: Behold! We are using a temporary hack here to update the args
+        # for each layer's attention op in the graph.
+        with torch.npu.stream(update_stream):
+            for key, param, handle, event in zip(
+                forward_context.attn_metadata,
+                graph_params.attn_params[num_tokens],
+                graph_params.handles[num_tokens],
+                graph_params.events[num_tokens],
+            ):
+                (
+                    q_nope,
+                    k_nope,
+                    q_pe,
+                    k_pe,
+                    num_heads,
+                    num_kv_heads,
+                    input_layout,
+                    spec_attn_mask,
+                    sparse_mode,
+                    scale,
+                    block_table,
+                    block_size,
+                    actual_seq_lengths,
+                    actual_seq_lengths_kv,
+                    attn_output,
+                    softmax_lse,
+                ) = param
+
+                decode_meta = forward_context.attn_metadata[key].decode
+                seq_len = decode_meta.cp_seq_len
+                if isinstance(seq_len, torch.Tensor):
+                    seq_len = seq_len.tolist()
+                actual_seq_lengths_kv = seq_len
+
+                pad_length = num_tokens - len(actual_seq_lengths_kv)
+                if pad_length > 0:
+                    actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (num_tokens - len(actual_seq_lengths_kv))
+
+                torch.npu.graph_task_update_begin(update_stream, handle)
+
+                torch_npu.npu_fused_infer_attention_score.out(
+                    q_nope,
+                    k_nope,
+                    k_nope,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    num_heads=num_heads,
+                    num_key_value_heads=num_kv_heads,
+                    input_layout=input_layout,
+                    atten_mask=spec_attn_mask,
+                    sparse_mode=sparse_mode,
+                    scale=scale,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    softmax_lse_flag=True,
+                    block_table=block_table,
+                    block_size=block_size,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    actual_seq_lengths=actual_seq_lengths,
+                    workspace=graph_params.workspaces.get(num_tokens),
+                    out=[attn_output, softmax_lse],
+                )
+                torch.npu.graph_task_update_end(update_stream)
+
+                event.record(update_stream)
+
     def get_num_actual_tokens(self, attn_metadata: M):
         if self.pcp_size > 1:
             return attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
@@ -328,7 +394,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
         prefill_kv_no_split = kv_no_split[:num_actual_tokens]
         kv_c, k_pe = prefill_kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())  # type: ignore[misc]
         assert len(kv_cache) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
         kv_c_normed = kv_c_normed.view([num_actual_tokens, self.num_kv_heads, -1])
         k_pe = k_pe.unsqueeze(1)
@@ -655,7 +721,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
-        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse, decode_meta.batch_seq_mask)
+        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
         attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return self._v_up_proj(attn_output)
 

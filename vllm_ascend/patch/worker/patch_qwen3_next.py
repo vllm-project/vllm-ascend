@@ -28,6 +28,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.models.qwen3_next import (Qwen3NextGatedDeltaNet,
                                                    fused_gdn_gating)
 from vllm.triton_utils import triton
+from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
@@ -35,14 +36,6 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
 from vllm_ascend.ops.triton.fla.sigmoid_gating import \
     fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.utils import vllm_version_is
-
-# isort: off
-if vllm_version_is('0.13.0'):
-    from vllm.attention.backends.abstract import AttentionMetadata  # type: ignore
-else:
-    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
-# isort: on
 
 
 class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
