@@ -31,6 +31,7 @@ from enum import Enum
 
 import aiohttp
 import uvicorn
+from aiohttp import ClientResponse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -140,22 +141,23 @@ async def _encode_fanout(
             elif hasattr(r, "status_code"):
                 error_detail = f"Status: {r.status_code}, Error: {error_detail}"
             raise HTTPException(status_code=502, detail=f"Encoder request failed: {error_detail}")
-        if hasattr(r, "status") and r.status != 200:
-            try:
-                detail = await r.text()
-            except Exception:
-                detail = "<unable to read body>"
-            logger.error(
-                "[%s] Encoder request #%d returned status %s: %s",
-                req_id,
-                idx,
-                r.status,
-                detail,
-            )
-            raise HTTPException(
-                status_code=r.status,
-                detail=f"Encoder request failed: {detail}",
-            )
+        if isinstance(r, ClientResponse):
+            if hasattr(r, "status") and r.status != 200:
+                try:
+                    detail = await r.text()
+                except Exception:
+                    detail = "<unable to read body>"
+                logger.error(
+                    "[%s] Encoder request #%d returned status %s: %s",
+                    req_id,
+                    idx,
+                    r.status,
+                    detail,
+                )
+                raise HTTPException(
+                    status_code=r.status,
+                    detail=f"Encoder request failed: {detail}",
+                )
 
     logger.info("[%s] All %d encoder requests completed successfully", req_id, len(mm_items))
 
@@ -238,12 +240,12 @@ async def maybe_prefill(
         logger.info("[%s] Processing through prefill: %s", req_id, p_url)
 
         prefill_response = await process_prefill_stage(req_data, p_url, req_id)
-        # for nixl connector to facilitate kv transfer...
-        prefill_response_json = await prefill_response.json()
-        kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
-        if kv_transfer_params:
-            req_data["kv_transfer_params"] = kv_transfer_params
-
+        if isinstance(prefill_response, ClientResponse):
+            # for nixl connector to facilitate kv transfer...
+            prefill_response_json = await prefill_response.json()
+            kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
+            if kv_transfer_params:
+                req_data["kv_transfer_params"] = kv_transfer_params
         return req_data
     else:
         return req_data
@@ -253,7 +255,7 @@ async def process_prefill_stage(
     req_data: dict,
     p_url: str,
     req_id: str,
-) -> dict:
+) -> ClientResponse:
     """Process request through Prefill stage and return kv_transfer_params"""
     logger.info("[%s] Sending prefill request to: %s", req_id, p_url)
 
@@ -574,7 +576,7 @@ async def health_check():
             try:
                 if session is None:
                     return "unhealthy"
-                async with encode_session.get(f"{u}/health") as resp:
+                async with session.get(f"{u}/health") as resp:
                     resp.raise_for_status()
             except Exception:
                 return "unhealthy"
@@ -703,10 +705,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prefill-servers-urls",
         required=True,
-        help=(
-            'Comma-separated prefill URLs ("http://p1:8003,http://p2:8004") ',
-            'to enable E->P->D, set "disable" or "none" to enable E->PD',
-        ),
+        help='Comma-separated prefill URLs ("http://p1:8003,http://p2:8004") to enable E->P->D, '
+        'set "disable" or "none" to enable E->PD',
     )
     parser.add_argument(
         "--decode-servers-urls",

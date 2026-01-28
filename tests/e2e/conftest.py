@@ -404,19 +404,23 @@ class RemoteOpenAIServer:
 
 
 class RemoteEPDServer(RemoteOpenAIServer):
+    def _start_server(self, model: str, server_cmd: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        """Subclasses override this method to customize server process launch
+        """
+        raise NotImplementedError("RemoteEPDServer should use _start_server_with_prefix instead")
 
     def __init__(self,
-                 vllm_serve_args: Union[list, list[list]],
+                 vllm_serve_args: Union[list[str], list[list[str]]],
                  server_host: str = '0.0.0.0',
                  env_dict: Optional[dict[str, str]] = None,
                  max_wait_seconds: Optional[float] = 2800) -> None:
 
         self._proc_list = []
 
-        if env_dict is None:
-            self.env_dict = {}
-        else:
-            self.env_dict = env_dict.copy()
+        self.env_dict: dict[str, str] = {}
+        if env_dict is not None:
+            self.env_dict.update(env_dict)
 
         self.env_dict['VLLM_ALLOW_LONG_MAX_MODEL_LEN'] = "1"
         self.env_dict['VLLM_USE_V1'] = "1"
@@ -429,10 +433,13 @@ class RemoteEPDServer(RemoteOpenAIServer):
 
         if isinstance(vllm_serve_args, list):
             if not all(isinstance(item, list) for item in vllm_serve_args):
-                self.vllm_serve_args_list.append(
-                    copy.deepcopy(vllm_serve_args))
+                args_copy = copy.deepcopy(vllm_serve_args)
+                self.vllm_serve_args_list.append([str(arg) for arg in args_copy])
             else:
-                self.vllm_serve_args_list = copy.deepcopy(vllm_serve_args)
+                self.vllm_serve_args_list = [
+                    [str(arg) for arg in sublist]
+                    for sublist in copy.deepcopy(vllm_serve_args)
+                ]
         else:
             raise RuntimeError("vllm_serves_args must be a list")
 
@@ -440,20 +447,34 @@ class RemoteEPDServer(RemoteOpenAIServer):
 
         for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
             self.env_dict['ASCEND_RT_VISIBLE_DEVICES'] = str(i)
-            if "--port" not in vllm_serve_arg:
-                raise ValueError("You have manually specified the port ")
+            if isinstance(vllm_serve_arg, list):
+                if "--port" not in vllm_serve_arg:
+                    raise ValueError("You have manually specified the port ")
+                else:
+                    port_arg = "--port"
+                    try:
+                        index = vllm_serve_arg.index(port_arg)
+                    except ValueError:
+                        raise ValueError(f"--port not found in args: {vllm_serve_arg}")
+                    port_str = vllm_serve_arg[index + 1]
+                    self.port = int(port_str)
             else:
-                index = vllm_serve_arg.index("--port")
-                self.port = vllm_serve_arg[index + 1]
+                vllm_serve_arg_str = str(vllm_serve_arg)
+                if "--port" not in vllm_serve_arg_str:
+                    raise ValueError("You have manually specified the port ")
+                else:
+                    raise ValueError(f"Unexpected type for vllm_serve_arg: {type(vllm_serve_arg)}")
+
             self.health_url_list.append(super().url_for("health"))
             vllm_serve_arg = [*serve_arg_cmd, *vllm_serve_arg]
-            self._proc_list.append(
-                self._start_server(vllm_serve_arg, self.env_dict,
-                                   f"[VLLM_{i}] "))
+            proc = self._start_server_with_prefix(vllm_serve_arg, self.env_dict,
+                                                  f"[VLLM_{i}] ")
+            self._proc_list.append(proc)
 
+        timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
         super()._wait_for_multiple_servers([(self.host, url)
                                             for url in self.health_url_list],
-                                           timeout=max_wait_seconds)
+                                           timeout=timeout_value)
 
     def _poll(self) -> Optional[int]:
         return None
@@ -462,11 +483,14 @@ class RemoteEPDServer(RemoteOpenAIServer):
         for i, arg in enumerate(self.vllm_serve_args_list):
             if "--ec-transfer-config" in arg:
                 index = arg.index("--ec-transfer-config")
-                shm_path = json.loads(arg[index + 1]).get(
-                    "ec_connector_extra_config").get("shared_storage_path")
-                args = ["rm", "-r", "-f", shm_path]
-                print(f"delete shm_path is: {shm_path}")
-                self._start_server(args, None, "[DELETE] ")
+                config_str = arg[index + 1]
+                config_dict = json.loads(config_str)
+                ec_connector_extra_config = config_dict.get("ec_connector_extra_config", {})
+                shm_path = ec_connector_extra_config.get("shared_storage_path")
+                if shm_path:
+                    args = ["rm", "-r", "-f", str(shm_path)]
+                    print(f"delete shm_path is: {shm_path}")
+                    self._start_server_with_prefix(args, None, "[DELETE] ")
 
     def _read_output(self, pipe, prefix):
         try:
@@ -479,7 +503,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
             print(f"error: {e}")
             traceback.print_exc()
 
-    def _start_server(self, server_cmd: list[str],
+    def _start_server_with_prefix(self, server_cmd: list[str],
                       env_dict: Optional[dict[str, str]], log_prefix: str):
         env = os.environ.copy()
         if env_dict is not None:
@@ -542,27 +566,41 @@ class RemoteEPDServer(RemoteOpenAIServer):
 class DisaggEpdProxy(RemoteEPDServer):
 
     def __init__(self,
-                 proxy_args: Union[list[str], str] = None,
+                 proxy_args: Optional[Union[list[str], str]] = None,
                  env_dict: Optional[dict[str, str]] = None,
                  server_host: str = '0.0.0.0',
                  max_wait_seconds: Optional[float] = 2800) -> None:
-        self.proxy_args = proxy_args
+
+        if proxy_args is None:
+            proxy_args_list: list[str] = []
+        elif isinstance(proxy_args, str):
+            proxy_args_list = shlex.split(proxy_args)
+        else:
+            proxy_args_list = proxy_args
+
+        self.proxy_args = proxy_args_list
         self.env_dict = env_dict
         self._proc_list = list()
         self.host = server_host
 
         print(f"proxy param is: {self.proxy_args}")
-        proxy_args = ["python", DISAGG_EPD_PROXY_SCRIPT, *self.proxy_args]
-        self._proc_list.append(super()._start_server(proxy_args, self.env_dict,
-                                                     "[PRXOY] "))
+        proxy_cmd = ["python", str(DISAGG_EPD_PROXY_SCRIPT), *self.proxy_args]
+        proc = self._start_server_with_prefix(proxy_cmd, self.env_dict, "[PROXY] ")
+        self._proc_list.append(proc)
 
         if "--port" not in proxy_args:
             raise ValueError("You have manually specified the port ")
         else:
-            index = proxy_args.index("--port")
-            self.port = proxy_args[index + 1]
+            try:
+                index = proxy_cmd.index("--port")
+            except ValueError:
+                raise ValueError("--port not found in proxy args")
+            port_str = proxy_cmd[index + 1]
+            self.port = int(port_str)
+
+        timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
         super()._wait_for_multiple_servers(
-            [(self.host, super().url_for("health"))], timeout=max_wait_seconds)
+            [(self.host, super().url_for("health"))], timeout=timeout_value)
 
     def __enter__(self):
         """Context manager entry point."""
