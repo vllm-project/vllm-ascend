@@ -408,13 +408,11 @@ class EagleProposer(VllmEagleProposer):
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
-        if self.use_cuda_graph and \
-            num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
-            if vllm_version_is('0.14.1'):
+        if self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
+            if vllm_version_is("0.14.1"):
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
             else:
-                num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[
-                    num_tokens]
+                num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[num_tokens]
         else:
             num_input_tokens = num_tokens
 
@@ -1092,9 +1090,14 @@ class EagleProposer(VllmEagleProposer):
     # update full-graph params for one spec token
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
         update_full_graph_params(
-            self.runner.attn_backend, self.update_stream, forward_context, num_tokens,
-            self.vllm_config, self.vllm_config.speculative_config,
-            draft_attn_metadatas=draft_attn_metadatas)
+            self.runner.attn_backend,
+            self.update_stream,
+            forward_context,
+            num_tokens,
+            self.vllm_config,
+            self.vllm_config.speculative_config,
+            draft_attn_metadatas=draft_attn_metadatas,
+        )
 
     # padding tensor into desired size
     def _pad_tensor(self, tensor, pad_size):

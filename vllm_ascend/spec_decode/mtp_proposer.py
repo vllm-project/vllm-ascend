@@ -223,14 +223,11 @@ class MtpProposer(EagleProposer):
         assert self.runner is not None
 
         # Note(qcs): We may need to refactor these check logics.
-        if self.use_cuda_graph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
-                -1]:
-            if vllm_version_is('0.14.1'):
-                num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                    num_scheduled_tokens)
+        if self.use_cuda_graph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[-1]:
+            if vllm_version_is("0.14.1"):
+                num_input_tokens = self.vllm_config.pad_for_cudagraph(num_scheduled_tokens)
             else:
-                num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[
-                    num_scheduled_tokens]
+                num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[num_scheduled_tokens]
         else:
             # Eager mode, no padding needed
             num_input_tokens = num_tokens
@@ -285,15 +282,16 @@ class MtpProposer(EagleProposer):
 
         for step in range(self.num_speculative_tokens):
             with set_ascend_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_input_tokens,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    aclgraph_runtime_mode=aclgraph_runtime_mode,
-                    batch_descriptor=batch_descriptor,
-                    num_actual_tokens=num_tokens,
-                    is_draft_model=True):
-                with ProfileExecuteDuration().capture_async('mtp_forward'):
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                aclgraph_runtime_mode=aclgraph_runtime_mode,
+                batch_descriptor=batch_descriptor,
+                num_actual_tokens=num_tokens,
+                is_draft_model=True,
+            ):
+                with ProfileExecuteDuration().capture_async("mtp_forward"):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata
                     input_ids = self.input_ids[:num_input_tokens]
@@ -451,7 +449,7 @@ class MtpProposer(EagleProposer):
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self._set_positions(batch_size, clamped_positions)
-            self.hidden_states[:hidden_states.shape[0]] = hidden_states
+            self.hidden_states[: hidden_states.shape[0]] = hidden_states
             if self.pcp_size * self.dcp_size > 1:
                 # update local seq_len
                 num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
@@ -470,7 +468,7 @@ class MtpProposer(EagleProposer):
                 attn_metadata_i.slot_mapping[:batch_size] = slot_mapping
             if self.speculative_config.disable_padded_drafter_batch:
                 if self.uses_mrope:
-                   self.mrope_positions[:, batch_size:num_input_tokens] = 0
+                    self.mrope_positions[:, batch_size:num_input_tokens] = 0
                 else:
                     self.positions[batch_size:num_input_tokens] = 0
                 self.input_ids[batch_size:num_input_tokens] = 0
@@ -480,8 +478,7 @@ class MtpProposer(EagleProposer):
                 prefill_metadata.seq_lens = attn_metadata_i.seq_lens
                 prefill_metadata.seq_lens_list = prefill_metadata.seq_lens.tolist()
                 prefill_metadata.context_lens = attn_metadata_i.seq_lens
-                prefill_metadata.input_positions = self._get_positions(
-                    num_input_tokens)
+                prefill_metadata.input_positions = self._get_positions(num_input_tokens)
                 prefill_metadata.max_seq_lens += 1
                 prefill_metadata.max_seq_lens = min(
                     prefill_metadata.max_seq_lens, self.runner.model_config.max_model_len
@@ -490,13 +487,11 @@ class MtpProposer(EagleProposer):
                 decode_metadata.seq_lens = attn_metadata_i.seq_lens
                 decode_metadata.seq_lens_list = decode_metadata.seq_lens.tolist()
                 decode_seq_lens_list = decode_metadata.seq_lens_list
-                if aclgraph_runtime_mode == CUDAGraphMode.FULL and \
-                        self.speculative_config.disable_padded_drafter_batch:
-                    decode_metadata.seq_lens_list = decode_seq_lens_list + [
-                        0
-                    ] * (graph_pad_size - len(decode_seq_lens_list))
-                decode_metadata.input_positions = self._get_positions(
-                    num_input_tokens)
+                if aclgraph_runtime_mode == CUDAGraphMode.FULL and self.speculative_config.disable_padded_drafter_batch:
+                    decode_metadata.seq_lens_list = decode_seq_lens_list + [0] * (
+                        graph_pad_size - len(decode_seq_lens_list)
+                    )
+                decode_metadata.input_positions = self._get_positions(num_input_tokens)
                 decode_metadata.max_seq_lens += 1
                 decode_metadata.max_seq_lens = min(decode_metadata.max_seq_lens, self.runner.model_config.max_model_len)
 
