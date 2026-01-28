@@ -97,6 +97,10 @@ static ge::graphStatus CheckGmm1Shape(gert::TilingContext *context, DispatchGmmC
     } else {
         tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W = false;
     }
+    auto gmm1WeightDesc = context->GetDynamicInputDesc(INPUT_GMM1_WEIGHT_INDEX, 0);
+    if (GetPrimaryFormat(gmm1WeightDesc->GetStorageFormat()) == ge::FORMAT_ND) {
+        tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isNDFormat = true;
+    }
 
     OPS_ERR_IF(elementDims != 2 && elementDims != 3, OPS_LOG_E(nodeName, "gmm1Weight shape is invalid."),
             return ge::GRAPH_FAILED);
@@ -179,6 +183,10 @@ static ge::graphStatus CheckGmm2Shape(gert::TilingContext *context, DispatchGmmC
     uint32_t elementDims = gmm2FirstTensorElementShape.GetDimNum();
     OPS_ERR_IF(elementDims != 2 && elementDims != 3, OPS_LOG_E(nodeName, "gmm2Weight shape is invalid."),
             return ge::GRAPH_FAILED);
+    auto gmm2WeightDesc = context->GetDynamicInputDesc(INPUT_GMM2_WEIGHT_INDEX, 0);
+    if (GetPrimaryFormat(gmm2WeightDesc->GetStorageFormat()) == ge::FORMAT_ND) {
+        tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isNDFormat = true;
+    }
     if (gmm2ListLen > 1) { // List
         OPS_ERR_IF(gmm2ListLen != moeExpertNumPerRank,
                 OPS_LOG_E(nodeName, "gmm2 does not match local expert number perRank."), return ge::GRAPH_FAILED);
@@ -484,8 +492,8 @@ static ge::graphStatus DispatchGmmCombineDecodeTilingFuncImpl(gert::TilingContex
     if (tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isTensorList) {
         tilingKey |= EXEC_FLAG_TENSOR_LIST;
     }
-    if (tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isBf16Fp16W) {
-        tilingKey |= EXEC_FLAG_BF16_FP16_W;
+    if (tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isNDFormat) {
+        tilingKey |= EXEC_FLAG_ND_FORMAT;
     }
     printf("compile time is %s:%s tilingKey = %lu\n", __DATE__, __TIME__, tilingKey);
     context->SetTilingKey(tilingKey);

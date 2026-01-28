@@ -32,6 +32,7 @@ struct DispatchGmmCombineDecodeInfo {
     uint64_t gmm1HLen;
     bool isTensorList;
     bool isBf16Fp16W;
+    bool isNDFormat;
 };
 
 struct DispatchGmmCombineDecodeTilingData {
@@ -78,6 +79,6 @@ constexpr uint32_t WORKSPACE_STAGES = 4;
 constexpr uint32_t EXEC_FLAG_DEEP_FUSE = (1U << 0);
 constexpr uint32_t EXEC_FLAG_TENSOR_LIST = (1U << 1);
 constexpr uint32_t EXEC_FLAG_X_ACTIVE_MASK = (1U << 2);
-constexpr uint32_t EXEC_FLAG_BF16_FP16_W = (1U << 3);
+constexpr uint32_t EXEC_FLAG_ND_FORMAT = (1U << 3);
 
 #endif  // DISPATCH_GMM_COMBINE_DECODE_TILING_H
