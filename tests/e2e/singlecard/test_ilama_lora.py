@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import vllm
-from modelscope import snapshot_download  # type: ignore
 from vllm.lora.request import LoRARequest
 
 from tests.e2e.conftest import VllmRunner
@@ -46,7 +45,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 
 def test_ilama_lora(ilama_lora_files):
     with VllmRunner(
-            snapshot_download(MODEL_PATH),
+            MODEL_PATH,
             enable_lora=True,
             dtype="half",
             max_loras=4,

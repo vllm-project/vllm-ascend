@@ -28,7 +28,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
-        TRANSFORMERS_OFFLINE: 1
+        HF_HUB_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -137,7 +137,7 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
-        TRANSFORMERS_OFFLINE: 1
+        HF_HUB_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -245,7 +245,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
-        TRANSFORMERS_OFFLINE: 1
+        HF_HUB_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -322,7 +322,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
-        TRANSFORMERS_OFFLINE: 1
+        HF_HUB_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -380,7 +380,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
-        TRANSFORMERS_OFFLINE: 1
+        HF_HUB_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |

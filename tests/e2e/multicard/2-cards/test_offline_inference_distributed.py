@@ -24,7 +24,6 @@ import os
 from unittest.mock import patch
 
 import pytest
-from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
@@ -77,7 +76,7 @@ def test_qwen3_w4a8_dynamic_tp2(model):
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download(model),
+            model,
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
@@ -96,7 +95,7 @@ def test_qwen3_moe_sp_tp2() -> None:
                                      top_k=50,
                                      top_p=0.9)
 
-    with VllmRunner(snapshot_download("Qwen/Qwen3-30B-A3B"),
+    with VllmRunner("Qwen/Qwen3-30B-A3B",
                     dtype="auto",
                     tensor_parallel_size=2,
                     distributed_executor_backend="mp",
@@ -119,7 +118,7 @@ def test_deepseek_w4a8_accuracy_tp2(model):
         '逍遙而至地去 accrued', '平行于我udo madreHelen', 'ysteepaolis backwards Kj'
     ]
     sampling_params = SamplingParams(max_tokens=5, temperature=0.0)
-    with VllmRunner(snapshot_download(model),
+    with VllmRunner(model,
                     dtype="auto",
                     tensor_parallel_size=2,
                     cudagraph_capture_sizes=[1, 2, 4, 8],
@@ -152,7 +151,7 @@ def test_qwen3_moe_fc2_tp2() -> None:
                                      top_k=50,
                                      top_p=0.9)
 
-    with VllmRunner(snapshot_download("Qwen/Qwen3-30B-A3B"),
+    with VllmRunner("Qwen/Qwen3-30B-A3B",
                     dtype="auto",
                     tensor_parallel_size=2,
                     distributed_executor_backend="mp",
@@ -173,7 +172,7 @@ def test_qwen3_moe_fc2_oshard_tp2() -> None:
                                      top_p=0.9)
 
     with VllmRunner(
-            snapshot_download("Qwen/Qwen3-30B-A3B"),
+            "Qwen/Qwen3-30B-A3B",
             dtype="auto",
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
@@ -193,7 +192,7 @@ def test_deepseek_v2_lite_fc1_tp2() -> None:
                                      temperature=0.0,
                                      top_k=50,
                                      top_p=0.9)
-    with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V2-Lite-W8A8"),
+    with VllmRunner("vllm-ascend/DeepSeek-V2-Lite-W8A8",
                     dtype="auto",
                     tensor_parallel_size=2,
                     distributed_executor_backend="mp",
@@ -212,7 +211,7 @@ def test_qwen3_dense_fc1_tp2(model):
     max_tokens = 5
 
     with VllmRunner(
-            snapshot_download(model),
+            model,
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
@@ -231,7 +230,7 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
     max_tokens = 5
 
     with VllmRunner(
-            snapshot_download(model),
+            model,
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
@@ -277,7 +276,7 @@ def test_qwen3_w4a4_distributed_tp2(model):
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download(model),
+            model,
             tensor_parallel_size=2,
             cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
