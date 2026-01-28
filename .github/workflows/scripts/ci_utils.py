@@ -190,7 +190,7 @@ def run_e2e_files(
             if capture_output:
                 # Capture output for retry decision
                 process = subprocess.Popen(
-                    ["pytest -sv --durations=0", full_path],
+                    ["pytest", "-sv", "--durations=0", full_path],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     env=os.environ,
@@ -204,7 +204,7 @@ def run_e2e_files(
                 process.wait()
             else:
                 process = subprocess.Popen(
-                    ["pytest -sv --durations=0", full_path], stdout=None, stderr=None, env=os.environ
+                    ["pytest", "-sv", "--durations=0", full_path], stdout=None, stderr=None, env=os.environ
                 )
                 process.wait()
 
@@ -259,6 +259,7 @@ def run_e2e_files(
                     failed_tests.append((filename, f"exit code {ret_code}"))
                     break
 
+            # TODO: we should enable the timeout for the test
             except TimeoutError:
                 kill_process_tree(process.pid)
                 time.sleep(5)
