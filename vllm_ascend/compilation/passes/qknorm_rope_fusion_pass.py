@@ -183,7 +183,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
             )
             return results
 
-    return replacement
+        return replacement
 
 
 class QKNormRopeFusionPass(VllmInductorPass):
