@@ -27,6 +27,12 @@ jobs:
         run: |
           echo "Building target: ${{ matrix.target }}"
 
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
       - name: Login to Huawei Cloud SWR
         id: login-swr
         if: ${{ env.HW_USERNAME != '' && env.HW_TOKEN != '' }}
@@ -47,9 +53,6 @@ jobs:
             --network host \
             --platform linux/arm64 \
             -f .github/Dockerfile.nightly.${TARGET} \
-            --build-arg CANN_VERSION="8.5.0" \
-            --build-arg UBUNTU_VERSION="22.04" \
-            --build-arg PYTHON_VERSION="3.11" \
             -t "$IMAGE_TAG" .
 
           echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
