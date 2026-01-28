@@ -49,7 +49,7 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import is_vl_model
+from vllm_ascend.utils import enable_custom_op, is_vl_model
 
 # isort: off
 if TYPE_CHECKING:
@@ -570,8 +570,39 @@ class KVCacheRecvingThread(threading.Thread):
         is_kv_transfer_end = global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
         need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
+        use_fused_op = get_ascend_config().ascend_fusion_config.fusion_ops_transpose_kvcache_by_block
         if need_nz_cache or need_cat_cache:
-            self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, need_cat_cache, need_nz_cache)
+            # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
+            if use_fused_op and enable_custom_op():
+                if need_cat_cache:
+                    # the fused op only support cat GQA/MHA kv cache by head
+                    self.reformat_kv_cache_with_fused_op(grouped_local_block_ids, tp_num_need_pulls)
+                if need_nz_cache:
+                    # maybe use fused op to reformat kv nz too in the future.
+                    self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, False, need_nz_cache)
+            else:
+                self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, need_cat_cache, need_nz_cache)
+
+    def reformat_kv_cache_with_fused_op(self, block_ids: list[list[int]], tp_num_need_pulls: int):
+        # Get necessary parameters
+        k_cache = list(self.kv_caches.values())[0][0]
+        device = k_cache.device
+        head_dim = self.model_config.hf_text_config.head_dim
+        block_size = self.vllm_config.cache_config.block_size
+        num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
+        layers = self.model_config.hf_text_config.num_hidden_layers
+        flat_block_ids = [item for sublist in block_ids for item in sublist]
+        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)
+
+        k_caches = []
+        v_caches = []
+        for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
+            k_caches.append(k_cache_layer)
+            v_caches.append(v_cache_layer)
+
+        torch.ops._C_ascend.transpose_kv_cache_by_block(
+            k_caches, v_caches, block_ids_tensor, block_size, num_kv_head, head_dim, tp_num_need_pulls, layers
+        )
 
     def reformat_kv_cache(
         self,
