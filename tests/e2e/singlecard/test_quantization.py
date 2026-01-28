@@ -15,8 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from modelscope import snapshot_download  # type: ignore[import-untyped]
-
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
@@ -33,7 +31,7 @@ def test_qwen3_w8a8_quant():
                             )]
 
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-0.6B-W8A8"),
+            "vllm-ascend/Qwen3-0.6B-W8A8",
             max_model_len=8192,
             gpu_memory_utilization=0.7,
             cudagraph_capture_sizes=[1, 2, 4, 8],
@@ -62,7 +60,7 @@ def test_qwen3_dense_w8a16():
                             )]
 
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-0.6B-W8A16"),
+            "vllm-ascend/Qwen3-0.6B-W8A16",
             max_model_len=8192,
             enforce_eager=False,
             gpu_memory_utilization=0.7,
