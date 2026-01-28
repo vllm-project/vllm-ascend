@@ -81,6 +81,7 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: |
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py::test_npugraph_ex_with_static_kernel
           pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
 
       - name: Run e2e test
