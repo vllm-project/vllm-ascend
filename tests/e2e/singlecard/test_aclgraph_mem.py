@@ -21,7 +21,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
@@ -54,10 +53,10 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
 
         return wrapped
 
-    original_capture = NPUModelRunner._capture_model
+    original_capture = NPUModelRunner.capture_model
 
     with patch.object(NPUModelRunner,
-                      '_capture_model',
+                      'capture_model',
                       new=capture_model_wrapper(original_capture)):
         prompts = [
             "Hello, my name is", "The president of the United States is",
@@ -66,14 +65,14 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
         sampling_params = SamplingParams(max_tokens=max_tokens,
                                          temperature=0.0)
         if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
-            vllm_model = VllmRunner(snapshot_download(model),
+            vllm_model = VllmRunner(model,
                                     max_model_len=1024,
                                     quantization="ascend")
         else:
-            vllm_model = VllmRunner(snapshot_download(model))
+            vllm_model = VllmRunner(model)
         _ = vllm_model.generate(prompts, sampling_params)
 
-    assert capture_called.value == 1, "_capture_model was not called during test"
+    assert capture_called.value == 1, "capture_model was not called during test"
     assert capture_mem_before.value != -1, "capture_mem_before not set"
     assert capture_mem_after.value != -1, "capture_mem_after not set"
 
@@ -93,7 +92,7 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
     max_capture_mem_gib = baseline_capture_mem * capture_mem_tolerance
     max_mem_expected = max_capture_mem_gib * (1024**3)
     assert mem_used_by_capture < max_mem_expected, (
-        f"_capture_model used more memory than expected. "
+        f"capture_model used more memory than expected. "
         f"Used: {mem_used_by_capture / (1024**3):.2f} GiB, "
         f"Expected: < {max_capture_mem_gib:.2f} GiB")
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = 'spawn'

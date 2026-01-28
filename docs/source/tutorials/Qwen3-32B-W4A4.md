@@ -36,7 +36,7 @@ docker run --rm \
 
 :::{note}
 You can choose to convert the model yourself or use the quantized model we uploaded,
-see https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4
+see <https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4>
 :::
 
 ```bash
@@ -108,7 +108,7 @@ curl http://localhost:8000/v1/completions \
     -d '{
         "model": "qwen3-32b-w4a4",
         "prompt": "what is large language model?",
-        "max_tokens": "128",
+        "max_completion_tokens": "128",
         "top_p": "0.95",
         "top_k": "40",
         "temperature": "0.0"

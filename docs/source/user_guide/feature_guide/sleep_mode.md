@@ -23,7 +23,7 @@ The engine (v0/v1) supports two sleep levels to manage memory during idle period
     - Memory: The content of both the model weights and KV cache is forgotten.
     - Use Case: Ideal when switching to a different model or updating the current one.
 
-Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) and build from source. If you are using < v0.12.0rc1, remember to set `export COMPILE_CUSTOM_KERNELS=1`.
+Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) and build from source. If you are using < v0.12.0rc1, remember to set `export COMPILE_CUSTOM_KERNELS=1`.
 
 ## Usage
 
@@ -51,7 +51,7 @@ The following is a simple example of how to use sleep mode.
         # record npu memory use baseline in case other process is running
         used_bytes_baseline = total - free
         llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
-        sampling_params = SamplingParams(temperature=0, max_tokens=10)
+        sampling_params = SamplingParams(temperature=0, max_completion_tokens=10)
         output = llm.generate(prompt, sampling_params)
 
         llm.sleep(level=1)
@@ -110,7 +110,7 @@ The following is a simple example of how to use sleep mode.
         -d '{
             "model": "Qwen/Qwen2.5-0.5B-Instruct",
             "prompt": "The future of AI is",
-            "max_tokens": 7,
+            "max_completion_tokens": 7,
             "temperature": 0
         }'
     ```

@@ -18,9 +18,11 @@
 #
 
 import contextlib
+import functools
 import gc
 import json
 import logging
+import multiprocessing
 import os
 import shlex
 import subprocess
@@ -28,7 +30,6 @@ import sys
 import time
 from typing import Any, Optional, Tuple, TypeVar, Union
 
-import httpx
 import numpy as np
 import openai
 import pytest
@@ -52,7 +53,8 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
-from tests.e2e.nightly.multi_node.config.multi_node_config import NodeInfo
+from tests.e2e.nightly.multi_node.scripts.multi_node_config import (
+    DisaggregatedPrefillCfg, NodeInfo)
 from vllm_ascend.ascend_config import clear_ascend_config
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
@@ -78,6 +80,77 @@ logger = logging.getLogger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 
 
+def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: float):
+    import torch_npu  # type: ignore
+    
+    # We can try to clean up memory in this subprocess, though it mostly affects this process.
+    # But if there are any lingering contexts in this process (unlikely for a fresh spawn), it helps.
+    gc.collect()
+    torch.npu.empty_cache()
+    
+    _, total_npu_memory = torch.npu.mem_get_info()
+    start_time = time.time()
+
+    while True:
+        free_bytes, _ = torch.npu.mem_get_info()
+        if free_bytes / total_npu_memory >= target_free_percentage:
+            print(f'check_npu_memory_worker: npu free memory decreased target value.')
+            return  # Success
+
+        elapsed = time.time() - start_time
+        if elapsed > max_wait_seconds:
+            # Print to stderr so it's visible in test logs even if captured
+            print(
+                f"Timeout: NPU memory free size did not reach "
+                f"{target_free_percentage} of total npu memory within {max_wait_seconds} seconds.",
+                file=sys.stderr
+            )
+            sys.exit(1)  # Failure
+
+        print(
+            f"Waiting for NPU memory to be free: "
+            f"{free_bytes / 1024**3:.2f} GB available, "
+            f"Elapsed time: {elapsed:.2f} s."
+        )
+        # Try to clean up
+        gc.collect()
+        torch.npu.empty_cache()
+        time.sleep(1)
+
+
+def wait_until_npu_memory_free(target_free_percentage: float = 0.5, max_wait_seconds: float = 50):
+    """Decorator to wait until the NPU memory free size is above target_free_percentage.
+
+    Args:
+        target_free_percentage (float): Target free memory percentage of total.
+        max_wait_seconds (float): Maximum wait time in seconds.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Clean up non-NPU resources in the main process
+            cleanup_dist_env_and_memory()
+            
+            # Use a spawned subprocess to check NPU memory to avoid initializing NPU in the main process
+            ctx = multiprocessing.get_context("spawn")
+            p = ctx.Process(
+                target=_check_npu_memory_worker,
+                args=(target_free_percentage, max_wait_seconds)
+            )
+            p.start()
+            p.join()
+            
+            if p.exitcode != 0:
+                raise TimeoutError(
+                    f"Timeout: NPU memory free size did not reach "
+                    f"{target_free_percentage} of total npu memory within {max_wait_seconds} seconds."
+                )
+
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     destroy_model_parallel()
     destroy_distributed_environment()
@@ -87,8 +160,59 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         import ray  # Lazy import Ray
         ray.shutdown()
     gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
+    
+    # Only clean NPU cache if NPU is already initialized/available in this process.
+    # This prevents accidental initialization of NPU context in the main process,
+    # which would break subsequent forks.
+    if hasattr(torch, "npu") and torch.npu.is_initialized():
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
+
+
+class MooncakeLauncher:
+
+    def __init__(
+        self,
+        mooncake_port,
+        mooncake_metrics_port,
+        eviction_high_watermark_ratio=0.8,
+        eviction_ratio=0.05,
+    ):
+        self.mooncake_port = mooncake_port
+        self.mooncake_metrics_port = mooncake_metrics_port
+        self.eviction_high_watermark_ratio = eviction_high_watermark_ratio
+        self.eviction_ratio = eviction_ratio
+
+    def __enter__(self):
+        cmd = [
+            "mooncake_master",
+            "--eviction_high_watermark_ratio",
+            str(self.eviction_high_watermark_ratio),
+            "--eviction_ratio",
+            str(self.eviction_ratio),
+            "--port",
+            str(self.mooncake_port),
+            "--metrics_port",
+            str(self.mooncake_metrics_port),
+        ]
+
+        logger.info("Launching mooncake: %s", " ".join(cmd))
+        curr_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
+        mooncake_ld_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:"
+        os.environ["LD_LIBRARY_PATH"] = mooncake_ld_path + curr_ld_path
+        env = os.environ.copy()
+        self.process = subprocess.Popen(cmd, env=env)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self.process:
+            return
+        logger.info("Stopping mooncake server...")
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
 
 
 class RemoteOpenAIServer:
@@ -104,6 +228,7 @@ class RemoteOpenAIServer:
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
             env.update(env_dict)
+        logger.info(f"Starting server with command: {' '.join(server_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
             server_cmd,
             env=env,
@@ -111,20 +236,21 @@ class RemoteOpenAIServer:
             stderr=sys.stderr,
         )
 
-    def __init__(self,
-                 model: str,
-                 vllm_serve_args: Union[list[str], str],
-                 *,
-                 server_host: str = '0.0.0.0',
-                 server_port: int = 8080,
-                 env_dict: Optional[dict[str, str]] = None,
-                 seed: Optional[int] = None,
-                 auto_port: bool = True,
-                 nodes_info: Optional[list[NodeInfo]] = None,
-                 disaggregated_prefill: Optional[dict] = None,
-                 proxy_port: Optional[int] = None,
-                 max_wait_seconds: Optional[float] = None,
-                 override_hf_configs: Optional[dict[str, Any]] = None) -> None:
+    def __init__(
+            self,
+            model: str,
+            vllm_serve_args: Union[list[str], str],
+            *,
+            server_host: str = '0.0.0.0',
+            server_port: int = 8080,
+            env_dict: Optional[dict[str, str]] = None,
+            seed: Optional[int] = None,
+            auto_port: bool = True,
+            nodes_info: Optional[list[NodeInfo]] = None,
+            disaggregated_prefill: Optional[DisaggregatedPrefillCfg] = None,
+            proxy_port: Optional[int] = None,
+            max_wait_seconds: Optional[float] = None,
+            override_hf_configs: Optional[dict[str, Any]] = None) -> None:
         if isinstance(vllm_serve_args, str):
             vllm_serve_args = shlex.split(vllm_serve_args)
         else:
@@ -187,6 +313,7 @@ class RemoteOpenAIServer:
         This is for headless mode, where the api server
         process only exists in the leader node.
         """
+        logger.info("Hanging until server process terminates...")
         client = requests
         try:
             while True:
@@ -198,8 +325,6 @@ class RemoteOpenAIServer:
                 except Exception:
                     break
         finally:
-            if isinstance(client, httpx.Client):
-                client.close()
             self._terminate_server()
 
     def _wait_for_server_pd(self, timeout: float):
@@ -210,8 +335,7 @@ class RemoteOpenAIServer:
         def url_health(ip: str, port: int) -> str:
             return f"http://{ip}:{port}/health"
 
-        targets = [(node_info.ip,
-                    url_health(node_info.ip, node_info.server_port))
+        targets = [(node_info.ip, url_health(node_info.ip, self.port))
                    for node_info in self.nodes_info if not node_info.headless]
 
         # Wait for proxy ready
@@ -375,9 +499,9 @@ class VllmRunner:
             if images is not None and (image := images[i]) is not None:
                 multi_modal_data["image"] = image
             if videos is not None and (video := videos[i]) is not None:
-                multi_modal_data["video"] = video
+                multi_modal_data["video"] = video # type: ignore
             if audios is not None and (audio := audios[i]) is not None:
-                multi_modal_data["audio"] = audio
+                multi_modal_data["audio"] = audio # type: ignore
 
             text_prompt_kwargs: dict[str, Any] = {
                 "multi_modal_data": multi_modal_data or None
@@ -754,6 +878,12 @@ class HfRunner:
 @pytest.fixture(scope="session")
 def ilama_lora_files():
     return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def llama32_lora_files():
+    from huggingface_hub import snapshot_download as hf_snapshot_download
+    return hf_snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider", local_files_only=True)
 
 
 def qwen_prompt(questions: list[str]) -> list[str]:

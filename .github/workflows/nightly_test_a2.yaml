@@ -49,18 +49,24 @@ jobs:
       fail-fast: false
       matrix:
         test_config:
+          - name: qwen3-next
+            os: linux-aarch64-a2-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
           - name: qwen3-32b
             os: linux-aarch64-a2-4
-            tests: tests/e2e/nightly/models/test_qwen3_32b.py
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_32b.py
           - name: qwen3-32b-in8-a2
             os: linux-aarch64-a2-4
-            tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_32b_int8.py
           - name: test_custom_op
             os: linux-aarch64-a2-1
-            tests: tests/e2e/nightly/ops
+            tests: tests/e2e/nightly/single_node/ops/singlecard_ops
+          - name: test_custom_op_multi_card
+            os: linux-aarch64-a2-4
+            tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: v0.13.0
+      vllm: v0.14.1
       runner: ${{ matrix.test_config.os }}
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
@@ -84,13 +90,13 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a2
-      runner: linux-aarch64-a2-0
+      runner: linux-amd64-cpu-8-hk
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
     secrets:
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A2_B64 }}
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
 
   single-node-accuracy-tests:
     if: >-
@@ -131,8 +137,8 @@ jobs:
               - Qwen3-Omni-30B-A3B-Instruct
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: v0.13.0
+      vllm: v0.14.1
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11'
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11'
       upload: false

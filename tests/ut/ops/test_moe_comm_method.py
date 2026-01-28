@@ -8,6 +8,8 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (AllGatherCommImpl,
                                                        AlltoAllCommImpl,
                                                        MC2CommImpl)
 from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
+from vllm_ascend.ops.fused_moe.token_dispatcher import (TokenCombineResult,
+                                                        TokenDispatchResult)
 
 
 class TestMoECommMethod(TestBase):
@@ -24,7 +26,7 @@ class TestMoECommMethod(TestBase):
         self.moe_config.tp_size = 1
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
-        self.moe_config.num_global_redundant_experts = 0
+        self.moe_config.global_redundant_expert_num = 0
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
@@ -161,6 +163,7 @@ class TestMoECommMethod(TestBase):
         "vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithAllGather"
     )
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.unified_apply_mlp")
+    @patch("torch.npu.current_stream", MagicMock())
     def test_fused_experts_method(self, mock_unified_apply_mlp,
                                   mock_token_dispatcher, mock_prepare_finalize,
                                   mock_get_forward_context):
@@ -178,12 +181,12 @@ class TestMoECommMethod(TestBase):
 
         # Mock token dispatcher
         mock_td_instance = MagicMock()
-        mock_td_instance.token_dispatch.return_value = {
-            "hidden_states": torch.randn(6, 8),
-            "group_list": torch.tensor([2, 2, 2]),
-            "group_list_type": 1
-        }
-        mock_td_instance.token_combine.return_value = torch.randn(4, 8)
+        mock_td_instance.token_dispatch.return_value = TokenDispatchResult(
+            hidden_states=torch.randn(6, 8),
+            group_list=torch.tensor([2, 2, 2]),
+            group_list_type=1)
+        mock_td_instance.token_combine.return_value = TokenCombineResult(
+            routed_out=torch.randn(4, 8))
         mock_token_dispatcher.return_value = mock_td_instance
 
         # Mock unified_apply_mlp
@@ -213,7 +216,7 @@ class TestMoECommMethod(TestBase):
                                          activation="silu")
 
         # Verify result shape
-        self.assertEqual(result.shape, (4, 8))
+        self.assertEqual(result.routed_out.shape, (4, 8))
 
         # Verify token_dispatch was called
         mock_td_instance.token_dispatch.assert_called_once()

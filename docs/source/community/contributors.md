@@ -1,6 +1,6 @@
-# Maintainers and Contributors
+# Committers and Contributors
 
-## Maintainers
+## Committers
 
 | Name | Github ID | Date |
 |:-----------:|:-----:|:-----:|
@@ -17,15 +17,46 @@
 | Jie Wen| [@zzzzwwjj](https://github.com/zzzzwwjj) | 2025/12 |
 | Chao Lei| [@LCAIZJ](https://github.com/LCAIZJ) | 2025/12 |
 | JiaXu Liu| [@realliujiaxu](https://github.com/realliujiaxu) | 2025/12 |
+| HeXiang Wang| [@whx-sjtu](https://github.com/whx-sjtu) | 2026/01 |
 
 ## Contributors
 
 Every release of vLLM Ascend would not have been possible without the following contributors:
 
-Updated on 2025-12-16:
+Updated on 2025-12-30:
 
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|
+| 263 | [@hu-qi](https://github.com/hu-qi) | 2025/12/30 | [c85cc04](https://github.com/vllm-project/vllm-ascend/commit/c85cc045f893293e3b44e24d2e1f01ddc5849ea8) |
+| 262 | [@ZCG12345](https://github.com/ZCG12345) | 2025/12/30 | [45c3c27](https://github.com/vllm-project/vllm-ascend/commit/45c3c279e2b31c85c8739c45b43d8c47710e447b) |
+| 261 | [@Fager10086](https://github.com/Fager10086) | 2025/12/29 | [51da5ea](https://github.com/vllm-project/vllm-ascend/commit/51da5ea5438749fa057a7bb60977750e3ac22392) |
+| 260 | [@jiazhengyi](https://github.com/jiazhengyi) | 2025/12/29 | [d5f7283](https://github.com/vllm-project/vllm-ascend/commit/d5f72835e65e6b6b8cf8e173a9048c926890881b) |
+| 259 | [@zhanzy178](https://github.com/zhanzy178) | 2025/12/29 | [d8e15da](https://github.com/vllm-project/vllm-ascend/commit/d8e15dae6c5e563c3284309d4557afb4d4a17feb) |
+| 258 | [@jiangkuaixue123](https://github.com/jiangkuaixue123) | 2025/12/27 | [e91e11d](https://github.com/vllm-project/vllm-ascend/commit/e91e11d3b0a961f2e0e034cd738632653e5f6bdc) |
+| 257 | [@pisceskkk](https://github.com/pisceskkk) | 2025/12/26 | [da0b113](https://github.com/vllm-project/vllm-ascend/commit/da0b113cf57111c309be2a609aa2541a83b6cca6) |
+| 256 | [@maoxx241](https://github.com/maoxx241) | 2025/12/26 | [7372225](https://github.com/vllm-project/vllm-ascend/commit/7372225bcb0bd4896f43e989cef8109bfe45b13c) |
+| 255 | [@cookieyyds](https://github.com/cookieyyds) | 2025/12/25 | [2da8038](https://github.com/vllm-project/vllm-ascend/commit/2da8038dd2d30f813c00b37ba2cd9abeaaf3d0f3) |
+| 254 | [@wjunLu](https://github.com/wjunLu) | 2025/12/25 | [fca2f94](https://github.com/vllm-project/vllm-ascend/commit/fca2f948c101c9d520f1a381a6b705d9e11c042e) |
+| 253 | [@changdawei1](https://github.com/changdawei1) | 2025/12/25 | [a9fccbe](https://github.com/vllm-project/vllm-ascend/commit/a9fccbeb300fd4753f8e54aaddf02abf59d7429c) |
+| 252 | [@chenaoxuan](https://github.com/chenaoxuan) | 2025/12/25 | [6d25372](https://github.com/vllm-project/vllm-ascend/commit/6d25372baaa0ef018a75b427b387fab8dd2e92b4) |
+| 251 | [@TmacAaron](https://github.com/TmacAaron) | 2025/12/24 | [5018f2d](https://github.com/vllm-project/vllm-ascend/commit/5018f2d8fd6dc11240900e38049150619895570d) |
+| 250 | [@hzxuzhonghu](https://github.com/hzxuzhonghu) | 2025/12/23 | [cb963c5](https://github.com/vllm-project/vllm-ascend/commit/cb963c53a58a4a7339f3507fcc087d83a0d7df7e) |
+| 249 | [@lengrongfu](https://github.com/lengrongfu) | 2025/12/23 | [c9b5881](https://github.com/vllm-project/vllm-ascend/commit/c9b5881bcd3a7b76d7b631471e4f3eae2ac545dd) |
+| 248 | [@LJQ142857](https://github.com/LJQ142857) | 2025/12/22 | [55beac9](https://github.com/vllm-project/vllm-ascend/commit/55beac9c91b8399cbe6425bd79f225b5dc72b243) |
+| 247 | [@OsirisDuan](https://github.com/OsirisDuan) | 2025/12/22 | [b2c1216](https://github.com/vllm-project/vllm-ascend/commit/b2c121637fd8b8045e66e24ea0f63cb17ffb3b69) |
+| 246 | [@pisceskkk](https://github.com/pisceskkk) | 2025/12/22 | [ea6206b](https://github.com/vllm-project/vllm-ascend/commit/ea6206bb183e555345e0fbc38c7cd0a1634fe21f) |
+| 245 | [@YuhanBai](https://github.com/YuhanBai) | 2025/12/20 | [5d02eed](https://github.com/vllm-project/vllm-ascend/commit/5d02eed16f6e4e5187259583f9db16a916095ab3) |
+| 244 | [@luluxiu520](https://github.com/luluxiu520) | 2025/12/19 | [bc05a81](https://github.com/vllm-project/vllm-ascend/commit/bc05a81bf2d68dc45d9c6115e5d4f3191a528891) |
+| 243 | [@hukongyi](https://github.com/hukongyi) | 2025/12/19 | [ea8f544](https://github.com/vllm-project/vllm-ascend/commit/ea8f544ce73708aef8c9d48a2916b64fa0e09806) |
+| 242 | [@yuxingcyx](https://github.com/yuxingcyx) | 2025/12/18 | [5a88e33](https://github.com/vllm-project/vllm-ascend/commit/5a88e3333bea5d4c948e14447d2d9e4ca8963e4d) |
+| 241 | [@LICO1314](https://github.com/LICO1314) | 2025/12/18 | [9fcaf66](https://github.com/vllm-project/vllm-ascend/commit/9fcaf66646d15671ab4d9bcf3530cccfcc6b2675) |
+| 240 | [@yuxinshan](https://github.com/yuxinshan) | 2025/12/18 | [b0376ab](https://github.com/vllm-project/vllm-ascend/commit/b0376abd4c8d535953208c1b38c646ac7e8b31f4) |
+| 239 | [@ZT-AIA](https://github.com/ZT-AIA) | 2025/12/18 | [39fb9e7](https://github.com/vllm-project/vllm-ascend/commit/39fb9e7c8324c48f967a5f38d77b3e1225ecec2f) |
+| 238 | [@TingW09](https://github.com/TingW09) | 2025/12/18 | [879ec2d](https://github.com/vllm-project/vllm-ascend/commit/879ec2d1c4267f6a927ac6d3d2d835fe37e89f80) |
+| 237 | [@YzTongNiar](https://github.com/YzTongNiar) | 2025/12/17 | [7671ce1](https://github.com/vllm-project/vllm-ascend/commit/7671ce1bf12b3df45aaa92c6316b40d8f954230a) |
+| 236 | [@ader47](https://github.com/ader47) | 2025/12/17 | [eda3cab](https://github.com/vllm-project/vllm-ascend/commit/eda3cabf5b0de9e0e435328e666614f5320e657c) |
+| 235 | [@JeffLee1874](https://github.com/JeffLee1874) | 2025/12/17 | [724d043](https://github.com/vllm-project/vllm-ascend/commit/724d04391e89408f3fc3fb0cef13e5f4cf155dde) |
+| 234 | [@Toneymiller](https://github.com/Toneymiller) | 2025/12/17 | [b1a853b](https://github.com/vllm-project/vllm-ascend/commit/b1a853b0f64961ac9145fd4a510e194fb152992e) |
 | 233 | [@UnifiedCacheManager](https://github.com/UnifiedCacheManager) | 2025/12/16 | [195eac6](https://github.com/vllm-project/vllm-ascend/commit/195eac665b2d42b8287c59128490586c6931d54c) |
 | 232 | [@knight0528](https://github.com/knight0528) | 2025/12/15 | [e25c57b](https://github.com/vllm-project/vllm-ascend/commit/e25c57b3461b8116d533724013fbc9957716f92d) |
 | 231 | [@ming1212](https://github.com/ming1212) | 2025/12/15 | [98b9e2e](https://github.com/vllm-project/vllm-ascend/commit/98b9e2e18e8f8e9f1495eafc8f57e3e1791e0a34) |
@@ -113,11 +144,6 @@ Updated on 2025-12-16:
 | 149 | [@kiscad](https://github.com/kiscad) | 2025/10/12 | [bcc313e](https://github.com/vllm-project/vllm-ascend/commit/bcc313e8f2bfe9a53ed88dffffd93632db52a4ba) |
 | 148 | [@wangxiaoteng888](https://github.com/wangxiaoteng888) | 2025/10/11 | [ca05f7d](https://github.com/vllm-project/vllm-ascend/commit/ca05f7d63267c6e77fd1c297264970ed19e17620) |
 | 147 | [@huangdong2022](https://github.com/huangdong2022) | 2025/10/09 | [23db56a](https://github.com/vllm-project/vllm-ascend/commit/23db56a34063c5285f7d34e80e45c1888b877bd3) |
-
-Updated on 2025-09-30:
-
-| Number | Contributor | Date | Commit ID |
-|:------:|:-----------:|:-----:|:---------:|
 | 146 | [@socrahow](https://github.com/socrahow) | 2025/9/28 | [c3fee66](https://github.com/vllm-project/vllm-ascend/commit/c3fee66806f252476796389ea73d13a8aca60146) |
 | 145 | [@slippersss](https://github.com/slippersss) | 2025/9/28 | [a86ece5](https://github.com/vllm-project/vllm-ascend/commit/a86ece5e399db9aa9d7186ab7e51bc0e0dad4134) |
 | 144 | [@florenceCH](https://github.com/florenceCH) | 2025/9/26 | [14497b7](https://github.com/vllm-project/vllm-ascend/commit/14497b748d778f95328f55a957e997ad80a492da) |

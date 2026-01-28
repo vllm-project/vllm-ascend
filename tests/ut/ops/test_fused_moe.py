@@ -20,8 +20,6 @@ import torch
 import torch.nn as nn
 import torch_npu
 from pytest_mock import MockerFixture
-from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
-
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
@@ -117,8 +115,8 @@ def mock_dist_env(mocker: MockerFixture):
                 enable_multistream_moe=False,
                 expert_map_path=None
             )), \
-        patch('vllm_ascend.ops.fused_moe.fused_moe.determine_expert_map',
-            return_value=(3, torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]))), \
+        patch('vllm_ascend.ops.fused_moe.fused_moe.init_eplb_config',
+            return_value=(torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]), None, 0)), \
         patch('vllm_ascend.ops.fused_moe.fused_moe.get_forward_context',
             return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context',
@@ -231,25 +229,6 @@ class MockQuantMethod(nn.Module):
                                                  torch.randn(num_tokens, 10)))
         else:
             self.apply = MagicMock(return_value=(torch.randn(num_tokens, 32)))
-
-
-class MockFusedMoEMethod(FusedMoEMethodBase):
-    moe = MagicMock()
-
-    def __init__(self):
-        super().__init__(self.moe)
-
-    def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size_per_partition: int,
-                       params_dtype: torch.dtype, **extra_weight_attrs):
-        pass
-
-    def apply(self, hidden_states: torch.Tensor,
-              expert_weights: torch.Tensor) -> torch.Tensor:
-        pass
-
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
-        pass
 
 
 class TestExpertsSelector:

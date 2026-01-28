@@ -1,6 +1,7 @@
 # Qwen3-8B-W4A8
 
 ## Run Docker Container
+
 :::{note}
 w4a8 quantization feature is supported by v0.9.1rc2 and later.
 :::
@@ -27,9 +28,10 @@ docker run --rm \
 ```
 
 ## Install modelslim and Convert Model
+
 :::{note}
 You can choose to convert the model yourself or use the quantized model we uploaded,
-see https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8
+see <https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8>
 :::
 
 ```bash
@@ -69,6 +71,7 @@ python quant_qwen.py \
 ```
 
 ## Verify the Quantized Model
+
 The converted model files look like:
 
 ```bash
@@ -103,7 +106,7 @@ curl http://localhost:8000/v1/completions \
     -d '{
         "model": "qwen3-8b-w4a8",
         "prompt": "what is large language model?",
-        "max_tokens": "128",
+        "max_completion_tokens": "128",
         "top_p": "0.95",
         "top_k": "40",
         "temperature": "0.0"

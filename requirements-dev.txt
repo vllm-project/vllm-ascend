@@ -5,7 +5,7 @@ openai
 pytest >= 6.0,<9.0.0
 pytest-asyncio
 pytest-mock
-lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d 
+lm-eval==0.4.9.2
 types-jsonschema
 xgrammar
 zmq
@@ -21,5 +21,5 @@ pytest_mock
 msserviceprofiler>=1.2.2
 mindstudio-probe>=8.3.0
 arctic-inference==0.1.1
-xlite
+xlite==0.1.0rc1
 uc-manager

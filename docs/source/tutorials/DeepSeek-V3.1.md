@@ -23,6 +23,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 ## Environment Preparation
 
 ### Model Weight
+
 - `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
 - `DeepSeek-V3.1-w8a8`(Quantized version without mtp): [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.1-w8a8).
 - `DeepSeek-V3.1_w8a8mix_mtp`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8). Please modify `torch_dtype` from `float16` to `bfloat16` in `config.json`.
@@ -105,7 +106,6 @@ export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -131,7 +131,7 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 
 **Notice:**
 The parameters are explained as follows:
-- Setting the environment variable `VLLM_ASCEND_ENABLE_MLAPO=1` enables a fusion operator that can significantly improve performance, though it requires more NPU memory. It is therefore recommended to enable this option when sufficient NPU memory is available.
+
 - Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
@@ -169,7 +169,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
@@ -222,7 +221,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
@@ -257,7 +255,8 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 We recommend using Mooncake for deployment: [Mooncake](./pd_disaggregation_mooncake_multi_node.md).
 
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
- - `DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
+
+- `DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
 
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_dp_program.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
@@ -296,9 +295,11 @@ export HCCL_BUFFSIZE=256
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICE=$1
+export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --host 0.0.0.0 \
@@ -319,14 +320,13 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
   --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+  --additional-config '{"recompute_scheduler_enable":true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "30000",
   "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -372,9 +372,11 @@ export HCCL_BUFFSIZE=256
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICE=$1
+export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --host 0.0.0.0 \
@@ -395,14 +397,13 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
   --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+  --additional-config '{"recompute_scheduler_enable":true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "30100",
   "engine_id": "1",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -444,12 +445,11 @@ export HCCL_CONNECT_TIMEOUT=120
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=1100
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICE=$1
+export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -468,19 +468,18 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --max-num-batched-tokens 256 \
   --max-num-seqs 28 \
   --trust-remote-code \
-  --gpu-memory-utilization 0.95 \
+  --gpu-memory-utilization 0.92 \
   --quantization ascend \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 16, 32, 48, 64, 80, 96, 112]}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
   --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "30200",
   "engine_id": "2",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -522,12 +521,11 @@ export HCCL_CONNECT_TIMEOUT=120
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=1100
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICE=$1
+export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -546,19 +544,18 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --max-num-batched-tokens 256 \
   --max-num-seqs 28 \
   --trust-remote-code \
-  --gpu-memory-utilization 0.95 \
+  --gpu-memory-utilization 0.92 \
   --quantization ascend \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 16, 32, 48, 64, 80, 96, 112]}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
   --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "30300",
   "engine_id": "3",
-  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -571,6 +568,17 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
       }
   }'
 ```
+
+**Notice:**
+The parameters are explained as follows:
+
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+- `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
+- `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
+- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+- `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
+- `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
 
 6. run server for each node
 
@@ -653,7 +661,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     -d '{
         "model": "deepseek_v3",
         "prompt": "The future of AI is",
-        "max_tokens": 50,
+        "max_completion_tokens": 50,
         "temperature": 0
     }'
 ```
@@ -663,6 +671,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 Here are two accuracy evaluation methods.
 
 ### Using AISBench
+
 1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result, here is the result of `DeepSeek-V3.1-w8a8-mtp-QuaRot` in `vllm-ascend:0.11.0rc1` for reference only.
@@ -673,6 +682,7 @@ Here are two accuracy evaluation methods.
 | gsm8k | - | accuracy | gen | 96.28 | 1 Atlas 800 A3 (64G × 16) |
 
 ### Using Language Model Evaluation Harness
+
 Not test yet.
 
 ## Performance
@@ -681,6 +691,16 @@ Not test yet.
 
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
+The performance result is:  
+
+**Hardware**: A3-752T, 4 node
+
+**Deployment**: 2P1D, Prefill node: DP2+TP8, Decode Node: DP32+TP1
+
+**Input/Output**: 3.5k/1.5k
+
+**Performance**: TTFT = 6.16s, TPOT = 48.82ms, Average performance of each card is 478 TPS (Token Per Second).
+
 ### Using vLLM Benchmark
 
 Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an example.
@@ -688,6 +708,7 @@ Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

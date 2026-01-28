@@ -1,7 +1,6 @@
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.distributed.parallel_state import GroupCoordinator
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
@@ -14,6 +13,23 @@ from vllm_ascend.utils import AscendDeviceType
 
 class TestAscendAttentionBackend(TestBase):
 
+    def setUp(self):
+        self.mock_config = MagicMock()
+
+        mock_parallel_config = MagicMock()
+        mock_parallel_config.prefill_context_parallel_size = 1
+        mock_parallel_config.decode_context_parallel_size = 1
+
+        self.mock_config.parallel_config = mock_parallel_config
+
+        self.utils_patcher = patch(
+            'vllm_ascend.attention.utils.get_current_vllm_config',
+            return_value=self.mock_config)
+        self.utils_patcher.start()
+
+        from vllm_ascend.attention.utils import enable_cp
+        enable_cp.cache_clear()
+
     def test_get_name(self):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
@@ -25,9 +41,7 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_builder_cls(),
                          AscendAttentionMetadataBuilder)
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType.A3)
-    def test_get_kv_cache_shape_not_310p(self, mock_soc_version):
+    def test_get_kv_cache_shape_not(self):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 20, 30, 40))
 
@@ -50,33 +64,11 @@ class TestAscendAttentionBackend(TestBase):
 
 class TestAscendAttentionMetadataBuilder(TestBase):
 
-    @patch('vllm.distributed.parallel_state.get_pcp_group')
-    @patch('vllm.distributed.parallel_state._PCP',
-           new_callable=lambda: MagicMock(spec=GroupCoordinator))
-    @patch('vllm.distributed.parallel_state.get_dcp_group')
-    @patch('vllm.distributed.parallel_state._DCP',
-           new_callable=lambda: MagicMock(spec=GroupCoordinator))
-    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
-           return_value=1)
-    def setUp(self, mock_get_dcp_size, mock_dcp, mock_get_dcp_group, mock_pcp,
-              mock_get_pcp_group):
-        mock_dcp.world_size = 1
-        dcp_group = MagicMock(spec=GroupCoordinator)
-        dcp_group.rank_in_group = 0
-        dcp_group.world_size = 1
-        dcp_group.device_group = MagicMock()
-        mock_get_dcp_group.return_value = dcp_group
-
-        mock_pcp.world_size = 1
-        pcp_group = MagicMock(spec=GroupCoordinator)
-        pcp_group.rank_in_group = 0
-        pcp_group.world_size = 1
-        pcp_group.device_group = MagicMock()
-        mock_get_pcp_group.return_value = pcp_group
-
+    def setUp(self):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.speculative_config = None
         self.mock_vllm_config.model_config.max_model_len = 640
+        self.mock_vllm_config.model_config.hf_text_config.sliding_window = None
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_vllm_config.compilation_config.cudagraph_mode = None
         self.mock_vllm_config.scheduler_config.max_num_seqs = 10
@@ -98,9 +90,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertFalse(result)
 
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
-    @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType.A3)
-    def test_build_non_310p(self, mock_soc_version, mock_ascend_metadata):
+    def test_build(self, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),
             query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
@@ -113,8 +103,6 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             slot_mapping=torch.tensor(range(20)),
             actual_seq_lengths_q=torch.tensor([0, 1, 2]),
             positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((15, 15)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.ChunkedPrefill,
             num_computed_tokens_cpu=None,
             seq_lens=None,
@@ -126,47 +114,39 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
 class TestAscendAttentionBackendImpl(TestBase):
 
-    @patch('vllm.distributed.parallel_state.get_pcp_group')
-    @patch('vllm.distributed.parallel_state._PCP',
-           new_callable=lambda: MagicMock(spec=GroupCoordinator))
-    @patch('vllm.distributed.parallel_state.get_dcp_group')
-    @patch('vllm.distributed.parallel_state._DCP',
-           new_callable=lambda: MagicMock(spec=GroupCoordinator))
-    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
-           return_value=1)
-    def setUp(self, mock_get_dcp_size, mock_dcp, mock_get_dcp_group, mock_pcp,
-              mock_get_pcp_group):
-        mock_dcp.world_size = 1
-        dcp_group = MagicMock(spec=GroupCoordinator)
-        dcp_group.rank_in_group = 0
-        dcp_group.world_size = 1
-        dcp_group.device_group = MagicMock()
-        mock_get_dcp_group.return_value = dcp_group
+    def setUp(self):
+        self.mock_event = MagicMock()
+        self.mock_event.record.return_value = None
+        self.mock_event.wait.return_value = None
 
-        mock_pcp.world_size = 1
-        pcp_group = MagicMock(spec=GroupCoordinator)
-        pcp_group.rank_in_group = 0
-        pcp_group.world_size = 1
-        pcp_group.device_group = MagicMock()
-        mock_get_pcp_group.return_value = pcp_group
+        self.mock_stream = MagicMock()
+        self.event_patcher = patch('torch_npu.npu.Event',
+                                   return_value=self.mock_event)
+        self.stream_patcher = patch('torch_npu.npu.current_stream',
+                                    return_value=self.mock_stream)
+
+        self.event_patcher.start()
+        self.stream_patcher.start()
 
         self.layer = MagicMock()
         self.layer.layer_name = "test_layer"
         self.layer._k_scale_float = 1.0
         self.layer._v_scale_float = 1.0
-
         self.attention_type = MagicMock()
         self.attention_type.DECODER = "decoder"
         self.attention_type.ENCODER = "encoder"
-
         self.attn_metadata = MagicMock()
         self.attn_metadata.return_value = "1"
-
         self.layer_no_quant = MagicMock(
             spec=['layer_name', '_k_scale_float', '_v_scale_float'])
         self.layer_no_quant.layer_name = "test_layer"
         self.layer_no_quant._k_scale_float = 1.0
         self.layer_no_quant._v_scale_float = 1.0
+        self.mock_vllm_config = MagicMock()
+        self.config_patcher = patch(
+            'vllm_ascend.attention.attention_v1.get_current_vllm_config',
+            return_value=self.mock_vllm_config)
+        self.config_patcher.start()
 
         self.impl = AscendAttentionBackendImpl(
             num_heads=8,
@@ -368,26 +348,3 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_fused_infer_attention_score.assert_called_once()
 
         assert output.shape == (10, 8, 64)
-
-    @patch('torch_npu._npu_reshape_and_cache')
-    def test_forward_raise_error(self, mock_paged_attention):
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
-        kv_cache = torch.empty(2, 5, 128, 8, 64)
-        output = torch.empty_like(query)
-
-        metadata = self.attn_metadata
-        metadata.attn_mask = torch.randn(1, 1, 10, 10)
-        metadata.query_lens = torch.tensor([10])
-        metadata.seq_lens = torch.tensor([10])
-        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
-        metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
-        metadata.num_decodes = 0
-        metadata.num_prefills = 10
-        layer = self.layer_no_quant
-
-        with self.assertRaises(NotImplementedError):
-            self.impl_error.forward(layer, query, key, value, kv_cache,
-                                    metadata, output)

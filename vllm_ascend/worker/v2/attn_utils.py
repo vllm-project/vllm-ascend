@@ -1,19 +1,40 @@
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/attn_utils.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Tuple
 
 import numpy as np
 import torch
 from vllm.config import VllmConfig
-from vllm.config.model import ModelDType
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          AscendPrefillContextParallelMetadata)
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is('0.14.1'):
+    from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+else:
+    from vllm.v1.attention.backend import AttentionMetadataBuilder
 
 _ATTENTION_MASK_BUILDER = None
 
@@ -33,17 +54,12 @@ def build_attn_metadata(
     query_start_loc_gpu: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
     seq_lens: torch.Tensor,
-    seq_lens_cpu: torch.Tensor,
-    num_computed_tokens_cpu: torch.Tensor,
+    seq_lens_np: np.ndarray,
+    num_computed_tokens_cpu: torch.Tensor | None,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
-    decode_token_per_req: int,
-    actual_seq_lengths_q: list[int],
     positions: torch.Tensor | None = None,
-    attn_mask: torch.Tensor
-    | None = None,
-    spec_attn_mask: torch.Tensor | None = None,
     attn_state: Any | None = None,
     graph_pad_size: int = -1,
     num_input_tokens: int = 0,
@@ -53,7 +69,11 @@ def build_attn_metadata(
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
     max_query_len = int(query_start_loc_cpu.max())
+    seq_lens_cpu = torch.from_numpy(seq_lens_np)
     max_seq_len = int(seq_lens_cpu.max())
+    # torch_npu._reshape_and_cache operator requires slot_mappings to
+    # be torch.int32.
+    slot_mappings = slot_mappings.to(torch.int32)
 
     attn_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -66,17 +86,12 @@ def build_attn_metadata(
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu[:num_reqs],
             seq_lens=seq_lens[:num_reqs],
-            num_computed_tokens_cpu=num_computed_tokens_cpu,
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            decode_token_per_req=decode_token_per_req,
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
-            actual_seq_lengths_q=actual_seq_lengths_q,
             positions=positions,
-            attn_mask=attn_mask,
-            spec_attn_mask=spec_attn_mask,
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
@@ -134,26 +149,3 @@ def build_attn_state(
     else:
         attn_state = AscendAttentionState.PrefillCacheHit
     return attn_state
-
-
-def make_attention_mask(
-    vllm_config: VllmConfig,
-    attn_state: AscendAttentionState,
-    dtype: ModelDType | torch.dtype,
-    device: torch.device,
-) -> torch.Tensor:
-    """make attention mask for npu's attention backend."""
-    attn_mask_builder = get_attn_mask_builder(device)
-    # pcp situation.
-    if attn_mask_builder is None:
-        raise ValueError("Attn mask builder is None")
-    # Pooling situation.
-    if vllm_config.model_config.runner_type == "pooling":
-        return attn_mask_builder.get_attn_mask(2048, torch.bool)
-
-    # TODO(Ronald1995) cosidering pcp.
-    if vllm_config.model_config.use_mla:
-        # mla prefill
-        if attn_state != AscendAttentionState.DecodeOnly:
-            return attn_mask_builder.get_mla_mask(dtype)
-    return attn_mask_builder.get_splitfuse_attn_mask()

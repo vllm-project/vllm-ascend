@@ -29,7 +29,7 @@ on:
       image:
         required: false
         type: string
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
       tests:
         required: true
         type: string
@@ -58,7 +58,7 @@ jobs:
     container:
       image: ${{ inputs.image }}
     env:
-      TRANSFORMERS_OFFLINE: 1
+      HF_HUB_OFFLINE: 1
       VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
@@ -110,26 +110,12 @@ jobs:
           fi
           cd ..
 
-      - name: Install custom-ops (for DeepSeek-V3.2-Exp)
-        if: ${{ inputs.name == 'deepseek3_2-exp-w8a8' }}
+      - name: Install clang
         shell: bash -l {0}
         run: |
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
-          chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-          ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-          export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-          export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-          pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-
-      - name: Install triton-ascend
-        if: ${{ inputs.name == 'test_custom_op' }}
-        shell: bash -l {0}
-        run: |
-          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
-          pip install triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
+          apt-get update && apt-get -y install clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -141,10 +127,4 @@ jobs:
         run: |
           # ignore test_dispatch_ffn_combine until the test is fixed
           pytest -sv ${{ inputs.tests }} \
-          --ignore=tests/e2e/nightly/ops/test_dispatch_ffn_combine.py \
-          --ignore=tests/e2e/nightly/ops/test_fused_moe.py \
-          --ignore=tests/e2e/nightly/ops/test_rotary_embedding.py \
-          --ignore=tests/e2e/nightly/ops/test_matmul_allreduce_add_rmsnorm.py
-
-
-
+          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py

@@ -12,11 +12,13 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 8.3.RC2                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.8.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.8.0                          | Required for torch-npu and vllm           |
+    | CANN          | == 8.5.0                       | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
+    | NNAL          | == 8.5.0                       | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
+
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
 - **Using docker**: use the `vllm-ascend` pre-built docker image directly.
 
@@ -45,6 +47,10 @@ Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/
 
 The easiest way to prepare your software environment is using CANN image directly:
 
+```{note}
+The CANN prebuilt image includes NNAL (Ascend Neural Network Acceleration Library) which provides libatb.so for advanced tensor operations. No additional installation is required when using the prebuilt image.
+```
+
 ```{code-block} bash
    :substitutions:
 # Update DEVICE according to your device (/dev/davinci[0-7])
@@ -71,6 +77,10 @@ docker run --rm \
 :animate: fade-in-slide-down
 You can also install CANN manually:
 
+```{warning}
+If you encounter "libatb.so not found" errors during runtime, please ensure NNAL is properly installed as shown in the manual installation steps below.
+```
+
 ```bash
 # Create a virtual environment.
 python -m venv vllm-ascend-env
@@ -80,19 +90,18 @@ source vllm-ascend-env/bin/activate
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run --full
-# https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/Milan-ASL/Milan-ASL%20V100R001C22B800TP052/Ascend-cann-kernels-910b_8.3.rc2_linux-aarch64.run
-
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-toolkit_8.5.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.5.0_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.5.0_linux-"$(uname -i)".run --full
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run
-./Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run
-./Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-910b-ops_8.5.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-910b-ops_8.5.0_linux-"$(uname -i)".run
+./Ascend-cann-910b-ops_8.5.0_linux-"$(uname -i)".run --install
+
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-nnal_8.5.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.5.0_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.5.0_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
@@ -175,6 +184,7 @@ If you encounter other problems during compiling, it is probably because unexpec
 `vllm-ascend` offers Docker images for deployment. You can just pull the **prebuilt image** from the image repository [ascend/vllm-ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and run it with bash.
 
 Supported images as following.
+
 | image name | Hardware | OS |
 |-|-|-|
 | image-tag | Atlas A2 | Ubuntu |
@@ -297,16 +307,17 @@ Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt
 ```
 
 ## Multi-node Deployment
+
 ### Verify Multi-Node Communication
 
 First, check physical layer connectivity, then verify each node, and finally verify the inter-node connectivity.
 
-#### Physical Layer Requirements:
+#### Physical Layer Requirements
 
 - The physical machines must be located on the same WLAN, with network connectivity.
 - All NPUs are connected with optical modules, and the connection status must be normal.
 
-#### Each Node Verification:
+#### Each Node Verification
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -353,8 +364,10 @@ Execute the following commands on each node in sequence. The results must all be
 ::::
 :::::
 
-#### Interconnect Verification:
+#### Interconnect Verification
+
 ##### 1. Get NPU IP Addresses
+
 :::::{tab-set}
 :sync-group: multi-node
 
