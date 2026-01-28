@@ -240,6 +240,7 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
 
         with th.lock:
             th.task_tracker["reqX"] = 0
+            th.request_map["reqX"] = "reqX"
 
         th.update_task("reqX")
         with th.lock:
@@ -313,6 +314,7 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
 
         with th.lock:
             th.task_tracker["reqA"] = 0
+            th.request_map["reqA"] = "reqA"
 
         with self.assertRaises(SystemExit):
             th.run()
@@ -386,6 +388,7 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
                                        ready_event=self.ready_event)
         with th.lock:
             th.task_tracker["reqB"] = 0
+            th.request_map["reqB"] = "reqB"
         with self.assertRaises(SystemExit):
             th.run()
 
