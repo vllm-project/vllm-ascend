@@ -160,6 +160,7 @@ def test_npugraph_ex_with_static_kernel(cur_case: LLMTestCase, monkeypatch):
                   prompts=cur_case.prompts,
                   sampling_params=cur_case.sampling_params,
                   golden_answers=cur_case.golden_answers)
+
     # Check whether the static kernel is properly uninstall
     ascend_home_path = os.environ["ASCEND_HOME_PATH"]
     static_kernel_install_path = os.path.join(ascend_home_path, 'opp/static_kernel/ai_core')
