@@ -271,7 +271,9 @@ def _pad_attention_seq_params(
             padded_actual_seq_lengths_q = actual_seq_lengths_q
         else:
             vllm_config = get_current_vllm_config()
-            step = vllm_config.speculative_config.num_speculative_tokens + 1
+            step = 1
+            if vllm_config and vllm_config.speculative_config:
+                step += vllm_config.speculative_config.num_speculative_tokens
             interpolated = list(range(last_val + 1, runtime_shape + 1, step))
             if interpolated and interpolated[-1] < runtime_shape:
                 interpolated.append(runtime_shape)
