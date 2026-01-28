@@ -285,18 +285,14 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         common_epsilons = [1e-5, 1e-6]
         for eps in common_epsilons:
             AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-            # AddRMSNormQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-            # if enable_custom_op():
-            #     AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
-            #     AddRMSNormQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
+            AddRMSNormQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
+            if enable_custom_op():
+                AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
+                AddRMSNormQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        logger.info("before AddRMSNormQuantFusionPass")
-        logger.info(graph.graph)
         self.matched_count = self.pattern_match_passes.apply(graph)
-        logger.info("after AddRMSNormQuantFusionPass")
-        logger.info(graph.graph)
         logger.debug("Replaced %s patterns", self.matched_count)
         self.end_and_log()
 
