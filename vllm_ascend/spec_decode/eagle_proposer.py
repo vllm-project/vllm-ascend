@@ -465,9 +465,18 @@ class EagleProposer(VllmEagleProposer):
             num_input_tokens = num_tokens
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
+        if scheduler_output and not self.enable_shared_expert_dp:
+            max_query_len = common_attn_metadata.max_query_len
+            uniform_decode = (max_query_len in list(
+                range(1, self.num_speculative_tokens +
+                      2))) and (scheduler_output.total_num_scheduled_tokens
+                                == self.runner.input_batch.num_reqs *
+                                (self.num_speculative_tokens + 1))
+        else:
+            uniform_decode = False
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = \
-                self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=True, has_lora=has_lora)
+                self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
