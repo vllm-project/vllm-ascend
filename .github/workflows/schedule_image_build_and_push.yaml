@@ -13,11 +13,10 @@ name: Image Build and Push
 on:
   pull_request:
     branches:
-      - 'main'
-      - '*-dev'
+      - 'releases/*'
     paths:
       - '.github/workflows/schedule_image_build_and_push.yaml'
-      - 'Dockerfile.a3'
+      - 'Dockerfile*'
       - 'vllm_ascend/**'
       - 'setup.py'
       - 'pyproject.toml'
@@ -29,8 +28,7 @@ on:
   push:
     # Publish image when tagging, the Dockerfile in tag will be build as tag image
     branches:
-      - 'main'
-      - '*-dev'
+      - 'releases/*'
     tags:
       - 'v*'
     paths:
