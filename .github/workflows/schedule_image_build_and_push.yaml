@@ -11,12 +11,38 @@
 #   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3 / vllm-ascend:v1.2.3rc1
 name: Image Build and Push
 on:
-  schedule:
-    # UTC+8: 8am, 12pm, 16pm, 22pm
-    - cron: '0 0,4,8,14 * * *'
+  pull_request:
+    branches:
+      - 'main'
+      - '*-dev'
+    paths:
+      - '.github/workflows/schedule_image_build_and_push.yaml'
+      - 'Dockerfile.a3'
+      - 'vllm_ascend/**'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'csrc/**'
+    types: [ labeled ]
   push:
+    # Publish image when tagging, the Dockerfile in tag will be build as tag image
+    branches:
+      - 'main'
+      - '*-dev'
     tags:
       - 'v*'
+    paths:
+      - '.github/workflows/schedule_image_build_and_push.yaml'
+      - 'Dockerfile*'
+      - 'vllm_ascend/**'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'csrc/**'
   workflow_dispatch:
     inputs:
       tag:
@@ -25,8 +51,13 @@ on:
         default: main
         required: true
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   image_build:
+    if: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ready') }}
     name: Image Build and Push
     strategy:
       matrix:

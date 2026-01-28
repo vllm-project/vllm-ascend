@@ -46,6 +46,7 @@ jobs:
       with:
         fetch-depth: 0
         persist-credentials: false
+        ref: ${{ github.ref }}
 
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -105,6 +106,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
 
       - name: Download arm64 digests
         uses: actions/download-artifact@v7
@@ -146,8 +149,9 @@ jobs:
           #      which follow the rule from vLLM with prefix v
           # TODO(yikun): the post release might be considered as latest release
           tags: |
+            type=ref,event=branch,suffix=${{ env.SUFFIX }}
+            type=schedule,pattern={{branch}},suffix=${{ env.SUFFIX }}
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
-            type=schedule,pattern=main,suffix=${{ env.SUFFIX }}
           flavor:
             latest=false
 
