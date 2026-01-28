@@ -16,27 +16,25 @@
 # limitations under the License.
 #
 import torch
-import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 from vllm.attention.layer import Attention
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import Range
 from vllm.logger import logger
+from vllm_ascend.compilation.passes.base_pattern import BasePattern
 
-
-class QKNormRopeFusionPattern:
+class QKNormRopeFusionPattern(BasePattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
-        self.vllm_config = vllm_config
+        super().__init__(vllm_config, eps)
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.eps = eps
         self.device = vllm_config.device_config.device if vllm_config.device_config else None
 
-    def get_inputs(self):
+    def get_example_inputs(self):
         T = 5
         qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
         q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
@@ -45,7 +43,7 @@ class QKNormRopeFusionPattern:
         sin = torch.empty(1, T, 1, self.head_dim, dtype=torch.bfloat16, device="npu")
         return [qkv, q_weight, k_weight, cos, sin]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def get_pattern(self):
         def pattern(
             qkv: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
         ):
@@ -66,7 +64,9 @@ class QKNormRopeFusionPattern:
             q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
 
             return q_rope, k_rope, v
+        return pattern
 
+    def get_replacement(self):
         def replacement(
             qkv: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
         ):
@@ -85,22 +85,20 @@ class QKNormRopeFusionPattern:
             )
 
             return results
+        return replacement
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
 
-
-class QKNormRopeFusionPatternWithBias:
+class QKNormRopeFusionPatternWithBias(BasePattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
+        super().__init__(vllm_config, eps)
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.eps = eps
-        self.vllm_config = vllm_config
         self.device = vllm_config.device_config.device if vllm_config.device_config else None
 
-    def get_inputs(self):
+    def get_example_inputs(self):
         T = 5
         qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
         q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
@@ -112,7 +110,7 @@ class QKNormRopeFusionPatternWithBias:
 
         return [qkv, q_weight, k_weight, q_bias, k_bias, cos, sin]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def get_pattern(self):
         def pattern(
             qkv: torch.Tensor,
             q_weight: torch.Tensor,
@@ -141,7 +139,9 @@ class QKNormRopeFusionPatternWithBias:
             q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
 
             return q_rope, k_rope, v
+        return pattern
 
+    def get_replacement(self):
         def replacement(
             qkv: torch.Tensor,
             q_weight: torch.Tensor,
@@ -165,8 +165,7 @@ class QKNormRopeFusionPatternWithBias:
                 sin=sin,
             )
             return results
-
-        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+    return replacement
 
 
 class QKNormRopeFusionPass(VllmInductorPass):

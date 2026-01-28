@@ -8,9 +8,10 @@ from vllm.config import VllmConfig
 from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
 class BasePattern(ABC):
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
+        self.eps = eps
         
     @abstractmethod
     def get_example_inputs(self) -> List[torch.Tensor]:
