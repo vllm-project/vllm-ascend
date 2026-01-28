@@ -81,7 +81,7 @@ jobs:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
       quay_username: ${{ vars.QUAY_USERNAME }}
-      should_push: ${{ github.repository_owner == 'vllm-project' }}
+      should_push: ${{ github.repository_owner == 'vllm-project' && github.event_name == 'push'}}
       workflow_dispatch_tag: ${{ inputs.tag }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
