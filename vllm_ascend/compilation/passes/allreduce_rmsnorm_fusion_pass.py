@@ -67,6 +67,7 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
             out1 = output[2]
 
             return out0, out1
+
         return pattern
 
     def get_replacement(self):
@@ -84,6 +85,7 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
                 False,
             )
             return out0, out1
+
         return replacement
 
 
@@ -112,6 +114,7 @@ class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
             output = torch.ops._C_ascend.npu_add_rms_norm_bias(all_reduce_, residual, rms_norm_weight, None)
 
             return output[0]
+
         return pattern
 
     def get_replacement(self):

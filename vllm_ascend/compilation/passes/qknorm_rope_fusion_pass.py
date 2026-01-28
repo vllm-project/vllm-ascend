@@ -32,7 +32,7 @@ else:
     from vllm.model_executor.layers.attention import Attention
 
 
-class QKNormRopeFusionPattern:
+class QKNormRopeFusionPattern(BasePattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
         super().__init__(vllm_config, eps)
         self.head_dim = head_dim
@@ -75,6 +75,7 @@ class QKNormRopeFusionPattern:
             )
 
             return q_rope, k_rope, v
+
         return pattern
 
     def get_replacement(self):
@@ -100,6 +101,7 @@ class QKNormRopeFusionPattern:
             )
 
             return results
+
         return replacement
 
 
@@ -153,6 +155,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
             )
 
             return q_rope, k_rope, v
+
         return pattern
 
     def get_replacement(self):
@@ -179,6 +182,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
                 positions=positions,
             )
             return results
+
     return replacement
 
 
