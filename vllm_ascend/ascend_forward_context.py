@@ -43,7 +43,7 @@ def set_ascend_forward_context(
     model_instance: torch.nn.Module = None,
     is_draft_model=False,
     skip_compiled: bool = False,
-    draft_attn_metadatas=None
+    draft_attn_metadatas=None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
