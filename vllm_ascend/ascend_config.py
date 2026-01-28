@@ -61,6 +61,7 @@ class AscendConfig:
         self.enable_shared_expert_dp = (
             additional_config.get("enable_shared_expert_dp", False)
             and vllm_config.parallel_config.enable_expert_parallel
+            and vllm_config.parallel_config.tensor_parallel_size > 1
         )
         from vllm_ascend.utils import enable_sp
 
