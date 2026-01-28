@@ -147,9 +147,6 @@ class PCPManager:
             dtype=torch.int32,
             device=self.device)
         self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type == "qwen3_next"
-        self.cp_kv_recover_idx_for_chunk: list[list[int]] = [
-            [] for _ in range(self.pcp_world_size)
-        ]
 
         self.num_pcp_pads = torch.zeros(self.max_num_reqs, dtype=torch.int32)
         self.pcp_pads_logits_hybrid_attn = torch.zeros(self.max_num_reqs, dtype=torch.int32)
@@ -928,7 +925,6 @@ class PCPManager:
                 long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[: num_actual_tokens_pcp_padded // self.pcp_world_size - num_decodes]
                 long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[: sum(pcp_unpad_mask) + num_decodes * (self.pcp_world_size - 1)]
 
-                long_seq_metadata.cp_kv_recover_idx_for_chunk = self.cp_kv_recover_idx_for_chunk
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
                 long_seq_metadata.q_full_idx = self.q_full_idx

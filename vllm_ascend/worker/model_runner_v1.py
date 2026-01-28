@@ -291,20 +291,6 @@ class NPUModelRunner(GPUModelRunner):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-        # Persistent batch.
-        # self.input_ids = torch.zeros(self.max_num_tokens,
-        #                              dtype=torch.int32,
-        #                              device=self.device)
-        # self.positions = torch.zeros(self.max_num_tokens,
-        #                              dtype=torch.int64,
-        #                              device=self.device)
-        # self.query_start_loc = torch.zeros(self.max_num_reqs + 1,
-        #                                    dtype=torch.int32,
-        #                                    device=self.device)
-        # self.seq_lens = torch.zeros(self.max_num_reqs,
-        #                             dtype=torch.int32,
-        #                             device=self.device)
-
         set_cos_and_sin(vllm_config, self.max_num_reqs,
                         self.uniform_decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs,
@@ -363,9 +349,6 @@ class NPUModelRunner(GPUModelRunner):
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
         self.pcp_use_hybrid_attn = self.model_config.hf_config.model_type == "qwen3_next"
-        self.cp_kv_recover_idx_for_chunk: list[list[int]] = [
-            [] for _ in range(self.pcp_size)
-        ]
 
         self.num_pcp_pads = torch.zeros(self.max_num_reqs, dtype=torch.int32)
         self.pcp_pads_logits_hybrid_attn = torch.zeros(self.max_num_reqs, dtype=torch.int32)
@@ -918,7 +901,7 @@ class NPUModelRunner(GPUModelRunner):
                 logits_indices,
                 (0, max_num_reqs_across_dp - logits_indices.shape[0]))
 
-        return logits_indices, spec_decode_metadata
+        return logits_indices, spec_decode_metadata, max_num_tokens_across_pcp, pcp_unpad_mask
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
@@ -1274,6 +1257,8 @@ class NPUModelRunner(GPUModelRunner):
                 (
                     logits_indices,
                     spec_decode_metadata,
+                    max_num_tokens_across_pcp,
+                    pcp_unpad_mask,
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
@@ -1345,6 +1330,7 @@ class NPUModelRunner(GPUModelRunner):
                         num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                         num_scheduled_tokens_np=num_scheduled_tokens_np,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                        pcp_unpad_mask=pcp_unpad_mask,
                     )
                 )
 
@@ -1992,6 +1978,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        pcp_unpad_mask: torch.Tensor | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -2019,7 +2006,7 @@ class NPUModelRunner(GPUModelRunner):
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
-        def _get_pcp_metadata(num_tokens):
+        def _get_pcp_metadata(num_tokens, pcp_unpad_mask):
             if not self.use_cp:
                 return None
             return self.pcp_manager.generate_pcp_metadata(
@@ -2027,6 +2014,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.query_lens,
                 self.input_batch,
                 num_scheduled_tokens_np,
+                pcp_unpad_mask,
             )
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
@@ -2074,7 +2062,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             return blk_table_tensor, slot_mapping
 
-        long_seq_metdadata = _get_pcp_metadata(num_tokens)
+        long_seq_metdadata = _get_pcp_metadata(num_tokens, pcp_unpad_mask)
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
 
         cm_base = AscendCommonAttentionMetadata(
