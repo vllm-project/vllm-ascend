@@ -224,8 +224,13 @@ class AscendFusedMoE(FusedMoE):
                 self.global_num_experts,
                 get_compressed_expert_map(self._expert_map))
         if self.dynamic_eplb:
-            self.moe_load = torch.zeros(self.local_num_experts,
-                                        dtype=torch.int64).npu()
+            self.load_counter = torch.tensor(0, dtype=torch.int32, device='npu')
+            self.num_iter = ascend_config.num_iterations_eplb_update
+            self.moe_load = torch.zeros(
+                (self.num_iter, self.local_num_experts),
+                dtype=torch.int32,
+                device='npu'
+            )
 
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
@@ -273,6 +278,7 @@ class AscendFusedMoE(FusedMoE):
 
     def clear_moe_load(self):
         if self.moe_load is not None:
+            self.load_counter.zero_()
             self.moe_load.zero_()
 
     def maybe_all_reduce_tensor_model_parallel(
@@ -387,9 +393,12 @@ class AscendFusedMoE(FusedMoE):
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, \
                 "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
-            local_load = expert_tokens if group_list_type == 1 else \
-                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-            self.moe_load.add_(local_load)
+            self.moe_load.index_add_(
+                dim=0,
+                index=self.load_counter,
+                source=expert_tokens.to(torch.int32, non_blocking=True).view(1,-1),
+            )
+            self.load_counter.add_(1)
 
         routed_out = forward_context.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
