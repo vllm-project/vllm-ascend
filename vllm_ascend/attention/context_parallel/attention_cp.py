@@ -281,9 +281,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         update_stream,
         forward_context,
         num_tokens,
-        vllm_config,
+        vllm_config=None,
         speculative_config=None,
         num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
     ):
         graph_params = get_graph_params()
         # FIXME: Behold! We are using a temporary hack here to update the args
