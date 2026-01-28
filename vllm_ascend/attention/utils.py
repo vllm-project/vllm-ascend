@@ -105,8 +105,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
                  num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
         # This only use to eagle now. It will be use to enforce_eager in future.
         return AscendCommonAttentionMetadata(
-            query_start_loc=self.query_start_loc[:num_actual_reqs + 1],
-            query_start_loc_cpu=self.query_start_loc_cpu[:num_actual_reqs + 1],
+            query_start_loc=self.query_start_loc,
+            query_start_loc_cpu=self.query_start_loc_cpu,
             seq_lens=self.seq_lens[:num_actual_reqs],
             seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
             num_computed_tokens_cpu=self.

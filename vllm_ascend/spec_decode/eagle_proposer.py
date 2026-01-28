@@ -713,7 +713,11 @@ class EagleProposer(VllmEagleProposer):
         if draft_step == 1:
             attn_metadata.num_actual_tokens = batch_size
             attn_metadata.max_query_len = 1
-            attn_metadata.query_start_loc = self.arange_cpu[:batch_size + 1]
+            if aclgraph_runtime_mode == CUDAGraphMode.FULL and input_batch_size > batch_size:
+                slice_size = input_batch_size + 1
+            else:
+                slice_size = batch_size + 1
+            attn_metadata.query_start_loc = self.arange_cpu[:slice_size]
             attn_metadata.num_decodes, attn_metadata.num_prefills, attn_metadata.num_decode_tokens, attn_metadata.num_prefill_tokens = 0, batch_size, 0, batch_size
             attn_metadata.num_actual_tokens_pcp_padded = attn_metadata.num_decode_tokens + attn_metadata.num_prefill_tokens
 
