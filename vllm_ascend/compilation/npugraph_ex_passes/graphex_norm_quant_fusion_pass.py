@@ -25,68 +25,6 @@ from vllm.logger import logger
 from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
 
-class GraphEXAddRMSNormQuantPattern:
-    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        self.vllm_config = vllm_config
-        self.dtype = vllm_config.model_config.dtype
-        self.eps = eps
-
-    def get_inputs(self):
-        """
-        Generate example inputs for the AddRMSNormQuant fusion pattern.
-        """
-        rms_norm_input = torch.randn(2, 4, device="npu")
-        residual = torch.randn(2, 4, device="npu")
-        rms_norm_weight = torch.randn(4, device="npu")
-        scale = torch.ones(4, device="npu")
-        scale_reciprocal = torch.ones(4, device="npu")
-        offset = torch.zeros(4, device="npu")
-        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset]
-
-    def register(self):
-        def pattern(
-            rms_norm_input: torch.Tensor,
-            residual: torch.Tensor,
-            rms_norm_weight: torch.Tensor,
-            scale: torch.Tensor,
-            scale_reciprocal: torch.Tensor,
-            offset: torch.Tensor,
-        ):
-            """
-            Pattern for AddRMSNormQuant fusion.
-            """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
-            out0 = output[0]
-            out1 = output[2]
-            quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
-            return quantized_output, out1
-
-        def replacement(
-            rms_norm_input: torch.Tensor,
-            residual: torch.Tensor,
-            rms_norm_weight: torch.Tensor,
-            scale: torch.Tensor,
-            scale_reciprocal: torch.Tensor,
-            offset: torch.Tensor,
-        ):
-            """
-            Replacement for the AddRMSNormQuant fusion.
-            """
-            output = torch.ops.npu.npu_add_rms_norm_quant(
-                rms_norm_input, residual, rms_norm_weight, scale, offset, epsilon=self.eps
-            )
-            quantized_output = output[0]
-            out1 = output[2]
-            return quantized_output, out1
-
-        torchair.register_replacement(
-            search_fn=pattern,
-            replace_fn=replacement,
-            example_inputs=self.get_inputs(),
-            extra_check=extra_stream_scope_check,
-        )
-
-
 class GraphEXAddRMSNormQuantPatternWithBias:
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
