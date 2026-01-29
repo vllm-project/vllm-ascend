@@ -1,7 +1,9 @@
 #include "kernel_operator.h"
 using namespace AscendC;
+
 #ifndef __OP_KERNEL_KV_CACHE_TRANSPOSE_H__
 #define __OP_KERNEL_KV_CACHE_TRANSPOSE_H__
+
 template <typename T>
 __aicore__ inline __gm__ T* GetTensorAddr(uint16_t index, GM_ADDR tensorPtr) {
     __gm__ uint64_t* dataAddr = reinterpret_cast<__gm__ uint64_t*>(tensorPtr);
