@@ -66,6 +66,7 @@ class MoeV2GatherDynamicQuant {
   int64_t needCoreNum;
   int64_t blockIdx;
   int64_t cols;
+  int64_t cols_scale_;
   int64_t n;
   int64_t k;
   int64_t totalLength;
@@ -117,7 +118,7 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::Compute(LocalTensor<float>& s
 
   LocalTensor<float> tempLocal = calcQueue.AllocTensor<float>();
   LocalTensor<int8_t> outLocal = inputXOutQueue.AllocTensor<int8_t>();
-  LocalTensor<float> dynamicQuantLocal = scaleOutQueue.AllocTensor<float>();
+  LocalTensor<float> dynamicQuantLocal = outLocal[this->cols].template ReinterpretCast<float>();
 
   if constexpr (!IsSameType<T, float>::value) {
     Cast(inLocal, inLocal.ReinterpretCast<T>()[perLoopColsAlign], RoundMode::CAST_NONE, this->cols);
@@ -151,7 +152,6 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::Compute(LocalTensor<float>& s
 
   calcQueue.FreeTensor(tempLocal);
   inputXOutQueue.EnQue(outLocal);
-  scaleOutQueue.EnQue(dynamicQuantLocal);
 }
 
 template <typename T>
@@ -163,7 +163,7 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::CopyOutXQuant1H(int64_t progr
   int64_t currentLoopStartRow = initialRow / this->k;
   int64_t currentLoopLastRow = (initialRow + this->currentLoopRows - 1) / this->k;
   DataCopyExtParams copyInParams{1, static_cast<uint32_t>(this->cols * sizeof(T)), 0, 0, 0};
-  DataCopyExtParams copyOutParams{1, static_cast<uint32_t>(this->cols * sizeof(int8_t)), 0, 0, 0};
+  DataCopyExtParams copyOutParams{1, static_cast<uint32_t>((this->cols + BLOCK_BYTES) * sizeof(int8_t)), 0, 0, 0};
   DataCopyExtParams smoothParams{1, static_cast<uint32_t>(this->cols * sizeof(float)), 0, 0, 0};
 
   LocalTensor<float> smoothLocal;
@@ -184,10 +184,9 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::CopyOutXQuant1H(int64_t progr
 
     inputXInQueue.EnQue<T>(inLocal);
 
-    // Compute quantization
+    // 计算quant
     Compute(smoothLocal);
 
-    LocalTensor<float> quantScaleLocal = scaleOutQueue.DeQue<float>();
     LocalTensor<int8_t> outLocal = inputXOutQueue.DeQue<int8_t>();
 
     while (curLoopRow < this->currentLoopRows && initialRow / this->k == row) {
@@ -197,15 +196,10 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::CopyOutXQuant1H(int64_t progr
       if (outIndex == -1 || (this->dropPadMode == DROPLESS_MODE && outIndex >= this->activateRows)) {
         continue;
       }
-      DataCopyPad(expandedXGm[outIndex * cols], outLocal, copyOutParams);
-      DataCopyPad(dynamicQuantScaleGm[outIndex], quantScaleLocal, {1, 4, 0, 0, 0});
+      DataCopyPad(expandedXGm[outIndex * cols_scale_], outLocal, copyOutParams);   // scale放在data后面的位置
     }
     inputXInQueue.FreeTensor(inLocal);
     inputXOutQueue.FreeTensor(outLocal);
-    scaleOutQueue.FreeTensor(quantScaleLocal);
-  }
-  if (smoothType == 1) {
-    smoothInQueue.FreeTensor(smoothLocal);
   }
   expandRowIdxInQueue.FreeTensor(indicesLocal);
 }
@@ -463,6 +457,7 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::Init(GM_ADDR inputX, GM_ADDR 
   this->needCoreNum = this->gatherOutTilingData->needCoreNum;
   this->activateRows = this->gatherOutTilingData->activateRows;
   this->cols = tilingData->cols;
+  this->cols_scale_ = this->cols + ALIGN_512;
   this->n = tilingData->n;
   this->k = tilingData->k;
   this->totalLength = tilingData->n * tilingData->k;
@@ -518,32 +513,15 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::Init(GM_ADDR inputX, GM_ADDR 
   pipe->InitBuffer(smoothInQueue, BUFFER_NUM, AlignBytes(this->perLoopCols, sizeof(float)));
   pipe->InitBuffer(calcQueue, 1, AlignBytes(this->perLoopCols, sizeof(float)));
   pipe->InitBuffer(inputXOutQueue, 1, AlignBytes(this->perLoopCols, sizeof(int8_t)));
-  pipe->InitBuffer(scaleOutQueue, 1, BLOCK_BYTES + BLOCK_BYTES);
 }
 
 template <typename T>
 __aicore__ inline void MoeV2GatherDynamicQuant<T>::Process() {
   if (this->blockIdx < this->needCoreNum) {
     currentLoopRows = perLoopRows;
-    if (colLoops > 1) {  // A single row cannot be fully loaded; workspace is required
-      if (smoothType == 2) {
-        for (int64_t loop = 0; loop < this->rowLoops - 1; loop++) {
-          CopyInExpandedExpertIdx(loop);
-          CopyOutPartialXQuantEH(loop);
-        }
-        currentLoopRows = lastLoopRows;
-        CopyInExpandedExpertIdx(this->rowLoops - 1);
-        CopyOutPartialXQuantEH(this->rowLoops - 1);
-      } else {
-        for (int64_t loop = 0; loop < this->rowLoops - 1; loop++) {
-          CopyInExpandedRowIdx(loop);
-          CopyOutPartialXQuant1H(loop);
-        }
-        currentLoopRows = lastLoopRows;
-        CopyInExpandedRowIdx(this->rowLoops - 1);
-        CopyOutPartialXQuant1H(this->rowLoops - 1);
-      }
-    } else {  // A single row can be fully loaded
+    if (colLoops > 1) {  // 一行无法全载，需要workspace
+      trap();   // 不支持
+    } else {  // 一行可以全载
       if (smoothType == 2) {
         for (int64_t loop = 0; loop < this->rowLoops - 1; loop++) {
           CopyInExpandedExpertIdx(loop);
