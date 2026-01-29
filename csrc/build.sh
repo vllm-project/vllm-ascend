@@ -178,7 +178,7 @@ CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_
 set_env
 clean
 
-ccache_system=$(which ccache || true)
+ccache_system=$(which sccache || true)
 if [ -n "${ccache_system}" ];then
     CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_CCACHE=ON -DCUSTOM_CCACHE=${ccache_system}"
     gen_bisheng ${ccache_system}
