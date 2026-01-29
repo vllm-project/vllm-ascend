@@ -84,7 +84,7 @@ jobs:
       runner: linux-arm64-npu-1
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
       contains_310: false
-      type: full
+      type: light
     secrets:
       # 传递敏感的 secrets（必须和子 workflow 声明的名称一致）
       HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
