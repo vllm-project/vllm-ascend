@@ -92,10 +92,13 @@ class LayerPoolKey(PoolKey):
 
 
 class ChunkedTokenDatabase:
-    def __init__(self, metadata: KeyMetadata, block_size: int, use_mla: bool, partitions: list[int] | None):
+    def __init__(
+        self, metadata: KeyMetadata, block_size: int, use_mla: bool, use_sparse: bool, partitions: list[int] | None
+    ):
         self.metadata = metadata
         self.block_size = block_size
         self.use_mla = use_mla
+        self.use_sparse = use_sparse
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
         self.partitions = partitions
@@ -118,7 +121,12 @@ class ChunkedTokenDatabase:
         size_list = []
         block_id = block_ids[start // self.block_size]
         for index, base_addr in enumerate(self.kv_caches_base_addr):
-            block_len = self.block_len[index % 2] if self.use_mla else self.block_len[0]
+            if self.use_sparse:
+                block_len = self.block_len[index % 3]
+            elif self.use_mla:
+                block_len = self.block_len[index % 2]
+            else:
+                block_len = self.block_len[0]
 
             addr = base_addr + block_id * block_len
             length = int(block_len / self.block_size * (end - start))
@@ -128,18 +136,28 @@ class ChunkedTokenDatabase:
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         block_id = block_ids[start // self.block_size]
-        if self.use_mla:
+        if self.use_sparse:
+            addr_k = self.kv_caches_base_addr[layer_id * 3] + block_id * self.block_len[0]
+            addr_v = self.kv_caches_base_addr[layer_id * 3 + 1] + block_id * self.block_len[1]
+            addr_dsa_k = self.kv_caches_base_addr[layer_id * 3 + 2] + block_id * self.block_len[2]
+            length_k = int(self.block_len[0] / self.block_size * (end - start))
+            length_v = int(self.block_len[1] / self.block_size * (end - start))
+            length_dsa_k = int(self.block_len[2] / self.block_size * (end - start))
+            size_list = [length_k, length_v, length_dsa_k]
+            addr_list = [addr_k, addr_v, addr_dsa_k]
+        elif self.use_mla:
             addr_k = self.kv_caches_base_addr[layer_id * 2] + block_id * self.block_len[0]
             addr_v = self.kv_caches_base_addr[layer_id * 2 + 1] + block_id * self.block_len[1]
             length_k = int(self.block_len[0] / self.block_size * (end - start))
             length_v = int(self.block_len[1] / self.block_size * (end - start))
             size_list = [length_k, length_v]
+            addr_list = [addr_k, addr_v]
         else:
             addr_k = self.kv_caches_base_addr[layer_id * 2] + block_id * self.block_len[0]
             addr_v = self.kv_caches_base_addr[layer_id * 2 + 1] + block_id * self.block_len[0]
             length = int(self.block_len[0] / self.block_size * (end - start))
             size_list = [length, length]
-        addr_list = [addr_k, addr_v]
+            addr_list = [addr_k, addr_v]
         return addr_list, size_list
 
     def process_tokens(
