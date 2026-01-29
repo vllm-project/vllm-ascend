@@ -67,6 +67,7 @@ class AscendRMSNorm(RMSNorm):
                                              self.variance_epsilon)
         if self.bias is not None:
             x.add_(self.bias)
+        x = torch.ops.vllm.maybe_wait_prefetch_done(x)
         return x
 
 
