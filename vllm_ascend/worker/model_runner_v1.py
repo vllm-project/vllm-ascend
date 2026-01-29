@@ -363,7 +363,7 @@ class NPUModelRunner(GPUModelRunner):
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
-        self.long_seq_metadata = None
+        self.pcp_metadata = None
 
     @property
     def use_cp(self) -> bool:
@@ -980,7 +980,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 req_scheduled_tokens = scheduler_output.num_scheduled_tokens
                 if self.pcp_size * self.dcp_size > 1:
-                    long_seq_metadata = self.long_seq_metadata  # type: ignore
+                    pcp_metadata = self.pcp_metadata  # type: ignore
                     input_ids_pcp_full = self.pcp_manager.input_ids_pcp_full.gpu
                     query_start_loc_pcp_full = self.pcp_manager.query_start_loc_pcp_full.gpu
                     query_start_loc_pcp_full_cpu = self.pcp_manager.query_start_loc_pcp_full.cpu
@@ -991,7 +991,7 @@ class NPUModelRunner(GPUModelRunner):
                                         > self.decode_threshold).sum().item()
                     num_decode_reqs = num_reqs - num_prefill_reqs
                 else:
-                    long_seq_metadata = None  # type: ignore
+                    pcp_metadata = None  # type: ignore
                     num_prefill_reqs = 0
                     num_decode_reqs = 0
                 if spec_decode_metadata is None:
@@ -1066,7 +1066,7 @@ class NPUModelRunner(GPUModelRunner):
                     common_attn_metadata=common_attn_metadata,
                     sampling_metadata=sampling_metadata,
                     req_scheduled_tokens=req_scheduled_tokens,
-                    long_seq_metadata=long_seq_metadata,
+                    pcp_metadata=pcp_metadata,
                     num_prefill_reqs=num_prefill_reqs,
                     num_decode_reqs=num_decode_reqs,
                     scheduler_output=scheduler_output,
@@ -1938,7 +1938,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             return blk_table_tensor, slot_mapping
 
-        long_seq_metdadata = _get_pcp_metadata(num_tokens)
+        pcp_metdadata = _get_pcp_metadata(num_tokens)
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
 
         cm_base = AscendCommonAttentionMetadata(
@@ -1963,7 +1963,7 @@ class NPUModelRunner(GPUModelRunner):
             positions=self.positions.gpu,
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
-            prefill_context_parallel_metadata=long_seq_metdadata,
+            prefill_context_parallel_metadata=pcp_metdadata,
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:

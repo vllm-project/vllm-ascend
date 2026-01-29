@@ -90,13 +90,13 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
 
             has_prefill_requests = (num_reqs - num_decodes) > 0
             if has_prefill_requests:
-                assert hasattr(result, 'q_head_idx_tensor')
-                assert hasattr(result, 'q_tail_idx_tensor')
+                assert hasattr(result, 'q_head_idx')
+                assert hasattr(result, 'q_tail_idx')
                 assert hasattr(result, 'q_full_idx')
-                assert hasattr(result, 'kv_with_q_head_nomask_idx_tensor')
-                assert hasattr(result, 'kv_with_q_head_mask_idx_tensor')
-                assert hasattr(result, 'kv_with_q_tail_nomask_idx_tensor')
-                assert hasattr(result, 'kv_with_q_tail_mask_idx_tensor')
+                assert hasattr(result, 'kv_with_q_head_nomask_idx')
+                assert hasattr(result, 'kv_with_q_head_mask_idx')
+                assert hasattr(result, 'kv_with_q_tail_nomask_idx')
+                assert hasattr(result, 'kv_with_q_tail_mask_idx')
                 assert hasattr(result, 'attn_mask_seqlens')
                 assert hasattr(result, 'head_attn_nomask_seqlens')
                 assert hasattr(result, 'tail_attn_nomask_seqlens')
@@ -378,7 +378,7 @@ def test_generate_pcp_mtp_input(
             [torch.tensor([[128, 128], [2, 3]], dtype=torch.int32)],
         ),
     ])
-def test_split_nomask_idx_tensor_list(
+def test_split_nomask_idx_list(
         pcp_world_rank, split_with_q_head_nomask_idx_reqs,
         split_kv_with_q_tail_nomask_idx_reqs, head_attn_nomask_seqlens,
         chunk_seqlens, target_split_q_head, target_split_q_tail,
@@ -388,7 +388,7 @@ def test_split_nomask_idx_tensor_list(
     mock_runner.device = "cpu"
     mock_runner.pcp_world_rank = 0
     mock_runner.kv_idx_names = {
-        "kv_with_q_head_nomask_idx_tensor":
+        "kv_with_q_head_nomask_idx":
         torch.tensor([1, 2, 3], dtype=torch.int32)
     }
 
@@ -401,7 +401,7 @@ def test_split_nomask_idx_tensor_list(
         mock_runner, PCPManager)
 
     # Call the method under test
-    result = PCPManager._split_nomask_idx_tensor_list(
+    result = PCPManager._split_nomask_idx_list(
         mock_runner,
         split_with_q_head_nomask_idx_reqs=split_with_q_head_nomask_idx_reqs,
         split_kv_with_q_tail_nomask_idx_reqs=
