@@ -80,6 +80,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'light' }}
         run: |
+          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_graphex_allreduce_matmul_fusion.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
           pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
 
@@ -92,6 +93,7 @@ jobs:
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
           # basic 
+          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_graphex_allreduce_matmul_fusion.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_auto_fit_max_mode_len.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_batch_invariant.py
