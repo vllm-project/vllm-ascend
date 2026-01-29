@@ -507,7 +507,7 @@ class NPUWorker(WorkerBase):
                 aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
                 l2_cache=False,
                 op_attr=False,
-                data_simplification=False,
+                data_simplification=True,
                 record_op_args=False,
                 gc_detect_threshold=None,
             )
@@ -517,10 +517,11 @@ class NPUWorker(WorkerBase):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU,
                 ],
-                with_stack=envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK,
-                profile_memory=envs_vllm.\
-                    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                with_modules=False,
+                with_stack=False,
+                profile_memory=bool(envs_vllm.\
+                    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY) != '0' if envs_vllm.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY is not None else False,
+                with_modules=bool(envs_vllm.\
+                    VLLM_TORCH_PROFILER_WITH_STACK) != '0' if envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK is not None else True,
                 experimental_config=experimental_config,
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir))
