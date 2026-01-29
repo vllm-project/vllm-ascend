@@ -66,7 +66,7 @@ deployment:
         --data-parallel-rpc-port 13389
         --tensor-parallel-size 1
         --seed 1024
-        --max-num-seqs 16
+        --max-num-seqs 32
         --max-model-len 8192
         --max-num-batched-tokens 8192
         --enable-expert-parallel
