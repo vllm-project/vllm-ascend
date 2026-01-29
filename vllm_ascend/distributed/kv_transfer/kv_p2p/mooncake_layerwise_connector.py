@@ -1096,7 +1096,7 @@ class MooncakeLayerwiseConnectorWorker:
                     {block_id for req_id in selected_req_ids for block_id in metadata.requests[req_id].local_block_ids}
                 )
 
-                device = self.k_buffer.device
+                device = self.k_buffer.device  # type: ignore
                 flat_block_ids = send_task.rearrange_block_ids
                 block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
                 send_task.num_blocks = len(flat_block_ids)
@@ -1127,8 +1127,8 @@ class MooncakeLayerwiseConnectorWorker:
                 assert self.resharding_stream is not None
                 with npu_stream_switch(self.resharding_stream):
                     reshape_cache_event.wait()
-                    dtype = self.k_buffer.dtype
-                    device = self.k_buffer.device
+                    dtype = self.k_buffer.dtype  # type: ignore
+                    device = self.k_buffer.device  # type: ignore
                     # Initialize buffers
                     keys = torch.empty((send_task.num_tokens, *kv_layer[0].size()[-2:]), dtype=dtype, device=device)
                     values = torch.empty((send_task.num_tokens, *kv_layer[1].size()[-2:]), dtype=dtype, device=device)
