@@ -119,8 +119,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
-        long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-        num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded if long_seq_metadata else None
+        pcp_metadata = common_attn_metadata.prefill_context_parallel_metadata
+        num_actual_tokens_pcp_padded = pcp_metadata.num_actual_tokens_pcp_padded if pcp_metadata else None
         if num_actual_tokens_pcp_padded is None:
             num_actual_tokens_pcp_padded = num_actual_tokens
 
@@ -131,12 +131,11 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
         query_start_loc = query_start_loc_cpu.to(self.device, non_blocking=True)
 
-        common_long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         prefill_metadata = None
         decode_metadata = None
-        if common_long_seq_metadata is None:
-            raise AssertionError("common_long_seq_metadata should not be None.")
-        num_computed_tokens_of_pcp_dcp = common_long_seq_metadata.num_computed_tokens_of_pcp_dcp
+        if pcp_metadata is None:
+            raise AssertionError("pcp_metadata should not be None.")
+        num_computed_tokens_of_pcp_dcp = pcp_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
         chunked_context_metadata = None
         if num_prefills > 0:
@@ -161,7 +160,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 # when only using dcp.
                 if self.pcp_size > 1:
                     kv_inverse_idx_for_chunk = torch.argsort(
-                        common_long_seq_metadata.pcp_allgather_restore_idx[pcp_size * num_decode_tokens :].to(
+                        pcp_metadata.pcp_allgather_restore_idx[pcp_size * num_decode_tokens :].to(
                             torch.float32
                         )
                     )
@@ -189,26 +188,26 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                     chunk_seq_mask_filtered_indices=chunk_seq_mask_filtered_indices,
                     local_total_toks=local_total_toks.item(),
                 )
-            attn_mask_seqlens = common_long_seq_metadata.attn_mask_seqlens
-            head_attn_nomask_seqlens = common_long_seq_metadata.head_attn_nomask_seqlens
-            tail_attn_nomask_seqlens = common_long_seq_metadata.tail_attn_nomask_seqlens
+            attn_mask_seqlens = pcp_metadata.attn_mask_seqlens
+            head_attn_nomask_seqlens = pcp_metadata.head_attn_nomask_seqlens
+            tail_attn_nomask_seqlens = pcp_metadata.tail_attn_nomask_seqlens
             if pcp_size > 1:
                 attn_mask_seqlens = torch.cumsum(attn_mask_seqlens[0], dim=0).tolist()
                 head_attn_nomask_seqlens = torch.cumsum(head_attn_nomask_seqlens[1], dim=0).tolist()
                 tail_attn_nomask_seqlens = torch.cumsum(tail_attn_nomask_seqlens[1], dim=0).tolist()
 
             pcp_metadata = AscendPCPMetadata(
-                q_head_idx=common_long_seq_metadata.q_head_idx_tensor,
-                q_tail_idx=common_long_seq_metadata.q_tail_idx_tensor,
-                kv_with_q_head_nomask_idx=common_long_seq_metadata.kv_with_q_head_nomask_idx_tensor,
-                kv_with_q_head_mask_idx=common_long_seq_metadata.kv_with_q_head_mask_idx_tensor,
-                kv_with_q_tail_nomask_idx=common_long_seq_metadata.kv_with_q_tail_nomask_idx_tensor,
-                kv_with_q_tail_mask_idx=common_long_seq_metadata.kv_with_q_tail_mask_idx_tensor,
+                q_head_idx=pcp_metadata.q_head_idx,
+                q_tail_idx=pcp_metadata.q_tail_idx,
+                kv_with_q_head_nomask_idx=pcp_metadata.kv_with_q_head_nomask_idx,
+                kv_with_q_head_mask_idx=pcp_metadata.kv_with_q_head_mask_idx,
+                kv_with_q_tail_nomask_idx=pcp_metadata.kv_with_q_tail_nomask_idx,
+                kv_with_q_tail_mask_idx=pcp_metadata.kv_with_q_tail_mask_idx,
                 attn_mask_seqlens=attn_mask_seqlens,
                 head_attn_nomask_seqlens=head_attn_nomask_seqlens,
                 tail_attn_nomask_seqlens=tail_attn_nomask_seqlens,
-                q_full_idx=common_long_seq_metadata.q_full_idx,
-                pcp_allgather_restore_idx=common_long_seq_metadata.pcp_allgather_restore_idx,
+                q_full_idx=pcp_metadata.q_full_idx,
+                pcp_allgather_restore_idx=pcp_metadata.pcp_allgather_restore_idx,
             )
 
             prefill_metadata = AscendMetadataForPrefill(

@@ -76,9 +76,9 @@ class MtpProposer(EagleProposer):
                     decode_token_per_req=self.runner.decode_token_per_req,
                     max_seq_len=0)
                 if self.pcp_size * self.dcp_size > 1:
-                    # update long_seq related params and flatten block_table
+                    # update pcp related params and flatten block_table
                     common_attn_metadata.prefill_context_parallel_metadata = \
-                        self.runner.pcp_manager.long_seq_metadata
+                        self.runner.pcp_manager.pcp_metadata
                     common_attn_metadata.block_table_tensor = \
                         self.runner.input_batch.block_table[0].get_device_tensor()[
                             :num_reqs * self.decode_threshold]
@@ -144,7 +144,7 @@ class MtpProposer(EagleProposer):
         mm_embed_inputs: Optional[tuple[list[torch.Tensor],
                                         torch.Tensor]] = None,
         req_scheduled_tokens=None,
-        long_seq_metadata=None,
+        pcp_metadata=None,
         num_prefill_reqs=0,
         num_decode_reqs=0,
         scheduler_output: SchedulerOutput = None,
@@ -171,8 +171,8 @@ class MtpProposer(EagleProposer):
 
         # update pcp related params
         if self.pcp_size * self.dcp_size > 1:
-            assert long_seq_metadata is not None
-            common_attn_metadata.prefill_context_parallel_metadata = long_seq_metadata
+            assert pcp_metadata is not None
+            common_attn_metadata.prefill_context_parallel_metadata = pcp_metadata
             ori_last_token_indices = last_token_indices.clone()
             query_lens_d = self.runner.query_lens[:num_decode_reqs]
         if self.pcp_size > 1:

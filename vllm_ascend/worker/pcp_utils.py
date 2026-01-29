@@ -574,7 +574,6 @@ class PCPManager:
         num_prefills = num_reqs - num_decodes
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_world_size
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
-        long_seq_metadata = None
         if self.pcp_world_size * self.dcp_world_size > 1:
             decode_context_lens = input_batch.num_computed_tokens_cpu[:
                                                                       num_decodes] + num_scheduled_tokens[:
@@ -626,7 +625,7 @@ class PCPManager:
                             1::self.decode_threshold])
                 num_computed_tokens_of_pcp_dcp = torch.cat(
                     num_computed_tokens_of_pcp_dcp_list, dim=0)
-            long_seq_metadata = AscendPrefillContextParallelMetadata(
+            pcp_metadata = AscendPrefillContextParallelMetadata(
                 num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_of_pcp_dcp.
                 numpy())
@@ -726,37 +725,37 @@ class PCPManager:
                         split_kv_with_q_tail_nomask_idx_reqs,
                         head_attn_nomask_seqlens, chunk_seqlens)
 
-                self.extra_long_seq_kwargs = {
+                self.extra_pcp_kwargs = {
                     'attn_mask_seqlens': attn_mask_seqlens,
                     'head_attn_nomask_seqlens': head_attn_nomask_seqlens,
                     'tail_attn_nomask_seqlens': tail_attn_nomask_seqlens
                 }
-                long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:
+                pcp_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:
                                                                                                  num_actual_tokens_pcp_padded]
-                long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
-                long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
-                long_seq_metadata.q_full_idx = self.q_full_idx
-                long_seq_metadata.kv_with_q_head_nomask_idx_tensor = self.kv_idx_names[
+                pcp_metadata.q_head_idx_tensor = self.q_head_idx_tensor
+                pcp_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
+                pcp_metadata.q_full_idx = self.q_full_idx
+                pcp_metadata.kv_with_q_head_nomask_idx_tensor = self.kv_idx_names[
                     'kv_with_q_head_nomask_idx_tensor']
-                long_seq_metadata.kv_with_q_head_mask_idx_tensor = self.kv_idx_names[
+                pcp_metadata.kv_with_q_head_mask_idx_tensor = self.kv_idx_names[
                     'kv_with_q_head_mask_idx_tensor']
-                long_seq_metadata.kv_with_q_tail_nomask_idx_tensor = self.kv_idx_names[
+                pcp_metadata.kv_with_q_tail_nomask_idx_tensor = self.kv_idx_names[
                     'kv_with_q_tail_nomask_idx_tensor']
-                long_seq_metadata.kv_with_q_tail_mask_idx_tensor = self.kv_idx_names[
+                pcp_metadata.kv_with_q_tail_mask_idx_tensor = self.kv_idx_names[
                     'kv_with_q_tail_mask_idx_tensor']
-                long_seq_metadata.attn_mask_seqlens = self.extra_long_seq_kwargs[
+                pcp_metadata.attn_mask_seqlens = self.extra_pcp_kwargs[
                     'attn_mask_seqlens']
-                long_seq_metadata.head_attn_nomask_seqlens = self.extra_long_seq_kwargs[
+                pcp_metadata.head_attn_nomask_seqlens = self.extra_pcp_kwargs[
                     'head_attn_nomask_seqlens']
-                long_seq_metadata.tail_attn_nomask_seqlens = self.extra_long_seq_kwargs[
+                pcp_metadata.tail_attn_nomask_seqlens = self.extra_pcp_kwargs[
                     'tail_attn_nomask_seqlens']
                 if self.vllm_config.model_config.use_mla:
-                    long_seq_metadata.kv_with_q_head_nomask_idx_tensor = split_q_head_nomask_idx_tensor_list
-                    long_seq_metadata.kv_with_q_tail_nomask_idx_tensor = split_q_tail_nomask_idx_tensor_list
-                    long_seq_metadata.head_attn_nomask_seqlens = head_attn_nomask_seqlens_list
-                    long_seq_metadata.tail_attn_nomask_seqlens = tail_attn_nomask_seqlens_list
-        self.long_seq_metadata = long_seq_metadata
-        return long_seq_metadata
+                    pcp_metadata.kv_with_q_head_nomask_idx_tensor = split_q_head_nomask_idx_tensor_list
+                    pcp_metadata.kv_with_q_tail_nomask_idx_tensor = split_q_tail_nomask_idx_tensor_list
+                    pcp_metadata.head_attn_nomask_seqlens = head_attn_nomask_seqlens_list
+                    pcp_metadata.tail_attn_nomask_seqlens = tail_attn_nomask_seqlens_list
+        self.pcp_metadata = pcp_metadata
+        return pcp_metadata
 
     def _list_to_tensor(self, lst, device, dtype=torch.int32):
         tensor_npu = torch.zeros(len(lst), dtype=dtype, device=device)

@@ -429,7 +429,7 @@ class EagleProposer(VllmEagleProposer):
         mm_embed_inputs: Optional[tuple[list[torch.Tensor],
                                         torch.Tensor]] = None,
         req_scheduled_tokens=None,
-        long_seq_metadata=None,
+        pcp_metadata=None,
         num_prefill_reqs=0,
         num_decode_reqs=0,
         scheduler_output: SchedulerOutput = None,

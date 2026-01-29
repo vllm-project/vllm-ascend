@@ -135,16 +135,16 @@ e2e-multicard-4-cards:
   - name: tests/e2e/multicard/4-cards/test_kimi_k2.py
     estimated_time: 100
     is_skipped: true
-  - name: tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py
+  - name: tests/e2e/multicard/4-cards/context_parallel/test_accuracy.py
     estimated_time: 60
     is_skipped: true
-  - name: tests/e2e/multicard/4-cards/long_sequence/test_basic.py
+  - name: tests/e2e/multicard/4-cards/context_parallel/test_basic.py
     estimated_time: 60
     is_skipped: true
-  - name: tests/e2e/multicard/4-cards/long_sequence/test_chunked_prefill.py
+  - name: tests/e2e/multicard/4-cards/context_parallel/test_chunked_prefill.py
     estimated_time: 60
     is_skipped: true
-  - name: tests/e2e/multicard/4-cards/long_sequence/test_mtp.py
+  - name: tests/e2e/multicard/4-cards/context_parallel/test_mtp.py
     estimated_time: 60
     is_skipped: true
   - name: tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py
