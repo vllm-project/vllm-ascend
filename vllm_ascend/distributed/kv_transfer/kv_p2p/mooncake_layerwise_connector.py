@@ -1351,6 +1351,6 @@ def ensure_zmq_recv(
 
 
 def get_external_request_id(request_id: str):
-    if os.environ.get("VLLM_VERSION", "0.0.0") == "0.13.0":
-        return request_id
+    # NOTE(zxr): vLLM PR #27987 add additional suffix
+    # to EngineCore request_id with len(suffix) == 9
     return request_id[:-9]
