@@ -284,8 +284,7 @@ jobs:
 
   e2e-4-cards-full:
     name: multicard-4-full
-    needs: [e2e-2-cards-full]
-    if: ${{ needs.e2e-2-cards-full.result == 'success' && inputs.type == 'full' }}
+    if: ${{ inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     strategy:
       matrix:
@@ -341,7 +340,6 @@ jobs:
           pip install -v -e .
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
-        working-directory: ./vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
