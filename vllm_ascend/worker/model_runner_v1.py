@@ -563,10 +563,16 @@ class NPUModelRunner(GPUModelRunner):
             req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
+
+        if self.pcp_size * self.dcp_size > 1:
+            self.pcp_manager.init_batch_info(
+                num_scheduled_tokens,
+                self.input_batch.num_reqs,
+            )
+
         # for pcp, prefill mtp should use origin scheduleroutput ,
         if self.speculative_config and self.pcp_size * self.dcp_size > 1:
             self.pcp_manager.generate_pcp_mtp_input(
-                num_reqs,
                 total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens,
                 with_prefill,
@@ -584,8 +590,6 @@ class NPUModelRunner(GPUModelRunner):
                                  num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
                                      num_scheduled_tokens[:num_reqs],
                                      self.arange_np,
-                                     self.input_batch.num_reqs,
-                                     self.reorder_batch_threshold,
                                  )
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens)
@@ -739,8 +743,7 @@ class NPUModelRunner(GPUModelRunner):
             num_draft_tokens = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
             if self.pcp_size * self.dcp_size > 1:
-                logits_indices = self.pcp_manager.get_logits_indices(
-                    cu_num_tokens, num_reqs)
+                logits_indices = self.pcp_manager.get_logits_indices(cu_num_tokens)
                 logits_indices = logits_indices.pin_memory().to(
                     self.device, non_blocking=True)
             else:
@@ -987,9 +990,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs = self.input_batch.num_reqs
                     ori_query_lens = query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
                         query_start_loc_pcp_full_cpu[:num_reqs]
-                    num_prefill_reqs = (ori_query_lens
-                                        > self.decode_threshold).sum().item()
-                    num_decode_reqs = num_reqs - num_prefill_reqs
+                    num_prefill_reqs = self.pcp_manager.num_prefill_reqs
+                    num_decode_reqs = self.pcp_manager.num_decode_reqs
                 else:
                     long_seq_metadata = None  # type: ignore
                     num_prefill_reqs = 0
@@ -1938,7 +1940,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             return blk_table_tensor, slot_mapping
 
-        long_seq_metdadata = _get_pcp_metadata(num_tokens)
+        self.long_seq_metadata = _get_pcp_metadata(num_tokens)
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
 
         cm_base = AscendCommonAttentionMetadata(
@@ -1963,7 +1965,7 @@ class NPUModelRunner(GPUModelRunner):
             positions=self.positions.gpu,
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
-            prefill_context_parallel_metadata=long_seq_metdadata,
+            prefill_context_parallel_metadata=self.long_seq_metadata,
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
@@ -2153,6 +2155,11 @@ class NPUModelRunner(GPUModelRunner):
                 force_has_lora=activate_lora,
             )
         )
+        if self.pcp_size * self.dcp_size > 1:
+            self.pcp_manager.init_batch_info(
+                num_scheduled_tokens,
+                num_reqs,
+            )
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode
         else:
