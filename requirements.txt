@@ -31,7 +31,7 @@ numba
 torch-npu==2.8.0.post2
 
 arctic-inference==0.1.1
-transformers>=4.57.4
+transformers>=4.57.4, < 5
 fastapi<0.124.0
 
 # Install triton-ascend
