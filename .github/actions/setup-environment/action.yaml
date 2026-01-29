@@ -23,9 +23,6 @@ runs:
         apt-get update -y
         apt install git -y
 
-    - name: Checkout vllm-project/vllm-ascend repo
-      uses: actions/checkout@v6
-
     - name: Install system dependencies
       shell: bash
       run: |
