@@ -19,8 +19,6 @@ from vllm.v1.executor.multiproc_executor import (
     set_multiprocessing_worker_envs,
 )
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class AscendMultiprocExecutor(MultiprocExecutor):
     def _init_executor(self) -> None:
@@ -178,8 +176,7 @@ class AscendWorkerProc(WorkerProc):
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
         }
-        if not vllm_version_is("0.14.1"):
-            process_kwargs["is_driver_worker"] = is_driver_worker
+        process_kwargs["is_driver_worker"] = is_driver_worker
         # Run EngineCore busy loop in background process.
         proc = context.Process(
             target=WorkerProc.worker_main,
