@@ -46,6 +46,16 @@ suites_singlecard_light = {
     ],
 }
 
+suites_2_card_light = {
+    "e2e-2card-light": [
+        TestFile("tests/e2e/multicard/2-cards/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep", 220),
+        TestFile(
+            "tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep",
+            90,
+        ),
+    ],
+}
+
 suites_2_card = {
     "e2e-multicard-2-cards": [
         # TODO: recover skipped tests
@@ -108,6 +118,7 @@ suites_4_card = {
 
 # TODO: add more suites
 suites.update(suites_singlecard_light)
+suites.update(suites_2_card_light)
 suites.update(suites_2_card)
 suites.update(suites_4_card)
 

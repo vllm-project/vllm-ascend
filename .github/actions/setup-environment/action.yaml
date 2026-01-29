@@ -1,0 +1,58 @@
+name: 'Setup Environment'
+description: 'Setup environment for vllm-ascend tests'
+inputs:
+  vllm_ref:
+    description: 'The ref of vllm-project/vllm to checkout'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check npu and CANN info
+      shell: bash
+      run: |
+        npu-smi info
+        cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+    - name: Config mirrors
+      shell: bash
+      run: |
+        sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+        pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+        apt-get update -y
+        apt install git -y
+
+    - name: Checkout vllm-project/vllm-ascend repo
+      uses: actions/checkout@v6
+
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        apt-get -y install `cat packages.txt`
+        apt-get -y install gcc g++ cmake libnuma-dev clang-15
+
+        update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+        update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+    - name: Checkout vllm-project/vllm repo
+      uses: actions/checkout@v6
+      with:
+        repository: vllm-project/vllm
+        ref: ${{ inputs.vllm_ref }}
+        path: ./vllm-empty
+        fetch-depth: 1
+
+    - name: Install vllm-project/vllm from source
+      working-directory: ./vllm-empty
+      shell: bash
+      run: |
+        VLLM_TARGET_DEVICE=empty pip install -e .
+
+    - name: Install vllm-project/vllm-ascend
+      shell: bash
+      env:
+        PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+      run: |
+        pip install -r requirements-dev.txt
+        pip install -v -e .
