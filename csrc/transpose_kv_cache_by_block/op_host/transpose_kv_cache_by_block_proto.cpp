@@ -23,15 +23,10 @@ namespace ops {
 
 static ge::graphStatus InferShapeTransposeKvCacheByBlock(gert::InferShapeContext* context)
 {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
-    gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x1_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataTypeTransposeKvCacheByBlock(gert::InferDataTypeContext *context)
 {
-    const auto inputDataType = context->GetInputDataType(0);
-    context->SetOutputDataType(0, inputDataType);
     return ge::GRAPH_SUCCESS;
 }
 

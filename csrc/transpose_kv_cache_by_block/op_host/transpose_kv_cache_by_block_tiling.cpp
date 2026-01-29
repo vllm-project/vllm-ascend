@@ -47,7 +47,6 @@ ge::graphStatus CalTiling(gert::TilingContext* context, TransposeKvCacheByBlockT
     const int64_t* headDimPtr = attr->GetAttrPointer<int64_t>(2);
     const int64_t* splitNumPtr = attr->GetAttrPointer<int64_t>(3);
     const int64_t* layerNumPtr = attr->GetAttrPointer<int64_t>(4);
-    const int64_t* blockNumPtr = attr->GetAttrPointer<int64_t>(5);
     OPS_CHECK(blockSizePtr == nullptr || headNumPtr == nullptr || headDimPtr == nullptr ||
                 splitNumPtr == nullptr || layerNumPtr == nullptr,
                 OPS_LOG_E(context->GetNodeName(), "Get attr failed."),
