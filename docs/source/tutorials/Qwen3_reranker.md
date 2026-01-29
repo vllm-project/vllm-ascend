@@ -35,7 +35,7 @@ Using the Qwen3-Reranker-8B model as an example, first run the docker container 
 ### Online Inference
 
 ```bash
-vllm serve Qwen/Qwen3-Reranker-8B --task score --host 127.0.0.1 --port 8888 --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+vllm serve Qwen/Qwen3-Reranker-8B --host 127.0.0.1 --port 8888 --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
 ```
 
 Once your server is started, you can send request with follow examples.
