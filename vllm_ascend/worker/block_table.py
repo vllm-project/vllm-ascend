@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.utils import CpuGpuBuffer
 
 
@@ -18,7 +19,8 @@ class BlockTable:
                  device: torch.device,
                  kernel_sizes: Union[list[int], None] = None,
                  cp_kv_cache_interleave_size: int = 1,
-                 num_speculative_tokens: int = 0):
+                 num_speculative_tokens: int = 0,
+                 kv_cache_group: KVCacheGroupSpec = None):
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -245,16 +247,18 @@ class BlockTable:
 class MultiGroupBlockTable:
     """The BlockTables for each KV cache group."""
 
-    def __init__(self,
-                 max_num_reqs: int,
-                 max_model_len: int,
-                 max_num_batched_tokens: int,
-                 pin_memory: bool,
-                 device: torch.device,
-                 block_sizes: list[int],
-                 num_speculative_tokens: int = 0,
-                 kernel_sizes: Optional[list[list[int]]] = None,
-                 cp_kv_cache_interleave_size: int = 1) -> None:
+    def __init__(
+            self,
+            max_num_reqs: int,
+            max_model_len: int,
+            max_num_batched_tokens: int,
+            pin_memory: bool,
+            device: torch.device,
+            block_sizes: list[int],
+            num_speculative_tokens: int = 0,
+            kernel_sizes: Optional[list[list[int]]] = None,
+            cp_kv_cache_interleave_size: int = 1,
+            kv_cache_groups: list[KVCacheGroupSpec] | None = None) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
         # so the block_size which used for calc max_num_blocks_per_req
@@ -278,17 +282,35 @@ class MultiGroupBlockTable:
                 f"block_sizes length ({len(block_sizes)})")
 
         # Use zip to pair block_sizes with kernel_sizes one-to-one
-        self.block_tables = [
-            BlockTable(
-                block_size, max_num_reqs,
-                max(
-                    cdiv(max_model_len,
-                         block_size * dcp_world_size * pcp_world_size),
-                    1 + num_speculative_tokens), max_num_batched_tokens,
-                pin_memory, device, kernel_size_list,
-                cp_kv_cache_interleave_size, num_speculative_tokens)
-            for block_size, kernel_size_list in zip(block_sizes, kernel_sizes)
-        ]
+        if kv_cache_groups is not None:
+            kv_cache_group_size = len(kv_cache_groups)
+            self.block_tables = [
+                BlockTable(
+                    block_size, max_num_reqs,
+                    max(
+                        cdiv(max_model_len,
+                             block_size * dcp_world_size * pcp_world_size),
+                        1 + num_speculative_tokens), max_num_batched_tokens,
+                    pin_memory, device, kernel_size_list,
+                    cp_kv_cache_interleave_size, num_speculative_tokens,
+                    kv_cache_group)
+                for block_size, kernel_size_list, kv_cache_group in zip(
+                    block_sizes * kv_cache_group_size, kernel_sizes *
+                    kv_cache_group_size, kv_cache_groups)
+            ]
+        else:
+            self.block_tables = [
+                BlockTable(
+                    block_size, max_num_reqs,
+                    max(
+                        cdiv(max_model_len,
+                             block_size * dcp_world_size * pcp_world_size),
+                        1 + num_speculative_tokens), max_num_batched_tokens,
+                    pin_memory, device, kernel_size_list,
+                    cp_kv_cache_interleave_size, num_speculative_tokens)
+                for block_size, kernel_size_list in zip(
+                    block_sizes, kernel_sizes)
+            ]
 
     def append_row(self, block_ids: tuple[list[int], ...],
                    row_idx: int) -> None:

@@ -1,0 +1,214 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 10:00+0800\n"
+"Last-Translator: Your Name <email@example.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:1
+msgid "Prefill-Decode Disaggregation (Qwen2.5-VL)"
+msgstr "Prefill-Decode Disaggregation (Qwen2.5-VL)"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:3
+msgid "Getting Start"
+msgstr "开始使用"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:5
+msgid ""
+"vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide "
+"takes one-by-one steps to verify these features with constrained "
+"resources."
+msgstr "vLLM-Ascend 现在支持预填充-解码（PD）分离。本指南将逐步介绍如何使用有限资源验证这些功能。"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:7
+msgid ""
+"Using the Qwen2.5-VL-7B-Instruct model as an example, use vllm-ascend "
+"v0.11.0rc1 (with vLLM v0.11.0) on 1 Atlas 800T A2 server to deploy the "
+"\"1P1D\" architecture. Assume the IP address is 192.0.0.1."
+msgstr "以 Qwen2.5-VL-7B-Instruct 模型为例，在 1 台 Atlas 800T A2 服务器上使用 vllm-ascend v0.11.0rc1（配合 vLLM v0.11.0）部署 \"1P1D\" 架构。假设 IP 地址为 192.0.0.1。"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:9
+msgid "Verify Communication Environment"
+msgstr "验证通信环境"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:11
+msgid "Verification Process"
+msgstr "验证流程"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:13
+msgid "Single Node Verification:"
+msgstr "单节点验证："
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:15
+msgid ""
+"Execute the following commands in sequence. The results must all be "
+"`success` and the status must be `UP`:"
+msgstr "按顺序执行以下命令。结果必须全部为 `success` 且状态必须为 `UP`："
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:30
+msgid "Check NPU HCCN Configuration:"
+msgstr "检查 NPU HCCN 配置："
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:32
+msgid ""
+"Ensure that the hccn.conf file exists in the environment. If using "
+"Docker, mount it into the container."
+msgstr "确保环境中存在 hccn.conf 文件。如果使用 Docker，请将其挂载到容器中。"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:38
+msgid "Get NPU IP Addresses"
+msgstr "获取 NPU IP 地址"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:44
+msgid "Cross-Node PING Test"
+msgstr "跨节点 PING 测试"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:51
+msgid "Check NPU TLS Configuration"
+msgstr "检查 NPU TLS 配置"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:58
+msgid "Run with Docker"
+msgstr "使用 Docker 运行"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:59
+msgid "Start a Docker container."
+msgstr "启动一个 Docker 容器。"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:94
+msgid "Install Mooncake"
+msgstr "安装 Mooncake"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:96
+msgid ""
+"Mooncake is the serving platform for Kimi, a leading LLM service provided"
+" by Moonshot AI.Installation and Compilation Guide: https://github.com"
+"/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries. First, we"
+" need to obtain the Mooncake project. Refer to the following command:"
+msgstr "Mooncake 是 Kimi（由 Moonshot AI 提供的领先 LLM 服务）的服务平台。安装和编译指南：https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries。首先，我们需要获取 Mooncake 项目。参考以下命令："
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:103
+msgid "(Optional) Replace go install url if the network is poor"
+msgstr "（可选）如果网络状况不佳，请替换 go install 网址"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:110
+msgid "Install mpi"
+msgstr "安装 mpi"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:116
+msgid "Install the relevant dependencies. The installation of Go is not required."
+msgstr "安装相关依赖项。不需要安装 Go。"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:122
+msgid "Compile and install"
+msgstr "编译和安装"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:132
+msgid "Set environment variables"
+msgstr "设置环境变量"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:134
+msgid "**Note:**"
+msgstr "**注意：**"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:136
+msgid "Adjust the Python path according to your specific Python installation"
+msgstr "根据您的具体 Python 安装调整 Python 路径"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:137
+msgid ""
+"Ensure `/usr/local/lib` and `/usr/local/lib64` are in your "
+"`LD_LIBRARY_PATH`"
+msgstr "确保 `/usr/local/lib` 和 `/usr/local/lib64` 在您的 `LD_LIBRARY_PATH` 中"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:143
+msgid "Prefiller/Decoder Deployment"
+msgstr "预填充器/解码器部署"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:145
+msgid ""
+"We can run the following scripts to launch a server on the "
+"prefiller/decoder NPU, respectively."
+msgstr "我们可以分别运行以下脚本在预填充器/解码器 NPU 上启动服务器。"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md
+msgid "Prefiller"
+msgstr "预填充器"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md
+msgid "Decoder"
+msgstr "解码器"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:237
+msgid ""
+"If you want to run \"2P1D\", please set ASCEND_RT_VISIBLE_DEVICES and "
+"port to different values for each P process."
+msgstr "如果您想运行 \"2P1D\"，请为每个 P 进程设置不同的 ASCEND_RT_VISIBLE_DEVICES 和端口值。"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:239
+msgid "Example Proxy for Deployment"
+msgstr "部署示例代理"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:241
+msgid ""
+"Run a proxy server on the same node with the prefiller service instance. "
+"You can get the proxy program in the repository's examples: "
+"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr "在与预填充服务实例相同的节点上运行代理服务器。您可以在仓库的示例中获取代理程序：[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:193
+msgid "Parameter"
+msgstr "参数"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:193
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:193
+msgid "--port"
+msgstr "--port"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:193
+msgid "Port of proxy"
+msgstr "代理端口"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:193
+msgid "--prefiller-port"
+msgstr "--prefiller-port"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:193
+msgid "All ports of prefill"
+msgstr "预填充的所有端口"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:193
+msgid "--decoder-ports"
+msgstr "--decoder-ports"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:193
+msgid "All ports of decoder"
+msgstr "解码器的所有端口"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:259
+msgid "Verification"
+msgstr "验证"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:261
+msgid "Check service health using the proxy server endpoint."
+msgstr "使用代理服务器端点检查服务健康状况。"

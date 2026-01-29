@@ -1,0 +1,457 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:1
+msgid "Expert Parallelism Load Balancer (EPLB)"
+msgstr "专家并行负载均衡器（EPLB）"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:3
+msgid "Why We Need EPLB?"
+msgstr "为什么需要EPLB？"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:4
+msgid ""
+"When using Expert Parallelism (EP), different experts are assigned to "
+"different NPUs. Given that the load of various experts may vary depending"
+" on the current workload, it is crucial to maintain balanced loads across"
+" different NPUs. We adopt a redundant experts strategy by duplicating "
+"heavily-loaded experts. Then, we heuristically pack these duplicated "
+"experts onto NPUs to ensure load balancing across them. Moreover, thanks "
+"to the group-limited expert routing used in MoE models, we also attempt "
+"to place experts of the same group on the same node to reduce inter-node "
+"data traffic, whenever possible."
+msgstr "在使用专家并行（EP）时，不同的专家被分配到不同的NPU上。由于不同专家的负载可能随当前工作负载变化，确保各NPU间负载均衡至关重要。我们采用冗余专家策略，复制负载较重的专家，然后通过启发式方法将这些复制后的专家分配到各NPU上，以实现负载均衡。此外，得益于MoE模型中使用的组限专家路由机制，我们还尽可能将同一组的专家放置在同一节点上，以减少节点间的数据传输。"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:6
+msgid ""
+"To facilitate reproduction and deployment, Vllm Ascend supported deployed"
+" EP load balancing algorithm in `vllm_ascend/eplb/core/policy`. The "
+"algorithm computes a balanced expert replication and placement plan based"
+" on the estimated expert loads. Note that the exact method for predicting"
+" expert loads is outside the scope of this repository. A common method is"
+" to use a moving average of historical statistics."
+msgstr "为便于复现和部署，Vllm Ascend 在 `vllm_ascend/eplb/core/policy` 中提供了已部署的EP负载均衡算法。该算法基于预估的专家负载，计算出均衡的专家复制与放置方案。请注意，具体的专家负载预测方法不在本代码库的讨论范围内。一种常用方法是使用历史统计数据的移动平均值。"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:8
+msgid "![eplb](../../assets/eplb.png)"
+msgstr "![EPLB架构示意图](../../assets/eplb.png)"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:8
+msgid "eplb"
+msgstr "专家并行负载均衡器"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:9
+msgid "How to Use EPLB?"
+msgstr "如何使用EPLB？"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:10
+msgid ""
+"Please refer to the EPLB section of the user guide for detailed "
+"information: [How to Use "
+"EPLB](../../user_guide/feature_guide/eplb_swift_balancer.md)"
+msgstr "详细使用说明请参阅用户指南中的EPLB章节：[如何使用EPLB](../../user_guide/feature_guide/eplb_swift_balancer.md)"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:12
+msgid "How It Works?"
+msgstr "工作原理"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:13
+msgid "**EPLB Module Architecture**"
+msgstr "**EPLB模块架构**"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:36
+msgid ""
+"**1. Adaptor Module**   *Handles registration and adaptation for "
+"different MoE model types*"
+msgstr "**1. 适配器模块**   *处理不同MoE模型类型的注册与适配*"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:38
+msgid ""
+"`abstract_adaptor.py`   Abstract base class defining unified registration"
+" interfaces for EPLB adapters"
+msgstr "`abstract_adaptor.py`   定义EPLB适配器统一注册接口的抽象基类"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:40
+msgid ""
+"`vllm_adaptor.py`   Implementation supporting Qwen3-MoE and DeepSeek "
+"models, standardizing parameter handling for policy algorithms"
+msgstr "`vllm_adaptor.py`   支持Qwen3-MoE和DeepSeek模型的实现，标准化策略算法的参数处理"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:43
+msgid ""
+"**2. Core Module**   *Implements core algorithms, updates, and "
+"asynchronous processing*"
+msgstr "**2. 核心模块**   *实现核心算法、更新与异步处理*"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:45
+msgid ""
+"**Policy Submodule**   *Load balancing algorithms with factory pattern "
+"instantiation*"
+msgstr "**策略子模块**   *采用工厂模式实例化的负载均衡算法*"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:47
+msgid ""
+"`policy_abstract.py`   Abstract class for load balancing strategy "
+"interfaces"
+msgstr "`policy_abstract.py`   负载均衡策略接口的抽象类"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:49
+msgid ""
+"`policy_dynamic_ep.py`   Default implementation of open-source EPLB paper"
+" algorithm"
+msgstr "`policy_dynamic_ep.py`   开源EPLB论文算法的默认实现"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:51
+msgid ""
+"`policy_dynamic_ep_v2.py`   Enhanced version optimizing expert swaps for "
+"low-bandwidth devices (e.g., A2)"
+msgstr "`policy_dynamic_ep_v2.py`   优化专家交换的增强版本，适用于低带宽设备（如A2）"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:53
+msgid ""
+"`policy_flashlb.py`   Threshold-based adjustment reducing operational "
+"costs through layer-wise fluctuation detection"
+msgstr "`policy_flashlb.py`   基于阈值的调整策略，通过逐层波动检测降低操作成本"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:55
+msgid ""
+"`policy_factory.py`   Strategy factory for automatic algorithm "
+"instantiation"
+msgstr "`policy_factory.py`   自动算法实例化的策略工厂"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:58
+msgid ""
+"`eplb_device_transfer_loader.py`   Manages expert table/weight "
+"transmission and updates"
+msgstr "`eplb_device_transfer_loader.py`   管理专家表/权重的传输与更新"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:60
+msgid "`eplb_utils.py`   Utilities for expert table initialization and mapping"
+msgstr "`eplb_utils.py`   专家表初始化与映射的实用工具"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:62
+msgid ""
+"`eplb_worker.py`   Asynchronous algorithm orchestration and result "
+"processing"
+msgstr "`eplb_worker.py`   异步算法编排与结果处理"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:65
+msgid "**3. System Components**"
+msgstr "**3. 系统组件**"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:66
+msgid ""
+"`eplb_updator.py`   Central coordinator for load balancing during "
+"inference workflows"
+msgstr "`eplb_updator.py`   推理工作流中负载均衡的中央协调器"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:68
+msgid "`utils.py`   General utilities for EPLB interface registration"
+msgstr "`utils.py`   EPLB接口注册的通用实用工具"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:71
+msgid "*Key Optimizations:*"
+msgstr "*关键优化点：*"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:72
+msgid "Maintained original structure while improving technical clarity"
+msgstr "保持原始结构的同时提升了技术表述的清晰度"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:73
+msgid "Standardized terminology"
+msgstr "标准化术语"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:74
+msgid "Enhanced algorithm differentiation through concise descriptors"
+msgstr "通过简洁的描述符增强了算法区分度"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:75
+msgid "Improved scoping through hierarchical presentation"
+msgstr "通过分层呈现改进了范围界定"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:76
+msgid "Preserved file/class relationships while optimizing readability"
+msgstr "在优化可读性的同时保留了文件/类的关系"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:78
+msgid "Default Algorithm"
+msgstr "默认算法"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:79
+msgid "Hierarchical Load Balancing"
+msgstr "分层负载均衡"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:80
+msgid ""
+"When the number of server nodes evenly divides the number of expert "
+"groups, we use the hierarchical load balancing policy to leverage group-"
+"limited expert routing. We first pack the expert groups onto nodes "
+"evenly, ensuring balanced loads across different nodes. Then, we "
+"replicate the experts within each node. Finally, we pack the replicated "
+"experts onto individual NPUs to ensure load balancing across them. The "
+"hierarchical load balancing policy can be used in the prefilling stage "
+"with a smaller expert-parallel size."
+msgstr "当服务器节点数量能整除专家组数量时，我们采用分层负载均衡策略以利用组限专家路由。首先将专家组均匀分配到各节点，确保节点间负载均衡。然后在每个节点内部复制专家。最后将复制后的专家分配到各NPU上，确保NPU间负载均衡。分层负载均衡策略可在专家并行规模较小的预填充阶段使用。"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:82
+msgid "Global Load Balancing"
+msgstr "全局负载均衡"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:83
+msgid ""
+"In other cases, we use the global load balancing policy, which replicates"
+" experts globally regardless of expert groups, and packs the replicated "
+"experts onto individual NPUs. This policy can be adopted in the decoding "
+"stage with a larger expert-parallel size."
+msgstr "在其他情况下，我们采用全局负载均衡策略，该策略无视专家组的划分，全局复制专家，并将复制后的专家分配到各NPU上。此策略可在专家并行规模较大的解码阶段采用。"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:85
+msgid "Add a New EPLB Policy"
+msgstr "添加新的EPLB策略"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:86
+msgid ""
+"If you want to add a new eplb policy to vllm_ascend, you must follow "
+"these steps:"
+msgstr "若要在vllm_ascend中添加新的EPLB策略，必须遵循以下步骤："
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:87
+msgid ""
+"Inherit the `EplbPolicy` abstract class of `policy_abstract.py`  and "
+"override the `rebalance_experts` interface, ensuring consistent input "
+"parameters `current_expert_table`, `expert_workload` and return types "
+"`newplacement`. For example:"
+msgstr "继承 `policy_abstract.py` 中的 `EplbPolicy` 抽象类，并重写 `rebalance_experts` 接口，确保输入参数 `current_expert_table`、`expert_workload` 和返回类型 `newplacement` 保持一致。例如："
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:113
+msgid ""
+"To add a new EPLB algorithm, include the policy type and its "
+"corresponding implementation class in the `PolicyFactory` of "
+"`policy_factory.py`."
+msgstr "要添加新的EPLB算法，需在 `policy_factory.py` 的 `PolicyFactory` 中包含策略类型及其对应的实现类。"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:115
+msgid "Add a New MoE Model"
+msgstr "添加新的MoE模型"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:116
+msgid "**Implementation Guide for Model Integration**"
+msgstr "**模型集成实现指南**"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:118
+msgid "**Adapter File Modification**"
+msgstr "**适配器文件修改**"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:119
+msgid "Inherit or modify `vllm_ascend/eplb/adaptor/vllm_adaptor.py`"
+msgstr "继承或修改 `vllm_ascend/eplb/adaptor/vllm_adaptor.py`"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:120
+msgid "Add processing logic for key parameters:"
+msgstr "为关键参数添加处理逻辑："
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:121
+msgid "`num_dense_layers`"
+msgstr "`num_dense_layers`"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:122
+msgid "`global_expert_num`"
+msgstr "`global_expert_num`"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:123
+msgid "`num_roe_layers`"
+msgstr "`num_roe_layers`"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:124
+msgid "Ensure parameter synchronization in the `model_register` function."
+msgstr "确保 `model_register` 函数中的参数同步。"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:126
+msgid "For example:"
+msgstr "例如："
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:128
+msgid "Modify `__init__` of `vllm_adaptor.py` to add a new moe model eplb params:"
+msgstr "修改 `vllm_adaptor.py` 的 `__init__` 方法，添加新MoE模型的EPLB参数："
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:136
+msgid ""
+"Modify `model_register` of `vllm_adaptor.py` to register eplb params for "
+"new moe model:"
+msgstr "修改 `vllm_adaptor.py` 的 `model_register` 方法，为新MoE模型注册EPLB参数："
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:143
+msgid "**MoE Feature Integration**"
+msgstr "**MoE特性集成**"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:144
+msgid "Extend `vllm_ascend/eplb/utils.py` with MoE-specific methods"
+msgstr "在 `vllm_ascend/eplb/utils.py` 中扩展MoE特定的方法"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:145
+msgid "Implement required functionality for expert routing or weight management"
+msgstr "实现专家路由或权重管理所需的功能"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:147
+msgid "**Registration Logic Update**"
+msgstr "**注册逻辑更新**"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:148
+msgid "Add patch logic within the `model_register` function"
+msgstr "在 `model_register` 函数中添加补丁逻辑"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:149
+msgid "Maintain backward compatibility with existing model types"
+msgstr "保持与现有模型类型的向后兼容性"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:151
+msgid "**Validation & Testing**"
+msgstr "**验证与测试**"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:152
+msgid "Verify parameter consistency across layers"
+msgstr "验证各层间的参数一致性"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:153
+msgid "Test cross-device communication for expert tables"
+msgstr "测试专家表的跨设备通信"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:154
+msgid "Benchmark against baseline implementations (e.g., Qwen3-MoE)"
+msgstr "与基线实现（如Qwen3-MoE）进行基准测试"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:156
+msgid "*Key Implementation Notes:*"
+msgstr "*关键实现说明：*"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:157
+msgid "Preserve existing interface contracts in abstract classes"
+msgstr "在抽象类中保留现有的接口契约"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:158
+msgid "Use decorators for non-intrusive patch integration"
+msgstr "使用装饰器进行非侵入式的补丁集成"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:159
+msgid "Leverage `eplb_utils.py` for shared expert mapping operations"
+msgstr "利用 `eplb_utils.py` 处理共享的专家映射操作"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:160
+msgid "DFX"
+msgstr "可维护性（DFX）"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:161
+msgid "Parameter Validation"
+msgstr "参数验证"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:162
+msgid "Integer Parameters"
+msgstr "整数参数"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:163
+msgid ""
+"All integer input parameters must explicitly specify their maximum and "
+"minimum values and be subject to valid value validation. For example, "
+"`num_iterations_eplb_update` must be greater than 0:"
+msgstr "所有整数输入参数必须明确指定其最大值和最小值，并接受有效值验证。例如，`num_iterations_eplb_update` 必须大于0："
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:178
+msgid "File Path"
+msgstr "文件路径"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:179
+msgid ""
+"The file path for EPLB must be checked for legality, such as whether the "
+"file path is valid and whether it has appropriate read and write "
+"permissions. For example:"
+msgstr "必须检查EPLB文件路径的合法性，例如文件路径是否有效，是否具有适当的读写权限。例如："
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:205
+msgid "Function Specifications"
+msgstr "函数规范"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:206
+msgid "Initialization Function"
+msgstr "初始化函数"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:207
+msgid ""
+"All EPLB parameters must be initialized by default during initialization,"
+" with specified parameter types and default values for proper handling."
+msgstr "初始化时，所有EPLB参数必须默认初始化，并指定参数类型和默认值以确保正确处理。"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:209
+msgid "General Functions"
+msgstr "通用函数"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:210
+msgid ""
+"All method arguments must specify parameter types and default values, and"
+" functions must include default return value handling for default "
+"arguments. It is recommended to use `try-except` blocks to handle the "
+"function body, specifying the type of exception captured and the failure "
+"handling (e.g., logging exceptions or returning a failure status)."
+msgstr "所有方法参数必须指定参数类型和默认值，函数必须包含对默认参数的默认返回值处理。建议使用 `try-except` 块处理函数体，指定捕获的异常类型和失败处理方式（例如记录异常或返回失败状态）。"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:212
+msgid "Consistency"
+msgstr "一致性"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:213
+msgid "Expert Map"
+msgstr "专家映射"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:214
+msgid ""
+"The expert map must be globally unique during initialization and update. "
+"In a multi-node scenario during initialization, distributed communication"
+" should be used to verify the consistency of expert maps across each "
+"rank. If they are inconsistent, the user should be notified which ranks "
+"have inconsistent maps. During the update process, if only a few layers "
+"or the expert table of a certain rank has been changed, the updated "
+"expert table must be synchronized with the EPLB's context to ensure "
+"global consistency."
+msgstr "专家映射在初始化和更新时必须保持全局唯一性。在初始化时的多节点场景中，应使用分布式通信来验证各排名（rank）间专家映射的一致性。若不一致，应通知用户哪些排名存在映射不一致。在更新过程中，若仅少数层或某排名的专家表发生更改，必须将更新后的专家表与EPLB的上下文同步，以确保全局一致性。"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:217
+msgid "Expert Weight"
+msgstr "专家权重"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:218
+msgid ""
+"When updating expert weights, ensure that the memory allocated for the "
+"expert weights has been released, or that the expert (referring to the "
+"old version) is no longer in use."
+msgstr "更新专家权重时，必须确保为专家权重分配的内存已被释放，或专家（指旧版本）不再被使用。"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:220
+msgid "Limitation"
+msgstr "限制条件"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:221
+msgid ""
+"Before using EPLB, start the script and add `export "
+"DYNAMIC_EPLB=\"true\"`. Before performing load data collection (or "
+"performance data collection), start the script and add `export "
+"EXPERT_MAP_RECORD=\"true\"`."
+msgstr "使用EPLB前，启动脚本并添加 `export DYNAMIC_EPLB=\"true\"`。在执行负载数据收集（或性能数据收集）前，启动脚本并添加 `export EXPERT_MAP_RECORD=\"true\"`。"
+

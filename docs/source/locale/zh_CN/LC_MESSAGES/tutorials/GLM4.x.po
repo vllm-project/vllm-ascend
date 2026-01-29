@@ -1,0 +1,325 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 10:00+0800\n"
+"Last-Translator: Your Name <email@example.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/GLM4.x.md:1
+msgid "GLM-4.5/4.6/4.7"
+msgstr "GLM-4.5/4.6/4.7"
+
+#: ../../source/tutorials/GLM4.x.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/GLM4.x.md:5
+msgid ""
+"GLM-4.x series models use a Mixture-of-Experts (MoE) architecture and are"
+" foundational models specifically designed for agent applications"
+msgstr "GLM-4.x 系列模型采用混合专家（MoE）架构，是专门为智能体应用设计的基础模型"
+
+#: ../../source/tutorials/GLM4.x.md:7
+msgid "The `GLM-4.5` model is first supported in `vllm-ascend:v0.10.0rc1`"
+msgstr "`GLM-4.5` 模型首次在 `vllm-ascend:v0.10.0rc1` 中得到支持"
+
+#: ../../source/tutorials/GLM4.x.md:9
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node and multi-node deployment, accuracy and "
+"performance evaluation."
+msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度和性能评估。"
+
+#: ../../source/tutorials/GLM4.x.md:11
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/GLM4.x.md:13
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr "请参考[支持的特性](../user_guide/support_matrix/supported_models.md)以获取模型支持的特性矩阵。"
+
+#: ../../source/tutorials/GLM4.x.md:15
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参考[特性指南](../user_guide/feature_guide/index.md)以获取特性的配置信息。"
+
+#: ../../source/tutorials/GLM4.x.md:17
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/GLM4.x.md:19
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/GLM4.x.md:20
+msgid ""
+"`GLM-4.5`(BF16 version): [Download model "
+"weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5)."
+msgstr "`GLM-4.5`(BF16 版本): [下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5)。"
+
+#: ../../source/tutorials/GLM4.x.md:21
+msgid ""
+"`GLM-4.6`(BF16 version): [Download model "
+"weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6)."
+msgstr "`GLM-4.6`(BF16 版本): [下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6)。"
+
+#: ../../source/tutorials/GLM4.x.md:22
+msgid ""
+"`GLM-4.7`(BF16 version): [Download model "
+"weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7)."
+msgstr "`GLM-4.7`(BF16 版本): [下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7)。"
+
+#: ../../source/tutorials/GLM4.x.md:23
+msgid ""
+"`GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download "
+"model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8)."
+msgstr "`GLM-4.5-w8a8-with-float-mtp`(带 MTP 的量化版本): [下载模型权重](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8)。"
+
+#: ../../source/tutorials/GLM4.x.md:24
+msgid ""
+"`GLM-4.6-w8a8`(Quantized version without mtp): [Download model "
+"weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because "
+"vllm do not support GLM4.6 mtp in October, so we do not provide mtp "
+"version. And last month, it supported, you can use the following "
+"quantization scheme to add mtp weights to Quantized weights."
+msgstr "`GLM-4.6-w8a8`(无 MTP 的量化版本): [下载模型权重](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8)。由于 vllm 在十月不支持 GLM4.6 mtp，因此我们不提供 mtp 版本。上个月已经支持，您可以使用以下量化方案将 mtp 权重添加到量化权重中。"
+
+#: ../../source/tutorials/GLM4.x.md:25
+msgid ""
+"`Method of Quantify`: [quantization "
+"scheme](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209)."
+" You can use these methods to quantify the model."
+msgstr "`量化方法`: [量化方案](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209)。您可以使用这些方法对模型进行量化。"
+
+#: ../../source/tutorials/GLM4.x.md:27
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多个节点的共享目录中，例如 `/root/.cache/`"
+
+#: ../../source/tutorials/GLM4.x.md:29
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/GLM4.x.md:31
+msgid "You can using our official docker image to run `GLM-4.x` directly."
+msgstr "您可以使用我们的官方 docker 镜像直接运行 `GLM-4.x`。"
+
+#: ../../source/tutorials/GLM4.x.md:33
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../installation.md#set-up-using-"
+"docker)."
+msgstr "根据您的机器类型选择镜像，并在您的节点上启动 docker 镜像，请参考[使用 docker](../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/GLM4.x.md:71
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/GLM4.x.md:73
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/GLM4.x.md:75
+msgid "In low-latency scenarios, we recommend a single-machine deployment."
+msgstr "在低延迟场景中，我们推荐单机部署。"
+
+#: ../../source/tutorials/GLM4.x.md:76
+msgid ""
+"Quantized model `glm4.5_w8a8_with_float_mtp` can be deployed on 1 Atlas "
+"800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8)."
+msgstr "量化模型 `glm4.5_w8a8_with_float_mtp` 可以部署在 1 台 Atlas 800 A3 (64G × 16) 或 1 台 Atlas 800 A2 (64G × 8) 上。"
+
+#: ../../source/tutorials/GLM4.x.md:78
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+#: ../../source/tutorials/GLM4.x.md:103
+msgid "**Notice:** The parameters are explained as follows:"
+msgstr "**注意：** 参数说明如下："
+
+#: ../../source/tutorials/GLM4.x.md:105
+msgid ""
+"For single-node deployment, we recommend using `dp1tp16` and turn off "
+"expert parallel in low-latency scenarios."
+msgstr "对于单节点部署，在低延迟场景中我们推荐使用 `dp1tp16` 并关闭专家并行。"
+
+#: ../../source/tutorials/GLM4.x.md:106
+msgid ""
+"`--async-scheduling` Asynchronous scheduling is a technique used to "
+"optimize inference efficiency. It allows non-blocking task scheduling to "
+"improve concurrency and throughput, especially when processing large-"
+"scale models."
+msgstr "`--async-scheduling` 异步调度是一种用于优化推理效率的技术。它允许非阻塞的任务调度，以提高并发性和吞吐量，特别是在处理大规模模型时。"
+
+#: ../../source/tutorials/GLM4.x.md:108
+msgid "Multi-node Deployment"
+msgstr "多节点部署"
+
+#: ../../source/tutorials/GLM4.x.md:110
+msgid "Not recommended to deploy multi-node on Atlas 800 A2 (64G * 8)."
+msgstr "不建议在 Atlas 800 A2 (64G * 8) 上部署多节点。"
+
+#: ../../source/tutorials/GLM4.x.md:112
+msgid "Prefill-Decode Disaggregation"
+msgstr "预填充-解码分离"
+
+#: ../../source/tutorials/GLM4.x.md:114 ../../source/tutorials/GLM4.x.md:132
+msgid "Not test yet."
+msgstr "尚未测试。"
+
+#: ../../source/tutorials/GLM4.x.md:116
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/GLM4.x.md:118
+msgid "Here are two accuracy evaluation methods."
+msgstr "这里有两种精度评估方法。"
+
+#: ../../source/tutorials/GLM4.x.md:120 ../../source/tutorials/GLM4.x.md:136
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/GLM4.x.md:121
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr "详情请参考[使用 AISBench](../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/GLM4.x.md:123
+msgid ""
+"After execution, you can get the result, here is the result of `GLM4.6` "
+"in `vllm-ascend:main` (after `vllm-ascend:0.13.0rc1`) for reference only."
+msgstr "执行后，您可以得到结果，这里是 `vllm-ascend:main`（在 `vllm-ascend:0.13.0rc1` 之后）中 `GLM4.6` 的结果，仅供参考。"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "note"
+msgstr "备注"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "gsm8k"
+msgstr "gsm8k"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "-"
+msgstr "-"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "96.13"
+msgstr "96.13"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "1 Atlas 800 A3 (64G × 16)"
+msgstr "1 Atlas 800 A3 (64G × 16)"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "96.06"
+msgstr "96.06"
+
+#: ../../source/tutorials/GLM4.x.md:35
+msgid "GPU"
+msgstr "GPU"
+
+#: ../../source/tutorials/GLM4.x.md:130
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用 Language Model Evaluation Harness"
+
+#: ../../source/tutorials/GLM4.x.md:134
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/GLM4.x.md:138
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr "详情请参考[使用 AISBench 进行性能评估](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/GLM4.x.md:140
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM Benchmark"
+
+#: ../../source/tutorials/GLM4.x.md:142
+msgid "Run performance evaluation of `GLM-4.x` as an example."
+msgstr "以 `GLM-4.x` 为例运行性能评估。"
+
+#: ../../source/tutorials/GLM4.x.md:144
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr "更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+
+#: ../../source/tutorials/GLM4.x.md:146
+msgid "There are three `vllm bench` subcommand:"
+msgstr "`vllm bench` 有三个子命令："
+
+#: ../../source/tutorials/GLM4.x.md:147
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`: 基准测试单批次请求的延迟。"
+
+#: ../../source/tutorials/GLM4.x.md:148
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`: 基准测试在线服务吞吐量。"
+
+#: ../../source/tutorials/GLM4.x.md:149
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`: 基准测试离线推理吞吐量。"
+
+#: ../../source/tutorials/GLM4.x.md:151
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 为例。运行以下代码。"
+
+#: ../../source/tutorials/GLM4.x.md:173
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，您可以得到性能评估结果。"

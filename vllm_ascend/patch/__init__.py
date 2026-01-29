@@ -263,6 +263,17 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
+# ** File: worker/patch_deepseekv3.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#    1. vllm.model_executor.models.deepseek_v2 (DeepseekV2 & DeepseekMoE related logic)
+#    Why:
+#      The mix placement feature requires modifying the loading format of DeepseekV3 shared expert weights and adjusting the inference path of DeepseekMoE.
+#    How：
+#      Patch the weight loading logic of DeepseekV3 to adapt to the mix placement storage format, and modify the forward inference path of DeepseekMoE to support the mix placement feature.
+#    Related PR (if no, explain why):
+#      https://github.com/vllm-project/vllm/pull/4881
+#    Future Plan:
+#      Remove this patch after the mix placement feature is natively implemented in the official vllm codebase.
 # ** 12. File: platform/patch_lor_model_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.lora.model_manager.LoRAModelManager.__init__`
@@ -272,6 +283,51 @@
 #       Add a conditional check: use a custom operator when rank < 128, otherwise use the vllm operator.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/31408
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#
+# ** 13. File: platform/patch_kv_cache_coordinator.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator`
+#    Why:
+#       Add this patch to support MultiBlockPool.
+#    How：
+#       Add a new branch to make `KVCacheCoordinatorWithMultiPool` could be routed by. This will only take effect when USE_MULTI_BLOCK_POOL is True.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support MultiBlockPool, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#
+# ** 14. File: platform/patch_kv_cache_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_utils.get_kv_cache_groups`
+#    Why:
+#       Add this patch to support kvcache group with different page sizes in the specs.
+#    How：
+#       Implement a new func to make KVCacheGroupSpec for different page sizes without unifying their page sizes.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support this feature, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`
+#    Why:
+#       Add this patch to create KVCacheConfig to support kvcache group with different page size in the specs.
+#    How：
+#       Add a new branch to avoid shared the memory pools between the groups.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support this feature, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#
+# ** 15. File: platform/patch_vllm_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.VllmConfig.__post_init__`
+#    Why:
+#       Add this patch to enable hybrid kv cache in Prefill Disaggregation scenario.
+#    How：
+#       Disable `need_disable_hybrid_kv_cache_manager` if Prefill Disaggregation is enabled.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support this feature, will raise a pr soon.
 #    Future Plan:
 #       Keep this patch in vllm-ascend v0.13.0.
 #

@@ -1,0 +1,266 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:1
+msgid "ACL Graph"
+msgstr "ACL 图"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:3
+msgid "Why we need ACL Graph?"
+msgstr "为什么我们需要 ACL 图？"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:5
+msgid ""
+"When in LLM inference, each token requires nearly thousand operator "
+"executions, and when host launching operators are slower than device, it "
+"will cause host bound. In severe cases, the device will be idle for more "
+"than half of the time. To solve this problem, we use graph in LLM "
+"inference."
+msgstr "在大语言模型推理中，每个词元（token）都需要近千次算子执行。当主机（host）启动算子的速度慢于设备（device）计算速度时，会导致主机端瓶颈。在严重情况下，设备有超过一半的时间处于空闲状态。为了解决这个问题，我们在LLM推理中使用了图（graph）技术。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:26
+msgid "How to use ACL Graph?"
+msgstr "如何使用 ACL 图？"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:28
+msgid ""
+"ACL Graph is enabled by default in V1 Engine, just need to check that "
+"`enforce_eager` is not set to `True`. More details see: [Graph Mode "
+"Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html)"
+msgstr "ACL 图在 V1 引擎中默认启用，只需确保 `enforce_eager` 未设置为 `True` 即可。更多详情请参阅：[图模式使用指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html)"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:30
+msgid "How it works?"
+msgstr "工作原理"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:32
+msgid ""
+"In short, graph mode works in two steps: **capture and replay**. When "
+"engine starts, we will capture all of the ops in model forward and save "
+"it as a graph, and when req come in, we just replay the graph on devices,"
+" and waiting for result."
+msgstr "简而言之，图模式的工作原理分为两步：**捕获（capture）和重放（replay）**。当引擎启动时，我们会捕获模型前向传播中的所有算子并将其保存为一个图。当有请求（req）到来时，我们只需在设备上重放这个图，然后等待结果。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:34
+msgid "But in reality, graph mode is not that simple."
+msgstr "但实际上，图模式并非如此简单。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:36
+msgid "Padding and Bucketing"
+msgstr "填充（Padding）与分桶（Bucketing）"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:38
+msgid ""
+"Due to graph can only replay the ops captured before, without doing "
+"tiling and checking graph input, we need to ensure the consistency of the"
+" graph input, but we know that model input's shape depends on the request"
+" scheduled by Scheduler, we can't ensure the consistency."
+msgstr "由于图只能重放之前捕获的算子，且不会进行算子分片或检查图输入，因此我们需要确保图输入的一致性。但我们知道，模型输入的形状取决于调度器（Scheduler）调度的请求，我们无法保证这种一致性。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:40
+msgid ""
+"Obviously, we can solve this problem by capturing the biggest shape and "
+"padding all of the model input to it. But it will bring a lot of "
+"redundant computing and make performance worse. So we can capture "
+"multiple graphs with different shape, and pad the model input to the "
+"nearest graph, which will greatly reduce redundant computing. But when "
+"`max_num_batched_tokens` is very large, the number of graphs that need to"
+" be captured will also become very large. But we know that when "
+"intensor's shape is large, the computing time will be very long, and "
+"graph mode is not necessary in this case. So all of things we need to do "
+"is:"
+msgstr "显然，我们可以通过捕获一个最大形状的图，并将所有模型输入填充（pad）到该形状来解决这个问题。但这会带来大量冗余计算，导致性能变差。因此，我们可以捕获多个不同形状的图，并将模型输入填充到最接近的图形状，这能极大减少冗余计算。然而，当 `max_num_batched_tokens` 很大时，需要捕获的图数量也会变得非常庞大。但我们知道，当输入张量（intensor）形状很大时，计算时间会很长，此时图模式并非必需。所以我们需要做的是："
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:41
+msgid "Set a threshold;"
+msgstr "设置一个阈值；"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:42
+msgid ""
+"When `num_scheduled_tokens` is bigger than the threshold, use "
+"`eager_mode`;"
+msgstr "当 `num_scheduled_tokens` 大于该阈值时，使用 `eager_mode`（即时执行模式）；"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:43
+msgid "Capture multiple graphs within a range below the threshold;"
+msgstr "在阈值以下的范围内捕获多个图；"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:58
+msgid "Piecewise and Full graph"
+msgstr "分段图与完整图"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:60
+msgid ""
+"Due to the increasing complexity of the attention layer in current LLM, "
+"we can't ensure all types of attention can run in graph. In MLA, "
+"prefill_tokens and decode_tokens have different calculation method, so "
+"when a batch has both prefills and decodes in MLA, graph mode is "
+"difficult to handle this situation."
+msgstr "由于当前LLM中注意力层日益复杂，我们无法保证所有类型的注意力计算都能在图模式下运行。在MLA（Multi-Query Latent Attention）中，预填充词元（prefill_tokens）和解码词元（decode_tokens）的计算方式不同，因此当一个批次中同时包含MLA的预填充和解码任务时，图模式难以处理这种情况。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:62
+msgid ""
+"vLLM solves this problem with piecewise graph mode. We use eager mode to "
+"launch attention's ops, and use graph to deal with others. But it also "
+"bring some problems: The cost of launching ops has become large again, "
+"although much smaller than eager mode, but it will also lead to host "
+"bound when cpu is poor or `num_tokens` is small."
+msgstr "vLLM 通过分段图（piecewise graph）模式解决了这个问题。我们使用即时执行模式来启动注意力相关的算子，而对于其他算子则使用图模式。但这也会带来一些问题：启动算子的开销再次变大（虽然仍比纯即时执行模式小很多），当CPU性能较差或 `num_tokens` 较小时，仍可能导致主机端瓶颈。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:64
+msgid "Altogether, we need to support both piecewise and full graph mode."
+msgstr "总而言之，我们需要同时支持分段图和完整图模式。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:66
+msgid ""
+"When attention can run in graph, we tend to choose full graph mode to "
+"achieve optimal performance;"
+msgstr "当注意力计算可以在图模式下运行时，我们倾向于选择完整图模式以获得最佳性能；"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:67
+msgid "When full graph is not work, use piecewise graph as a substitute;"
+msgstr "当完整图模式不适用时，使用分段图作为替代方案；"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:68
+msgid ""
+"When piecewise graph's performance is not good and full graph mode is "
+"blocked, separate prefills and decodes, and use full graph mode in "
+"**decode_only** situation. Because when a batch include prefill req, "
+"usually `num_tokens` will be quite big and not cause host bound."
+msgstr "当分段图性能不佳且完整图模式受阻时，分离预填充和解码任务，并在 **仅解码（decode_only）** 的场景下使用完整图模式。这是因为当一个批次包含预填充请求时，通常 `num_tokens` 会很大，不会引起主机端瓶颈。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:70
+msgid ""
+"Currently, due to stream resource constraint, we can only support a few "
+"buckets in piecewise graph mode now, which will cause redundant computing"
+" and may lead to performance degradation compared with eager mode."
+msgstr "目前，由于流（stream）资源限制，我们在分段图模式下只能支持少数几个桶（bucket），这会导致冗余计算，并且相比即时执行模式可能导致性能下降。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:72
+msgid "How it be implemented?"
+msgstr "如何实现？"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:74
+msgid ""
+"vLLM has already implemented most of the modules in graph mode. You can "
+"see more details at: [CUDA "
+"Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs.html)"
+msgstr "vLLM 已经实现了图模式下的大部分模块。您可以在以下链接查看更多细节：[CUDA 图](https://docs.vllm.ai/en/latest/design/cuda_graphs.html)"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:76
+msgid ""
+"When in graph mode, vLLM will call "
+"`current_platform.get_static_graph_wrapper_cls` to get current device's "
+"graph model wrapper, so what we need to do is to implement the graph mode"
+" wrapper on Ascend: `ACLGraphWrapper`."
+msgstr "在图模式下，vLLM 会调用 `current_platform.get_static_graph_wrapper_cls` 来获取当前设备的图模型封装器（wrapper）。因此，我们需要做的是在 Ascend 平台上实现这个图模式封装器：`ACLGraphWrapper`。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:78
+msgid ""
+"vLLM has added `support_torch_compile` decorator to all models, this "
+"decorator will replace the `__init__` and `forward` interface of the "
+"model class, and when `forward` called, the code inside the "
+"`ACLGraphWrapper` will be executed, and it will do capture or replay as "
+"mentioned above."
+msgstr "vLLM 已为所有模型添加了 `support_torch_compile` 装饰器。该装饰器会替换模型类的 `__init__` 和 `forward` 接口。当 `forward` 被调用时，`ACLGraphWrapper` 内部的代码将被执行，并如前所述执行捕获或重放操作。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:80
+msgid ""
+"When use piecewise graph, we just need to follow the above-mentioned "
+"process, but when in full graph, due to the complexity of the attention, "
+"sometimes we need to update attention op's param before execution. So we "
+"implement `update_attn_params` and `update_mla_attn_params` funcs for "
+"full graph mode. And when forward, memory will be reused between "
+"different ops, so we can't update attention op's param before forward. In"
+" ACL Graph, we use `torch.npu.graph_task_update_begin` and "
+"`torch.npu.graph_task_update_end` to do it, and use "
+"`torch.npu.ExternalEvent` to ensure order between params update and ops "
+"execution."
+msgstr "使用分段图时，我们只需遵循上述流程。但在完整图模式下，由于注意力的复杂性，有时需要在执行前更新注意力算子的参数。因此，我们为完整图模式实现了 `update_attn_params` 和 `update_mla_attn_params` 函数。在前向传播时，内存会在不同算子间复用，因此我们不能在前向传播开始前更新注意力算子参数。在 ACL 图中，我们使用 `torch.npu.graph_task_update_begin` 和 `torch.npu.graph_task_update_end` 来完成这个操作，并使用 `torch.npu.ExternalEvent` 来确保参数更新与算子执行的顺序。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:82
+msgid "DFX"
+msgstr "可维护性（DFX）"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:84
+msgid "Stream resource constraint"
+msgstr "流资源限制"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:86
+msgid ""
+"Currently, we can only capture 1800 graphs at most, due to the limitation"
+" of ACL graph that a graph requires a separate stream at least. This "
+"number is bounded by the number of streams, which is 2048, we save 248 "
+"streams as a buffer. Besides, there are many variables that can affect "
+"the number of buckets:"
+msgstr "目前，由于ACL图的限制（一个图至少需要一个独立的流），我们最多只能捕获1800个图。这个上限受限于流的数量（2048个），我们预留了248个流作为缓冲。此外，还有许多变量会影响桶的数量："
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:88
+msgid ""
+"Piecewise graph will divides the model into `num_hidden_layers + 1` sub "
+"modules, based on attention layer. Every sub module is a single graph "
+"which need to cost stream, so the number of buckets in piecewise graph "
+"mode is very tight compared with full graph mode."
+msgstr "分段图会根据注意力层将模型划分为 `num_hidden_layers + 1` 个子模块。每个子模块都是一个单独的图，需要消耗一个流。因此，与完整图模式相比，分段图模式下可用的桶数量非常紧张。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:90
+msgid ""
+"The number of streams required for a graph is related to the number of "
+"comm domains. Each comm domain will increase one stream consumed by a "
+"graph."
+msgstr "一个图所需的流数量与通信域（comm domains）的数量有关。每个通信域都会使一个图多消耗一个流。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:92
+msgid ""
+"When multi-stream is explicitly called in sub module, it will consumes an"
+" additional stream."
+msgstr "当在子模块中显式调用了多流（multi-stream）时，会额外消耗一个流。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:94
+msgid ""
+"There are some other rules about ACL Graph and stream. Currently, we use "
+"func `update_aclgraph_sizes` to calculate the maximum number of buckets "
+"and update `graph_batch_sizes` to ensure stream resource is sufficient."
+msgstr "关于ACL图和流还有一些其他规则。目前，我们使用函数 `update_aclgraph_sizes` 来计算最大桶数量，并更新 `graph_batch_sizes` 以确保流资源充足。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:96
+msgid "We will expand the stream resource limitation in the future."
+msgstr "我们将在未来扩展流资源限制。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:98
+msgid "Limitation"
+msgstr "限制"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:100
+msgid "`FULL` and `FULL_AND_PIECEWISE` are not supported now;"
+msgstr "目前不支持 `FULL` 和 `FULL_AND_PIECEWISE` 模式；"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:101
+msgid ""
+"When use ACL Graph and MTP and `num_speculative_tokens > 1`, as vLLM "
+"don't support this case in v0.11.0, we need to set "
+"`cudagraph_capture_sizes` explicitly."
+msgstr "当同时使用 ACL 图和 MTP，且 `num_speculative_tokens > 1` 时，由于 vLLM v0.11.0 不支持此情况，我们需要显式设置 `cudagraph_capture_sizes`。"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:102
+msgid "`use_inductor` is not supported now;"
+msgstr "目前不支持 `use_inductor`；"

@@ -1,0 +1,248 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 19:40+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:1
+msgid "Qwen3-Omni-30B-A3B-Thinking"
+msgstr "Qwen3-Omni-30B-A3B-Thinking"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:5
+msgid ""
+"Qwen3-Omni is the natively end-to-end multilingual omni-modal foundation "
+"models. It processes text, images, audio, and video, and delivers real-"
+"time streaming responses in both text and natural speech. We introduce "
+"several architectural upgrades to improve performance and efficiency. The"
+" Thinking model of Qwen3-Omni-30B-A3B, containing the thinker component, "
+"equipped with chain-of-thought reasoning, supporting audio, video, and "
+"text input, with text output."
+msgstr ""
+"Qwen3-Omni 是原生端到端的多语言全模态基础模型。它能够处理文本、图像、音频和视频，"
+"并提供文本和自然语音形式的实时流式响应。我们引入了多项架构升级以提升性能和效率。"
+"Qwen3-Omni-30B-A3B 的 Thinking（思考）模型包含思考者（thinker）组件，配备思维链（CoT）推理能力，"
+"支持音频、视频和文本输入，并输出文本结果。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:7
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node deployment, accuracy and performance evaluation."
+msgstr ""
+"本文档将展示该模型的主要验证步骤，包括支持的功能、功能配置、环境准备、单节点部署、精度和性能评估。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:9
+msgid "Supported Features"
+msgstr "支持的功能"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:10
+msgid ""
+"Refer to [supported features](https://docs.vllm.ai/projects/ascend/zh-"
+"cn/latest/user_guide/support_matrix/supported_models.html) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参考[支持功能列表](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/support_matrix/supported_models.html) "
+"获取该模型支持的功能矩阵。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:12
+msgid ""
+"Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-"
+"cn/latest/user_guide/feature_guide/index.html) to get the feature's "
+"configuration."
+msgstr ""
+"请参考 [功能指南](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/index.html) "
+"获取功能的配置方式。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:14
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:15
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:17
+msgid ""
+"`Qwen3-Omni-30B-A3B-Thinking` require 2 NPU Card(64G × 2).[Download model"
+" weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking) "
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr ""
+"`Qwen3-Omni-30B-A3B-Thinking` 需要 2 张 NPU 卡（64G × 2）。"
+"[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)。"
+"建议将模型权重下载到多节点共享目录中，例如 `/root/.cache/`。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:20
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md
+msgid "Use docker image"
+msgstr "使用 Docker 镜像"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:26
+msgid ""
+"You can using our official docker image to run Qwen3-Omni-30B-A3B-"
+"Thinking directly"
+msgstr "您可以直接使用我们的官方 Docker 镜像运行 Qwen3-Omni-30B-A3B-Thinking。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:28
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../installation.md#set-up-using-"
+"docker)."
+msgstr "根据您的机器类型选择镜像并在节点上启动 Docker 镜像，请参考 [使用 Docker](../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md
+msgid "Build from source"
+msgstr "源码构建"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:63
+msgid "You can build all from source."
+msgstr "您可以从源码构建所有内容。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:65
+msgid ""
+"Install `vllm-ascend`, refer to [set up using python](../installation.md"
+"#set-up-using-python)."
+msgstr "安装 `vllm-ascend`，请参考 [使用 Python 安装](../installation.md#set-up-using-python)。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:69
+msgid "Please install system dependencies"
+msgstr "请安装系统依赖项"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:79
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:80
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:81
+msgid "Offline Inference on Multi-NPU"
+msgstr "多 NPU 离线推理"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:83
+msgid "Run the following script to execute offline inference on multi-NPU:"
+msgstr "运行以下脚本以在多 NPU 上执行离线推理："
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:170
+msgid "Online Inference on Multi-NPU"
+msgstr "多 NPU 在线推理"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:172
+msgid ""
+"Run the following script to start the vLLM server on Multi-NPU: For an "
+"Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at"
+" least 1, and for 32 GB of memory, tensor-parallel-size should be at "
+"least 2."
+msgstr ""
+"运行以下脚本以在多 NPU 上启动 vLLM 服务器：对于显存为 64 GB 的 Atlas A2，"
+"张量并行大小 (tensor-parallel-size) 至少应为 1；对于 32 GB 显存，该值至少应为 2。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:179
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:180
+msgid "Once your server is started, you can query the model with input prompts."
+msgstr "服务器启动后，您可以使用输入提示词查询模型。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:221
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:223
+msgid "Here are accuracy evaluation methods."
+msgstr "以下是精度评估方法。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:225
+msgid "Using EvalScope"
+msgstr "使用 EvalScope"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:227
+msgid ""
+"As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test "
+"dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in "
+"online mode."
+msgstr ""
+"以 `gsm8k`、`omnibench` 和 `bbh` 为例作为测试数据集，在在线模式下运行 "
+"`Qwen3-Omni-30B-A3B-Thinking` 的精度评估。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:228
+msgid ""
+"Refer to Using "
+"evalscope(https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html"
+"#install-evalscope-using-pip) for `evalscope`installation."
+msgstr ""
+"有关 `evalscope` 的安装方式，请参考 [使用 evalscope]"
+"(https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip)。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:229
+msgid "Run `evalscope` to execute the accuracy evaluation."
+msgstr "运行 `evalscope` 执行精度评估。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:244
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:283
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen3"
+"-Omni-30B-A3B-Thinking` in vllm-ascend:0.13.0rc1 for reference only."
+msgstr "执行后即可获取结果，以下为 `vllm-ascend:0.13.0rc1` 下 `Qwen3-Omni-30B-A3B-Thinking` 的测试结果，仅供参考。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:258
+msgid "Performance"
+msgstr "性能指标"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:260
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM 基准测试 (Benchmark)"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:261
+msgid ""
+"Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an "
+"example. Refer to vllm benchmark for more details. Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+"以 `Qwen3-Omni-30B-A3B-Thinking` 的性能评估为例。更多细节请参考 "
+"[vLLM Benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:265
+msgid "There are three `vllm bench` subcommand:"
+msgstr "共有三个 `vllm bench` 子命令："
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:266
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`：测试单批次请求的延迟。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:267
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`：测试在线服务的吞吐量。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:268
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`：测试离线推理的吞吐量。"
+
+#: ../../source/tutorials/Qwen3-Omni-30B-A3B-Thinking.md:270
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 模式为例，运行如下代码。"

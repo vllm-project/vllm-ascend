@@ -1,0 +1,327 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-22 17:09+0800\n"
+"PO-Revision-Date: 2026-01-22 17:15+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:1
+msgid "Fine-Grained Tensor Parallelism (Finegrained TP)"
+msgstr "细粒度张量并行"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:5
+msgid ""
+"Fine-Grained Tensor Parallelism (Finegrained TP) extends standard tensor "
+"parallelism by enabling **independent tensor parallel sizes for different"
+" model components**. Instead of applying a single global "
+"`tensor_parallel_size` to all layers, Finegrained TP allows users to "
+"configure separate TP size for key modules—such as embedding, language "
+"model head (lm_head), attention output projection (oproj), and MLP "
+"blocks—via the `finegrained_tp_config` parameter."
+msgstr ""
+"细粒度张量并行 (Fine-Grained TP) 通过为**不同的模型组件启用独立的张量并行大小**，扩展了标准的张量并行。Fine-"
+"Grained TP 不再对所有层应用统一的全局 `tensor_parallel_size`，而是允许用户通过 "
+"`finegrained_tp_config` 参数，为关键模块（如 Embedding、语言模型头 (LM Head)、Attention "
+"输出投影 (o_proj) 和 MLP 块）单独配置 TP 大小。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:7
+msgid ""
+"This capability supports heterogeneous parallelism strategies within a "
+"single model, providing finer control over weight distribution, memory "
+"layout, and communication patterns across devices. The feature is "
+"compatible with standard dense transformer architectures and integrates "
+"seamlessly into vLLM’s serving pipeline."
+msgstr ""
+"此功能支持在单个模型内采用异构并行策略，从而对跨设备的权重分布、内存布局和通信模式进行更精细的控制。该特性与标准的 Dense "
+"Transformer 架构兼容，并无缝集成到 vLLM 的推理流水线中。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:11
+msgid "Benefits of Finegrained TP"
+msgstr "细粒度 TP 的优势"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:13
+msgid ""
+"Fine-Grained Tensor Parallelism delivers two primary performance "
+"advantages through targeted weight sharding:"
+msgstr "细粒度张量并行通过有针对性的权重分片，带来两个主要的性能优势："
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:15
+msgid ""
+"**Reduced Per-Device Memory Footprint**：   Finegrained TP shards large "
+"weight matrices（如 LM Head、o_proj）across devices, lowering peak memory "
+"usage and enabling larger batches or deployment on memory-limited "
+"hardware—without quantization."
+msgstr ""
+"**降低单设备显存占用**：细粒度 TP 将巨大的权重矩阵（如 LM "
+"Head、o_proj）跨设备分片，从而降低峰值显存使用量。这使得在不使用量化的情况下，也能支持更大的 Batch Size "
+"或在显存受限的硬件上进行部署。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:18
+msgid ""
+"**Faster Memory Access in GEMMs**：   In decode-heavy workloads, GEMM "
+"performance is often memory-bound. Weight sharding reduces per-device "
+"weight fetch volume, cutting DRAM traffic and improving bandwidth "
+"efficiency—especially for latency-sensitive layers like LM Head and "
+"o_proj."
+msgstr ""
+"**加速 GEMM 内存访问**：在以解码 (Decode) 为主的工作负载中，GEMM "
+"性能通常受限于内存带宽。权重分片减少了单个设备需要获取的权重数据量，降低了 DRAM 流量并提高了带宽效率——对于像 LM Head 和 "
+"o_proj 这样对延迟敏感的层尤其有效。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:21
+msgid ""
+"Together, these effects allow practitioners to better balance memory, "
+"communication, and compute—particularly in high-concurrency serving "
+"scenarios—while maintaining compatibility with standard dense transformer"
+" models."
+msgstr ""
+"综上所述，这些优化使得开发者能够更好地平衡内存、通信和计算资源（特别是在高并发推理场景下），同时保持对标准 Dense Transformer "
+"模型的兼容性。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:25
+msgid "Supported Scenarios"
+msgstr "支持的场景"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:27
+msgid "Models"
+msgstr "模型支持"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:28
+msgid ""
+"Finegrained TP is **model-agnostic** and supports all standard dense "
+"transformer architectures, including Llama, Qwen, DeepSeek (base/dense "
+"variants), and others."
+msgstr ""
+"细粒度 TP 是**模型无关**的，支持所有标准的 Dense Transformer 架构，包括 "
+"Llama、Qwen、DeepSeek（Base/Dense 变体）等。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:30
+msgid "Component & Execution Mode Support"
+msgstr "组件与执行模式支持情况"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "TP config"
+msgstr "TP 配置项目"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "Eager"
+msgstr "Eager 模式"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "Graph"
+msgstr "图模式 (Graph)"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "Hybrid"
+msgstr "混合 (Hybrid)"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "Prefill"
+msgstr "预填充 (Prefill)"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "Decode"
+msgstr "解码 (Decode)"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "**embedding**"
+msgstr "**embedding**"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "✅"
+msgstr "✅"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "**o_proj**"
+msgstr "**o_proj**"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "❌"
+msgstr "❌"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "**mlp**"
+msgstr "**mlp**"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "**LMhead**"
+msgstr "**LMhead**"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:39
+msgid "⚠️ Note:"
+msgstr "⚠️ 注意："
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:40
+msgid ""
+"`o_proj` TP is only supported in Graph mode during Decode, because "
+"dummy_run in eager mode will not trigger o_proj."
+msgstr ""
+"`o_proj` 的 TP 仅在 Decode 阶段的图模式 (Graph mode) 下支持，因为 Eager 模式下的 dummy_run "
+"不会触发 o_proj。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:41
+msgid ""
+"`mlp` TP supports dense models, or dense layers in MoE models. For "
+"example, the first three dense layers of DeepSeek-R1."
+msgstr "`mlp` TP 支持 Dense 模型，或者 MoE 模型中的 Dense 层（例如 DeepSeek-R1 的前三层 Dense 层）。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:43
+msgid "Configuration Limit:"
+msgstr "配置限制："
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:44
+msgid "The Fine-Grained TP size for any component must:"
+msgstr "任何组件的细粒度 TP 大小必须满足："
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:45
+msgid "Be **≤ the data-parallel (DP) size**, and"
+msgstr "必须 **≤ 数据并行 (DP) 的大小**，且"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:46
+msgid ""
+"**Evenly divide the DP size** (i.e., `dp_size % tp_size == 0`) to ensure "
+"valid device assignment and communication grouping."
+msgstr "必须**能整除 DP 大小**（即 `dp_size % tp_size == 0`），以确保有效的设备分配和通信组划分。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:47
+msgid ""
+"⚠️ Violating these constraints will result in runtime errors or undefined"
+" behavior."
+msgstr "⚠️ 违反这些约束将导致运行时错误或未定义的行为。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:51
+msgid "How to Use Finegrained TP"
+msgstr "如何使用细粒度 TP"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:53
+msgid "Configuration Format:"
+msgstr "配置格式："
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:55
+msgid ""
+"Finegrained TP is controlled via the `finegrained_tp_config` field inside"
+" `--additional-config`."
+msgstr "细粒度 TP 通过 `--additional-config` 中的 `finegrained_tp_config` 字段进行控制。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:68
+msgid "Example Usage:"
+msgstr "使用示例："
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:86
+msgid "Experimental Results"
+msgstr "实验结果"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:88
+msgid ""
+"To evaluate the effectiveness of fine-grained TP in large-scale service "
+"scenarios, we use the model **DeepSeek-R1-W8A8**, deploy PD-separated "
+"decode instances in the environment of 32 cards Ascend 910B*64G (A2), "
+"with parallel configuration as DP32+EP32, and fine-grained TP size of 8, "
+"the performance data is as follows."
+msgstr ""
+"为了评估细粒度 TP 在大规模服务场景下的有效性，我们使用 **DeepSeek-R1-W8A8** 模型，在 32 卡 Ascend "
+"910B*64G (A2) 环境下部署 PD 分离的 Decode 实例。并行配置为 DP32+EP32，细粒度 TP 大小设为 "
+"8。性能数据如下。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "Module"
+msgstr "模块"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "Memory Savings"
+msgstr "显存节省"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "TPOT Impact (batch=24)"
+msgstr "TPOT 影响 (batch=24)"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "o_proj TP = 8"
+msgstr "o_proj TP = 8"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "5.8 GB"
+msgstr "5.8 GB"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "**+1.5 ms** (degradation)"
+msgstr "**+1.5 ms** (性能下降)"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "LM head TP = 8"
+msgstr "LM head TP = 8"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "1.51 GB"
+msgstr "1.51 GB"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "**−1.2 ms** (improvement)"
+msgstr "**−1.2 ms** (性能提升)"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "FFN TP = 8"
+msgstr "FFN TP = 8"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "0.9 GB"
+msgstr "0.9 GB"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "**−1.0 ms** (improvement)"
+msgstr "**−1.0 ms** (性能提升)"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "Embedding TP = 8"
+msgstr "Embedding TP = 8"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "**Total**"
+msgstr "**合计**"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "**9.72 GB**"
+msgstr "**9.72 GB**"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md
+msgid "—"
+msgstr "—"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:98
+msgid ""
+"We achieved significant gains in terms of high memory capacity on a "
+"single card, as well as the benefits of TPOT."
+msgstr "我们在单卡显存容量利用率方面获得了显著收益，同时在 TPOT 性能上也取得了进步。"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:101
+msgid "✅ Deployment Recommendations"
+msgstr "✅ 部署建议"
+
+#: ../../source/user_guide/feature_guide/Fine_grained_TP.md:103
+msgid ""
+"Fine-grained TP is the **most effective** in the **decode instance** of "
+"PD separation, where models are typically deployed in all-DP mode. In "
+"this setup, sharding weight-heavy layers reduces redundant storage and "
+"memory pressure."
+msgstr ""
+"细粒度 TP 在 PD 分离的**解码 (Decode) 实例**中**最为有效**。在该场景下，模型通常以全 DP "
+"模式部署，通过对权重密集的层进行分片，可以有效减少冗余存储并缓解显存压力。"
+

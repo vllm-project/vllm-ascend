@@ -1,0 +1,216 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 16:50+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:1
+msgid "Qwen3-Coder-30B-A3B"
+msgstr "Qwen3-Coder-30B-A3B"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:5
+msgid ""
+"The newly released Qwen3-Coder-30B-A3B employs a sparse MoE architecture "
+"for efficient training and inference, delivering significant "
+"optimizations in agentic coding, extended context support of up to 1M "
+"tokens, and versatile function calling."
+msgstr ""
+"最新发布的 Qwen3-Coder-30B-A3B 采用了稀疏混合专家（Sparse MoE）架构，"
+"以实现高效的训练与推理。该模型在智能体编程（agentic coding）、"
+"高达 1M token 的长上下文支持以及多功能函数调用（function calling）方面"
+"进行了重大优化。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:7
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node deployment, accuracy and performance evaluation."
+msgstr "本文档将展示该模型的主要验证步骤，包括支持的功能、功能配置、环境准备、单节点部署、精度和性能评估。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:9
+msgid "Supported Features"
+msgstr "支持的功能"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:11
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr "请参考 [支持功能列表](../user_guide/support_matrix/supported_models.md) 以获取该模型支持的功能矩阵。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:13
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参考 [功能指南](../user_guide/feature_guide/index.md) 以获取功能的配置方式。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:15
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:17
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:19
+msgid ""
+"`Qwen3-Coder-30B-A3B-Instruct`(BF16 version): requires 1 Atlas 800 A3 "
+"node (with 16x 64G NPUs) or 1 Atlas 800 A2 node (with 8x 64G/32G NPUs). "
+"[Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3"
+"-Coder-30B-A3B-Instruct)"
+msgstr ""
+"`Qwen3-Coder-30B-A3B-Instruct`（BF16 版本）：需要 1 个 Atlas 800 A3 节点（配备 16x 64G NPU）"
+"或 1 个 Atlas 800 A2 节点（配备 8x 64G/32G NPU）。"
+"[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-Coder-30B-A3B-Instruct)"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:21
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:23
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:25
+msgid ""
+"`Qwen3-Coder` is first supported in `vllm-ascend:v0.10.0rc1`, please run "
+"this model using a later version."
+msgstr "`Qwen3-Coder` 最早在 `vllm-ascend:v0.10.0rc1` 版本中得到支持，请使用该版本或更高版本运行此模型。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:27
+msgid ""
+"You can using our official docker image to run `Qwen3-Coder-30B-A3B-"
+"Instruct` directly."
+msgstr "您可以直接使用我们的官方 Docker 镜像来运行 `Qwen3-Coder-30B-A3B-Instruct`。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:53
+msgid ""
+"In addition, if you don't want to use the docker image as above, you can "
+"also build all from source:"
+msgstr "此外，如果您不想使用上述 Docker 镜像，也可以从源码构建："
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:55
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../installation.md)."
+msgstr "从源码安装 `vllm-ascend`，请参考 [安装指南](../installation.md)。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:57
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:59
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:61
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本以执行在线推理。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:63
+msgid ""
+"For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size "
+"should be at least 2, and for 32 GB of memory, tensor-parallel-size "
+"should be at least 4."
+msgstr "对于配备 64 GB 显存的 Atlas A2，张量并行大小（tensor-parallel-size）应至少为 2；对于 32 GB 显存，该值应至少为 4。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:72
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:74
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示词查询模型："
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:89
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:91
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:103
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:93
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr "详见 [使用 AISBench](../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:95
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen3"
+"-Coder-30B-A3B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only."
+msgstr "执行后可获取结果，以下为 `vllm-ascend:0.11.0rc0` 下 `Qwen3-Coder-30B-A3B-Instruct` 的测试结果，仅供参考。"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "openai_humaneval"
+msgstr "openai_humaneval"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "f4a973"
+msgstr "f4a973"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "humaneval_pass@1"
+msgstr "humaneval_pass@1"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "94.51"
+msgstr "94.51"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:101
+msgid "Performance"
+msgstr "性能指标"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:105
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr "详见 [使用 AISBench 进行性能评估](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"

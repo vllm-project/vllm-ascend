@@ -1,0 +1,302 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 10:00+0800\n"
+"Last-Translator: Your Name <email@example.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:1
+msgid "Qwen2.5-Omni-7B"
+msgstr "Qwen2.5-Omni-7B"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:5
+msgid ""
+"Qwen2.5-Omni is an end-to-end multimodal model designed to perceive "
+"diverse modalities, including text, images, audio, and video, while "
+"simultaneously generating text and natural speech responses in a "
+"streaming manner."
+msgstr "Qwen2.5-Omni 是一个端到端的多模态模型，旨在感知文本、图像、音频和视频等多种模态，同时以流式方式生成文本和自然语音响应。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:7
+msgid ""
+"The `Qwen2.5-Omni` model was supported since `vllm-ascend:v0.11.0rc0`. "
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-NPU and multi-NPU deployment, accuracy and "
+"performance evaluation."
+msgstr "`Qwen2.5-Omni` 模型从 `vllm-ascend:v0.11.0rc0` 开始得到支持。本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单 NPU 和多 NPU 部署、精度和性能评估。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:9
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:11
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr "请参考[支持的特性](../user_guide/support_matrix/supported_models.md)以获取模型支持的特性矩阵。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:13
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参考[特性指南](../user_guide/feature_guide/index.md)以获取特性的配置信息。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:15
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:17
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:19
+msgid ""
+"`Qwen2.5-Omni-3B`(BF16): [Download model "
+"weight](https://huggingface.co/Qwen/Qwen2.5-Omni-3B)"
+msgstr "`Qwen2.5-Omni-3B`(BF16): [下载模型权重](https://huggingface.co/Qwen/Qwen2.5-Omni-3B)"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:20
+msgid ""
+"`Qwen2.5-Omni-7B`(BF16): [Download model "
+"weight](https://huggingface.co/Qwen/Qwen2.5-Omni-7B)"
+msgstr "`Qwen2.5-Omni-7B`(BF16): [下载模型权重](https://huggingface.co/Qwen/Qwen2.5-Omni-7B)"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:22
+msgid "Following examples use the 7B version deafultly."
+msgstr "以下示例默认使用 7B 版本。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:24
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:26
+msgid "You can using our official docker image to run `Qwen2.5-Omni` directly."
+msgstr "您可以使用我们的官方 docker 镜像直接运行 `Qwen2.5-Omni`。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:28
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../installation.md#set-up-using-"
+"docker)."
+msgstr "根据您的机器类型选择镜像，并在您的节点上启动 docker 镜像，请参考[使用 docker](../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:65
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:67
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:69
+msgid "Single NPU (Qwen2.5-Omni-7B)"
+msgstr "单 NPU (Qwen2.5-Omni-7B)"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:72
+msgid ""
+"The env `LOCAL_MEDIA_PATH` which allowing API requests to read local "
+"images or videos from directories specified by the server file system. "
+"Please note this is a security risk. Should only be enabled in trusted "
+"environments."
+msgstr "环境变量 `LOCAL_MEDIA_PATH` 允许 API 请求从服务器文件系统指定的目录读取本地图像或视频。请注意，这存在安全风险。仅应在受信任的环境中启用。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:90
+msgid ""
+"Now vllm-ascend docker image should contain vllm[audio] build part, if "
+"you encounter *audio not supported issue* by any chance, please re-build "
+"vllm with [audio] flag."
+msgstr "当前 vllm-ascend docker 镜像应包含 vllm[audio] 构建部分，如果您遇到 *audio not supported issue*，请使用 [audio] 标志重新构建 vllm。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:98
+msgid ""
+"`--allowed-local-media-path` is optional, only set it if you need infer "
+"model with local media file"
+msgstr "`--allowed-local-media-path` 是可选的，仅当您需要使用本地媒体文件推理模型时才设置"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:100
+msgid ""
+"`--gpu-memory-utilization` should not be set manually only if yous know "
+"what this parameter aims to."
+msgstr "`--gpu-memory-utilization` 不应手动设置，除非您知道此参数的目的。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:102
+msgid "Multiple NPU (Qwen2.5-Omni-7B)"
+msgstr "多 NPU (Qwen2.5-Omni-7B)"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:121
+msgid ""
+"`--tensor_parallel_size` no need to set for this 7B model, but if you "
+"really need tensor parallel, tp size can be one of `1\\2\\4`"
+msgstr "对于此 7B 模型，`--tensor_parallel_size` 无需设置，但如果您确实需要张量并行，tp 大小可以是 `1\\2\\4` 之一"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:123
+msgid "Prefill-Decode Disaggregation"
+msgstr "预填充-解码分离"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:125
+msgid "Not supported yet"
+msgstr "尚未支持"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:127
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:129
+msgid "If your service start successfully, you can see the info shown below:"
+msgstr "如果您的服务成功启动，您可以看到如下信息："
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:137
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "一旦您的服务器启动，您就可以使用输入提示词查询模型："
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:165
+msgid ""
+"If you query the server successfully, you can see the info shown below "
+"(client):"
+msgstr "如果您成功查询服务器，您可以看到如下信息（客户端）："
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:171
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:173
+msgid "Qwen2.5-Omni on vllm-ascend has been test on AISBench."
+msgstr "vllm-ascend 上的 Qwen2.5-Omni 已在 AISBench 上进行测试。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:175
+#: ../../source/tutorials/Qwen2.5-Omni.md:188
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:177
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr "详情请参考[使用 AISBench](../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:179
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen2.5"
+"-Omni-7B` with `vllm-ascend:0.11.0rc0` for reference only."
+msgstr "执行后，您可以得到结果，这里是 `vllm-ascend:0.11.0rc0` 中 `Qwen2.5-Omni-7B` 的结果，仅供参考。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "platform"
+msgstr "平台"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "vllm-api-stream-chat"
+msgstr "vllm-api-stream-chat"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "textVQA"
+msgstr "textVQA"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "A2"
+msgstr "A2"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "gen_base64"
+msgstr "gen_base64"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "83.47"
+msgstr "83.47"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "A3"
+msgstr "A3"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "84.04"
+msgstr "84.04"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:186
+msgid "Performance Evaluation"
+msgstr "性能评估"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:190
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr "详情请参考[使用 AISBench 进行性能评估](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:192
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM Benchmark"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:194
+msgid "Run performance evaluation of `Qwen2.5-Omni-7B` as an example."
+msgstr "以 `Qwen2.5-Omni-7B` 为例运行性能评估。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:196
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr "更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:198
+msgid "There are three `vllm bench` subcommand:"
+msgstr "`vllm bench` 有三个子命令："
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:199
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`: 基准测试单批次请求的延迟。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:200
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`: 基准测试在线服务吞吐量。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:201
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`: 基准测试离线推理吞吐量。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:203
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 为例。运行以下代码。"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:209
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，您可以得到性能评估结果。"

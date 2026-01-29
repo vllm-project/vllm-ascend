@@ -1,0 +1,125 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/310p.md:1
+msgid "Atlas 300I"
+msgstr "Atlas 300I "
+
+#: ../../source/tutorials/310p.md:4
+msgid ""
+"This Atlas 300I series is currently experimental. In future versions, "
+"there may be behavioral changes related to model coverage and performance"
+" improvement."
+msgstr "当前 Atlas 300I 系列仍处于实验性支持阶段。在未来版本中，可能会对模型覆盖范围和性能优化进行行为调整。"
+
+#: ../../source/tutorials/310p.md:5
+msgid ""
+"Currently, the 310I series only supports eager mode and the float16 data "
+"type."
+msgstr "目前 310I 系列仅支持即时执行模式（eager mode）和 float16 数据类型。"
+
+#: ../../source/tutorials/310p.md:6
+msgid ""
+"There are some known issues for running vLLM on 310p series, you can "
+"refer to vllm-ascend [<u>#3316</u>](https://github.com/vllm-project/vllm-"
+"ascend/issues/3316) and  [<u>#2795</u>](https://github.com/vllm-project"
+"/vllm-ascend/issues/2795). You can use v0.10.0rc1 version first."
+msgstr "在 310P 系列上运行 vLLM 存在一些已知问题，您可以参考 vllm-ascend 的 [<u>#3316</u>](https://github.com/vllm-project/vllm-ascend/issues/3316) 和 [<u>#2795</u>](https://github.com/vllm-project/vllm-ascend/issues/2795) issue。建议先使用 v0.10.0rc1 版本。"
+
+#: ../../source/tutorials/310p.md:10
+msgid "Run vLLM on Atlas 300I Series"
+msgstr "在 Atlas 300I 系列上运行 vLLM"
+
+#: ../../source/tutorials/310p.md:12
+msgid "Run docker container:"
+msgstr "运行 Docker 容器："
+
+#: ../../source/tutorials/310p.md:42
+msgid "Set up environment variables:"
+msgstr "设置环境变量："
+
+#: ../../source/tutorials/310p.md:52
+msgid "Online Inference on NPU"
+msgstr "NPU 在线推理"
+
+#: ../../source/tutorials/310p.md:54
+msgid ""
+"Run the following script to start the vLLM server on NPU (Qwen3-0.6B:1 "
+"card, Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):"
+msgstr "运行以下脚本在 NPU 上启动 vLLM 服务器（模型与卡数配置：Qwen3-0.6B：1卡，Qwen2.5-7B-Instruct：2卡，Pangu-Pro-MoE-72B：8卡）："
+
+#: ../../source/tutorials/310p.md
+msgid "Qwen3-0.6B"
+msgstr "Qwen3-0.6B"
+
+#: ../../source/tutorials/310p.md:64 ../../source/tutorials/310p.md:94
+#: ../../source/tutorials/310p.md:124 ../../source/tutorials/310p.md:161
+msgid "Run the following command to start the vLLM server:"
+msgstr "运行以下命令启动 vLLM 服务器："
+
+#: ../../source/tutorials/310p.md:75 ../../source/tutorials/310p.md:105
+#: ../../source/tutorials/310p.md:135
+msgid "Once your server is started, you can query the model with input prompts"
+msgstr "服务器启动后，您可以使用输入提示词（prompt）查询模型"
+
+#: ../../source/tutorials/310p.md
+msgid "Qwen2.5-7B-Instruct"
+msgstr "Qwen2.5-7B-Instruct"
+
+#: ../../source/tutorials/310p.md
+msgid "Qwen2.5-VL-3B-Instruct"
+msgstr "Qwen2.5-VL-3B-Instruct"
+
+#: ../../source/tutorials/310p.md
+msgid "Pangu-Pro-MoE-72B"
+msgstr "Pangu-Pro-MoE-72B"
+
+#: ../../source/tutorials/310p.md:154 ../../source/tutorials/310p.md:335
+msgid "Download the model:"
+msgstr "下载模型："
+
+#: ../../source/tutorials/310p.md:175
+msgid "Once your server is started, you can query the model with input prompts."
+msgstr "服务器启动后，您可以使用输入提示词（prompt）查询模型。"
+
+#: ../../source/tutorials/310p.md:192
+msgid "If you run this script successfully, you can see the results."
+msgstr "如果脚本运行成功，您将能看到推理结果。"
+
+#: ../../source/tutorials/310p.md:194
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/tutorials/310p.md:196
+msgid ""
+"Run the following script (`example.py`) to execute offline inference on "
+"NPU:"
+msgstr "运行以下脚本（`example.py`）在 NPU 上执行离线推理："
+
+#: ../../source/tutorials/310p.md:398
+msgid "Run script:"
+msgstr "运行脚本："
+
+#: ../../source/tutorials/310p.md:404
+msgid "If you run this script successfully, you can see the info shown below:"
+msgstr "如果脚本运行成功，您将看到如下信息："
+

@@ -1,0 +1,239 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:1
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:2
+msgid ""
+"This document guides you to conduct accuracy testing using "
+"[AISBench](https://gitee.com/aisbench/benchmark/tree/master). AISBench "
+"provides accuracy and performance evaluation for many datasets."
+msgstr "本文档指导您如何使用 [AISBench](https://gitee.com/aisbench/benchmark/tree/master) 进行准确率测试。AISBench 为多种数据集提供准确率和性能评估。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:4
+msgid "Online Server"
+msgstr "在线服务器模式"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:5
+msgid "1. Start the vLLM server"
+msgstr "1.启动 vLLM 服务器"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:6
+msgid "You can run docker container to start the vLLM server on a single NPU:"
+msgstr "您可以通过运行 Docker 容器，在单个 NPU 上启动 vLLM 服务器："
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:34
+msgid "Run the vLLM server in the docker."
+msgstr "在 Docker 容器中运行 vLLM 服务器。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:42
+msgid ""
+"`--max_model_len` should be greater than `35000`, this will be suitable "
+"for most datasets. Otherwise the accuracy evaluation may be affected."
+msgstr "`--max_model_len` 参数应设置为大于 `35000`，这适用于大多数数据集。否则可能会影响准确率评估结果。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:45
+msgid "The vLLM server is started successfully, if you see logs as below:"
+msgstr "如果您看到如下日志，表明 vLLM 服务器已成功启动："
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:53
+msgid "2. Run different dataset using AISBench"
+msgstr "2.使用 AISBench 运行不同数据集"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:55
+msgid "Install AISBench"
+msgstr "安装 AISBench"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:57
+msgid ""
+"Refer to [AISBench](https://gitee.com/aisbench/benchmark/tree/master) for"
+" details. Install AISBench from source."
+msgstr "详细安装说明请参考 [AISBench](https://gitee.com/aisbench/benchmark/tree/master) 文档。从源码安装 AISBench。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:66
+msgid "Install extra AISBench dependencies."
+msgstr "安装 AISBench 的额外依赖。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:73
+msgid "Run `ais_bench -h` to check the installation."
+msgstr "运行 `ais_bench -h` 命令检查安装是否成功。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:75
+msgid "Download Dataset"
+msgstr "下载数据集"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:77
+msgid "You can choose one or multiple datasets to execute accuracy evaluation."
+msgstr "您可以选择一个或多个数据集进行准确率评估。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:79
+msgid "`C-Eval` dataset."
+msgstr "`C-Eval` 数据集。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:81
+msgid ""
+"Take `C-Eval` dataset as an example. And you can refer to "
+"[Datasets](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets)"
+" for more datasets. Every datasets have a `README.md` for detailed "
+"download and installation process."
+msgstr "以 `C-Eval` 数据集为例。您可以参考 [数据集列表](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) 查看更多数据集信息。每个数据集都有一个 `README.md` 文件，提供了详细的下载和安装说明。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:83
+msgid "Download dataset and install it to specific path."
+msgstr "下载数据集并将其安装到指定路径。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:95
+msgid "`MMLU` dataset."
+msgstr "`MMLU` 数据集。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:104
+msgid "`GPQA` dataset."
+msgstr "`GPQA` 数据集。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:113
+msgid "`MATH` dataset."
+msgstr "`MATH` 数据集。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:122
+msgid "`LiveCodeBench` dataset."
+msgstr "`LiveCodeBench` 数据集。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:130
+msgid "`AIME 2024` dataset."
+msgstr "`AIME 2024` 数据集。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:141
+msgid "`GSM8K` dataset."
+msgstr "`GSM8K` 数据集。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:150
+msgid "Configuration"
+msgstr "配置文件设置"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:152
+msgid ""
+"Update the file "
+"`benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`."
+" There are several arguments that you should update according to your "
+"environment."
+msgstr "更新 `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py` 文件。您需要根据实际环境更新以下几个参数。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:155
+msgid ""
+"`attr`: Identifier for the inference backend type, fixed as `service` "
+"(serving-based inference) or `local` (local model)."
+msgstr "`attr`：推理后端类型的标识符，固定为 `service`（基于服务的推理）或 `local`（本地模型）。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:156
+msgid "`type`: Used to select different backend API types."
+msgstr "`type`：用于选择不同的后端 API 类型。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:157
+msgid ""
+"`abbr`: Unique identifier for a local task, used to distinguish between "
+"multiple tasks."
+msgstr "`abbr`：本地任务的唯一标识符，用于区分多个任务。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:158
+msgid "`path`: Update to your model weight path."
+msgstr "`path`：更新为您的模型权重路径。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:159
+msgid "`model`: Update to your model name in vLLM."
+msgstr "`model`：更新为您的模型在 vLLM 中的名称。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:160
+msgid "`host_ip` and `host_port`: Update to your vLLM server ip and port."
+msgstr "`host_ip` 和 `host_port`：更新为您的 vLLM 服务器的 IP 地址和端口号。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:161
+msgid ""
+"`max_out_len`: Note `max_out_len` + LLM input length should be less than "
+"`max-model-len`(config in your vllm server), `32768` will be suitable for"
+" most datasets."
+msgstr "`max_out_len`：请注意，`max_out_len` + LLM 输入长度应小于 vLLM 服务器中配置的 `max-model-len`。`32768` 适用于大多数数据集。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:162
+msgid "`batch_size`: Update according to your dataset."
+msgstr "`batch_size`：根据您的数据集进行设置。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:163
+msgid "`temperature`: Update inference argument."
+msgstr "`temperature`：设置推理参数。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:196
+msgid "Execute Accuracy Evaluation"
+msgstr "执行准确率评估"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:198
+msgid "Run the following code to execute different accuracy evaluation."
+msgstr "运行以下代码执行不同的准确率评估。"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:221
+msgid ""
+"After each dataset execution, you can get the result from saved files "
+"such as `outputs/default/20250628_151326`, there is an example as "
+"follows:"
+msgstr "每个数据集执行完毕后，您可以从保存的文件（如 `outputs/default/20250628_151326`）中获取结果，示例如下："
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:246
+msgid "Execute Performance Evaluation"
+msgstr "执行性能评估"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:248
+msgid "Text-only benchmarks:"
+msgstr "纯文本基准测试："
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:270
+msgid "Multi-modal benchmarks (text + images):"
+msgstr "多模态基准测试（文本 + 图像）："
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:277
+msgid ""
+"After execution, you can get the result from saved files, there is an "
+"example as follows:"
+msgstr "执行完成后，您可以从保存的文件中获取结果，示例如下："
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:297
+msgid "3. Troubleshooting"
+msgstr "3.故障排除"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:299
+msgid "Invalid Image Path Error"
+msgstr "无效图像路径错误"
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:301
+msgid "If you download the TextVQA dataset following the AISBench documentation:"
+msgstr "如果您按照 AISBench 文档下载 TextVQA 数据集："
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:313
+msgid "you may encounter the following error:"
+msgstr "可能会遇到以下错误："
+
+#: ../../source/developer_guide/evaluation/using_ais_bench.md:319
+msgid ""
+"You need to manually replace the dataset image paths with absolute paths,"
+" changing `/path/to/benchmark/ais_bench/datasets/textvqa/train_images/` "
+"to the actual absolute directory where the images are stored:"
+msgstr "您需要手动将数据集图像路径替换为绝对路径，将 `/path/to/benchmark/ais_bench/datasets/textvqa/train_images/` 改为实际存储图像的绝对目录："

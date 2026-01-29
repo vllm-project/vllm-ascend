@@ -1,0 +1,612 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-23 11:24+0800\n"
+"PO-Revision-Date: 2026-01-23 12:30+0800\n"
+"Last-Translator: Gemini <support@google.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:1
+msgid "DeepSeek-V3/3.1"
+msgstr "DeepSeek-V3/3.1"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:5
+msgid ""
+"DeepSeek-V3.1 is a hybrid model that supports both thinking mode and non-"
+"thinking mode. Compared to the previous version, this upgrade brings "
+"improvements in multiple aspects:"
+msgstr "DeepSeek-V3.1 是一个支持思维模式和非思维模式的混合模型。与之前的版本相比，此次升级在多个方面带来了改进："
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:7
+msgid ""
+"Hybrid thinking mode: One model supports both thinking mode and non-"
+"thinking mode by changing the chat template."
+msgstr "混合思维模式：通过更改聊天模板，单个模型同时支持思维模式和非思维模式。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:9
+msgid ""
+"Smarter tool calling: Through post-training optimization, the model's "
+"performance in tool usage and agent tasks has significantly improved."
+msgstr "更智能的工具调用：通过后训练优化，模型在工具使用和智能体任务方面的性能显著提升。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:11
+msgid ""
+"Higher thinking efficiency: DeepSeek-V3.1-Think achieves comparable "
+"answer quality to DeepSeek-R1-0528, while responding more quickly."
+msgstr "更高的思维效率：DeepSeek-V3.1-Think 达到了与 DeepSeek-R1-0528 相当的答案质量，同时响应速度更快。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:13
+msgid "The `DeepSeek-V3.1` model is first supported in `vllm-ascend:v0.9.1rc3`"
+msgstr "`DeepSeek-V3.1` 模型首次在 `vllm-ascend:v0.9.1rc3` 中得到支持"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:15
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node and multi-node deployment, accuracy and "
+"performance evaluation."
+msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度和性能评估。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:17
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:19
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr "请参考[支持的特性](../user_guide/support_matrix/supported_models.md)以获取模型支持的特性矩阵。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:21
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参考[特性指南](../user_guide/feature_guide/index.md)以获取特性的配置信息。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:23
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:25
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:26
+msgid ""
+"`DeepSeek-V3.1`(BF16 version): [Download model "
+"weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1)."
+msgstr ""
+"`DeepSeek-V3.1`(BF16 版本): [下载模型权重](https://www.modelscope.cn/models"
+"/deepseek-ai/DeepSeek-V3.1)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:27
+msgid ""
+"`DeepSeek-V3.1-w8a8`(Quantized version without mtp): [Download model "
+"weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.1-w8a8)."
+msgstr ""
+"`DeepSeek-V3.1-w8a8`(无 MTP 的量化版本): "
+"[下载模型权重](https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-V3.1-w8a8)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:28
+msgid ""
+"`DeepSeek-V3.1_w8a8mix_mtp`(Quantized version with mix mtp): [Download "
+"model weight](https://www.modelscope.cn/models/Eco-"
+"Tech/DeepSeek-V3.1-w8a8). Please modify `torch_dtype` from `float16` to "
+"`bfloat16` in `config.json`."
+msgstr ""
+"`DeepSeek-V3.1_w8a8mix_mtp`(混合 MTP 量化版本): "
+"[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8)。请在"
+" `config.json` 中将 `torch_dtype` 从 `float16` 修改为 `bfloat16`。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:29
+msgid ""
+"`DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp):"
+" [Download model weight](https://www.modelscope.cn/models/Eco-"
+"Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot)."
+msgstr ""
+"`DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(混合 MTP 量化版本): "
+"[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1"
+"-Terminus-w4a8-mtp-QuaRot)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:30
+#, python-format
+msgid ""
+"`Method of Quantify`: "
+"[msmodelslim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v31-w8a8-%E6%B7%B7%E5%90%88%E9%87%8F%E5%8C%96-mtp-%E9%87%8F%E5%8C%96)."
+" You can use these methods to quantify the model."
+msgstr ""
+"`量化方法`: "
+"[msmodelslim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v31-w8a8-%E6%B7%B7%E5%90%88%E9%87%8F%E5%8C%96-mtp-%E9%87%8F%E5%8C%96)。"
+" 您可以使用这些方法对模型进行量化。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:32
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多个节点的共享目录中，例如 `/root/.cache/`"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:34
+msgid "Verify Multi-node Communication(Optional)"
+msgstr "验证多节点通信（可选）"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:36
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../installation.md#verify-multi-node-communication)."
+msgstr ""
+"如果要部署多节点环境，需要根据[验证多节点通信环境](../installation.md#verify-multi-node-"
+"communication)验证多节点通信。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:38
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:40
+msgid "You can using our official docker image to run `DeepSeek-V3.1` directly."
+msgstr "您可以使用我们的官方 docker 镜像直接运行 `DeepSeek-V3.1`。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:42
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+"根据您的机器类型选择镜像，并在您的节点上启动 docker 镜像，请参考[使用 docker](../installation.md#set-"
+"up-using-docker)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:80
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr "如果要部署多节点环境，需要在每个节点上设置环境。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:82
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:84
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:86
+msgid ""
+"Quantized model `DeepSeek-V3.1-w8a8-mtp-QuaRot` can be deployed on 1 "
+"Atlas 800 A3 (64G × 16)."
+msgstr "量化模型 `DeepSeek-V3.1-w8a8-mtp-QuaRot` 可以部署在 1 台 Atlas 800 A3 (64G × 16) 上。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:88
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:132
+#: ../../source/tutorials/DeepSeek-V3.1.md:579
+msgid "**Notice:** The parameters are explained as follows:"
+msgstr "**注意：** 参数说明如下："
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:134
+msgid ""
+"Setting the environment variable `VLLM_ASCEND_ENABLE_MLAPO=1` enables a "
+"fusion operator that can significantly improve performance, though it "
+"requires more NPU memory. It is therefore recommended to enable this "
+"option when sufficient NPU memory is available."
+msgstr ""
+"设置环境变量 `VLLM_ASCEND_ENABLE_MLAPO=1` 会启用一个融合算子，可以显著提高性能，但需要更多的 NPU "
+"内存。因此建议在 NPU 内存充足时启用此选项。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:135
+msgid ""
+"Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` "
+"enables balance scheduling. This may help increase output throughput and "
+"reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios."
+" Furthermore, enabling this feature is not recommended in scenarios where"
+" PD is separated."
+msgstr ""
+"设置环境变量 `VLLM_ASCEND_BALANCE_SCHEDULING=1` 会启用均衡调度。这可能有助于提高 v1 "
+"调度器的输出吞吐量并降低 TPOT。 然而，在某些场景下 TTFT 可能会下降。此外，在 PD 分离的场景中不建议启用此功能。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:136
+msgid ""
+"For single-node deployment, we recommend using `dp4tp4` instead of "
+"`dp2tp8`."
+msgstr "对于单节点部署，我们推荐使用 `dp4tp4` 而不是 `dp2tp8`。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:137
+msgid ""
+"`--max-model-len` specifies the maximum context length - that is, the sum"
+" of input and output tokens for a single request. For performance testing"
+" with an input length of 3.5K and output length of 1.5K, a value of "
+"`16384` is sufficient, however, for precision testing, please set it at "
+"least `35000`."
+msgstr ""
+"`--max-model-len` 指定最大上下文长度——即单个请求的输入和输出令牌总和度。对于输入长度 3.5K 和输出长度 1.5K "
+"的性能测试，`16384` 的值就足够了，但对于精度测试，请至少设置为 `35000`。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:138
+msgid ""
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
+"To enable it, remove this option."
+msgstr "`--no-enable-prefix-caching` 表示前缀缓存被禁用。要启用它，请删除此选项。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:139
+msgid ""
+"If you use the w4a8 weight, more memory will be allocated to kvcache, and"
+" you can try to increase system throughput to achieve greater throughput."
+msgstr "如果使用 w4a8 权重，更多的内存将分配给 kvcache，您可以尝试增加系统吞吐量以实现更大的吞吐量。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:141
+msgid "Multi-node Deployment"
+msgstr "多节点部署"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:143
+msgid ""
+"`DeepSeek-V3.1-w8a8-mtp-QuaRot`: require at least 2 Atlas 800 A2 (64G × "
+"8)."
+msgstr "`DeepSeek-V3.1-w8a8-mtp-QuaRot`: 需要至少 2 台 Atlas 800 A2 (64G × 8)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:145
+msgid "Run the following scripts on two nodes respectively."
+msgstr "分别在两个节点上运行以下脚本。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:147
+msgid "**Node 0**"
+msgstr "**节点 0**"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:200
+msgid "**Node 1**"
+msgstr "**节点 1**"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:255
+msgid "Prefill-Decode Disaggregation"
+msgstr "预填充-解码分离"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:257
+msgid ""
+"We recommend using Mooncake for deployment: "
+"[Mooncake](./pd_disaggregation_mooncake_multi_node.md)."
+msgstr ""
+"我们推荐使用 Mooncake "
+"进行部署：[Mooncake](./pd_disaggregation_mooncake_multi_node.md)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:259
+msgid ""
+"Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 "
+"nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory "
+"to serve high concurrency in 1P1D case."
+msgstr ""
+"以 Atlas 800 A3 (64G × 16) 为例，我们建议部署 2P1D（4 个节点）而不是 1P1D（2 个节点），因为在 1P1D "
+"情况下没有足够的 NPU 内存来服务高并发。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:260
+msgid ""
+"`DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 "
+"(64G × 16)."
+msgstr ""
+"`DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` 需要 4 台 Atlas 800 A3 (64G ×"
+" 16)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:262
+msgid ""
+"To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need "
+"to deploy a `launch_dp_program.py` script and a `run_dp_template.sh` "
+"script on each node and deploy a `proxy.sh` script on prefill master node"
+" to forward requests."
+msgstr ""
+"要运行 vllm-ascend `Prefill-Decode Disaggregation` 服务，您需要在每个节点上部署一个 "
+"`launch_dp_program.py` 脚本和一个 `run_dp_template.sh` 脚本，并在预填充主节点上部署一个 "
+"`proxy.sh` 脚本来转发请求。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:264
+msgid ""
+"`launch_online_dp.py` to launch external dp vllm servers. "
+"[launch\\_online\\_dp.py](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
+msgstr ""
+"`launch_online_dp.py` 用于启动外部 dp vllm "
+"服务器。[launch\\_online\\_dp.py](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:267
+msgid "Prefill Node 0 `run_dp_template.sh` script"
+msgstr "预填充节点 0 `run_dp_template.sh` 脚本"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:345
+msgid "Prefill Node 1 `run_dp_template.sh` script"
+msgstr "预填充节点 1 `run_dp_template.sh` 脚本"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:423
+msgid "Decode Node 0 `run_dp_template.sh` script"
+msgstr "解码节点 0 `run_dp_template.sh` 脚本"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:501
+msgid "Decode Node 1 `run_dp_template.sh` script"
+msgstr "解码节点 1 `run_dp_template.sh` 脚本"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:581
+msgid ""
+"`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization"
+" function on the prefill nodes."
+msgstr "`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: 在预填充节点上启用通信优化功能。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:582
+msgid ""
+"`VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can "
+"significantly improve performance but consumes more NPU memory. In the "
+"Prefill-Decode (PD) separation scenario, enable MLAPO only on decode "
+"nodes."
+msgstr ""
+"`VLLM_ASCEND_ENABLE_MLAPO=1`: 启用融合算子，这可以显著提高性能，但会消耗更多的 NPU 内存。"
+"在预填充-解码 (PD) 分离场景中，仅在解码节点上启用 MLAPO。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:583
+msgid ""
+"`--async-scheduling`: enables the asynchronous scheduling function. When "
+"Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of "
+"operator delivery can be implemented to overlap the operator delivery "
+"latency."
+msgstr ""
+"`--async-scheduling`: 启用异步调度功能。当启用多 Token 预测 (MTP) 时，"
+"可以实现算子下发的异步调度，以重叠算子下发的延迟。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:584
+msgid ""
+"`cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And "
+"the min is `n = 1` and the max is `n = max-num-seqs`. For other values, "
+"it is recommended to set them to the number of frequently occurring "
+"requests on the Decode (D) node."
+msgstr ""
+"`cudagraph_capture_sizes`: 推荐值为 `n x (mtp + 1)`。最小值 `n = 1`，最大值 `n = max-num-seqs`。"
+"对于其他值，建议将其设置为解码 (D) 节点上频繁出现的请求数量。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:585
+msgid ""
+"`recompute_scheduler_enable: true`: enables the recomputation scheduler. "
+"When the Key-Value Cache (KV Cache) of the decode node is insufficient, "
+"requests will be sent to the prefill node to recompute the KV Cache. In "
+"the PD separation scenario, it is recommended to enable this "
+"configuration on both prefill and decode nodes simultaneously."
+msgstr ""
+"`recompute_scheduler_enable: true`: 启用重计算调度器。当解码节点的 KV 缓存不足时，"
+"请求将被发送到预填充节点以重新计算 KV 缓存。在 PD 分离场景中，建议在预填充和解码节点上同时启用此配置。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:586
+msgid ""
+"`multistream_overlap_shared_expert: true`: When the Tensor Parallelism "
+"(TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream "
+"is enabled to overlap the computation process of shared experts for "
+"improved efficiency."
+msgstr ""
+"`multistream_overlap_shared_expert: true`: 当张量并行 (TP) 大小为 1 或 `enable_shared_expert_dp: true` 时，"
+"启用额外的流来重叠共享专家的计算过程，以提高效率。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:587
+msgid ""
+"`lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size "
+"of the decode node is 1, this parameter allows the TP size of the LMHead "
+"embedding layer to be greater than 1, which is used to reduce the "
+"computational load of each card on the LMHead embedding layer."
+msgstr ""
+"`lmhead_tensor_parallel_size: 16`: 当解码节点的张量并行 (TP) 大小为 1 时，此参数允许 LMHead 嵌入层的 TP 大小大于 1，"
+"用于减轻每张卡在 LMHead 嵌入层上的计算负载。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:589
+msgid "run server for each node"
+msgstr "为每个节点运行服务器"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:602
+msgid "Run proxy `proxy.sh` scripts on the prefill master node"
+msgstr "在预填充主节点上运行代理 `proxy.sh` 脚本"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:604
+msgid ""
+"Run a proxy server on the same node with the prefiller service instance. "
+"You can get the proxy program in the repository's examples: "
+"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+"在与预填充服务实例相同的节点上运行代理服务器。您可以在仓库的示例中获取代理程序：[load\\_balance\\_proxy\\_server\\_example.py](https://github.com"
+"/vllm-project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:660
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:662
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "一旦您的服务器启动，您就可以使用输入提示词查询模型："
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:675
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:677
+msgid "Here are two accuracy evaluation methods."
+msgstr "这里有两种精度评估方法。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:679
+#: ../../source/tutorials/DeepSeek-V3.1.md:694
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:680
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr "详情请参考[使用 AISBench](../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:682
+msgid ""
+"After execution, you can get the result, here is the result of "
+"`DeepSeek-V3.1-w8a8-mtp-QuaRot` in `vllm-ascend:0.11.0rc1` for reference "
+"only."
+msgstr ""
+"执行后，您可以得到结果，这里是 `vllm-ascend:0.11.0rc1` 中 `DeepSeek-V3.1-w8a8-mtp-QuaRot`"
+" 的结果，仅供参考。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "note"
+msgstr "备注"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "ceval"
+msgstr "ceval"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "-"
+msgstr "-"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "90.94"
+msgstr "90.94"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "1 Atlas 800 A3 (64G × 16)"
+msgstr "1 Atlas 800 A3 (64G × 16)"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "gsm8k"
+msgstr "gsm8k"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "96.28"
+msgstr "96.28"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:689
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用 Language Model Evaluation Harness"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:690
+msgid "Not test yet."
+msgstr "尚未测试。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:692
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:696
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详情请参考[使用 AISBench "
+"进行性能评估](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:698
+msgid "The performance result is:"
+msgstr "性能结果为："
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:700
+msgid "**Hardware**: A3-752T, 4 node"
+msgstr "**硬件**: A3-752T, 4 节点"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:702
+msgid "**Deployment**: 2P1D, Prefill node: DP2+TP8, Decode Node: DP32+TP1"
+msgstr "**部署**: 2P1D, 预填充节点: DP2+TP8, 解码节点: DP32+TP1"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:704
+msgid "**Input/Output**: 3.5k/1.5k"
+msgstr "**输入/输出**: 3.5k/1.5k"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:706
+msgid ""
+"**Performance**: TTFT = 6.16s, TPOT = 48.82ms, Average performance of "
+"each card is 478 TPS (Token Per Second)."
+msgstr ""
+"**性能**: TTFT = 6.16s, TPOT = 48.82ms, 每张卡的平均性能为 478 TPS (每秒 Token 数)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:707
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM Benchmark"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:709
+msgid ""
+"Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an "
+"example."
+msgstr "以 `DeepSeek-V3.1-w8a8-mtp-QuaRot` 为例运行性能评估。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:711
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+"更多详情请参考 [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:713
+msgid "There are three `vllm bench` subcommand:"
+msgstr "`vllm bench` 有三个子命令："
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:714
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`: 基准测试单批次请求的延迟。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:715
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`: 基准测试在线服务吞吐量。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:716
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`: 基准测试离线推理吞吐量。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:718
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 为例。运行以下代码。"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:724
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，您可以得到性能评估结果。"
+

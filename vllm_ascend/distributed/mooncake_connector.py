@@ -435,6 +435,8 @@ class KVCacheRecvingThread(threading.Thread):
                 f"{request_id}: {e}",
                 exc_info=True)
         finally:
+            self._send_done_signal_to_free_remote_port(request_id, remote_host,
+                                                       remote_port_send_num)
             if all_task_done:
                 self.task_tracker.update_done_task_count(request_id)
                 if request_id in self.proc_not_transfer_request:
@@ -446,8 +448,6 @@ class KVCacheRecvingThread(threading.Thread):
             self._send_done_recv_signal(request_id, remote_host,
                                         remote_handshake_port,
                                         remote_port_send_num)
-            self._send_done_signal_to_free_remote_port(request_id, remote_host,
-                                                       remote_port_send_num)
 
     def _send_done_signal_to_free_remote_port(self, request_id, remote_host,
                                               remote_port_send_num):
@@ -1458,8 +1458,12 @@ class MooncakeConnectorWorker:
         def get_remote_port_send_num(local_remote_block_port_mappings):
             remote_port_send_num: dict[int, dict[str, int | str]] = {}
             for port in range(self._prefill_tp_size * meta.remote_pcp_size):
-                remote_host = meta.remote_multi_nodes_meta_mapping[str(
-                    port)]['host']
+                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(
+                    str(port), None)
+                if remote_host_info is None:
+                    remote_host = meta.remote_host
+                else:
+                    remote_host = remote_host_info['host']
                 remote_port_send_num[meta.remote_port + port] = {}
                 remote_port_send_num[meta.remote_port + port]['num'] = 0
                 remote_port_send_num[meta.remote_port +

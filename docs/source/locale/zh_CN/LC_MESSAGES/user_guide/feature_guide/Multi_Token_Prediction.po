@@ -1,0 +1,260 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 16:25+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:1
+msgid "Multi Token Prediction (MTP)"
+msgstr "多Token预测(MTP)"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:3
+msgid "Why We Need MTP"
+msgstr "为什么需要 MTP"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:4
+msgid ""
+"MTP boosts inference performance by parallelizing the prediction of "
+"multiple tokens, shifting from single-token to multi-token generation. "
+"This approach significantly increases generation throughput and achieves "
+"multiplicative acceleration in inference speed—all without compromising "
+"output quality."
+msgstr ""
+"MTP 通过并行化多个 Token 的预测，将单 Token 生成模式转变为多 Token 生成模式，从而提升推理性能。"
+"这种方法在不损失输出质量的前提下，显著提高了生成吞吐量，并实现了推理速度的倍增。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:6
+msgid "How to Use MTP"
+msgstr "如何使用 MTP"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:7
+msgid ""
+"To enable MTP for DeepSeek-V3 models, add the following parameter when "
+"starting the service:"
+msgstr "若要在 DeepSeek-V3 模型中启用 MTP，请在启动服务时添加以下参数："
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:9
+#, python-brace-format
+msgid ""
+"--speculative_config ' {\"method\": \"mtp\", \"num_speculative_tokens\": "
+"1, \"disable_padded_drafter_batch\": False} '"
+msgstr ""
+"--speculative_config ' {\"method\": \"mtp\", \"num_speculative_tokens\": "
+"1, \"disable_padded_drafter_batch\": False} '"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:11
+msgid ""
+"`num_speculative_tokens`: The number of speculative tokens which enable "
+"model to predict multiple tokens at once, if provided. It will default to"
+" the number in the draft model config if present, otherwise, it is "
+"required."
+msgstr ""
+"`num_speculative_tokens`: 猜测 Token 的数量。如果提供该参数，模型将能够一次性预测多个 Token。"
+"如果存在草图模型（draft model）配置，则默认为该配置中的数量，否则该参数是必需的。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:12
+msgid ""
+"`disable_padded_drafter_batch`: Disable input padding for speculative "
+"decoding. If set to True, speculative input batches can contain sequences"
+" of different lengths, which may only be supported by certain attention "
+"backends. This currently only affects the MTP method of speculation, "
+"default is False."
+msgstr ""
+"`disable_padded_drafter_batch`: 禁用猜测式解码的输入填充。如果设置为 True，猜测输入 Batch 可以包含不同长度的序列，"
+"这通常仅受特定的 Attention 后端支持。目前该参数仅影响 MTP 猜测方法，默认值为 False。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:14
+msgid "How It Works"
+msgstr "工作原理"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:16
+msgid "Module Architecture"
+msgstr "模块架构"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:27
+msgid "**1. sample**"
+msgstr "**1. 采样 (sample)**"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:29
+msgid ""
+"*rejection_sample.py*: During decoding, the main model processes the "
+"previous round’s output token and the predicted token together (computing"
+" 1+k tokens simultaneously). The first token is always correct, while the"
+" second token—referred to as the **bonus token**—is uncertain since it is"
+" derived from speculative prediction, thus We employ **Greedy Strategy** "
+"and **Rejection Sampling Strategy** to determine whether the bonus token "
+"should be accepted. The module structure consists of an "
+"`AscendRejectionSampler` class with a forward method that implements the "
+"specific sampling logic."
+msgstr ""
+"*rejection_sample.py*: 在解码过程中，主模型会同时处理上一轮输出的 Token 和预测出的 Token（同时计算 1+k 个 Token）。"
+"第一个 Token 始终是正确的，而第二个 Token（被称为 **Bonus Token**）由于源自猜测预测，具有不确定性。"
+"因此，我们采用**贪婪策略 (Greedy Strategy)** 和 **拒绝采样策略 (Rejection Sampling Strategy)** 来决定是否接受 Bonus Token。"
+"该模块结构包含一个 `AscendRejectionSampler` 类，通过其 forward 方法实现具体的采样逻辑。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:37
+msgid "**2. spec_decode**"
+msgstr "**2. 猜测式解码 (spec_decode)**"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:39
+msgid ""
+"This section encompasses the model preprocessing for spec-decode, "
+"primarily structured as follows: it includes loading the model, executing"
+" a dummy run, and generating token ids. These steps collectively form the"
+" model data construction and forward invocation for a single spec-decode "
+"operation."
+msgstr ""
+"本节包含猜测式解码的模型预处理，其主要结构如下：加载模型、执行空运行（dummy run）以及生成 Token ID。"
+"这些步骤共同构成了单次猜测式解码操作的模型数据构建和前向调用。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:40
+msgid ""
+"*mtp_proposer.py*: Configure vLLM-Ascend to use speculative decoding "
+"where proposals are generated by deepseek mtp layer."
+msgstr "*mtp_proposer.py*: 配置 vLLM-Ascend 使用猜测式解码，其中的候选 Token（proposals）由 DeepSeek MTP 层生成。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:52
+msgid "Algorithm"
+msgstr "算法"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:54
+msgid "**1. Reject_Sample**"
+msgstr "**1. 拒绝采样 (Reject_Sample)**"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:55
+msgid "*Greedy Strategy*"
+msgstr "*贪婪策略 (Greedy Strategy)*"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:57
+msgid ""
+"Verify whether the token generated by the main model matches the "
+"speculative token predicted by MTP in the previous round. If they match "
+"exactly, accept the bonus token; otherwise, reject it and any subsequent "
+"tokens derived from that speculation."
+msgstr ""
+"验证主模型生成的 Token 是否与上一轮 MTP 预测的猜测 Token 匹配。"
+"如果完全匹配，则接受 Bonus Token；否则，拒绝该 Token 以及随后基于该猜测生成的所有 Token。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:59
+msgid "*Rejection Sampling Strategy*"
+msgstr "*拒绝采样策略 (Rejection Sampling Strategy)*"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:61
+msgid "This method introduces stochasticity in rejection sampling."
+msgstr "此方法在拒绝采样中引入了随机性。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:63
+msgid ""
+"For each draft token, acceptance is determined by verifying whether the "
+"inequality `P_target / P_draft ≥ U` holds, where `P_target` represents "
+"the probability assigned to the current draft token by the target model, "
+"`P_draft` denotes the probability assigned by the draft model, and `U` is"
+" a random number sampled uniformly from the interval [0, 1)."
+msgstr ""
+"对于每个草图 Token（draft token），通过验证不等式 `P_target / P_draft ≥ U` 是否成立来确定是否接受。"
+"其中 `P_target` 表示目标模型分配给当前草图 Token 的概率，`P_draft` 表示草图模型分配的概率，"
+"`U` 是从区间 [0, 1) 中均匀采样的随机数。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:65
+msgid ""
+"The decision logic for each draft token is as follows: if the inequality "
+"`P_target / P_draft ≥ U` holds, the draft token is accepted as output; "
+"conversely, if `P_target / P_draft < U`, the draft token is rejected."
+msgstr ""
+"每个草图 Token 的决策逻辑如下：如果不等式 `P_target / P_draft ≥ U` 成立，则接受该草图 Token 作为输出；"
+"反之，如果 `P_target / P_draft < U`，则拒绝该草图 Token。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:67
+msgid ""
+"When a draft token is rejected, a recovery sampling process is triggered "
+"where a \"recovered token\" is resampled from the adjusted probability "
+"distribution defined as `Q = max(P_target - P_draft, 0)`. In the current "
+"MTP implementation, since `P_draft` is not provided and defaults to 1, "
+"the formulas simplify such that token acceptance occurs when `P_target ≥ "
+"U,` and the recovery distribution becomes `Q = max(P_target - 1, 0)`."
+msgstr ""
+"当草图 Token 被拒绝时，会触发恢复采样过程，从调整后的概率分布 `Q = max(P_target - P_draft, 0)` 中重新采样一个“恢复 Token”。"
+"在当前的 MTP 实现中，由于不提供 `P_draft` 且默认值为 1，公式简化为：当 `P_target ≥ U` 时接受 Token，"
+"恢复分布变为 `Q = max(P_target - 1, 0)`。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:69
+msgid "**2. Performance**"
+msgstr "**2. 性能性能**"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:71
+msgid ""
+"If the bonus token is accepted, the MTP model performs inference for "
+"(num_speculative +1) tokens, including original main model output token "
+"and bonus token. If rejected, inference is performed for less token, "
+"determining on how many tokens accepted."
+msgstr ""
+"如果 Bonus Token 被接受，MTP 模型将对 (num_speculative + 1) 个 Token 进行推理，包括原始主模型输出的 Token 和 Bonus Token。"
+"如果被拒绝，则对较少的 Token 进行推理，具体取决于有多少 Token 被接受。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:73
+msgid "DFX"
+msgstr "DFX (设计卓越性)"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:75
+msgid "Method Validation"
+msgstr "方法验证"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:77
+msgid ""
+"Currently, the spec_decode scenario only supports methods such as ngram, "
+"eagle, eagle3, and mtp. If an incorrect parameter is passed for the "
+"method, the code will raise an error to alert the user that an incorrect "
+"method was provided."
+msgstr ""
+"目前，spec_decode 场景仅支持 ngram, eagle, eagle3 和 mtp 等方法。"
+"如果为 method 传递了错误的参数，代码将抛出错误，提醒用户提供了不正确的方法。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:95
+msgid "Integer Validation"
+msgstr "整数验证"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:96
+msgid ""
+"The current npu_fused_infer_attention_score operator only supports "
+"integers less than 16 per decode round. Therefore, the maximum supported "
+"value for MTP is 15. If a value greater than 15 is provided, the code "
+"will raise an error and alert the user."
+msgstr ""
+"目前的 `npu_fused_infer_attention_score` 算子每轮解码仅支持小于 16 的整数。"
+"因此，MTP 支持的最大值为 15。如果提供的值大于 15，代码将抛出错误并提醒用户。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:107
+msgid "Limitation"
+msgstr "限制"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:108
+msgid ""
+"Due to the fact that only a single layer of weights is exposed in "
+"DeepSeek's MTP, the accuracy and performance are not effectively "
+"guaranteed in scenarios where MTP > 1 (especially MTP ≥ 3). Moreover, due"
+" to current operator limitations, MTP supports a maximum of 15."
+msgstr ""
+"由于 DeepSeek 的 MTP 仅公开了单层权重，在 MTP > 1（特别是 MTP ≥ 3）的场景下，准确性和性能无法得到有效保证。"
+"此外，受限于当前算子限制，MTP 最大支持 15。"
+
+#: ../../source/user_guide/feature_guide/Multi_Token_Prediction.md:109
+msgid ""
+"In the fullgraph mode with MTP > 1, the capture size of each aclgraph "
+"must be an integer multiple of (num_speculative_tokens + 1)."
+msgstr ""
+"在 MTP > 1 的全图模式（fullgraph mode）下，每个 aclgraph 的捕获大小（capture size）必须是 (num_speculative_tokens + 1) 的整数倍。"

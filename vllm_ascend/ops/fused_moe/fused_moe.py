@@ -170,6 +170,7 @@ class AscendFusedMoE(FusedMoE):
 
         num_experts = kwargs["num_experts"]
         intermediate_size = kwargs["intermediate_size"]
+        num_shared_experts = kwargs.get("n_shared_experts", 0)
 
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
@@ -202,6 +203,10 @@ class AscendFusedMoE(FusedMoE):
                 dtype=vllm_config.model_config.dtype)
 
         # init moe
+        self.mix_placement = getattr(ascend_config, "mix_placement", False)
+        self.n_shared_experts = num_shared_experts
+        num_experts += num_shared_experts if self.mix_placement else 0
+        self.moe_config.num_experts = num_experts
         self.global_expert_map, self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
             ascend_config, self.moe_instance_id, self.moe_config)
         self.global_num_experts = num_experts + self.global_redundant_expert_num
@@ -382,8 +387,9 @@ class AscendFusedMoE(FusedMoE):
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, \
                 "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
-            self.moe_load += expert_tokens if group_list_type == 1 else \
+            local_load = expert_tokens if group_list_type == 1 else \
                 torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+            self.moe_load.add_(local_load)
 
         routed_out = forward_context.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
@@ -428,15 +434,16 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # splitting shared expert computation (gate_up projection + activation,
         # then down projection) yields identical results to integrated
         # computation after weight loading.
-        original_process_weights = self.quant_method.process_weights_after_loading
+        if self._shared_experts is not None:
+            original_process_weights = self.quant_method.process_weights_after_loading
 
-        @wraps(original_process_weights)
-        def wrapped_process_weights(*args, **kwargs):
-            result = original_process_weights(*args, **kwargs)
-            self._validate_shared_expert_consistency()
-            return result
+            @wraps(original_process_weights)
+            def wrapped_process_weights(*args, **kwargs):
+                result = original_process_weights(*args, **kwargs)
+                self._validate_shared_expert_consistency()
+                return result
 
-        self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+            self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
     def _shared_experts_part1(self, hidden_states: torch.Tensor):
         shared_gate_up, _ = self._shared_experts.gate_up_proj(
@@ -514,11 +521,19 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        shared_out, fused_out = AscendFusedMoE.forward(
-            self,
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
+        if self._shared_experts is None:
+            fused_out = AscendFusedMoE.forward(
+                self,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+            shared_out = None
+        else:
+            shared_out, fused_out = AscendFusedMoE.forward(
+                self,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
         return shared_out, fused_out
 
     def _forward_shared_experts(self, hidden_states: torch.Tensor,
@@ -571,7 +586,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         )
         routed_out = fused_moe_results.routed_out
 
-        if self.multistream_overlap_gate:
+        if self._shared_experts is None:
+            return routed_out
+        elif self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
             assert fc3_context is not None
             shared_out = fc3_context.shared_out

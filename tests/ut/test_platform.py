@@ -37,6 +37,9 @@ class TestNPUPlatform(TestBase):
 
     def setUp(self):
         self.platform = NPUPlatform()
+        self.platform.supported_quantization[:] = [
+            "ascend", "compressed-tensors"
+        ]
 
     def test_class_variables(self):
         self.assertEqual(NPUPlatform._enum, PlatformEnum.OOT)
@@ -122,7 +125,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.utils.update_aclgraph_sizes")
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("os.environ", {})
     @patch(
@@ -154,7 +157,7 @@ class TestNPUPlatform(TestBase):
 
         mock_init_ascend.assert_called_once_with(vllm_config)
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -176,10 +179,15 @@ class TestNPUPlatform(TestBase):
             from vllm_ascend import platform
 
             importlib.reload(platform)
-            self.platform.check_and_update_config(vllm_config)
+            self.platform = platform.NPUPlatform()
+
+            with patch.object(platform.NPUPlatform,
+                              "_fix_incompatible_config"):
+                self.platform.check_and_update_config(vllm_config)
+
         self.assertTrue("Model config is missing" in cm.output[0])
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -201,7 +209,12 @@ class TestNPUPlatform(TestBase):
             from vllm_ascend import platform
 
             importlib.reload(platform)
-            self.platform.check_and_update_config(vllm_config)
+            self.platform = platform.NPUPlatform()
+
+            with patch.object(platform.NPUPlatform,
+                              "_fix_incompatible_config"):
+                self.platform.check_and_update_config(vllm_config)
+
         self.assertTrue("Compilation disabled, using eager mode by default" in
                         cm.output[0])
 
@@ -215,17 +228,14 @@ class TestNPUPlatform(TestBase):
             CUDAGraphMode.NONE,
         )
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
-    @patch("vllm_ascend.utils.update_default_aclgraph_sizes")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
         "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_unsupported_compilation_level(
-            self, mock_init_recompute, mock_init_ascend, mock_update_default,
-            mock_soc_version):
-        mock_update_default.return_value = MagicMock()
+            self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -242,7 +252,12 @@ class TestNPUPlatform(TestBase):
             from vllm_ascend import platform
 
             importlib.reload(platform)
-            self.platform.check_and_update_config(vllm_config)
+            self.platform = platform.NPUPlatform()
+
+            with patch.object(platform.NPUPlatform,
+                              "_fix_incompatible_config"):
+                self.platform.check_and_update_config(vllm_config)
+
             self.assertTrue("NPU does not support" in cm.output[0])
 
             self.assertEqual(
@@ -256,7 +271,7 @@ class TestNPUPlatform(TestBase):
 
     @pytest.mark.skip(
         "Revert me when vllm support setting cudagraph_mode on oot platform")
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     def test_check_and_update_config_unsupported_cudagraph_mode(
@@ -285,7 +300,7 @@ class TestNPUPlatform(TestBase):
                 CUDAGraphMode.NONE,
             )
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -312,7 +327,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(vllm_config.cache_config.block_size, 128)
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -351,7 +366,7 @@ class TestNPUPlatform(TestBase):
         )
 
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType._310P)
     @patch(
         "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"

@@ -28,10 +28,10 @@ numba
 # Install torch_npu
 #--pre
 #--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
-torch-npu==2.8.0
+torch-npu==2.8.0.post2
 
 arctic-inference==0.1.1
-transformers>=4.57.3
+transformers>=4.57.4, < 5
 fastapi<0.124.0
 
 # Install triton-ascend

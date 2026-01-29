@@ -105,7 +105,8 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
-                               enable_sp, get_ascend_device_type, is_moe_model,
+                               enable_sp, get_ascend_device_type,
+                               is_drafter_moe_model, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
                                set_weight_prefetch_method, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -396,17 +397,24 @@ class NPUModelRunner(GPUModelRunner):
     def _use_aclgraph(self) -> bool:
         return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.mode == CompilationMode.VLLM_COMPILE and not self.model_config.enforce_eager
 
-    def _skip_all_reduce_across_dp_group(self) -> bool:
+    def _skip_all_reduce_across_dp_group(self, is_draft_model=False) -> bool:
         """
         Decide whether to skip the all-reduce across the data-parallel (DP) group.
 
-        Skipping is only applicable for MoE models and only on ranks that act as
-        KV consumers. We skip the DP all-reduce when either:
+        Skipping is applicable for all dense models and for moe models only on ranks
+        that act as KV consumers. We skip the DP all-reduce when either:
         - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
         - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
         """
-        # Only applicable to MoE models and KV consumer ranks.
-        if not is_moe_model(self.vllm_config) or not self.is_kv_consumer:
+        # For dense models, since we don't actually need dp communication, we simply skip it.
+        # This usually happens when main model is moe while eagle draft model is dense.
+        is_context_moe_model = is_drafter_moe_model(self.vllm_config) if is_draft_model \
+            else is_moe_model(self.vllm_config)
+        if not is_context_moe_model:
+            return True
+
+        # Only applicable to MoE models on KV consumer ranks.
+        if not self.is_kv_consumer:
             return False
 
         def needs_mc2(num_tokens: int) -> bool:
@@ -436,8 +444,9 @@ class NPUModelRunner(GPUModelRunner):
     def _sync_metadata_across_dp(
         self,
         num_tokens: int,
-        with_prefill: bool,
+        with_prefill: bool = False,
         cudagraph_mode: int = 0,
+        is_draft_model: bool = False
     ) -> tuple[int, Optional[torch.Tensor], bool, int]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
@@ -448,7 +457,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return num_tokens, None, with_prefill, cudagraph_mode
 
-        if self._skip_all_reduce_across_dp_group():
+        if self._skip_all_reduce_across_dp_group(is_draft_model):
             num_tokens_after_padding = torch.tensor([num_tokens] *
                                                     self.dp_size,
                                                     device="cpu",
@@ -996,6 +1005,8 @@ class NPUModelRunner(GPUModelRunner):
                                 1:pad_size +
                                 1] * self.uniform_decode_query_len + last_query_loc
                         self.query_start_loc.copy_to_gpu(num_reqs_padded + 1)
+                        self.seq_lens.np[num_reqs:].fill(0)
+                        self.seq_lens.copy_to_gpu(num_reqs_padded)
 
                     # So we are trying to simulate the behavior of GPUModelRunner's
                     # prepare_inputs for uniform decode mode by padding query_start_loc
@@ -2776,9 +2787,10 @@ class NPUModelRunner(GPUModelRunner):
                 # of mamba block. In this case, BlockTable.block_size will never equal
                 # to kernel_block_sizes[0]
                 kernel_block_sizes.append([0])
-        if block_sizes != [
-                self.cache_config.block_size
-        ] or kernel_block_sizes != [[self.cache_config.block_size]]:
+        if block_sizes != [self.cache_config.block_size
+                           ] or kernel_block_sizes != [[
+                               self.cache_config.block_size
+                           ]] or len(kv_cache_config.kv_cache_groups) > 1:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
@@ -2799,6 +2811,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.vllm_config.speculative_config.num_speculative_tokens
                     if self.vllm_config.speculative_config else 0),
                 kernel_block_sizes=kernel_block_sizes,
+                kv_cache_groups=kv_cache_config.kv_cache_groups,
             )
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
@@ -3016,8 +3029,9 @@ class NPUModelRunner(GPUModelRunner):
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
-        super()._check_and_update_cudagraph_mode(attention_backends,
-                                                 kv_cache_groups)
+        with update_pass_config(self):
+            super()._check_and_update_cudagraph_mode(attention_backends,
+                                                     kv_cache_groups)
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
@@ -3120,3 +3134,15 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
         yield
     finally:
         setattr(target_module, "graph_capture", graph_capture)
+
+
+# TODO: remove it when flash_common1 is removed
+@contextmanager
+def update_pass_config(model_runner):
+    try:
+        original_pass_config_sp = model_runner.compilation_config.pass_config.enable_sp
+        model_runner.compilation_config.pass_config.enable_sp = enable_sp(
+            model_runner.vllm_config)
+        yield
+    finally:
+        model_runner.compilation_config.pass_config.enable_sp = original_pass_config_sp

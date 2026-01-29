@@ -71,7 +71,7 @@ RUN apt-get update -y && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
-# Install modelscope (for fast download) and ray (for multinode)
+# Install modelscope (for fast download), ray (for multinode) and torch-npu post version
 RUN python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
 

@@ -1,0 +1,279 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 10:00+0800\n"
+"Last-Translator: Your Name <email@example.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:1
+msgid "Qwen2.5-7B"
+msgstr "Qwen2.5-7B"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:5
+msgid ""
+"Qwen2.5-7B-Instruct is the flagship instruction-tuned variant of Alibaba "
+"Cloud’s Qwen 2.5 LLM series. It supports a maximum context window of "
+"128K, enables generation of up to 8K tokens, and delivers enhanced "
+"capabilities in multilingual processing, instruction following, "
+"programming, mathematical computation, and structured data handling."
+msgstr "Qwen2.5-7B-Instruct 是阿里云 Qwen 2.5 LLM 系列中的旗舰指令微调变体。它支持最大 128K 的上下文窗口，能够生成最多 8K 个令牌，并在多语言处理、指令跟随、编程、数学计算和结构化数据处理方面提供了增强的能力。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:7
+msgid ""
+"This document details the complete deployment and verification workflow "
+"for the model, including supported features, environment preparation, "
+"single-node deployment, functional verification, accuracy and performance"
+" evaluation, and troubleshooting of common issues. It is designed to help"
+" users quickly complete model deployment and validation."
+msgstr "本文档详细介绍了该模型的完整部署和验证工作流程，包括支持的特性、环境准备、单节点部署、功能验证、精度和性能评估以及常见问题排查。旨在帮助用户快速完成模型部署和验证。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:9
+msgid "The `Qwen2.5-7B-Instruct` model was supported since `vllm-ascend:v0.9.0`."
+msgstr "`Qwen2.5-7B-Instruct` 模型从 `vllm-ascend:v0.9.0` 开始得到支持。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:11
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:13
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr "请参考[支持的特性](../user_guide/support_matrix/supported_models.md)以获取模型支持的特性矩阵。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:15
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参考[特性指南](../user_guide/feature_guide/index.md)以获取特性的配置信息。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:17
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:19
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:21
+msgid ""
+"`Qwen2.5-7B-Instruct`(BF16 version): require 1 910B4 cards(32G × 1). "
+"[Qwen2.5-7B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-"
+"Instruct)"
+msgstr "`Qwen2.5-7B-Instruct`(BF16 版本): 需要 1 张 910B4 卡(32G × 1)。[Qwen2.5-7B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:23
+msgid ""
+"It is recommended to download the model weights to a local directory "
+"(e.g., `./Qwen2.5-7B-Instruct/`) for quick access during deployment."
+msgstr "建议将模型权重下载到本地目录（例如 `./Qwen2.5-7B-Instruct/`）以便在部署期间快速访问。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:25
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:27
+msgid ""
+"You can using our official docker image and install extra operator for "
+"supporting `Qwen2.5-7B-Instruct`."
+msgstr "您可以使用我们的官方 docker 镜像，并安装额外的算子来支持 `Qwen2.5-7B-Instruct`。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md
+msgid "A3 series"
+msgstr "A3 系列"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:36
+#: ../../source/tutorials/Qwen2.5-7B.md:64
+msgid "Start the docker image on your each node."
+msgstr "在每个节点上启动 docker 镜像。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md
+msgid "A2 series"
+msgstr "A2 系列"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:90
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:92
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:94
+msgid ""
+"Qwen2.5-7B-Instruct supports single-node single-card deployment on the "
+"910B4 platform. Follow these steps to start the inference service:"
+msgstr "Qwen2.5-7B-Instruct 支持在 910B4 平台上进行单节点单卡部署。按照以下步骤启动推理服务："
+
+#: ../../source/tutorials/Qwen2.5-7B.md:96
+msgid ""
+"Prepare model weights: Ensure the downloaded model weights are stored in "
+"the `./Qwen2.5-7B-Instruct/` directory."
+msgstr "准备模型权重：确保下载的模型权重存储在 `./Qwen2.5-7B-Instruct/` 目录中。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:97
+msgid "Create and execute the deployment script (save as `deploy.sh`):"
+msgstr "创建并执行部署脚本（保存为 `deploy.sh`）："
+
+#: ../../source/tutorials/Qwen2.5-7B.md:112
+msgid "Multi-node Deployment"
+msgstr "多节点部署"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:114
+msgid "Single-node deployment is recommended."
+msgstr "推荐单节点部署。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:116
+msgid "Prefill-Decode Disaggregation"
+msgstr "预填充-解码分离"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:118
+msgid "Not supported yet."
+msgstr "尚未支持。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:120
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:122
+msgid "After starting the service, verify functionality using a `curl` request:"
+msgstr "启动服务后，使用 `curl` 请求验证功能："
+
+#: ../../source/tutorials/Qwen2.5-7B.md:135
+msgid ""
+"A valid response (e.g., `\"Beijing is a vibrant and historic capital "
+"city\"`) indicates successful deployment."
+msgstr "有效的响应（例如 `\"Beijing is a vibrant and historic capital city\"`）表示部署成功。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:137
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:139
+#: ../../source/tutorials/Qwen2.5-7B.md:151
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:141
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr "详情请参考[使用 AISBench](../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:143
+msgid ""
+"Results and logs are saved to `benchmark/outputs/default/`. A sample "
+"accuracy report is shown below:"
+msgstr "结果和日志保存在 `benchmark/outputs/default/`。示例精度报告如下："
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "gsm8k"
+msgstr "gsm8k"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "-"
+msgstr "-"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "75.00"
+msgstr "75.00"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:149
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:153
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr "详情请参考[使用 AISBench 进行性能评估](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:155
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM Benchmark"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:156
+msgid "Run performance evaluation of `Qwen2.5-7B-Instruct` as an example."
+msgstr "以 `Qwen2.5-7B-Instruct` 为例运行性能评估。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:158
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr "更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:160
+msgid "There are three `vllm bench` subcommand:"
+msgstr "`vllm bench` 有三个子命令："
+
+#: ../../source/tutorials/Qwen2.5-7B.md:161
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`: 基准测试单批次请求的延迟。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:162
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`: 基准测试在线服务吞吐量。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:163
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`: 基准测试离线推理吞吐量。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:165
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 为例。运行以下代码。"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:178
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，您可以得到性能评估结果。"

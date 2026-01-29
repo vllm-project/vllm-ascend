@@ -90,7 +90,7 @@ class MtpProposer(EagleProposer):
                 attn_metadata_mtp = builder.build_for_graph_capture(
                     common_attn_metadata, attn_state)
                 attn_metadata = {}
-                for layer_name in self.attn_layer_name:
+                for layer_name in self.attn_layer_names:
                     attn_metadata[layer_name] = attn_metadata_mtp
             else:
                 attn_metadata = None
@@ -250,14 +250,10 @@ class MtpProposer(EagleProposer):
         assert self.runner is not None
 
         # Note(qcs): We may need to refactor these check logics.
-        if self.runner.use_aclgraph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
+        if self.use_cuda_graph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
                 -1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
-        elif self.use_aclgraph and num_tokens <= self.runner.cudagraph_batch_sizes[
-                -1]:
-            # Acl graph mode, add padding to the batch size
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
         else:
             # Eager mode, no padding needed
             num_input_tokens = num_tokens
@@ -301,11 +297,12 @@ class MtpProposer(EagleProposer):
         # update the graph_pad_size in common_attn_metadata, to tell the
         # builder padding some elements.
         common_attn_metadata.graph_pad_size = graph_pad_size
+        common_attn_metadata.num_input_tokens = num_input_tokens
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata_mtp = builder.build(0, common_attn_metadata,
                                           self.runner.get_model())
         attn_metadata = {}
-        for layer_name in self.attn_layer_name:
+        for layer_name in self.attn_layer_names:
             attn_metadata[layer_name] = attn_metadata_mtp
 
         for step in range(self.num_speculative_tokens):
@@ -334,7 +331,7 @@ class MtpProposer(EagleProposer):
                         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
                             hidden_states)
 
-                    for layer_name in self.attn_layer_name:
+                    for layer_name in self.attn_layer_names:
                         decode_metadata = getattr(attn_metadata[layer_name],
                                                   "decode", None)
                         if self.use_async_scheduling and decode_metadata is not None:
@@ -405,7 +402,7 @@ class MtpProposer(EagleProposer):
             if step == self.num_speculative_tokens - 1 or with_prefill:
                 break
 
-            attn_metadata_i = attn_metadata[self.attn_layer_name[0]]
+            attn_metadata_i = attn_metadata[self.attn_layer_names[0]]
 
             if step == 0:
                 positions = target_positions[last_token_indices]
@@ -515,7 +512,7 @@ class MtpProposer(EagleProposer):
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:hidden_states.shape[0]] = hidden_states
             if self.pcp_size * self.dcp_size > 1:
-                # update local seq_len and batch_seq_mask
+                # update local seq_len
                 num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
                     ori_seq_len + step + 1,
                     self.pcp_size,
@@ -524,14 +521,7 @@ class MtpProposer(EagleProposer):
                 )
                 cp_seq_len = \
                     num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank]
-                batch_seq_mask = (cp_seq_len == 0)
-                builder.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
-                    batch_seq_mask, non_blocking=True)
-                batch_seq_mask = builder.batch_seq_mask_buf[:batch_seq_mask.
-                                                            shape[0]]
-                cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
                 attn_metadata_i.decode.cp_seq_len = cp_seq_len
-                attn_metadata_i.decode.batch_seq_mask = batch_seq_mask
                 # update slot_mapping
                 slot_indices += self.pcp_size
                 slot_mapping = mtp_slot_mapping[slot_indices]

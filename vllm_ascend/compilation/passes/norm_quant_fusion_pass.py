@@ -23,6 +23,8 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.logger import logger
 
+from vllm_ascend.utils import enable_custom_op
+
 
 class AddRMSNormQuantPattern:
 
@@ -115,11 +117,10 @@ class AddRMSNormQuantPatternWithBias:
             """
             Pattern for AddRMSNormQuant fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual,
-                                                    rms_norm_weight, self.eps)
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, bias, self.eps)
             out0 = output[0]
             out1 = output[2]
-            out0 = out0 + bias
             quantized_output = torch.ops.vllm.quantize(out0, scale,
                                                        scale_reciprocal,
                                                        offset)
@@ -241,11 +242,10 @@ class AddRMSNormQuantSPPatternWithBias:
             """
             Pattern for AddRMSNormQuant fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual,
-                                                    rms_norm_weight, self.eps)
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, bias, self.eps)
             out0 = output[0]
             out1 = output[2]
-            out0 = out0 + bias
             out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
             quantized_output = torch.ops.vllm.quantize(out0, scale,
                                                        scale_reciprocal,
@@ -296,12 +296,13 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         for eps in common_epsilons:
             AddRMSNormQuantPattern(vllm_config,
                                    eps=eps).register(self.pattern_match_passes)
-            AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(
-                self.pattern_match_passes)
             AddRMSNormQuantSPPattern(vllm_config, eps=eps).register(
                 self.pattern_match_passes)
-            AddRMSNormQuantSPPatternWithBias(vllm_config, eps=eps).register(
-                self.pattern_match_passes)
+            if enable_custom_op():
+                AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(
+                    self.pattern_match_passes)
+                AddRMSNormQuantSPPatternWithBias(
+                    vllm_config, eps=eps).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()

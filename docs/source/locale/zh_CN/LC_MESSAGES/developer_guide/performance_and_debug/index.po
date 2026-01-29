@@ -23,4 +23,4 @@ msgstr ""
 #: ../../developer_guide/performance_and_debug/index.md:1
 #: ../../developer_guide/performance_and_debug/index.md:3
 msgid "Performance and Debug"
-msgstr "性能和调试"
+msgstr "性能与调试"

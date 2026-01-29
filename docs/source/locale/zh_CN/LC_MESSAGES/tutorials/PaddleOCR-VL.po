@@ -1,0 +1,218 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 10:00+0800\n"
+"Last-Translator: Your Name <email@example.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:1
+msgid "PaddleOCR-VL"
+msgstr "PaddleOCR-VL"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:5
+msgid ""
+"PaddleOCR-VL is a SOTA and resource-efficient model tailored for document"
+" parsing. Its core component is PaddleOCR-VL-0.9B, a compact yet powerful"
+" vision-language model (VLM) that integrates a NaViT-style dynamic "
+"resolution visual encoder with the ERNIE-4.5-0.3B language model to "
+"enable accurate element recognition."
+msgstr "PaddleOCR-VL 是一个专为文档解析设计的 SOTA 且资源高效的模型。其核心组件是 PaddleOCR-VL-0.9B，一个紧凑而强大的视觉语言模型（VLM），它集成了 NaViT 风格的动态分辨率视觉编码器与 ERNIE-4.5-0.3B 语言模型，以实现准确的元素识别。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:7
+msgid ""
+"This document provides a detailed workflow for the complete deployment "
+"and verification of the model, including supported features, environment "
+"preparation, single-node deployment, and functional verification. It is "
+"designed to help users quickly complete model deployment and "
+"verification."
+msgstr "本文档提供了该模型完整部署和验证的详细工作流程，包括支持的特性、环境准备、单节点部署和功能验证。旨在帮助用户快速完成模型部署和验证。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:9
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:11
+msgid ""
+"Refer to [supported "
+"features](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html)"
+" to get the model's supported feature matrix."
+msgstr "请参考[支持的特性](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html)以获取模型支持的特性矩阵。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:13
+msgid ""
+"Refer to [feature "
+"guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/index.html)"
+" to get the feature's configuration."
+msgstr "请参考[特性指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/index.html)以获取特性的配置信息。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:15
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:17
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:19
+msgid ""
+"`PaddleOCR-VL-0.9B`: [PaddleOCR-"
+"VL-0.9B](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL)"
+msgstr "`PaddleOCR-VL-0.9B`: [PaddleOCR-VL-0.9B](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL)"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:21
+msgid ""
+"It is recommended to download the model weights to a local directory "
+"(e.g., `./PaddleOCR-VL`) for quick access during deployment."
+msgstr "建议将模型权重下载到本地目录（例如 `./PaddleOCR-VL`）以便在部署期间快速访问。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:23
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:25
+msgid "You can using our official docker image to run `PaddleOCR-VL` directly."
+msgstr "您可以使用我们的官方 docker 镜像直接运行 `PaddleOCR-VL`。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:27
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../installation.md#set-up-using-"
+"docker)."
+msgstr "根据您的机器类型选择镜像，并在您的节点上启动 docker 镜像，请参考[使用 docker](../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:50
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:52
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:54
+msgid "Single NPU (PaddleOCR-VL)"
+msgstr "单 NPU (PaddleOCR-VL)"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:56
+msgid ""
+"PaddleOCR-VL supports single-node single-card deployment on the 910B4 "
+"platform. Follow these steps to start the inference service:"
+msgstr "PaddleOCR-VL 支持在 910B4 平台上进行单节点单卡部署。按照以下步骤启动推理服务："
+
+#: ../../source/tutorials/PaddleOCR-VL.md:58
+msgid ""
+"Prepare model weights: Ensure the downloaded model weights are stored in "
+"the `PaddleOCR-VL` directory."
+msgstr "准备模型权重：确保下载的模型权重存储在 `PaddleOCR-VL` 目录中。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:59
+msgid "Create and execute the deployment script (save as `deploy.sh`):"
+msgstr "创建并执行部署脚本（保存为 `deploy.sh`）："
+
+#: ../../source/tutorials/PaddleOCR-VL.md:75
+msgid "Multiple NPU (PaddleOCR-VL)"
+msgstr "多 NPU (PaddleOCR-VL)"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:77
+msgid "Single-node deployment is recommended."
+msgstr "推荐单节点部署。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:79
+msgid "Prefill-Decode Disaggregation"
+msgstr "预填充-解码分离"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:81
+msgid "Not supported yet"
+msgstr "尚未支持"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:83
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:85
+msgid "If your service start successfully, you can see the info shown below:"
+msgstr "如果您的服务成功启动，您可以看到如下信息："
+
+#: ../../source/tutorials/PaddleOCR-VL.md:93
+msgid ""
+"Once your server is started, you can use the OpenAI API client to make "
+"queries."
+msgstr "一旦您的服务器启动，您可以使用 OpenAI API 客户端进行查询。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:138
+msgid ""
+"If you query the server successfully, you can see the info shown below "
+"(client):"
+msgstr "如果您成功查询服务器，您可以看到如下信息（客户端）："
+
+#: ../../source/tutorials/PaddleOCR-VL.md:154
+msgid "Offline Inference with vLLM and PP-DocLayoutV2"
+msgstr "使用 vLLM 和 PP-DocLayoutV2 进行离线推理"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:156
+msgid ""
+"In the above example, we demonstrated how to use vLLM to infer the "
+"PaddleOCR-VL-0.9B model. Typically, we also need to integrate the PP-"
+"DocLayoutV2 model to fully unleash the capabilities of the PaddleOCR-VL "
+"model, making it more consistent with the examples provided by the "
+"official PaddlePaddle documentation."
+msgstr "在上面的示例中，我们演示了如何使用 vLLM 推理 PaddleOCR-VL-0.9B 模型。通常，我们还需要集成 PP-DocLayoutV2 模型，以充分发挥 PaddleOCR-VL 模型的能力，使其更符合官方 PaddlePaddle 文档提供的示例。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:159
+msgid ""
+"Use separate virtual environments for VLLM and PPdoclayoutV2 to prevent "
+"dependency conflicts."
+msgstr "为 VLLM 和 PPdoclayoutV2 使用单独的虚拟环境，以防止依赖冲突。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:162
+msgid "Pull the PaddlePaddle-compatible CANN image"
+msgstr "拉取与 PaddlePaddle 兼容的 CANN 镜像"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:164
+msgid "Obtaining Ascend Images from PaddlePaddle:"
+msgstr "从 PaddlePaddle 获取 Ascend 镜像："
+
+#: ../../source/tutorials/PaddleOCR-VL.md:170
+msgid "Start the container using the following command:"
+msgstr "使用以下命令启动容器："
+
+#: ../../source/tutorials/PaddleOCR-VL.md:182
+msgid ""
+"Install "
+"[PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined)"
+" and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)"
+msgstr "安装 [PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined) 和 [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:193
+msgid "The OpenCV component may be missing："
+msgstr "可能缺少 OpenCV 组件："
+
+#: ../../source/tutorials/PaddleOCR-VL.md:200
+msgid ""
+"CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is "
+"recommended to install the specified versions."
+msgstr "CANN-8.0.0 不支持某些版本的 NumPy 和 OpenCV。建议安装指定版本。"
+
+#: ../../source/tutorials/PaddleOCR-VL.md:209
+msgid ""
+"Using vLLM as the backend, combined with PP-DocLayoutV2 for offline "
+"inference"
+msgstr "使用 vLLM 作为后端，结合 PP-DocLayoutV2 进行离线推理"
