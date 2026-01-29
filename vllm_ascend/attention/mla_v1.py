@@ -410,9 +410,13 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
-        self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
-            split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
-        )
+        if self.speculative_config:
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens= \
+                split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold, require_uniform=True)
+        else:
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens= \
+                split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold, require_uniform=False)
+            
         self.set_num_actual_tokens(common_attn_metadata)
         assert self.num_decodes + self.num_prefills == num_reqs
         assert self.num_decode_tokens + self.num_prefill_tokens == common_attn_metadata.num_actual_tokens
