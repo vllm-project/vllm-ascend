@@ -16,15 +16,15 @@
 #include <register/op_impl_registry.h>
 #include "error/ops_error.h"
 
-
 using namespace ge;
 
 namespace ops {
 
 static ge::graphStatus InferShapeTransposeKvCacheByBlock(gert::InferShapeContext* context)
 {
-    return GRAPH_SUCCESS;
+    return ge::GRAPH_SUCCESS;
 }
+
 static ge::graphStatus InferDataTypeTransposeKvCacheByBlock(gert::InferDataTypeContext *context)
 {
     return ge::GRAPH_SUCCESS;
