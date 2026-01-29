@@ -108,6 +108,8 @@ class MoECommMethod(ABC):
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
             activation: str = "silu",
+            w1_bias: Optional[torch.Tensor] = None,
+            w2_bias: Optional[torch.Tensor] = None,
             apply_router_weight_on_input: bool = False,
             use_int8_w8a8: bool = False,
             use_int4_w4a8: bool = False,
@@ -157,6 +159,9 @@ class MoECommMethod(ABC):
             w1_scale=w1_scale,
             w2=w2,
             w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            activation=activation,
             group_list=dispatch_results.group_list,
             dynamic_scale=dispatch_results.dynamic_scale,
             group_list_type=dispatch_results.group_list_type,
@@ -264,7 +269,7 @@ class FusedMC2CommImpl(MoECommMethod):
     1. `enable_expert_parallel=True`.
     2. `npu_moe_distribute_dispatch` and `npu_moe_distribute_combine` are available.
     3. `enable_expert_parallel=False` is not supported.
-    
+
     This implementation uses the MC2 communication method, which is optimized for
     Communication and Computation parallelism on Ascend devices.
     """
@@ -283,6 +288,8 @@ class FusedMC2CommImpl(MoECommMethod):
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
             activation: str = "silu",
+            w1_bias: Optional[torch.Tensor] = None,
+            w2_bias: Optional[torch.Tensor] = None,
             apply_router_weight_on_input: bool = False,
             use_int8_w8a8: bool = False,
             use_int4_w4a8: bool = False,

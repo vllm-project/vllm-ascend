@@ -16,7 +16,7 @@
 #
 
 import torch
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
+from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul, SwigluOAIAndMul
 
 
 class AscendQuickGELU(QuickGELU):
@@ -37,3 +37,14 @@ class AscendSiluAndMul(SiluAndMul):
         out = torch_npu.npu_swiglu(x)
         torch.ops.vllm.maybe_wait_prefetch_done(out)
         return out
+
+class AscendSwigluOAIAndMul():
+
+    def swiglu_oai_forward(x: torch.Tensor, alpha: float = 1.702, limit: float = 7.0) -> torch.Tensor:
+        class MinimalSwigluOAIAndMul:
+            def __init__(self):
+                self.alpha = alpha
+                self.limit = limit
+
+        layer = MinimalSwigluOAIAndMul()
+        return SwigluOAIAndMul.forward_native(layer, x)
