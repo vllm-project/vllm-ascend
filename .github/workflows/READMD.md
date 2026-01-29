@@ -8,16 +8,16 @@ All E2E test cases are defined and managed in the `.github/workflows/scripts/con
 
 ### Steps
 
-1.  **Prepare the Test Script**: Ensure your test script (`.py` file) is placed in the appropriate location under the `tests/e2e/` directory (e.g., `tests/e2e/singlecard/` or `tests/e2e/multicard/`).
+1. **Prepare the Test Script**: Ensure your test script (`.py` file) is placed in the appropriate location under the `tests/e2e/` directory (e.g., `tests/e2e/singlecard/` or `tests/e2e/multicard/`).
 
-2.  **Modify `config.yaml`**:
+2. **Modify `config.yaml`**:
     Open `.github/workflows/scripts/config.yaml` and locate the corresponding test suite (e.g., `e2e-singlecard` or `e2e-multicard-2-cards`).
 
-3.  **Add Configuration Entry**:
+3. **Add Configuration Entry**:
     Add a new entry under the corresponding list. Each entry contains the following fields:
-    *   `name`: The relative path to the test file. If you only need to run a specific test function within the file, use `::` as a separator, e.g., `path/to/test.py::test_func`.
-    *   `estimated_time`: The estimated time (in seconds) required to run the test. **This field is crucial** as it is used for automatic load balancing (partitioning).
-    *   `is_skipped` (Optional): If set to `true`, the test will be skipped.
+    * `name`: The relative path to the test file. If you only need to run a specific test function within the file, use `::` as a separator, e.g., `path/to/test.py::test_func`.
+    * `estimated_time`: The estimated time (in seconds) required to run the test. **This field is crucial** as it is used for automatic load balancing (partitioning).
+    * `is_skipped` (Optional): If set to `true`, the test will be skipped.
 
 ### Example
 
@@ -46,20 +46,20 @@ To speed up CI execution, we support splitting large test suites into multiple p
 
 The partitioning algorithm uses a Greedy Approach to achieve load balancing, aiming to make the total estimated runtime of each partition as equal as possible.
 
-1.  **Read Configuration**: The script reads all non-skipped test cases and their `estimated_time` from `config.yaml`.
-2.  **Sort**: Test cases are sorted by `estimated_time` in descending order.
-3.  **Assign**: Iterating through the sorted test cases, each case is assigned to the partition (Bucket) with the current minimum total time.
+1. **Read Configuration**: The script reads all non-skipped test cases and their `estimated_time` from `config.yaml`.
+2. **Sort**: Test cases are sorted by `estimated_time` in descending order.
+3. **Assign**: Iterating through the sorted test cases, each case is assigned to the partition (Bucket) with the current minimum total time.
 
 ### How to Modify Partitioning Logic
 
 If you need to adjust the partitioning strategy, please modify the `.github/workflows/scripts/run_suite.py` file.
 
-*   **Algorithm Location**: `auto_partition` function.
-*   **Input Parameters**:
-    *   `files`: List of test files (including `estimated_time`).
-    *   `rank`: Index of the current partition (0 to size-1).
-    *   `size`: Total number of partitions.
-*   **Invocation**:
+* **Algorithm Location**: `auto_partition` function.
+* **Input Parameters**:
+    * `files`: List of test files (including `estimated_time`).
+    * `rank`: Index of the current partition (0 to size-1).
+    * `size`: Total number of partitions.
+* **Invocation**:
     CI workflows (e.g., `.github/workflows/_e2e_test.yaml`) call the script via command-line arguments:
     ```bash
     python3 .github/workflows/scripts/run_suite.py --suite <suite_name> --auto-partition-id <index> --auto-partition-size <total_count>
@@ -67,8 +67,8 @@ If you need to adjust the partitioning strategy, please modify the `.github/work
 
 ### Notes
 
-*   **Accurate Estimated Time**: To achieve the best load balancing, please provide an accurate `estimated_time` in `config.yaml`. If a new test is very time-consuming but the estimated time is set too low, it may cause a specific partition to timeout.
-*   **Number of Partitions**: The number of partitions (`auto-partition-size`) is typically defined in the `strategy.matrix` of the GitHub Actions workflow definition file (e.g., `_e2e_test.yaml`).
+* **Accurate Estimated Time**: To achieve the best load balancing, please provide an accurate `estimated_time` in `config.yaml`. If a new test is very time-consuming but the estimated time is set too low, it may cause a specific partition to timeout.
+* **Number of Partitions**: The number of partitions (`auto-partition-size`) is typically defined in the `strategy.matrix` of the GitHub Actions workflow definition file (e.g., `_e2e_test.yaml`).
 
 ## 3. Running Tests Locally
 
