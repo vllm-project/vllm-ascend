@@ -210,6 +210,20 @@ def weak_ref_workspaces(params):
         params.workspaces[num_tokens] = weak_ref_tensors(params.workspaces[num_tokens])
 
 
+@dataclass
+class UpdateGraphParams:
+    update_stream: Any
+    forward_context: Any
+    num_tokens: int
+    vllm_config: Any
+    speculative_config: Any = None
+    num_dcp_pcp_tokens: Any = None
+    draft_attn_metadatas: Any = None
+    graph_params: Any = None
+    attn_metadata: Any = None
+    attn_keys: Any = None
+
+
 def update_full_graph_params(
     attn_backend,
     update_stream,
@@ -221,7 +235,23 @@ def update_full_graph_params(
     draft_attn_metadatas=None,
 ):
     impl_cls = attn_backend.get_impl_cls()
-    impl_cls.update_graph_params(
+    graph_params = impl_cls.get_graph_params(forward_context)
+
+    kwargs = {"graph_params": graph_params}
+    if impl_cls.__name__ == "AscendAttentionBackendImpl":
+        if forward_context.is_draft_model:
+            assert draft_attn_metadatas, (
+                "draft_attn_metadatas must be provided and non-empty for draft model"
+            )
+            attn_metadata = draft_attn_metadatas
+            attn_keys = list(attn_metadata[0].keys())
+        else:
+            attn_metadata = forward_context.attn_metadata
+            attn_keys = list(attn_metadata.keys())
+        kwargs["attn_metadata"] = attn_metadata
+        kwargs["attn_keys"] = attn_keys
+
+    update_ctx = UpdateGraphParams(
         update_stream,
         forward_context,
         num_tokens,
@@ -229,7 +259,9 @@ def update_full_graph_params(
         speculative_config,
         num_dcp_pcp_tokens,
         draft_attn_metadatas,
+        **kwargs,
     )
+    impl_cls.update_graph_params(update_ctx)
 
 
 @dataclass
