@@ -1389,6 +1389,7 @@ def ensure_zmq_recv(
                 logger.error(f"Receive failed after all retries: {e}")
                 raise RuntimeError(f"Failed to receive data from {path} after {max_retries} retries: {e}")
 
+
 def get_external_request_id(request_id: str):
     # NOTE(zxr): vLLM PR #27987 add additional suffix
     # to EngineCore request_id with len(suffix) == 9
