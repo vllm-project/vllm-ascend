@@ -21,7 +21,7 @@ on:
 
 jobs:
   e2e-light:
-    name: singlecard
+    name: singlecard-light
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a2b3-1
     strategy:
@@ -84,8 +84,8 @@ jobs:
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
 
-  e2e:
-    name: singlecard
+  e2e-full:
+    name: singlecard-full
     if: ${{ inputs.type == 'full' }}
     runs-on: linux-aarch64-a2b3-1
     strategy:
@@ -149,7 +149,7 @@ jobs:
           python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
 
   e2e-2-cards-light:
-    name: multicard-2
+    name: multicard-2-light
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a3-2
     strategy:
@@ -211,8 +211,8 @@ jobs:
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-2card-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
 
-  e2e-2-cards:
-    name: multicard-2
+  e2e-2-cards-full:
+    name: multicard-2-full
     if: ${{ inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-2
     strategy:
@@ -228,10 +228,46 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
-      - name: Setup environment
-        uses: ./.github/actions/setup-environment
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
         with:
-          vllm_ref: ${{ inputs.vllm }}
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+          fetch-depth: 1
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -246,10 +282,10 @@ jobs:
           python3 -m pip uninstall -y triton-ascend
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
 
-  e2e-4-cards:
-    name: multicard-4
-    needs: [e2e-2-cards]
-    if: ${{ needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
+  e2e-4-cards-full:
+    name: multicard-4-full
+    needs: [e2e-2-cards-full]
+    if: ${{ needs.e2e-2-cards-full.result == 'success' && inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     strategy:
       matrix:
@@ -263,10 +299,46 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
-      - name: Setup environment
-        uses: ./.github/actions/setup-environment
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
         with:
-          vllm_ref: ${{ inputs.vllm }}
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+          fetch-depth: 1
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         working-directory: ./vllm-ascend
