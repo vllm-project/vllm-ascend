@@ -762,7 +762,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             return _ENABLE_SP
 
         assert not is_omni_model(vllm_config), \
-            "Currently, Omni models do not support FLASHCOMM in vllm-ascend. " \
+            "Currently, Omni models do not support FLASHCOMM in vllm-ascend." \
             "We will fix this in the future. Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0."
 
         assert vllm_config.parallel_config.tensor_parallel_size > 1, \
