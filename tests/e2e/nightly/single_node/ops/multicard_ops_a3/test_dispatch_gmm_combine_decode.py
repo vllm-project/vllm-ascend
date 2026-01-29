@@ -30,7 +30,8 @@ BASE_KWARGS = {
     "test_graph": False,
     "with_mc2_mask": False,
     "dynamic_eplb": False,
-    "w8a8_dynamic": True
+    "w8a8_dynamic": True,
+    "is_nz": True
 }
 
 
@@ -71,7 +72,8 @@ class DecodeMoeOps(torch.nn.Module):
                  global_rank_id,
                  shared_expert_rank_num=0,
                  dynamic_eplb=False,
-                 w8a8_dynamic=True):
+                 w8a8_dynamic=True,
+                 is_nz=True):
         super().__init__()
         if w8a8_dynamic:
             assert (gmm1_weight_scale is not None and gmm2_weight_scale is not None), "gmm1_weight_scale and gmm2_weight_scale must be provided for w8a8_dynamic"
@@ -92,6 +94,7 @@ class DecodeMoeOps(torch.nn.Module):
         self.ep_recv_count_size = self.local_expert_num * ep_world_size
         self.dynamic_eplb = dynamic_eplb
         self.w8a8_dynamic = w8a8_dynamic
+        self.is_nz = is_nz
         self.gmm1_weight = torch.empty([
             self.local_expert_num, self.token_hidden_size,
             self.moe_intermediate_size * 2
@@ -115,10 +118,11 @@ class DecodeMoeOps(torch.nn.Module):
 
     def _process_weights_after_loading(self, gmm1_weight, gmm1_weight_scale,
                                        gmm2_weight, gmm2_weight_scale):
-        gmm1_weight = torch_npu.npu_format_cast(gmm1_weight,
-                                                torch_npu.Format.FRACTAL_NZ)
-        gmm2_weight = torch_npu.npu_format_cast(gmm2_weight,
-                                                torch_npu.Format.FRACTAL_NZ)
+        if self.w8a8_dynamic:
+            gmm1_weight = torch_npu.npu_format_cast(gmm1_weight,
+                                                    torch_npu.Format.FRACTAL_NZ)
+            gmm2_weight = torch_npu.npu_format_cast(gmm2_weight,
+                                                    torch_npu.Format.FRACTAL_NZ)
         self.gmm1_weight = torch.nn.Parameter(gmm1_weight, requires_grad=False)
         self.gmm2_weight = torch.nn.Parameter(gmm2_weight, requires_grad=False)
         if self.w8a8_dynamic:
@@ -157,12 +161,14 @@ class SmallOps(DecodeMoeOps):
                  global_rank_id,
                  shared_expert_rank_num=0,
                  dynamic_eplb=False,
-                 w8a8_dynamic=True):
+                 w8a8_dynamic=True,
+                 is_nz=True):
         super().__init__(gmm1_weight, gmm1_weight_scale, gmm2_weight,
                          gmm2_weight_scale, ep_hcomm_info, batch_size,
                          token_hidden_size, moe_intermediate_size,
                          ep_world_size, moe_expert_num, global_rank_id,
-                         shared_expert_rank_num, dynamic_eplb, w8a8_dynamic)
+                         shared_expert_rank_num, dynamic_eplb, w8a8_dynamic,
+                         is_nz)
         self.tp_hcomm_info = ""
 
     def _apply_ops(self, x, expert_ids, smooth_scales, expert_scales,
@@ -260,12 +266,14 @@ class FusionOp(DecodeMoeOps):
                  global_rank_id,
                  shared_expert_rank_num=0,
                  dynamic_eplb=False,
-                 w8a8_dynamic=True):
+                 w8a8_dynamic=True,
+                 is_nz=True):
         super().__init__(gmm1_weight, gmm1_weight_scale, gmm2_weight,
                          gmm2_weight_scale, ep_hcomm_info, batch_size,
                          token_hidden_size, moe_intermediate_size,
                          ep_world_size, moe_expert_num, global_rank_id,
-                         shared_expert_rank_num, dynamic_eplb, w8a8_dynamic)
+                         shared_expert_rank_num, dynamic_eplb, w8a8_dynamic,
+                         is_nz)
 
     def _apply_ops(self, x, expert_ids, smooth_scales, expert_scales,
                    x_active_mask):
@@ -292,10 +300,11 @@ class FusionOp(DecodeMoeOps):
 
     def _process_weights_after_loading(self, gmm1_weight, gmm1_weight_scale,
                                        gmm2_weight, gmm2_weight_scale):
-        gmm1_weight = torch_npu.npu_format_cast(gmm1_weight,
-                                                torch_npu.Format.FRACTAL_NZ)
-        gmm2_weight = torch_npu.npu_format_cast(gmm2_weight,
-                                                torch_npu.Format.FRACTAL_NZ)
+        if self.is_nz:
+            gmm1_weight = torch_npu.npu_format_cast(gmm1_weight,
+                                                    torch_npu.Format.FRACTAL_NZ)
+            gmm2_weight = torch_npu.npu_format_cast(gmm2_weight,
+                                                    torch_npu.Format.FRACTAL_NZ)
 
         if self.dynamic_eplb:
             self.gmm1_weight = [
@@ -425,7 +434,8 @@ def run_once(local_rank_id,
              test_graph=False,
              with_mc2_mask=False,
              dynamic_eplb=False,
-             w8a8_dynamic=True):
+             w8a8_dynamic=True,
+             is_nz=True):
     log_file = redirect_output(f"local_rank_{local_rank_id}.log"
                                ) if output_to_file(local_rank_id) else None
     global_rank_id = local_rank_id  # 单机
@@ -460,9 +470,9 @@ def run_once(local_rank_id,
         data.npu() if data is not None else None for data in weight_datas
     ]
     small_ops = SmallOps(*weight_datas, ep_hcomm_info_small, *parameter,
-                         dynamic_eplb, w8a8_dynamic).npu()  # type: ignore
+                         dynamic_eplb, w8a8_dynamic, is_nz).npu()  # type: ignore
     fused_ops = FusionOp(*weight_datas, ep_hcomm_info_fused, *parameter,
-                         dynamic_eplb, w8a8_dynamic).npu()  # type: ignore
+                         dynamic_eplb, w8a8_dynamic, is_nz).npu()  # type: ignore
     if test_graph:
         config = torchair.CompilerConfig()
         config.mode = "reduce-overhead"
@@ -518,6 +528,7 @@ def test_dispatch_gmm_combine_decode_base():
     custom_kwargs["ep_world_size"] = 8
     custom_kwargs["moe_expert_num"] = 32
     custom_kwargs["w8a8_dynamic"] = False
+    custom_kwargs["is_nz"] = True
     ep_world_size = custom_kwargs["ep_world_size"]
     custom_args = tuple(custom_kwargs.values())
     print(f"{custom_kwargs=}")
