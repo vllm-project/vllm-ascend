@@ -116,7 +116,13 @@ jobs:
           apt-get update && apt-get -y install clang-15
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-
+      - name: checkout pr
+        shell: bash -l {0} 
+        run: |
+          cd /vllm-workspace/vllm-ascend
+          # git pull origin main
+          git fetch origin pull/6241/head:pr-6241
+          git checkout pr-6241
       - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
