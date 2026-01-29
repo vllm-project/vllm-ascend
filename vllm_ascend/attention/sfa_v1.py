@@ -479,7 +479,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 for msg in reasons:
                     logger.warning_once(msg)
             else:
-                self._process_weights_for_fused_mlapo(act_dtype)
+                self._process_weights_for_fused_mlapo_v3(act_dtype)
         if not self.enable_mlapo:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
@@ -651,6 +651,131 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
 
+    def _process_weights_for_fused_mlapo_v3(self, act_dtype: torch.dtype):
+        assert self.kv_a_proj_with_mqa is None
+        assert self.fused_qkv_a_proj is not None
+
+        # fused_qkv_a_proj [q_lora_rank + kv_lora_rank + qk_rope_head_dim, He]
+        # Hcq = q_lora_rank
+
+        weight_dq = self.fused_qkv_a_proj.weight.data[..., :self.q_lora_rank].contiguous()
+        # [Hcq, He] -> [He, Hcq]
+        weight_dq = weight_dq.t().contiguous() 
+        weight_dq = transdata(weight_dq, block_size=(16, 32)).unsqueeze(0).contiguous()
+        self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
+
+        weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank:].contiguous()
+        weight_dkv_kr = weight_dkv_kr.t().contiguous()  # [He, Hckv+Dr]
+        # Apply RoPE dimension transformation
+        weight_dkv_kr = trans_rope_weight(weight_dkv_kr, self.qk_rope_head_dim)
+        weight_dkv_kr = transdata(weight_dkv_kr, block_size=(16, 32)).unsqueeze(0).contiguous()
+        self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
+
+        # [num_heads*(D+Dr), Hcq]->[Hcq, num_heads*(D+Dr)]
+        weight_uq_qr = self.q_proj.weight.data.t().contiguous()  
+        # [Hcq, num_heads, D+Dr]
+        weight_uq_qr = weight_uq_qr.reshape(
+            self.q_lora_rank,
+            self.num_heads,
+            self.qk_nope_head_dim + self.qk_rope_head_dim
+        )
+        weight_uq_qr = weight_uq_qr.permute(1, 0, 2)  # [num_heads, Hcq, D+Dr]
+        weight_uq_qr = trans_rope_weight(weight_uq_qr, self.qk_rope_head_dim)
+        weight_uq_qr = weight_uq_qr.permute(1, 0, 2)  # [Hcq, num_heads, D+Dr]
+        weight_uq_qr = weight_uq_qr.reshape(
+            self.q_lora_rank,
+            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+        )
+        # Convert to FRACTAL_NZ format
+        weight_uq_qr = transdata(weight_uq_qr, block_size=(16, 32)).unsqueeze(0).contiguous()
+        self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
+
+        # [N, D, Hckv], ensure contiguous
+        self.weight_uk = self.W_UK_T.contiguous()
+
+        dequant_scale_w_dq = self.fused_qkv_a_proj.deq_scale[:self.q_lora_rank].contiguous()
+        self.dequant_scale_w_dq = dequant_scale_w_dq.view(1, -1)  # [1, Hcq]
+
+        dequant_scale_w_dkv_kr = self.fused_qkv_a_proj.deq_scale[self.q_lora_rank:].contiguous()
+        dequant_scale_w_dkv_kr = dequant_scale_w_dkv_kr.reshape(
+            self.kv_lora_rank + self.qk_rope_head_dim, -1
+        ).contiguous()
+        dequant_scale_w_dkv_kr = trans_rope_weight(dequant_scale_w_dkv_kr, self.qk_rope_head_dim)
+        self.dequant_scale_w_dkv_kr = dequant_scale_w_dkv_kr.view(1, -1)  # [1, Hckv+Dr]
+
+        dequant_scale_w_uq_qr = self.q_proj.deq_scale.data
+        dequant_scale_w_uq_qr = dequant_scale_w_uq_qr.reshape(
+            self.num_heads,
+            self.qk_nope_head_dim + self.qk_rope_head_dim,
+            -1
+        ).contiguous()
+        dequant_scale_w_uq_qr = trans_rope_weight(dequant_scale_w_uq_qr, self.qk_rope_head_dim)
+        dequant_scale_w_uq_qr = dequant_scale_w_uq_qr.reshape(
+            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+        )
+        self.dequant_scale_w_uq_qr = dequant_scale_w_uq_qr.view(1, -1)  # shape [1, N*(D+Dr)]
+
+        quant_bias_w_dq = self.fused_qkv_a_proj.quant_bias[:self.q_lora_rank].contiguous()
+        self.quant_bias_w_dq = quant_bias_w_dq
+
+        quant_bias_w_dkv_kr = self.fused_qkv_a_proj.quant_bias[self.q_lora_rank:].contiguous()
+        quant_bias_w_dkv_kr = quant_bias_w_dkv_kr.reshape(
+            self.kv_lora_rank + self.qk_rope_head_dim, -1
+        ).contiguous()
+        quant_bias_w_dkv_kr = trans_rope_weight(quant_bias_w_dkv_kr, self.qk_rope_head_dim)
+        self.quant_bias_w_dkv_kr = quant_bias_w_dkv_kr.view(-1)
+
+        quant_bias_w_uq_qr = self.q_proj.quant_bias.data
+        quant_bias_w_uq_qr = quant_bias_w_uq_qr.reshape(
+            self.num_heads,
+            self.qk_nope_head_dim + self.qk_rope_head_dim,
+            -1
+        ).contiguous()
+        quant_bias_w_uq_qr = trans_rope_weight(quant_bias_w_uq_qr, self.qk_rope_head_dim)
+        self.quant_bias_w_uq_qr = quant_bias_w_uq_qr.reshape(
+            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+        )
+
+        self.rmsnorm_gamma_cq = self.q_a_layernorm.weight.data  
+        self.rmsnorm_gamma_ckv = self.kv_a_layernorm.weight.data  
+
+        device = self.q_proj.weight.device
+        self.quant_scale_ckv = torch.tensor([1], dtype=torch.float32, device=device) # TODO: 需要修正为正确的 per-tile 量化的 scale 参数
+
+        self.smooth_scales_cq = torch.ones(1, dtype=torch.float32, device=device)
+
+        self.k_nope_clip_alpha = torch.tensor([1.0], dtype=torch.float32, device=device) # TODO: 需要正确设置 clip alpha 参数
+
+        self.gamma1 = self.q_a_layernorm.weight.data  
+        self.beta1 = self.q_a_layernorm.bias.data
+        self.gamma2 = self.kv_a_layernorm.weight.data 
+        self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
+        self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
+        self.quant_scale1 = self.q_proj.input_scale.data
+        self.quant_offset1 = self.q_proj.input_offset.data
+        self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
+        self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
+
+        self.aclnn_input_scale = self.fused_qkv_a_proj.aclnn_input_scale.clone().detach()
+        self.aclnn_input_scale_reciprocal = self.fused_qkv_a_proj.aclnn_input_scale_reciprocal.clone().detach()
+        self.aclnn_input_offset = self.fused_qkv_a_proj.aclnn_input_offset.clone().detach()
+
+        # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
+        # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
+        # referenced, so drop them to save memory.
+        if (
+            self.vllm_config.kv_transfer_config is not None
+            and self.vllm_config.kv_transfer_config.is_kv_consumer
+            and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+        ):
+            self.fused_qkv_a_proj.weight = None
+            self.fused_qkv_a_proj.deq_scale = None
+            self.fused_qkv_a_proj.quant_bias = None
+            self.q_proj.weight = None
+            self.q_proj.deq_scale = None
+            self.q_proj.quant_bias = None
+            torch.npu.empty_cache()
+
     def _sfa_preprocess_decode(
         self,
         hidden_states: torch.Tensor,
@@ -710,6 +835,94 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         return hidden_states, ql_nope, q_pe, q_c
 
+    def _sfa_preprocess_decode_v3(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        attn_metadata: M,
+        need_gather_q_kv: bool,
+        num_input_tokens: int,
+    ):
+        # hidden_states 是 BS 合轴的
+        # kv_cache is a tuple of (k_nope, k_pe, k)
+        k_nope, k_pe = kv_cache[0], kv_cache[1]
+
+
+        # 手动 hidden_states 转为 int8
+        quanted_hidden_states, quanted_hidden_states_scale = torch_npu.npu_dynamic_quant(hidden_states)
+        quanted_k_nope, _ = torch_npu.npu_dynamic_quant(k_nope)
+
+        cache_index = attn_metadata.slot_mapping
+        if self.enable_dsa_cp:
+            assert attn_metadata.dsa_cp_context is not None
+            cache_index = attn_metadata.dsa_cp_context.slot_mapping_cp
+
+        actual_seq_len = attn_metadata.cum_query_lens
+        if self.enable_dsa_cp:
+            actual_seq_len = attn_metadata.dsa_cp_context.actual_seq_lengths_query
+
+        rmsnorm_epsilon_cq = self.q_a_layernorm.variance_epsilon  
+        rmsnorm_epsilon_ckv = self.kv_a_layernorm.variance_epsilon  
+
+        # Prepare rope_sin and rope_cos for npu_mla_prolog_v3
+        # hidden_states is BS combined (2D: [T, He]), rope_sin/rope_cos should be 2D: [T, Dr]
+        # attn_metadata.sin/cos may be 4D: [T, 1, 1, Dr], need to reshape
+        rope_sin = attn_metadata.sin
+        rope_cos = attn_metadata.cos
+
+        if rope_sin.dim() == 4:
+            # Squeeze dimensions 1 and 2: [T, 1, 1, Dr] -> [T, Dr]
+            rope_sin = rope_sin.squeeze(1).squeeze(1).contiguous()
+            rope_cos = rope_cos.squeeze(1).squeeze(1).contiguous()
+        elif rope_sin.dim() == 3:
+            # 3D case: [B, S, Dr], keep as is for non-BS-combined case
+            # but hidden_states is BS combined, so this shouldn't happen
+            pass
+
+        # Ensure shape matches hidden_states first dimension
+        assert rope_sin.shape[0] == hidden_states.shape[0], \
+            f"rope_sin shape {rope_sin.shape} incompatible with hidden_states shape {hidden_states.shape}"
+        assert rope_cos.shape[0] == hidden_states.shape[0], \
+            f"rope_cos shape {rope_cos.shape} incompatible with hidden_states shape {hidden_states.shape}"
+
+        query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = torch_npu.npu_mla_prolog_v3(
+            token_x=quanted_hidden_states,
+            weight_dq=self.weight_dq,
+            weight_uq_qr=self.weight_uq_qr,
+            weight_uk=self.weight_uk,
+            weight_dkv_kr=self.weight_dkv_kr,
+            rmsnorm_gamma_cq=self.rmsnorm_gamma_cq,
+            rmsnorm_gamma_ckv=self.rmsnorm_gamma_ckv,
+            rope_sin=rope_sin,
+            rope_cos=rope_cos,
+            kv_cache=quanted_k_nope,  # k^C cache
+            kr_cache=k_pe,    # k^R cache
+            cache_index=cache_index,
+            dequant_scale_x=quanted_hidden_states_scale,
+            dequant_scale_w_dq=self.dequant_scale_w_dq,
+            dequant_scale_w_uq_qr=self.dequant_scale_w_uq_qr,
+            dequant_scale_w_dkv_kr=self.dequant_scale_w_dkv_kr,
+            quant_scale_ckv=self.quant_scale_ckv,
+            quant_scale_ckr=None,  # Not used in per-tensor mode
+            smooth_scales_cq=self.smooth_scales_cq,
+            actual_seq_len=actual_seq_len,
+            k_nope_clip_alpha=self.k_nope_clip_alpha,
+            rmsnorm_epsilon_cq=rmsnorm_epsilon_cq,
+            rmsnorm_epsilon_ckv=rmsnorm_epsilon_ckv,
+            cache_mode='PA_BSND',
+            query_norm_flag=False,
+            weight_quant_mode=2,
+            kv_cache_quant_mode=3, # per-tail 量化
+            query_quant_mode=1,
+            ckvkr_repo_mode=0,
+            quant_scale_repo_mode=1,
+            tile_size=128,
+            qc_qr_scale=1.0,
+            kc_scale=1.0)
+
+        return hidden_states, query, query_rope, query_norm
+
+
     def forward(
         self,
         layer_name,
@@ -749,7 +962,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         }
 
         if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
-            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode(
+            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode_v3(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
