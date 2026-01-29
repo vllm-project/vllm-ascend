@@ -34,6 +34,12 @@ def enable_cp():
     return prefill_config.prefill_context_parallel_size > 1 \
                 or prefill_config.decode_context_parallel_size > 1
 
+@dataclass
+class AscendSkipLiMetadata:
+    li_reorder_indices: torch.Tensor = None
+    li_cum_query_lens: torch.Tensor = None
+    li_seq_lens: torch.Tensor = None
+    li_skip_request_mask: torch.Tensor = None
 
 @dataclass
 # class AscendCommonLongSequenceMetadata:
@@ -99,6 +105,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     prefill_context_parallel_metadata: Optional[
         AscendPrefillContextParallelMetadata] = None
+    
+    li_skip_metadata:AscendSkipLiMetadata|None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int,
