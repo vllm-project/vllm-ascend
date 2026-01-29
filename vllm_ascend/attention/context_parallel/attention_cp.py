@@ -732,7 +732,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         value: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
-        output: torch.Tensor
+        output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
         if attn_metadata is None:
@@ -747,7 +747,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
             if has_decode:
-                slot_mapping = attn_metadata.slot_mapping[: num_decode_tokens * self.pcp_size : self.pcp_size]
+                if not attn_metadata.use_hybrid_attn:
+                    slot_mapping = attn_metadata.slot_mapping[: num_decode_tokens * self.pcp_size : self.pcp_size]
+                else:
+                    slot_mapping = attn_metadata.slot_mapping[: num_decode_tokens]
                 torch_npu._npu_reshape_and_cache(
                     key=key[:num_decode_tokens],
                     value=value[:num_decode_tokens],

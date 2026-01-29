@@ -32,7 +32,6 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm  # type: ignore
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
@@ -2036,8 +2035,8 @@ class NPUModelRunner(GPUModelRunner):
                     device=self.device,
                 )
             else:
-                total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
                 if self.pcp_size > 1:
+                    total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
                     if self.pcp_use_hybrid_attn:
                         maybe_pcp_full_tokens = sum(num_tokens_padded) * self.pcp_size - total_num_pcp_pads
                     else:

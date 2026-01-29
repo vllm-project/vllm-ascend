@@ -233,7 +233,7 @@ class PCPManager:
         >>> self.pcp_unpad_mask_cpu
         [True, False, True, True, True, True, True, False, False,
         False, True, True, True, True, True, True, True, True]
-        >>> self.pcp_allgather_resotre_idx
+        >>> self.pcp_allgather_restore_idx
         [0, 9, 1, 2, 10, 11, 12, 13, 3, 4, 5, 6, 14, 15, 16, 17, 7, 8]
         """
 
@@ -730,7 +730,7 @@ class PCPManager:
         query_lens,
         input_batch,
         num_scheduled_tokens,
-        pcp_unpad_mask = None
+        pcp_unpad_mask,
     ):
         from vllm_ascend.attention.utils import \
             AscendPrefillContextParallelMetadata

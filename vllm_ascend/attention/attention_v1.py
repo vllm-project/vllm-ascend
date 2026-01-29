@@ -865,6 +865,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
+        output: torch.Tensor,
     ):
         if len(kv_cache) > 1:
             if self.is_kv_producer:
@@ -882,7 +883,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
-        return query, key, value
+        return query, key, value, output
 
     def forward_impl(
         self,

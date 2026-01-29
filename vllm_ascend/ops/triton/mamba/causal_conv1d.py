@@ -140,7 +140,7 @@ def causal_conv1d_fn(
                 activation=activation,
                 return_final_states=True,
                 final_states_out=conv_states[cache_indices[i]][..., : (width - 1)].unsqueeze(0),
-                initial_states=conv_states[cache_indices[i]][..., : (width - 1)] if has_initial_state[i] else None,
+                initial_states=conv_states[cache_indices[i]][..., : (width - 1)],
             )
         )
 
