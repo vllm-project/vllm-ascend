@@ -463,6 +463,13 @@ class EagleProposer(VllmEagleProposer):
         else:
             num_input_tokens = num_tokens
 
+        (
+            num_input_tokens,
+            num_tokens_across_dp,
+            _,
+        ) = self.runner._sync_metadata_across_dp(num_input_tokens,
+                                                 is_draft_model=True)
+
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = \
@@ -500,7 +507,7 @@ class EagleProposer(VllmEagleProposer):
             common_attn_metadata.slot_mapping[:slot_mapping_lens])
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0][:slot_mapping_lens]
-
+        common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata,
@@ -539,12 +546,6 @@ class EagleProposer(VllmEagleProposer):
         self.last_token_indices[:last_token_indices_len].copy_(
             last_token_indices)
 
-        (
-            num_input_tokens,
-            num_tokens_across_dp,
-            _,
-        ) = self.runner._sync_metadata_across_dp(num_input_tokens,
-                                                 is_draft_model=True)
         with set_ascend_forward_context(
                 multi_steps_attn_metadata[0],
                 self.vllm_config,
