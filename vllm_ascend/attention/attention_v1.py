@@ -63,7 +63,7 @@ SWA_INT_MAX = 2147483647
 
 
 def _pad_attention_seq_params(
-    actual_seq_lengths_q: list[int], seq_lens: list[int], runtime_shape: int
+    actual_seq_lengths_q: list[int], seq_lens: list[int], runtime_shape: int, vllm_config: VllmConfig
 ) -> tuple[list[int], list[int]]:
     if not actual_seq_lengths_q:
         padded_actual_seq_lengths_q = [runtime_shape]
@@ -72,7 +72,14 @@ def _pad_attention_seq_params(
         if last_val >= runtime_shape:
             padded_actual_seq_lengths_q = actual_seq_lengths_q
         else:
-            interpolated = list(range(last_val + 1, runtime_shape + 1))
+            step = 1
+            if vllm_config and vllm_config.speculative_config:
+                step += vllm_config.speculative_config.num_speculative_tokens
+            interpolated = list(range(last_val + 1, runtime_shape + 1, step))
+            if interpolated and interpolated[-1] < runtime_shape:
+                interpolated.append(runtime_shape)
+            elif not interpolated and last_val < runtime_shape:
+                interpolated = [runtime_shape]
             padded_actual_seq_lengths_q = actual_seq_lengths_q + interpolated
 
     target_len = len(padded_actual_seq_lengths_q)
@@ -510,7 +517,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
                     actual_seq_lengths_q, seq_lens = _pad_attention_seq_params(
-                        actual_seq_lengths_q, seq_lens, num_tokens
+                        actual_seq_lengths_q, seq_lens, num_tokens, vllm_config
                     )
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
