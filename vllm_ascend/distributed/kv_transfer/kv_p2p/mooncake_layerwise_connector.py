@@ -1219,8 +1219,9 @@ class MooncakeLayerwiseConnectorWorker:
             try:
                 encoded_data = self.encoder.encode((GET_META_MSG, req_id))
                 sock = self._get_remote_socket(req_meta_update.remote_host, req_meta_update.remote_port)
-                ensure_zmq_send(sock, encoded_data)
-                metadata_bytes = ensure_zmq_recv(sock, self.remote_poller)
+                path = f"{req_meta_update.remote_host}:{req_meta_update.remote_port}"
+                ensure_zmq_send(sock, encoded_data, path)
+                metadata_bytes = ensure_zmq_recv(sock, self.remote_poller, path)
                 agent_meta = self.decoder.decode(metadata_bytes)
             except Exception as e:
                 logger.error(
@@ -1268,7 +1269,7 @@ class MooncakeLayerwiseConnectorWorker:
             msg_encoder = msgspec.msgpack.Encoder()
             encoded_data = msg_encoder.encode((DONE_SENDING_MSG, external_req_id))
             with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore
-                ensure_zmq_send(sock, encoded_data)
+                ensure_zmq_send(sock, encoded_data, f"{req_meta.remote_host}:{req_meta.remote_port}")
                 ack = sock.recv()
                 if ack != b"ACK":
                     raise ValueError(f"Unexpected ACK response: {ack}")
@@ -1346,6 +1347,7 @@ def string_to_int64_hash(input_str):
 def ensure_zmq_send(
     socket: zmq.Socket,  # type: ignore
     data: bytes,
+    path: str,
     max_retries: int = 3,
 ):
     retries_left = max_retries
@@ -1360,12 +1362,13 @@ def ensure_zmq_send(
                 time.sleep(0.1)
             else:
                 logger.error(f"Send failed after all retries: {e}")
-                raise RuntimeError(f"Failed to send data after {max_retries} retries: {e}")
+                raise RuntimeError(f"Failed to send data to {path} after {max_retries} retries: {e}")
 
 
 def ensure_zmq_recv(
     socket: zmq.Socket,  # type: ignore
     poller: zmq.Poller,  # type: ignore
+    path: str,
     timeout: float = 1.0,
     max_retries: int = 3,
 ) -> bytes:
@@ -1384,8 +1387,7 @@ def ensure_zmq_recv(
                 time.sleep(0.1)
             else:
                 logger.error(f"Receive failed after all retries: {e}")
-                raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
-
+                raise RuntimeError(f"Failed to receive data from {path} after {max_retries} retries: {e}")
 
 def get_external_request_id(request_id: str):
     # NOTE(zxr): vLLM PR #27987 add additional suffix
