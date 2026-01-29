@@ -47,7 +47,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             num_kv_heads: number of kv heads.
             prefix: This has no effect, it is only here to make it easier to
                     swap between Attention and MMEncoderAttention.
-            multimodal_config: configs for multi-modal.
         """
         super().__init__(
             num_heads=num_heads,
@@ -56,6 +55,14 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             num_kv_heads=num_kv_heads,
             prefix=prefix,
         )
+
+        self.enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
+                           and self.head_size > MIN_PAD_SIZE
+                           and self.head_size < MAX_PAD_SIZE)
+        self.last_cu_seqlens = None
+        self.seq_lens_cpu_cache = None
+        self.out_buffer = None
+        self.scale_value = self.head_size ** -0.5
 
     def reshape_qkv_to_3d(
         self,
@@ -94,54 +101,53 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         kv_len = key.size(1)
         is_reshaped = query.dim() == 4
 
+        assert cu_seqlens is not None
+        if cu_seqlens is not self.last_cu_seqlens:
+            self.last_cu_seqlens = cu_seqlens
+            # Update seq_lens cpu cache.
+            self.seq_lens_cpu_cache = torch.diff(cu_seqlens).to("cpu")
+        # Directly use seq_lens cpu cache to avoid d2h copy.
+        seq_lens_cpu = self.seq_lens_cpu_cache
+
         # q, k, v: [b, s, head, head_dim] -> [b * s, head, head_dim]
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
 
-        enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
-                      and self.head_size > MIN_PAD_SIZE
-                      and self.head_size < MAX_PAD_SIZE)
-
-        if enable_pad:
+        if self.enable_pad:
             origin_shape = q.shape[-1]
             pad_len = MAX_PAD_SIZE - origin_shape
             # Merge qkv to reduce the overhead of launching npu pad operation.
             # [3, b*s, head, head_dim]
             qkv = torch.stack([q, k, v], dim=0)
-            # qkv: [3, b * s, head, head_dim] -> [3, b * s, head, MAX_PAD_SIZE]
+            # [3, b*s, head, head_dim] -> [3, b*s, head, MAX_PAD_SIZE]
             qkv = F.pad(qkv, (0, pad_len), mode="constant", value=0)
             q, k, v = qkv.unbind(dim=0)
 
-        context_layer = torch.empty_like(q)
-
-        if cu_seqlens is None:
-            cu_seqlens = torch.arange(0, (bsz + 1) * q_len,
-                                      step=q_len,
-                                      dtype=torch.int32,
-                                      device=query.device)
-
-        cu_seqlens = torch.diff(cu_seqlens).to("cpu")
+        if self.out_buffer is None or self.out_buffer.shape != q.shape:
+            self.out_buffer = torch.empty_like(q)
+        # Directly use out_buffer to avoid frequently create the same tensor.
+        output = self.out_buffer
 
         # operator requires pta version >= 2.5.1
         torch_npu._npu_flash_attention_unpad(
             query=q,
             key=k,
             value=v,
-            seq_len=cu_seqlens,
-            scale_value=self.head_size**-0.5,
+            seq_len=seq_lens_cpu,
+            scale_value=self.scale_value,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
-            out=context_layer,
+            out=output,
         )
 
-        if enable_pad:
-            context_layer = context_layer[..., :origin_shape]
+        if self.enable_pad:
+            output = output[..., :origin_shape]
 
         if is_reshaped:
-            context_layer = einops.rearrange(context_layer,
-                                             "(b s) h d -> b s h d",
-                                             b=bsz).contiguous()
+            output = einops.rearrange(output,
+                                      "(b s) h d -> b s h d",
+                                      b=bsz).contiguous()
         else:
-            context_layer = einops.rearrange(context_layer,
-                                             "(b s) h d -> b s (h d)",
-                                             b=bsz).contiguous()
-        return context_layer
+            output = einops.rearrange(output,
+                                      "(b s) h d -> b s (h d)",
+                                      b=bsz).contiguous()
+        return output
