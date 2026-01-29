@@ -563,10 +563,18 @@ class NPUModelRunner(GPUModelRunner):
             req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
+
+        if self.pcp_size * self.dcp_size > 1:
+            self.pcp_manager.init_batch_info(
+                num_scheduled_tokens,
+                self.input_batch.num_computed_tokens_cpu,
+                self.input_batch.num_reqs,
+                self.reorder_batch_threshold,
+            )
+
         # for pcp, prefill mtp should use origin scheduleroutput ,
         if self.speculative_config and self.pcp_size * self.dcp_size > 1:
             self.pcp_manager.generate_pcp_mtp_input(
-                num_reqs,
                 total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens,
                 with_prefill,
@@ -584,8 +592,6 @@ class NPUModelRunner(GPUModelRunner):
                                  num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
                                      num_scheduled_tokens[:num_reqs],
                                      self.arange_np,
-                                     self.input_batch.num_reqs,
-                                     self.reorder_batch_threshold,
                                  )
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens)
@@ -739,8 +745,7 @@ class NPUModelRunner(GPUModelRunner):
             num_draft_tokens = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
             if self.pcp_size * self.dcp_size > 1:
-                logits_indices = self.pcp_manager.get_logits_indices(
-                    cu_num_tokens, num_reqs)
+                logits_indices = self.pcp_manager.get_logits_indices(cu_num_tokens)
                 logits_indices = logits_indices.pin_memory().to(
                     self.device, non_blocking=True)
             else:
