@@ -13,9 +13,8 @@ def load_suites_from_config(config_path: str = "config.yaml") -> dict[str, list[
     abs_config_path = script_dir / config_path
 
     with open(abs_config_path) as f:
-        config = yaml.safe_load(f)
+        suites_data = yaml.safe_load(f)
 
-    suites_data = config.get("suites", {})
     suites = {}
 
     for suite_name, test_files in suites_data.items():
