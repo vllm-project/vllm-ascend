@@ -39,6 +39,7 @@ class MtpProposer(EagleProposer):
 
         (
             num_tokens,
+            _,
             num_tokens_across_dp,
             with_prefill,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
@@ -258,7 +259,7 @@ class MtpProposer(EagleProposer):
         self._set_positions(num_tokens, target_positions)
         self.hidden_states[:num_tokens] = target_hidden_states
         # eager/acl piecewise mode need to update num_tokens_across_dp
-        (num_input_tokens, num_tokens_across_dp,
+        (num_input_tokens, _, num_tokens_across_dp,
          with_prefill) = self.runner._sync_metadata_across_dp(
              num_input_tokens, self.runner.with_prefill)
 

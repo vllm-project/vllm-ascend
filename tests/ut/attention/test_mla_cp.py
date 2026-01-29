@@ -249,8 +249,10 @@ class TestAscendMLAImpl(TestBase):
 
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
+    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_mla_preprocess_dcp(self, magic_npu_fetch,
+    def test_mla_preprocess_dcp(self, mock_get_forward_context,
+                                magic_npu_fetch,
                                 mock_maybe_all_gather_and_maybe_unpad):
 
         self.impl.num_kv_heads = 1
@@ -310,6 +312,8 @@ class TestAscendMLAImpl(TestBase):
         ]
 
         magic_npu_fetch.return_value = MagicMock()
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value.dbo_enabled = False
         mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
 
         decode_res, prefill_res = self.impl._mla_preprocess(
@@ -325,8 +329,10 @@ class TestAscendMLAImpl(TestBase):
     @patch('torch_npu._npu_reshape_and_cache')
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
+    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_mla_preprocess_pcp(self, magic_npu_fetch,
+    def test_mla_preprocess_pcp(self, mock_get_forward_context,
+                                magic_npu_fetch,
                                 mock_maybe_all_gather_and_maybe_unpad,
                                 mock_npu_reshape_and_cache):
         self.impl.num_kv_heads = 1
@@ -390,6 +396,8 @@ class TestAscendMLAImpl(TestBase):
         ]
 
         magic_npu_fetch.return_value = MagicMock()
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value.dbo_enabled = False
         mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
 
         self.impl.kv_a_layernorm = MagicMock()
