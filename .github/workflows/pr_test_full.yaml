@@ -77,7 +77,7 @@ jobs:
       matrix:
         vllm_version: [dc917cceb877dfd13f98c538c4c96158047d98bd, v0.14.1]
     needs: [changes]
-    #if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
+    if: ${{ needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.e2e_tracker == true }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
