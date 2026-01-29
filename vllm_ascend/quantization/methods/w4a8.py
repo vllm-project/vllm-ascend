@@ -473,3 +473,28 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
         layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
         layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
+
+        if self.dynamic_eplb:
+            layer.w13_weight_list = [
+                weight
+                for weight in layer.w13_weight.data.unbind(dim=0)
+            ]
+            layer.w2_weight_list = [
+                weight for weight in layer.w2_weight.data.unbind(dim=0)
+            ]
+            layer.w13_weight_scale_list = [
+                weight
+                for weight in layer.w13_weight_scale.data.unbind(dim=0)
+            ]
+            layer.w2_weight_scale_list = [
+                weight
+                for weight in layer.w2_weight_scale.data.unbind(dim=0)
+            ]
+            layer.w13_scale_bias_list = [
+                weight
+                for weight in layer.w13_scale_bias.data.unbind(dim=0)
+            ]
+            layer.w2_scale_bias_list = [
+                weight
+                for weight in layer.w2_scale_bias.data.unbind(dim=0)
+            ]
