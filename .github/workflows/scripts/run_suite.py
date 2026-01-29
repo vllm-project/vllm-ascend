@@ -3,124 +3,33 @@ import os
 from pathlib import Path
 
 import tabulate
+import yaml
 from ci_utils import TestFile, run_e2e_files
 
-# NOTE: Please add the case with the following format and give an expected time for each case:
-# case_path, estimated_time, is_skipped, num_devices
-suites = {
-    "e2e-singlecard": [
-        TestFile("tests/e2e/singlecard/test_auto_fit_max_mode_len.py", 25),
-        TestFile("tests/e2e/singlecard/test_aclgraph_accuracy.py", 480),
-        TestFile("tests/e2e/singlecard/test_aclgraph_batch_invariant.py", 410),
-        TestFile("tests/e2e/singlecard/test_aclgraph_mem.py", 130),
-        TestFile("tests/e2e/singlecard/test_async_scheduling.py", 150),
-        TestFile("tests/e2e/singlecard/test_batch_invariant.py", 320),
-        TestFile("tests/e2e/singlecard/test_camem.py", 77),
-        TestFile("tests/e2e/singlecard/test_completion_with_prompt_embeds.py", 76),
-        TestFile("tests/e2e/singlecard/test_cpu_offloading.py", 132),
-        TestFile("tests/e2e/singlecard/test_guided_decoding.py", 354),
-        TestFile("tests/e2e/singlecard/test_ilama_lora.py", 95),
-        TestFile("tests/e2e/singlecard/test_llama32_lora.py", 162),
-        TestFile("tests/e2e/singlecard/test_qwen3_multi_loras.py", 65),
-        TestFile("tests/e2e/singlecard/test_models.py", 300),
-        TestFile("tests/e2e/singlecard/test_multistream_overlap_shared_expert.py", 200),
-        TestFile("tests/e2e/singlecard/test_profile_execute_duration.py", 10),
-        TestFile("tests/e2e/singlecard/test_quantization.py", 200),
-        TestFile("tests/e2e/singlecard/test_sampler.py", 200),
-        TestFile("tests/e2e/singlecard/test_vlm.py", 354),
-        TestFile("tests/e2e/singlecard/test_xlite.py", 45),
-        TestFile("tests/e2e/singlecard/compile/test_norm_quant_fusion.py", 70),
-        TestFile("tests/e2e/singlecard/pooling/test_classification.py", 120),
-        TestFile("tests/e2e/singlecard/pooling/test_embedding.py", 270),
-        TestFile("tests/e2e/singlecard/pooling/test_scoring.py", 500),
-        TestFile("tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py", 1500),
-        TestFile("tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py", 1800),
-        TestFile("tests/e2e/singlecard/model_runner_v2/test_basic.py", 80, is_skipped=True),
-    ],
-}
 
-suites_singlecard_light = {
-    "e2e-singlecard-light": [
-        TestFile("tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency", 220),
-        TestFile("tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant", 90),
-    ],
-}
+def load_suites_from_config(config_path: str = "config.yaml") -> dict[str, list[TestFile]]:
+    # Get absolute path relative to this script
+    script_dir = Path(__file__).parent
+    abs_config_path = script_dir / config_path
 
-suites_2_card_light = {
-    "e2e-2card-light": [
-        TestFile("tests/e2e/multicard/2-cards/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep", 220),
-        TestFile(
-            "tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep",
-            90,
-        ),
-    ],
-}
+    with open(abs_config_path) as f:
+        config = yaml.safe_load(f)
 
-suites_2_card = {
-    "e2e-multicard-2-cards": [
-        # TODO: recover skipped tests
-        TestFile("tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py", 0, is_skipped=True),
-        TestFile("tests/e2e/multicard/2-cards/spec_decode/test_spec_decode.py", 0, is_skipped=True),
-        TestFile("tests/e2e/multicard/2-cards/test_offline_weight_load.py", 0, is_skipped=True),
-        TestFile("tests/e2e/multicard/2-cards/test_shared_expert_dp.py", 0, is_skipped=True),
-        TestFile("tests/e2e/multicard/2-cards/test_qwen3_performance.py", 180),
-        TestFile("tests/e2e/multicard/2-cards/test_data_parallel.py", 380),
-        TestFile("tests/e2e/multicard/2-cards/test_expert_parallel.py", 170),
-        TestFile("tests/e2e/multicard/2-cards/test_external_launcher.py", 300),
-        TestFile("tests/e2e/multicard/2-cards/test_full_graph_mode.py", 400),
-        TestFile("tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py", 60),
-        # Run the test in a separate step to avoid oom
-        TestFile(
-            "tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2", 100
-        ),
-        TestFile("tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a8_dynamic_tp2", 80),
-        TestFile("tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_sp_tp2", 132),
-        TestFile(
-            "tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_w4a8_accuracy_tp2", 132
-        ),
-        TestFile("tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_fc2_tp2", 140),
-        TestFile(
-            "tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_v2_lite_fc1_tp2", 82
-        ),
-        TestFile("tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_fc1_tp2", 73),
-        TestFile(
-            "tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2",
-            71,
-        ),
-        TestFile(
-            "tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep",
-            111,
-        ),
-        TestFile(
-            "tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a4_distributed_tp2", 180
-        ),
-        TestFile("tests/e2e/multicard/2-cards/test_pipeline_parallel.py", 270),
-        TestFile("tests/e2e/multicard/2-cards/test_prefix_caching.py", 430),
-        TestFile("tests/e2e/multicard/2-cards/test_quantization.py", 70),
-        TestFile("tests/e2e/multicard/2-cards/test_qwen3_moe.py", 1050),
-        TestFile("tests/e2e/multicard/2-cards/test_single_request_aclgraph.py", 215),
-    ],
-}
+    suites_data = config.get("suites", {})
+    suites = {}
 
-# TODO: recover skipped tests
-suites_4_card = {
-    "e2e-multicard-4-cards": [
-        TestFile("tests/e2e/multicard/4-cards/test_qwen3_next.py", 1250),
-        TestFile("tests/e2e/multicard/4-cards/test_data_parallel_tp2.py", 60, is_skipped=True),
-        TestFile("tests/e2e/multicard/4-cards/test_kimi_k2.py", 100, is_skipped=True),
-        TestFile("tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py", 60, is_skipped=True),
-        TestFile("tests/e2e/multicard/4-cards/long_sequence/test_basic.py", 60, is_skipped=True),
-        TestFile("tests/e2e/multicard/4-cards/long_sequence/test_chunked_prefill.py", 60, is_skipped=True),
-        TestFile("tests/e2e/multicard/4-cards/long_sequence/test_mtp.py", 60, is_skipped=True),
-        TestFile("tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py", 60, is_skipped=True),
-    ],
-}
+    for suite_name, test_files in suites_data.items():
+        suites[suite_name] = []
+        for file_data in test_files:
+            name = file_data.get("name")
+            estimated_time = file_data.get("estimated_time", 60)
+            is_skipped = file_data.get("is_skipped", False)
+            suites[suite_name].append(TestFile(name, estimated_time, is_skipped))
 
-# TODO: add more suites
-suites.update(suites_singlecard_light)
-suites.update(suites_2_card_light)
-suites.update(suites_2_card)
-suites.update(suites_4_card)
+    return suites
+
+
+suites = load_suites_from_config()
 
 
 def auto_partition(files, rank, size):
@@ -262,12 +171,6 @@ def _sanity_check_suites(suites: dict[str, list[TestFile]]):
 def main():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument(
-        "--timeout-per-file",
-        type=int,
-        default=2000,
-        help="The time limit for running one file in seconds.",
-    )
-    arg_parser.add_argument(
         "--suite",
         type=str,
         default=list(suites.keys())[0],
@@ -289,30 +192,6 @@ def main():
         action="store_true",
         default=False,
         help="Continue running remaining tests even if one fails (useful for nightly tests)",
-    )
-    arg_parser.add_argument(
-        "--enable-retry",
-        action="store_true",
-        default=False,
-        help="Enable smart retry for accuracy/performance assertion failures (not code errors)",
-    )
-    arg_parser.add_argument(
-        "--max-attempts",
-        type=int,
-        default=2,
-        help="Maximum number of attempts per file including initial run (default: 2)",
-    )
-    arg_parser.add_argument(
-        "--retry-wait-seconds",
-        type=int,
-        default=60,
-        help="Seconds to wait between retries (default: 60)",
-    )
-    arg_parser.add_argument(
-        "--retry-timeout-increase",
-        type=int,
-        default=600,
-        help="Additional timeout in seconds when retry is enabled (default: 600)",
     )
     args = arg_parser.parse_args()
     print(f"{args=}")
@@ -347,18 +226,9 @@ def main():
 
     print(msg, flush=True)
 
-    # Add extra timeout when retry is enabled
-    timeout = args.timeout_per_file
-    if args.enable_retry:
-        timeout += args.retry_timeout_increase
-
     exit_code = run_e2e_files(
         files,
-        timeout,
-        args.continue_on_error,
-        args.enable_retry,
-        args.max_attempts,
-        args.retry_wait_seconds,
+        continue_on_error=args.continue_on_error,
     )
 
     # Print tests again at the end for visibility
