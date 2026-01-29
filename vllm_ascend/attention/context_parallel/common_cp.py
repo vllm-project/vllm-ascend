@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch_npu
@@ -83,7 +84,7 @@ class AscendMetadataForPrefill:
 class AscendMetadataForDecode:
     """Decode-specific metadata for Ascend attention with Context Parallelism."""
 
-    num_computed_tokens_of_pcp_dcp: torch.Tensor | None = None
+    num_computed_tokens_of_pcp_dcp_np: np.ndarray | None = None
     block_tables: torch.Tensor | None = None
 
 
