@@ -323,6 +323,13 @@ class EagleProposer(VllmEagleProposer):
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None,
                   is_profile=False):
+        (
+            num_tokens,
+            num_tokens_across_dp,
+            _,
+        ) = self.runner._sync_metadata_across_dp(num_tokens,
+                                                 is_draft_model=True)
+
         # update global cos, sin
         update_cos_sin(self._get_positions(num_tokens))
 
@@ -380,12 +387,7 @@ class EagleProposer(VllmEagleProposer):
         model_previous_hidden_states = self.hidden_states[:num_tokens]
 
         batch_size = num_tokens // (self.num_speculative_tokens + 1)
-        (
-            num_tokens,
-            num_tokens_across_dp,
-            _,
-        ) = self.runner._sync_metadata_across_dp(num_tokens,
-                                                 is_draft_model=True)
+
         with set_ascend_forward_context(
                 multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
                 self.vllm_config,
