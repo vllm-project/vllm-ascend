@@ -938,12 +938,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
+        output_padded = None
         if key is not None and value is not None:
-            query, key, value, output = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
+            output_padded = output
+            query, key, value, output_padded = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling":
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
-        output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+        if output_padded is not None:
+            output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
+        else:
+            output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+        output[:num_tokens] = attn_output[:num_tokens]
         return output

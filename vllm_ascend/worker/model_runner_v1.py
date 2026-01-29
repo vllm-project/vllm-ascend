@@ -350,7 +350,6 @@ class NPUModelRunner(GPUModelRunner):
         self.pcp_use_hybrid_attn = self.model_config.hf_config.model_type == "qwen3_next"
 
         self.num_pcp_pads = torch.zeros(self.max_num_reqs, dtype=torch.int32)
-        self.pcp_pads_logits_hybrid_attn = torch.zeros(self.max_num_reqs, dtype=torch.int32)
         self.pcp_padded_slot_mapping = torch.zeros(
             self.max_num_tokens + 2 * self.pcp_size * self.max_num_reqs,
             dtype=torch.int32,
@@ -846,7 +845,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.device, non_blocking=True)
                 else:
                     tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
-                    tokens_logits = tokens_original_tensor + self.pcp_pads_logits_hybrid_attn[:tokens_original_tensor.shape[0]]
+                    tokens_logits = tokens_original_tensor + self.pcp_manager.pcp_pads_logits_hybrid_attn[:tokens_original_tensor.shape[0]]
                     logits_indices = torch.cumsum(tokens_logits, dim=0) - 1
                     logits_indices = logits_indices.pin_memory().to(
                         self.device, non_blocking=True)
