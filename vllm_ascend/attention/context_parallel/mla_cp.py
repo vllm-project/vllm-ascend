@@ -79,7 +79,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         fast_build: bool = False,
     ) -> AscendMLAMetadata:
         metadata_cls = super().build(common_prefix_len, common_attn_metadata)
-        if self.num_prefills == 0 and self.pcp_size > 1:
+        if self.pcp_size > 1:
             self.slot_mapping[: self.num_decode_tokens] = self.slot_mapping[
                 : self.num_decode_tokens * self.pcp_size : self.pcp_size
             ]
