@@ -29,6 +29,7 @@ from unittest.mock import patch
 import pytest
 import torch_npu
 from modelscope import snapshot_download  # type: ignore
+from tests.e2e.conftest import wait_until_npu_memory_free
 
 MODELS = ["Qwen/Qwen3-0.6B"]
 MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
@@ -110,6 +111,7 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
+@wait_until_npu_memory_free()
 def test_qwen3_external_launcher_with_sleepmode():
     script = Path(
         __file__
