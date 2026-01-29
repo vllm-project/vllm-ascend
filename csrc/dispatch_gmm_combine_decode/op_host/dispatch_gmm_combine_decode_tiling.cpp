@@ -495,7 +495,7 @@ static ge::graphStatus DispatchGmmCombineDecodeTilingFuncImpl(gert::TilingContex
     if (tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.isNDFormat) {
         tilingKey |= EXEC_FLAG_ND_FORMAT;
     }
-    printf("compile time is %s:%s tilingKey = %lu\n", __DATE__, __TIME__, tilingKey);
+
     context->SetTilingKey(tilingKey);
     context->SetBlockDim(aicNum);
     return ge::GRAPH_SUCCESS;

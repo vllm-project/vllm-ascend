@@ -404,6 +404,7 @@ def generate_datas(batch_size,
     if test_bfloat16:
         x = x.bfloat16()
         if w8a8_dynamic:
+            assert (gmm1_weight_scale is not None and gmm2_weight_scale is not None), "gmm1_weight_scale and gmm2_weight_scale must be provided for w8a8_dynamic"
             gmm1_weight_scale = gmm1_weight_scale.bfloat16()
             gmm2_weight_scale = gmm2_weight_scale.bfloat16()
     else:
