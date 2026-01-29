@@ -64,6 +64,7 @@ _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
+_IS_OMNI_MODEL = None
 _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
@@ -760,6 +761,10 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
         if not _ENABLE_SP:
             return _ENABLE_SP
 
+        assert not is_omni_model(vllm_config), \
+            "Currently, Omni models do not support FLASHCOMM in vllm-ascend. " \
+            "We will fix this in the future. Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0."
+
         assert vllm_config.parallel_config.tensor_parallel_size > 1, \
             "Flash Comm v1 (Sequence Parallelism) is only supported when tp_size > 1."
 
@@ -833,6 +838,17 @@ def _is_contain_expert(config: Any):
             if _is_contain_expert(v):
                 return True
     return False
+
+
+def is_omni_model(vllm_config: VllmConfig):
+    """Checks if the model is an Omni model by config"""
+    global _IS_OMNI_MODEL
+    if _IS_OMNI_MODEL is None and vllm_config and vllm_config.model_config:
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        if "thinker_config" in hf_config:
+            # Qwen-Omni models
+            _IS_OMNI_MODEL = True
+    return _IS_OMNI_MODEL
 
 
 def is_vl_model(vllm_config: VllmConfig):
