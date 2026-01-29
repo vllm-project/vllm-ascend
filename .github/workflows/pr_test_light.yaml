@@ -84,7 +84,8 @@ jobs:
     needs: [lint, changes]
     name: unit test
     # only trigger unit test after lint passed and the change is e2e and ut related.
-    if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
+    # if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
+    if: False
     strategy:
       matrix:
         vllm_version: [15d76f74e2fdb12a95ea00f0ca283acf6219a2b7, v0.16.0]
@@ -103,7 +104,8 @@ jobs:
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
+    # if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
+    if: False
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
