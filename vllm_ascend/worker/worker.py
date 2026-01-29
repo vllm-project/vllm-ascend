@@ -323,6 +323,26 @@ class NPUWorker(WorkerBase):
             f" {free_npu_memory}. This happens when the NPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
+        if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
+            # we put this check here because we still need a 
+            # profile run which compiles the model for max_num_batched_tokens
+
+            msg = (
+                f"Initial free memory {format_gib(self.init_npu_memory)} "
+                f"GiB, reserved {format_gib(kv_cache_memory_bytes)} GiB memory for "
+                "KV Cache as specified by kv_cache_memory_bytes config and "
+                "skipped memory profiling. This does not respect the "
+                "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
+                "config when you want manual control of KV cache memory "
+                "size. If OOM'ed, check the difference of initial free "
+                "memory between the current run and the previous run "
+                "where kv_cache_memory_bytes is suggested and update it "
+                "correspondingly."
+            )
+            logger.info(msg)
+            return kv_cache_memory_bytes
+
+
         # Get the peak memory allocation recorded by torch
         peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"]
         # TODO: don`t need impl this func after empty_cache in
