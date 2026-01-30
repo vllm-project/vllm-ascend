@@ -482,7 +482,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 get_world_group().rank,
                 get_world_group().local_rank, vllm_config)
             self.afd_connector.init_afd_connector()
-            self.num_stages = self.afd_config.num_afd_stages
         else:
             self.afd_connector = None
         # kv role
@@ -553,12 +552,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                   dtype=torch.int32)
         self.attn_dummy_run_call_cnt = 0
 
-        self.comm_stream1 = torch.npu.Stream() # ubatch1的通信流
-        self.comm_stream2 = torch.npu.Stream() # ubatch2的通信流
-        self.comm_stream1_event = torch.npu.ExternalEvent()
-        self.comm_stream2_event = torch.npu.ExternalEvent()
-        torch.npu.set_stream_limit(self.comm_stream1, -1, 8) # 限制通信流只用8个aiv
-        torch.npu.set_stream_limit(self.comm_stream2, -1, 8)
+        self.comm_stream = torch.npu.Stream() # ubatch1的通信流
 
         # import os
         # experimental_config = torch_npu.profiler._ExperimentalConfig(
@@ -1363,7 +1357,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # send is_ubatch to ffn side
         is_ubatch = True if ubatch_slices else False
         # to support inequal AF,[ffn_size,ffn_size + min_size) send
-        if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank) and self.afd_connector:
+        if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
             logger.debug(f'yxj self.afd_connector.rank in prepare input is {self.afd_connector.rank}')
             self.afd_connector.send_is_ubatch(is_ubatch)
         logger.debug(f'yxj send is_ubatch in prepare input is {is_ubatch}')
@@ -1857,10 +1851,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     # (num_tokens + padding)
     def pad_out_ubatch_slice(self, ubatch_slices: UBatchSlices,
                              num_total_tokens: int):
-        padded_second_ubatch_slice = slice(ubatch_slices[1].token_slice.start,
+        padded_last_ubatch_slice = slice(ubatch_slices[-1].token_slice.start,
                                            num_total_tokens)
-        ubatch_slices[1] = UBatchSlice(padded_second_ubatch_slice,
-                                       padded_second_ubatch_slice)
+        ubatch_slices[-1] = UBatchSlice(padded_last_ubatch_slice,
+                                       padded_last_ubatch_slice)
 
     def _pool(
             self,
@@ -2048,7 +2042,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     model_instance=self.model,
                     afd_metadata=afd_metadata,
                     ubatch_slices=ubatch_slices,
-                    weight_prefetch_method=self.weight_prefetch_method):
+                    weight_prefetch_method=self.weight_prefetch_method,
+                    comm_stream=self.comm_stream):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
@@ -2481,11 +2476,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 afd_stage_idx=0,
                 afd_connector=self.afd_connector,
                 afd_tokens_lens=afd_tokens_lens,
-                num_of_stages=len(ubatch_slices) if ubatch_slices else 1,
-                comm_stream1 = self.comm_stream1,
-                comm_stream2 = self.comm_stream2,
-                comm_stream1_event = self.comm_stream1_event,
-                comm_stream2_event = self.comm_stream2_event,
+                num_of_stages=len(ubatch_slices) if ubatch_slices else 1
             )
         return afd_metadata
 
@@ -2579,7 +2570,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # send is_ubatch to ffn side
         is_ubatch = True if ubatch_slices else False
         # to support inequal AF,[ffn_size,ffn_size + min_size) send
-        if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank) and self.afd_connector:
+        if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
             logger.debug(f'yxj self.afd_connector.rank in dummy_run is {self.afd_connector.rank}')
             self.afd_connector.send_is_ubatch(is_ubatch)
         logger.debug(f'send is_ubatch in dummy_run  is {is_ubatch}')
@@ -2690,7 +2681,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     model_instance=self.model,
                     afd_metadata=afd_metadata,
                     ubatch_slices=ubatch_slices,
-                    weight_prefetch_method=self.weight_prefetch_method):
+                    weight_prefetch_method=self.weight_prefetch_method,
+                    comm_stream=self.comm_stream):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     with_prefill, is_torchair_compile, input_ids, positions,
                     attn_metadata, num_tokens, intermediate_tensors,

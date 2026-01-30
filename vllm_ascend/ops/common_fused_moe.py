@@ -680,7 +680,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             topk_weights: Optional[torch.Tensor] = None,
             topk_ids: Optional[torch.Tensor] = None,
             row_idx: Optional[torch.Tensor] = None,
-            x_active_mask:Optional[torch.Tensor] = None,
+            x_active_mask: Optional[torch.Tensor] = None,
+            group_list_type: Optional[int] = 1,
             connector_name: Optional[str] = "",
             cam_p2p_ep_name: Optional[str] = "",
         ):
@@ -714,10 +715,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             )
             return shared_out,mlp_output
         from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
-        if connector_name == "m2nconnector":
-            group_list_type = 0
-        else:
-            group_list_type = 1
         
         permuted_hidden_states, expert_tokens = hidden_states, group_list
         
