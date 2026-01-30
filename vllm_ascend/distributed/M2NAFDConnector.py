@@ -22,7 +22,6 @@ from vllm.distributed.parallel_state import init_afd_process_group, init_model_p
 
 from vllm.logger import init_logger
 from vllm.config import VllmConfig,CUDAGraphMode,CompilationLevel
-from vllm_ascend.utils import npu_stream_switch_within_graph
 logger = init_logger(__name__)
 
 
@@ -113,13 +112,6 @@ class M2NAFDConnector(AFDConnectorBase):
         # 节点的卡数,最好取一个公约数,比如a侧8卡f侧4卡，那可以取2或者4
         self.server_rank_size = math.gcd(self.attn_size, self.ffn_size)
         logger.info("m2n connector initialized")
-
-        self.comm_stream = None
-        if self.config.afd_config.is_multistream:
-            self.comm_stream = torch.npu.Stream()
-            aic_num = int(self.config.afd_config.multistream_info["core_num"])
-            aiv_num = 2 * aic_num
-            torch.npu.set_stream_limit(self.comm_stream, aic_num, aiv_num)
 
         self._initialized = True
     
