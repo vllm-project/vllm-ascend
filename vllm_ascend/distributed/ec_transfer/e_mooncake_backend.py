@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 
 class EMooncakeBackend(MooncakeBackend):
     def __init__(self, parallel_config: ParallelConfig):
-        super.__init__(parallel_config=parallel_config)
+        super().__init__(parallel_config=parallel_config)
 
     def put_single(self, key: str, value: torch.Tensor | None) -> None:
         if value is not None:
