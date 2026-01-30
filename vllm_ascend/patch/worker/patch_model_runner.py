@@ -275,7 +275,7 @@ def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # request state. NOTE: The spec tokens are placeholders and not
         # added to token_ids_cpu.
         if self.is_kv_consumer and self.speculative_config and \
-            self.speculative_config.method == "mtp" and self.use_async_scheduling:
+            self.use_async_scheduling:
             req_state = self.requests[request.req_id]
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
                 request.req_id, [])

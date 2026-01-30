@@ -336,8 +336,7 @@ class NPUPlatform(Platform):
             # When open PD separation + MTP + Full Graph + asynchronous scheduling,
             # patch gpu_model_runner._update_states for solving
             # decode nodes may be in eager mode.
-            if vllm_config.speculative_config and vllm_config.kv_transfer_config and \
-               vllm_config.speculative_config.method == "mtp":
+            if vllm_config.speculative_config and vllm_config.kv_transfer_config:
                 import vllm_ascend.patch.worker.patch_model_runner  # noqa
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
