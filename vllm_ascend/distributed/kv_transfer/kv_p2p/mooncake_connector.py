@@ -50,6 +50,7 @@ from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
 from vllm_ascend.utils import enable_custom_op, is_vl_model
+from vllm_ascend import envs as ascend_envs
 
 # isort: off
 if TYPE_CHECKING:
@@ -570,7 +571,7 @@ class KVCacheRecvingThread(threading.Thread):
         is_kv_transfer_end = global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
         need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
-        use_fused_op = get_ascend_config().ascend_fusion_config.fusion_ops_transpose_kvcache_by_block
+        use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
         if need_nz_cache or need_cat_cache:
             # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
             if use_fused_op and enable_custom_op():
