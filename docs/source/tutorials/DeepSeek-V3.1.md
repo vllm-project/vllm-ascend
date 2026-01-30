@@ -299,7 +299,7 @@ export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
--`export VLLM_ASCEND_ENABLE_FLASHCOMM1=1`indicates that Flashcom1 optimization is enabaled.Currently,this optimization is only supported for MoE in scenarios where rensor-parallel-size > 1.
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --host 0.0.0.0 \
@@ -572,7 +572,7 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 **Notice:**
 The parameters are explained as follows:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: indicates that Flashcom1 optimization is enabaled.Currently,this optimization is only supported for MoE in scenarios where rensor-parallel-size > 1.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
 - `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
 - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
