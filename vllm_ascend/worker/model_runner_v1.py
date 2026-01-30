@@ -2775,10 +2775,10 @@ class NPUModelRunner(GPUModelRunner):
                 # Try to get the supported block sizes from the backend.
                 if attn_groups and self.use_hybrid_blocks:
                     backend = attn_groups[0].backend
-                    get_supported_block_size = getattr(backend, "get_supported_block_size", None)
+                    get_supported_kernel_block_sizes = getattr(backend, "get_supported_kernel_block_sizes", None)
                     # If the backend has the method, call it.
-                    if get_supported_block_size:
-                        if supported_sizes := get_supported_block_size():
+                    if get_supported_kernel_block_sizes:
+                        if supported_sizes := get_supported_kernel_block_sizes():
                             kernel_block_size_list = supported_sizes
                 kernel_block_sizes.append(kernel_block_size_list)
             else:
