@@ -87,6 +87,11 @@ def test_piecewise_res_consistency(cur_case: LLMTestCase):
         "max_model_len": 1024,
         "cudagraph_capture_sizes": [1, 2, 4, 8],
         "quantization": cur_case.quantization,
+        "additional_config": {
+            "npugraph_ex_config": {
+                "enable": False
+            }
+        },
     }
     gen_and_valid(runner_kwargs=runner_kwargs,
                   prompts=cur_case.prompts,
