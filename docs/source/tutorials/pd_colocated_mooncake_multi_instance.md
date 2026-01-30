@@ -121,7 +121,7 @@ Moonshot AI. Installation and compilation guide:
 First, obtain the Mooncake project using the following command:
 
 ```bash
-git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+git clone -b v0.3.8.post1 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 cd Mooncake
 git submodule update --init --recursive
 ```
