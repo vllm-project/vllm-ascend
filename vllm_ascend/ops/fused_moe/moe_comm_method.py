@@ -315,7 +315,7 @@ class FusedMC2CommImpl(MoECommMethod):
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
             out = torch.empty_like(hidden_states)
-            expert_token_nums = torch.empty_like(self.moe_config.num_local_experts)
+            expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=hidden_states,
                 weight1=w1,
