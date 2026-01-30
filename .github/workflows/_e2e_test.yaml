@@ -136,6 +136,7 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
           sccache --show-stats
+          sleep 43200
 
       - name: Run vllm-project/vllm-ascend test (light)
         env:
