@@ -30,6 +30,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
+from tqdm import tqdm  # type: ignore
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
@@ -301,6 +303,89 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs,
                                 self.uniform_decode_query_len)
         set_mc2_mask(vllm_config, self.device)
+        self.uses_mrope = self.model_config.uses_mrope
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+        if self.uses_mrope:
+            # NOTE: `mrope_positions` is implemented with one additional dummy
+            # position on purpose to make it non-contiguous so that it can work
+            # with torch compile.
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+
+            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+            # the modality of inputs. For text-only inputs, each dimension has
+            # identical position IDs, making M-RoPE functionally equivalent to
+            # 1D-RoPE.
+            # See page 5 of https://arxiv.org/abs/2409.12191
+            self.mrope_positions = torch.zeros((3, self.max_num_tokens + 1),
+                                               dtype=torch.int64,
+                                               device=self.device)
+            self.mrope_positions_cpu = torch.zeros(
+                (3, self.max_num_tokens + 1),
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=True)
+            self.mrope_positions_np = self.mrope_positions_cpu.numpy()
+
+        # OPTIMIZATION: Cache the tensors rather than creating them every step.
+        self.arange_np: npt.NDArray[np.int32] = np.arange(max(
+            self.max_num_reqs + 1, self.model_config.max_model_len,
+            self.max_num_tokens),
+                                                          dtype=np.int32)
+        # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
+        # a faster version of creating a new tensor every time. Thus, we should
+        # not make any assumptions about the values in these tensors.
+        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int32,
+                                         device="cpu",
+                                         pin_memory=True)
+        self.positions_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int64,
+                                         device="cpu",
+                                         pin_memory=True)
+        self.positions_np = self.positions_cpu.numpy()
+
+        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=True)
+        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
+        self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
+                                        dtype=torch.int32,
+                                        device="cpu",
+                                        pin_memory=True)
+        self.seq_lens_np = self.seq_lens_cpu.numpy()
+
+        self.pcp_use_hybrid_attn = self.model_config.hf_config.model_type == "qwen3_next"
+
+        self.num_pcp_pads = torch.zeros(self.max_num_reqs, dtype=torch.int32)
+        self.pcp_padded_slot_mapping = torch.zeros(
+            self.max_num_tokens + 2 * self.pcp_size * self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device)
+        self.num_actual_tokens_pcp_padded = 0
+        if self.speculative_config and self.pcp_size > 1:
+            self.input_ids_pcp_full = torch.zeros(self.max_num_tokens,
+                                                  dtype=torch.int32,
+                                                  device=self.device)
+            self.input_ids_pcp_full_cpu = torch.zeros(self.max_num_tokens,
+                                                      dtype=torch.int32,
+                                                      device="cpu",
+                                                      pin_memory=True)
+            self.query_start_loc_pcp_full = torch.zeros(self.max_num_reqs + 1,
+                                                        dtype=torch.int32,
+                                                        device=self.device)
+            self.query_start_loc_pcp_full_cpu = \
+                torch.zeros(self.max_num_reqs + 1,
+                            dtype=torch.int32,
+                            device="cpu",
+                            pin_memory=True)
+            self.query_start_loc_pcp_full_np = \
+                self.query_start_loc_pcp_full_cpu.numpy()
+            self.positions_pcp_full = torch.zeros(self.max_num_tokens,
+                                                  dtype=torch.int64,
+                                                  device="cpu",
+                                                  pin_memory=True)
+            self.positions_pcp_full_np = self.positions_pcp_full.numpy()
         self.decode_threshold = 1 + (
             self.speculative_config.num_speculative_tokens
             if self.speculative_config else 0)
@@ -600,6 +685,7 @@ class NPUModelRunner(GPUModelRunner):
             req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
+
         # for pcp, prefill mtp should use origin scheduleroutput ,
         if self.speculative_config and self.pcp_size * self.dcp_size > 1:
             self.pcp_manager.generate_pcp_mtp_input(
@@ -615,17 +701,20 @@ class NPUModelRunner(GPUModelRunner):
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
                 self.num_spec_tokens)
-
+            
+        max_num_tokens_across_pcp = 0
         if self.pcp_size > 1:
-            num_scheduled_tokens[:
-                                 num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
+            tokens, tokens_padded, max_num_tokens_across_pcp, position_pcp, pcp_unpad_mask = self.pcp_manager.update_tokens_for_pcp(
                                      num_scheduled_tokens[:num_reqs],
                                      self.arange_np,
                                      self.input_batch.num_reqs,
                                      self.reorder_batch_threshold,
                                  )
-            # Re-update after PCP split sequences.
-            total_num_scheduled_tokens = sum(num_scheduled_tokens)
+            num_scheduled_tokens_padded = None
+            if self.pcp_use_hybrid_attn and tokens_padded is not None:
+                num_scheduled_tokens_padded = np.array(tokens_padded, dtype=np.int32)
+            num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+            total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
             req_indices = np.repeat(self.arange_np[:num_reqs],
                                     num_scheduled_tokens)
             cu_num_tokens, _ = self._get_cumsum_and_arange(
@@ -636,6 +725,10 @@ class NPUModelRunner(GPUModelRunner):
                 position_pcp[:total_num_scheduled_tokens],
                 out=positions_np,
             )
+        else:
+            position_pcp, pcp_unpad_mask = None, None
+            self.num_pcp_pads = self.num_pcp_pads[:num_reqs]
+
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         # Get token indices.
@@ -710,7 +803,14 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens)
         self.seq_lens.copy_to_gpu()
 
+        # Fill unused with -1. Needed for reshape_and_cache
+        self.query_start_loc.gpu[num_reqs + 1:].fill_(-1)
         self.seq_lens.gpu[num_reqs:].fill_(0)
+
+        if self.pcp_size > 1 and self.pcp_use_hybrid_attn:
+            self.query_lens = torch.from_numpy(num_scheduled_tokens_padded)
+        else:
+            self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens,
@@ -772,10 +872,17 @@ class NPUModelRunner(GPUModelRunner):
             num_draft_tokens = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
             if self.pcp_size * self.dcp_size > 1:
-                logits_indices = self.pcp_manager.get_logits_indices(
-                    cu_num_tokens, num_reqs)
-                logits_indices = logits_indices.pin_memory().to(
-                    self.device, non_blocking=True)
+                if not self.pcp_use_hybrid_attn:
+                    logits_indices = self.pcp_manager.get_logits_indices(
+                        cu_num_tokens, num_reqs)
+                    logits_indices = logits_indices.pin_memory().to(
+                        self.device, non_blocking=True)
+                else:
+                    tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
+                    tokens_logits = tokens_original_tensor + self.pcp_manager.pcp_pads_logits_hybrid_attn[:tokens_original_tensor.shape[0]]
+                    logits_indices = torch.cumsum(tokens_logits, dim=0) - 1
+                    logits_indices = logits_indices.pin_memory().to(
+                        self.device, non_blocking=True)
             else:
                 logits_indices = self.query_start_loc.gpu[1:num_reqs + 1] - 1
         else:
@@ -826,7 +933,7 @@ class NPUModelRunner(GPUModelRunner):
                 logits_indices,
                 (0, max_num_reqs_across_dp - logits_indices.shape[0]))
 
-        return logits_indices, spec_decode_metadata
+        return logits_indices, spec_decode_metadata, max_num_tokens_across_pcp, pcp_unpad_mask, num_scheduled_tokens_padded
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
@@ -1182,6 +1289,9 @@ class NPUModelRunner(GPUModelRunner):
                 (
                     logits_indices,
                     spec_decode_metadata,
+                    max_num_tokens_across_pcp,
+                    pcp_unpad_mask,
+                    num_scheduled_tokens_padded,
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
@@ -1259,6 +1369,8 @@ class NPUModelRunner(GPUModelRunner):
                         num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                         num_scheduled_tokens_np=num_scheduled_tokens_np,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                        pcp_unpad_mask=pcp_unpad_mask,
+                        num_scheduled_tokens_padded=num_scheduled_tokens_padded,
                     )
                 )
 
@@ -1317,6 +1429,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_actual_tokens=scheduler_output.
                     total_num_scheduled_tokens,
                     model_instance=self.model,
+                    max_tokens_across_pcp=max_num_tokens_across_pcp if self.pcp_size > 1 else 0,
                     skip_compiled=has_encoder_input),
                 self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
             ):
@@ -1907,6 +2020,8 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        pcp_unpad_mask: torch.Tensor | None = None,
+        num_scheduled_tokens_padded: np.ndarray | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -1934,10 +2049,16 @@ class NPUModelRunner(GPUModelRunner):
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
-        def _get_pcp_metadata(num_tokens):
+        def _get_pcp_metadata(num_tokens, pcp_unpad_mask, num_scheduled_tokens_padded):
             if not self.use_cp:
                 return None
-            return self.pcp_manager.generate_pcp_metadata(num_tokens, self.query_lens, self.input_batch, num_scheduled_tokens_np)
+            return self.pcp_manager.generate_pcp_metadata(
+                num_tokens if not (self.pcp_use_hybrid_attn and self.pcp_size > 1) else sum(num_scheduled_tokens_padded),
+                self.query_lens,
+                self.input_batch,
+                num_scheduled_tokens_np,
+                pcp_unpad_mask,
+            )
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
@@ -1958,6 +2079,14 @@ class NPUModelRunner(GPUModelRunner):
                     device=self.device,
                 )
             else:
+                if self.pcp_size > 1:
+                    total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
+                    if self.pcp_use_hybrid_attn:
+                        maybe_pcp_full_tokens = sum(num_scheduled_tokens_padded) * self.pcp_size - total_num_pcp_pads
+                    else:
+                        maybe_pcp_full_tokens = num_tokens * self.pcp_size - total_num_pcp_pads
+                else:
+                    maybe_pcp_full_tokens = num_tokens_padded
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
                 maybe_num_reqs_padded = num_reqs_padded * self.decode_token_per_req if self.use_cp else num_reqs_padded
@@ -1970,13 +2099,17 @@ class NPUModelRunner(GPUModelRunner):
                     blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
             if self.pcp_size > 1:
                 slot_mapping = self.pcp_manager.get_padded_slot_mapping(
-                    num_tokens,
+                    num_tokens if not self.pcp_use_hybrid_attn else sum(num_scheduled_tokens_padded),
                     num_tokens_padded,
                     slot_mapping,
                 )
             return blk_table_tensor, slot_mapping
 
-        long_seq_metdadata = _get_pcp_metadata(num_tokens)
+        long_seq_metdadata = _get_pcp_metadata(
+            num_tokens,
+            pcp_unpad_mask,
+            num_scheduled_tokens_padded,
+        )
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
 
         actual_last_loc = self.query_start_loc.np[num_reqs_padded]
