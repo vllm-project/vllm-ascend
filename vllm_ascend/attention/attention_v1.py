@@ -854,13 +854,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
             )[0]
 
-    def reshape_and_cache(
+    def do_kv_cache_update(
         self,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: AscendMetadata,
-    ):
+    ) -> None:
         if len(kv_cache) > 1:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
@@ -932,8 +932,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
-        if key is not None and value is not None:
-            key, value = self.reshape_and_cache(key, value, kv_cache, attn_metadata)
+
+        if len(kv_cache) > 1 and self.key_cache is None:
+            self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling":
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
