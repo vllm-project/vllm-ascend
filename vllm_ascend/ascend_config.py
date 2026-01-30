@@ -214,9 +214,7 @@ class AscendFusionConfig:
     Configuration for controlling whether to use a fused operator gmmswigluquant.
     """
 
-    def __init__(
-        self, fusion_ops_gmmswigluquant: bool = True, **kwargs
-    ):
+    def __init__(self, fusion_ops_gmmswigluquant: bool = True, **kwargs):
         """
         Initialize the configuration.
 
@@ -227,6 +225,7 @@ class AscendFusionConfig:
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fusion_ops_gmmswigluquant = fusion_ops_gmmswigluquant
+
 
 class NpugraphExConfig:
     """
