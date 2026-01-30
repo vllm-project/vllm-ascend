@@ -67,7 +67,8 @@ class WeightPrefetchMethod:
             module_name="mlp",
             enable=weight_prefetch_config.enabled and not self.is_moe,
             prefetch_ratio=weight_prefetch_config.prefetch_ratio.get(
-                "mlp", {}))
+                "mlp", {}) or {'gate_up': 1.0, 'down': 1.0})
+
         print(f'mlp prefetch config: {self.mlp} self.is_moe:{self.is_moe} ==============================================================')
 
     def maybe_prefetch_attn_weight_preprocess(
@@ -153,7 +154,7 @@ class WeightPrefetchMethod:
             weight_size = weight.data.element_size() * weight.data.numel() * self.mlp.prefetch_ratio.get("gate_up", 0)
             if weight_size > MAX_PREFETCH_WEIGHT_SIZE:
                 weight_size = MAX_PREFETCH_WEIGHT_SIZE
-            #print(f'mlp prefetch current layer prefix:{curr_layer_prefix}, weight size: {weight_size} ==============================================================')
+            print(f'mlp prefetch gate_up current layer prefix:{curr_layer_prefix}, weight size: {weight_size} ==============================================================')
             torch.ops.vllm.prefetch_preprocess(weight=weight,
                                             start_flag=x_dependency,
                                             max_weight_size=int(weight_size))
@@ -172,7 +173,7 @@ class WeightPrefetchMethod:
                                         max_weight_size=int(weight_size))
         forward_context.prefetch_mlp_down_proj = True
         forward_context.layer_idx += 1
-        #print(f'mlp down prefetch layer idx:{layer_idx}, layer_idx in forward:{forward_context.layer_idx} ==============================================================')
+        print(f'mlp prefetch down layer idx:{layer_idx}, layer_idx for next forward:{forward_context.layer_idx}, weight size: {weight_size} ==============================================================')
 
     def maybe_prefetch_mlp_weight_postprocess(self, stop_flag: torch.Tensor):
         if not self.mlp.is_active_this_forward:
