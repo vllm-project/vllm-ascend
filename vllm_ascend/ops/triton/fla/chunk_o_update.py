@@ -9,18 +9,19 @@
 
 # ruff: noqa: E501
 # mypy: ignore-errors
-from typing import Optional
 
 import torch
 from vllm.triton_utils import tl, triton
 
-from .utils import prepare_chunk_offsets, safe_exp
+from .utils import prepare_chunk_offsets
 
 
-@triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-})
-@triton.jit(do_not_specialize=['T'])
+@triton.heuristics(
+    {
+        'IS_VARLEN': lambda args: args["cu_seqlens"] is not None,
+    }
+)
+@triton.jit(do_not_specialize=["T"])
 def chunk_fwd_kernel_o_update(
     h,
     h_update,
@@ -41,8 +42,7 @@ def chunk_fwd_kernel_o_update(
     i_n, i_h = i_nh // H, i_nh % H  # 按某个req的某个头划分网格
 
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(
-            tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int64)
@@ -60,12 +60,11 @@ def chunk_fwd_kernel_o_update(
         hupd_base = h_update + ((i_tg + i_n) * H + i_h).to(tl.int64) * K * K
 
         for i_k in range(tl.cdiv(K, BK)):
-            p_h = tl.make_block_ptr(h_base, (K, V), (V, 1),
-                                    (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-            p_hupd = tl.make_block_ptr(hupd_base, (K, V), (V, 1),
-                                    (i_k * BK, i_v * BV), (BK, BK), (1, 0))
-            p_updated_h_state = tl.make_block_ptr(updated_h_state, (K, V), (V, 1),
-                                    (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+            p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+            p_hupd = tl.make_block_ptr(hupd_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BK), (1, 0))
+            p_updated_h_state = tl.make_block_ptr(
+                updated_h_state, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0)
+            )
 
             # [BK, BV]
             b_h = tl.load(p_h, boundary_check=(0, 1))
@@ -84,7 +83,7 @@ def chunk_fwd_o_update(
     h: torch.Tensor,
     h_update: torch.Tensor,
     updated_h_state: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
@@ -101,7 +100,7 @@ def chunk_fwd_o_update(
         )
 
     def grid(meta):
-        return (triton.cdiv(V, meta['BV']), N * H)
+        return (triton.cdiv(V, meta["BV"]), N * H)
 
     chunk_fwd_kernel_o_update[grid](
         h=h,

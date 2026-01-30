@@ -13,8 +13,8 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from vllm.forward_context import get_forward_context
 from vllm.distributed import get_pcp_group
+from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
 
@@ -106,7 +106,6 @@ def causal_conv1d_fn(
     if attn_metadata is not None:
         num_decodes = attn_metadata.num_decodes
 
-
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
     if x.stride(-1) != 1:
@@ -154,7 +153,7 @@ def causal_conv1d_fn(
 def extract_last_width(x, start_loc, width):
     end_loc = start_loc[1:]
     offsets = torch.arange(width, device=x.device)
-    indices = (end_loc.unsqueeze(1) - width + offsets.unsqueeze(0))  # (num_seqs, width)
+    indices = end_loc.unsqueeze(1) - width + offsets.unsqueeze(0)  # (num_seqs, width)
 
     return x[:, indices].permute(1, 0, 2)
 

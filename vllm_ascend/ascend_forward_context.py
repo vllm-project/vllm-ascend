@@ -1,7 +1,7 @@
 import math
 from contextlib import contextmanager
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig

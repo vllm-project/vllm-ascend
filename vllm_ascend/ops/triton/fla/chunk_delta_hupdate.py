@@ -8,24 +8,21 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 # mypy: ignore-errors
-from typing import Optional
 
 import torch
 from vllm.triton_utils import tl, triton
 
-from .utils import prepare_chunk_indices, prepare_chunk_offsets, safe_exp, prepare_update_chunk_offsets
-from vllm_ascend.utils import prefill_context_parallel_enable
+from .utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_update_chunk_offsets, safe_exp
 
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import get_pcp_group, get_tp_group
+_CONDITIONS = ("seq7168",)
 
-_CONDITIONS = ("seq7168", )
-        
-@triton.heuristics({
-    "USE_G": lambda args: args["g"] is not None,
-    "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-})
+
+@triton.heuristics(
+    {
+        "USE_G": lambda args: args["g"] is not None,
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    }
+)
 @triton.jit(do_not_specialize=["T"])
 def chunk_gated_delta_rule_fwd_kernel_hupdate_blockdim64(
     k,
@@ -100,11 +97,9 @@ def chunk_gated_delta_rule_fwd_kernel_hupdate_blockdim64(
 
         k_base = k + bos * Hg * K + (i_h // (H // Hg)) * K
         # get row-sliced k [64, T]
-        p_k_upd1 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT),
-                                (64, BT), (0, 1))
+        p_k_upd1 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
         b_k_upd1 = tl.load(p_k_upd1, boundary_check=(0, 1))
-        p_k_upd2 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (64, i_t * BT),
-                                (64, BT), (0, 1))
+        p_k_upd2 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
         b_k_upd2 = tl.load(p_k_upd2, boundary_check=(0, 1))
 
         if USE_G:
@@ -126,17 +121,13 @@ def chunk_gated_delta_rule_fwd_kernel_hupdate_blockdim64(
         b_hupd_local_21 = -tl.dot(b_k_upd2, b_w_upd1.to(b_k_upd2.dtype)).to(tl.float32)
 
         hupd_base = h_update + (boh + i_t + i_n) * H * K * K + i_h * K * K
-        p_hupd_11 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (0, 0),
-                                    (64, 64), (1, 0))
+        p_hupd_11 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (0, 0), (64, 64), (1, 0))
         b_hupd_11 = tl.load(p_hupd_11, boundary_check=(1, 0))
-        p_hupd_21 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (64, 0),
-                                    (64, 64), (1, 0))
+        p_hupd_21 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (64, 0), (64, 64), (1, 0))
         b_hupd_21 = tl.load(p_hupd_21, boundary_check=(1, 0))
-        p_hupd_12 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (0, 64),
-                                    (64, 64), (1, 0))
+        p_hupd_12 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (0, 64), (64, 64), (1, 0))
         b_hupd_12 = tl.load(p_hupd_12, boundary_check=(1, 0))
-        p_hupd_22 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (64, 64),
-                                    (64, 64), (1, 0))
+        p_hupd_22 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (64, 64), (64, 64), (1, 0))
         b_hupd_22 = tl.load(p_hupd_22, boundary_check=(1, 0))
 
         b_hupd11_new = tl.dot(b_hupd_local_11.to(b_hupd_11.dtype), b_hupd_11).to(tl.float32)
@@ -152,38 +143,26 @@ def chunk_gated_delta_rule_fwd_kernel_hupdate_blockdim64(
         b_hupd22_new += tl.dot(b_hupd_local_22.to(b_hupd_22.dtype), b_hupd_22)
 
         hupd_next = h_update + (boh + i_t + i_n + 1) * H * K * K + i_h * K * K
-        p_hupd_11 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (0, 0),
-                                    (64, 64), (1, 0))
-        tl.store(p_hupd_11,
-                 b_hupd11_new.to(p_hupd_11.dtype.element_ty),
-                 boundary_check=(0, 1))
+        p_hupd_11 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (0, 0), (64, 64), (1, 0))
+        tl.store(p_hupd_11, b_hupd11_new.to(p_hupd_11.dtype.element_ty), boundary_check=(0, 1))
         
-        p_hupd_21 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (64, 0),
-                                    (64, 64), (1, 0))
-        tl.store(p_hupd_21,
-                 b_hupd21_new.to(p_hupd_21.dtype.element_ty),
-                 boundary_check=(0, 1))
+        p_hupd_21 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (64, 0), (64, 64), (1, 0))
+        tl.store(p_hupd_21, b_hupd21_new.to(p_hupd_21.dtype.element_ty), boundary_check=(0, 1))
         
-        p_hupd_12 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (0, 64),
-                                    (64, 64), (1, 0))
-        tl.store(p_hupd_12,
-                 b_hupd12_new.to(p_hupd_12.dtype.element_ty),
-                 boundary_check=(0, 1))
+        p_hupd_12 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (0, 64), (64, 64), (1, 0))
+        tl.store(p_hupd_12, b_hupd12_new.to(p_hupd_12.dtype.element_ty), boundary_check=(0, 1))
         
-        p_hupd_22 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (64, 64),
-                                    (64, 64), (1, 0))
-        tl.store(p_hupd_22,
-                 b_hupd22_new.to(p_hupd_22.dtype.element_ty),
-                 boundary_check=(0, 1))
+        p_hupd_22 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (64, 64), (64, 64), (1, 0))
+        tl.store(p_hupd_22, b_hupd22_new.to(p_hupd_22.dtype.element_ty), boundary_check=(0, 1))
 
 
 def chunk_gated_delta_rule_fwd_hupdate(
     k: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     num_decodes: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
@@ -192,8 +171,7 @@ def chunk_gated_delta_rule_fwd_hupdate(
     H = u.shape[-2]
     BT = chunk_size
 
-    chunk_indices = (prepare_chunk_indices(cu_seqlens, chunk_size)
-                     if cu_seqlens is not None else None)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
@@ -231,5 +209,5 @@ def chunk_gated_delta_rule_fwd_hupdate(
     )
     # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 1:
     #     print(">>>>>>>>", h_update.dtype, h_update.shape)
-    h_update[:, :num_decodes * 2, :, :, :] = torch.zeros((K, K), dtype=h_update.dtype, device=h_update.device)
+    h_update[:, : num_decodes * 2, :, :, :] = torch.zeros((K, K), dtype=h_update.dtype, device=h_update.device)
     return h_update

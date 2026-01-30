@@ -12,9 +12,9 @@ import warnings
 
 import torch
 from einops import rearrange
-from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
-from vllm.forward_context import get_forward_context
 from vllm.distributed import get_pcp_group
+from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
@@ -24,10 +24,8 @@ from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
-from .utils import input_guard
+from .utils import input_guard, prepare_final_chunk_indices
 from .wy_fast import recompute_w_u_fwd
-
-from .utils import prepare_final_chunk_indices
 
 
 def chunk_gated_delta_rule_fwd(
@@ -41,7 +39,6 @@ def chunk_gated_delta_rule_fwd(
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
 ):
-
     forward_context = get_forward_context()
     num_decodes = 0
     attn_metadata = forward_context.attn_metadata
@@ -93,9 +90,7 @@ def chunk_gated_delta_rule_fwd(
         updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
         updated_state[0, ...] = first_final_state
         for i in range(1, get_pcp_group().world_size):
-            updated_final_state = final_state + torch.matmul(
-                all_final_h_update[i, ...], updated_state[i - 1, ...]
-            )
+            updated_final_state = final_state + torch.matmul(all_final_h_update[i, ...], updated_state[i - 1, ...])
             updated_state[i, ...] = updated_final_state
 
         final_state = updated_state[-1, ...]
