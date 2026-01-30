@@ -393,9 +393,10 @@ class AscendFusedMoE(FusedMoE):
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, \
                 "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
+            cur_iter = torch.remainder(self.load_counter, self.num_iter)
             self.moe_load.index_add_(
                 dim=0,
-                index=self.load_counter,
+                index=cur_iter,
                 source=expert_tokens.to(torch.int32, non_blocking=True).view(1,-1),
             )
             self.load_counter.add_(1)
