@@ -44,6 +44,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    align_actual_seq_lengths_q,
     enable_cp,
     split_decodes_and_prefills,
     using_paged_attention,
@@ -488,6 +489,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
 
+                    actual_seq_lengths_q = align_actual_seq_lengths_q(
+                        actual_seq_lengths_q,
+                        int(query.shape[0]),
+                    )
+
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
@@ -525,13 +531,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
-        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        unpadded_num_tokens = attn_metadata.actual_seq_lengths_q[-1] if attn_metadata.actual_seq_lengths_q else 0
+        num_tokens = max(unpadded_num_tokens, int(query.shape[0]))
         forward_context = get_forward_context()
         if forward_context.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        actual_seq_lengths_q = align_actual_seq_lengths_q(attn_metadata.actual_seq_lengths_q, num_tokens)
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
 

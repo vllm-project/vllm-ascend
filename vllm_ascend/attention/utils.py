@@ -61,6 +61,20 @@ def enable_cp():
     return prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1
 
 
+def align_actual_seq_lengths_q(actual_seq_lengths_q: list[int], total_tokens: int) -> list[int]:
+    if not actual_seq_lengths_q:
+        return actual_seq_lengths_q
+    if actual_seq_lengths_q[-1] == total_tokens:
+        return actual_seq_lengths_q
+    if total_tokens < actual_seq_lengths_q[-1]:
+        return actual_seq_lengths_q
+    # In full-graph mode, query may be padded for cudagraph replay.
+    # Ensure TND requires last element equals total tokens.
+    aligned = list(actual_seq_lengths_q)
+    aligned[-1] = total_tokens
+    return aligned
+
+
 @dataclass
 class AscendPrefillContextParallelMetadata:
     """
