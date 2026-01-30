@@ -126,6 +126,7 @@ if command -v apt-get &> /dev/null; then
             cmake \
             git \
             wget \
+            unzip \
             libibverbs-dev \
             libgoogle-glog-dev \
             libgtest-dev \
@@ -142,6 +143,8 @@ if command -v apt-get &> /dev/null; then
             protobuf-compiler-grpc \
             libcurl4-openssl-dev \
             libhiredis-dev \
+            liburing-dev \
+            libjemalloc-dev \
             pkg-config \
             patchelf \
             mpich \
@@ -157,6 +160,7 @@ elif command -v yum &> /dev/null; then
         cmake \
         git \
         wget \
+        unzip \
         libibverbs-devel \
         numactl-devel \
         gflags-devel \
@@ -169,6 +173,8 @@ elif command -v yum &> /dev/null; then
         boost-devel \
         openssl-devel \
         hiredis-devel \
+        liburing-devel \
+        jemalloc-devel \
         python3-devel \
         curl-devel \
         patchelf
@@ -213,7 +219,7 @@ fi
 
 # Clone yalantinglibs
 echo "Cloning yalantinglibs from ${GITHUB_PROXY}/alibaba/yalantinglibs.git"
-git clone -b 0.5.5 --depth 1 ${GITHUB_PROXY}/alibaba/yalantinglibs.git
+git clone -b 0.5.6 --depth 1 ${GITHUB_PROXY}/alibaba/yalantinglibs.git
 check_success "Failed to clone yalantinglibs"
 
 # Build and install yalantinglibs
