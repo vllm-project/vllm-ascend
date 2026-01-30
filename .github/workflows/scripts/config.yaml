@@ -1,4 +1,8 @@
 e2e-singlecard:
+  - name: tests/e2e/singlecard/compile/test_graphex_norm_quant_fusion.py
+    estimated_time: 80
+  - name: tests/e2e/singlecard/compile/test_graphex_qknorm_rope_fusion.py
+    estimated_time: 80
   - name: tests/e2e/singlecard/test_auto_fit_max_mode_len.py
     estimated_time: 25
   - name: tests/e2e/singlecard/test_aclgraph_accuracy.py
