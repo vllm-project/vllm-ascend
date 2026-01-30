@@ -739,15 +739,19 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         self.smooth_scales_cq = self.fused_qkv_a_proj.deq_scale[:self.q_lora_rank].unsqeeze(0).contiguous()
 
-        self.gamma1 = self.q_a_layernorm.weight.data  
+        self.gamma1 = self.q_a_layernorm.weight.data
         self.beta1 = self.q_a_layernorm.bias.data
-        self.gamma2 = self.kv_a_layernorm.weight.data 
+        self.gamma2 = self.kv_a_layernorm.weight.data
         self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
         self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
         self.quant_scale1 = self.q_proj.input_scale.data
         self.quant_offset1 = self.q_proj.input_offset.data
         self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
         self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
+
+        # quant_scale_ckv for per-tile kv_cache quantization with shape [1, Hckv]
+        # Use the dequant_scale for kv part as the quant_scale for kv_cache output
+        self.quant_scale_ckv = self.dequant_scale_w_dkv_kr[:, :self.kv_lora_rank].clone()
 
         self.aclnn_input_scale = self.fused_qkv_a_proj.aclnn_input_scale.clone().detach()
         self.aclnn_input_scale_reciprocal = self.fused_qkv_a_proj.aclnn_input_scale_reciprocal.clone().detach()
@@ -839,6 +843,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # kv_cache is a tuple of (k_nope, k_pe, k)
         k_nope, k_pe = kv_cache[0], kv_cache[1]
 
+        # Prepare merged kv_cache for ckvkr_repo_mode=1
+        # Combine k_nope [B, N, S, Hckv] and k_pe [B, N, S, Dr] into [B, N, S, Hckv+Dr]
+        kv_cache_combined = torch.cat([k_nope, k_pe], dim=-1)
 
         quanted_hidden_states, quanted_hidden_states_scale = torch_npu.npu_dynamic_quant(hidden_states)
 
@@ -879,15 +886,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             rmsnorm_gamma_ckv=self.rmsnorm_gamma_ckv,
             rope_sin=rope_sin,
             rope_cos=rope_cos,
-            kv_cache=k_nope,  # k^C cache
-            kr_cache=k_pe,    # k^R cache
+            kv_cache=kv_cache_combined,  # k^C + k^R merged cache
+            kr_cache=kv_cache_combined,  # same buffer for ckvkr_repo_mode=1
             cache_index=cache_index.to(torch.int64),
             dequant_scale_x=quanted_hidden_states_scale.unsqueeze(-1),
             dequant_scale_w_dq=self.dequant_scale_w_dq,
             dequant_scale_w_uq_qr=self.dequant_scale_w_uq_qr,
             dequant_scale_w_dkv_kr=self.dequant_scale_w_dkv_kr,
-            quant_scale_ckv=None, # not used 
-            quant_scale_ckr=None,  # Not used in per-tensor mode
+            quant_scale_ckv=self.quant_scale_ckv,  # per-tile scale for merged kv_cache
+            quant_scale_ckr=None,  # Not used when ckvkr_repo_mode=1
             smooth_scales_cq=self.smooth_scales_cq,
             actual_seq_len=None,
             k_nope_clip_alpha=None,
@@ -896,10 +903,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             cache_mode='PA_BSND',
             query_norm_flag=True,
             weight_quant_mode=2, # weight_dq、weight_uq_qr、weight_dkv_kr 量化
-            kv_cache_quant_mode=0, # 先调通这个场景
-            query_quant_mode=0, # 
-            ckvkr_repo_mode=0, # 锁定 0
-            quant_scale_repo_mode=0, # 锁定 0
+            kv_cache_quant_mode=3, # per-tile量化
+            query_quant_mode=0,
+            ckvkr_repo_mode=1, # kv_cache和kr_cache合并存储
+            quant_scale_repo_mode=1, # scale和数据合并存储
             tile_size=128,
             qc_qr_scale=1.0,
             kc_scale=1.0)
