@@ -735,7 +735,8 @@ class TestHelperFunctions(unittest.TestCase):
     )
     def test_ensure_zmq_send_success(self, _):
         mock_socket = MagicMock()
-        ensure_zmq_send(mock_socket, b"hello")
+        path = "127.0.0.1:12345"
+        ensure_zmq_send(mock_socket, b"hello", path)
         mock_socket.send.assert_called_once_with(b"hello")
 
     @patch(
@@ -743,10 +744,11 @@ class TestHelperFunctions(unittest.TestCase):
     )
     def test_ensure_zmq_send_retry_and_fail(self, _):
         mock_socket = MagicMock()
+        path = "127.0.0.1:12345"
         mock_socket.send.side_effect = zmq.ZMQError(  # type: ignore
             "send failed")
         with self.assertRaises(RuntimeError):
-            ensure_zmq_send(mock_socket, b"hello", max_retries=2)
+            ensure_zmq_send(mock_socket, b"hello", path, max_retries=2)
         self.assertEqual(mock_socket.send.call_count, 2)
 
     @patch(
@@ -759,7 +761,8 @@ class TestHelperFunctions(unittest.TestCase):
         mock_poller.poll.return_value = [
             (mock_socket, zmq.POLLIN)  # type: ignore
         ]
-        data = ensure_zmq_recv(mock_socket, mock_poller)
+        path = "127.0.0.1:12345"
+        data = ensure_zmq_recv(mock_socket, mock_poller, path)
         self.assertEqual(data, b"response")
 
     @patch(
@@ -769,9 +772,11 @@ class TestHelperFunctions(unittest.TestCase):
         mock_socket = MagicMock()
         mock_poller = MagicMock()
         mock_poller.poll.return_value = []
+        path = "127.0.0.1:12345"
         with self.assertRaises(RuntimeError):
             ensure_zmq_recv(mock_socket,
                             mock_poller,
+                            path,
                             timeout=0.01,
                             max_retries=2)
 
