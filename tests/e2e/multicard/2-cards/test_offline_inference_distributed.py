@@ -41,6 +41,10 @@ QWEN_W4A8_MODELS = [
     "vllm-ascend/Qwen3-1.7B-W4A8-V1",
 ]
 
+QWEN_W4A4_MODELS = [
+    "Eco-Tech/Qwen3-32B-w4a4-LAOS",
+]
+
 DEEPSEEK_W4A8_MODELS = [
     "vllm-ascend/DeepSeek-V3.1-W4A8-puring",
 ]
@@ -238,7 +242,7 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
 
 
 @patch.dict(os.environ, {"HCCL_OP_EXPANSION_MODE": "AIV"})
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
@@ -258,6 +262,24 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
                         "num_speculative_tokens": 2,
                         "method": "deepseek_mtp"
                     },
+                    additional_config={
+                        "layer_sharding":["q_b_proj", "o_proj"]
+                    },
                     reasoning_parser="deepseek_v3",
                     tokenizer_mode="deepseek_v32") as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.parametrize("model", QWEN_W4A4_MODELS)
+def test_qwen3_w4a4_distributed_tp2(model):
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+            snapshot_download(model),
+            tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
+            quantization="ascend",
+    ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

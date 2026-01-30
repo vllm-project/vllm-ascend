@@ -21,13 +21,12 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
 
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 
 
 class EplbUpdator:
-
-    def __init__(self, eplb_config, loader, eplb_process: EplbProcess,
-                 process):
+    def __init__(self, eplb_config, loader, eplb_process: EplbProcess, process):
         self.eplb_config = eplb_config
         self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
@@ -35,9 +34,14 @@ class EplbUpdator:
         self.shared_dict = self.eplb_process.shared_dict
         self.moe_imbalance_dict: dict[int, float] = {}
 
-    def set_adaptor(self, adaptor):
+    def set_adaptor(self, adaptor: VllmEplbAdaptor):
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
+        local_load = self.adaptor.get_rank_expert_workload()
+        self.world_size = dist.get_world_size()
+        self.device = local_load.device
+        shape = (self.world_size, *local_load.shape)
+        self._gather_buffer = torch.empty(shape, dtype=local_load.dtype, device=self.device)
 
     def init_eplb(self, expert_map_path, process):
         self.rank_id = dist.get_rank()
@@ -64,52 +68,49 @@ class EplbUpdator:
 
         self.process = process
 
-        logger.info(
-            f"[ModelRunner] Launched EPLB process (pid={self.process.pid})")
+        logger.info(f"[ModelRunner] Launched EPLB process (pid={self.process.pid})")
 
     def update_iteration(self):
         self.cur_iterations += 1
-        if self.cur_iterations == (self.expert_heat_collection_interval + \
-                                   self.algorithm_execution_interval + self.num_moe_layers):
+        if self.cur_iterations == (
+            self.expert_heat_collection_interval + self.algorithm_execution_interval + self.num_moe_layers
+        ):
             logger.info("Finish expert parallel load balancing.")
             if self.expert_map_record_path is not None:
-                self.adaptor._export_tensor_to_file(
-                    self.shared_dict["expert_maps"],
-                    self.expert_map_record_path)
+                self.adaptor._export_tensor_to_file(self.shared_dict["expert_maps"], self.expert_map_record_path)
 
             self.adaptor.model.clear_all_moe_loads()
             self.cur_iterations = 0
 
     def get_update_info_flag(self):
-        return self.cur_iterations == (self.expert_heat_collection_interval +
-                                       self.algorithm_execution_interval - 1)
+        return self.cur_iterations == (self.expert_heat_collection_interval + self.algorithm_execution_interval - 1)
 
     def wakeup_eplb_worker_flag(self):
-        return self.cur_iterations == (self.expert_heat_collection_interval -
-                                       1)
+        return self.cur_iterations == (self.expert_heat_collection_interval - 1)
 
     def update_expert_weight_flag(self):
         weight_update_counter = self.cur_iterations - (
-            self.expert_heat_collection_interval +
-            self.algorithm_execution_interval)
-        return (weight_update_counter >= 0
-                and weight_update_counter < self.num_moe_layers)
+            self.expert_heat_collection_interval + self.algorithm_execution_interval
+        )
+        return weight_update_counter >= 0 and weight_update_counter < self.num_moe_layers
 
     def wakeup_eplb_worker(self):
         self.eplb_process.planner_q.put(1)
 
     def forward_before(self):
         if self.update_expert_weight_flag():
-            (expert_send_info, expert_recv_info, updated_expert_map,
-             log2phy_map, layer_id) = self.update_info_all.pop(0)
+            (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
+                0
+            )
             log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
             self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
-            updated_expert_map_this_rank = torch.from_numpy(
-                numpy.array(updated_expert_map))
+            updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
             self.eplb_loader.generate_expert_d2d_transfer_task(
-                expert_send_info, expert_recv_info,
+                expert_send_info,
+                expert_recv_info,
                 updated_expert_map_this_rank,
-                layer_id + self.adaptor.num_dense_layers)
+                layer_id + self.adaptor.num_dense_layers,
+            )
 
             # set asynchronous stream for d2d expert weight update
             self.reqs = []
@@ -122,50 +123,29 @@ class EplbUpdator:
 
     def forward_end(self):
         if self.wakeup_eplb_worker_flag():
-            self.compute_and_set_moe_load(is_clear=True)
+            self.compute_and_set_moe_load()
             self.wakeup_eplb_worker()
 
-        if self.update_expert_weight_flag(
-        ) and self.expert_map_record_path is None:
+        if self.update_expert_weight_flag() and self.expert_map_record_path is None:
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
         self.update_iteration()
 
-    def compute_and_set_moe_load(self, is_clear=False):
+    def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload()
+        dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
-        self._gather_buffer = None
-        if dist.is_initialized():
-            self.world_size = dist.get_world_size()
-            self.device = local_load.device
-            if self._gather_buffer is None:
-                shape = (self.world_size, *local_load.shape)
-                self._gather_buffer = torch.empty(shape,
-                                                  dtype=local_load.dtype,
-                                                  device=self.device)
+        moe_load = self._gather_buffer.permute(1, 0, 2)
+        self.shared_dict["moe_load"] = moe_load.cpu()
+        logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
 
-            dist.all_gather_into_tensor(self._gather_buffer, local_load)
-
-            moe_load = self._gather_buffer.permute(1, 0, 2)
-            self.shared_dict["moe_load"] = moe_load.cpu()
-            logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-            )
-        else:
-            moe_load = local_load.unsqueeze(1)
-            self.shared_dict["moe_load"] = moe_load.cpu()
-            logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-            )
-
-        if dist.is_initialized() and dist.get_rank() == 0:
+        if dist.get_rank() == 0:
             self.compute_moe_imbalance(moe_load)
             self.summarize_moe_imbalance()
 
         return moe_load
 
     def compute_moe_imbalance(self, moe_load: torch.Tensor):
-
         self.moe_imbalance_dict.clear()
 
         layer_card_load = moe_load.sum(dim=-1).cpu().float()
@@ -178,13 +158,11 @@ class EplbUpdator:
 
             moe_load_imbalance = max_load / (mean_load + 1e-6)
 
-            logger.debug(f"[ModelRunner][MOE_load_stats][Layer {layer_idx}] "
-                         f"PAR={moe_load_imbalance:.4f}")
+            logger.debug(f"[ModelRunner][MOE_load_stats][Layer {layer_idx}] PAR={moe_load_imbalance:.4f}")
 
             self.moe_imbalance_dict[layer_idx] = moe_load_imbalance
 
     def summarize_moe_imbalance(self):
-
         values = list(self.moe_imbalance_dict.values())
         if not values:
             logger.info("[MOE_load_stats] No data available.")
@@ -200,11 +178,10 @@ class EplbUpdator:
         )
 
     def warm_up_eplb(self):
-
         self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
         self.compute_and_set_moe_load()
 
-        src_tensor = torch.empty((1, ), device=self.device)
+        src_tensor = torch.empty((1,), device=self.device)
         self_rank = dist.get_rank()
 
         comm_op_list = []

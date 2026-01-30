@@ -170,6 +170,52 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         torch.npu.reset_peak_memory_stats()
 
 
+class MooncakeLauncher:
+
+    def __init__(
+        self,
+        mooncake_port,
+        mooncake_metrics_port,
+        eviction_high_watermark_ratio=0.8,
+        eviction_ratio=0.05,
+    ):
+        self.mooncake_port = mooncake_port
+        self.mooncake_metrics_port = mooncake_metrics_port
+        self.eviction_high_watermark_ratio = eviction_high_watermark_ratio
+        self.eviction_ratio = eviction_ratio
+
+    def __enter__(self):
+        cmd = [
+            "mooncake_master",
+            "--eviction_high_watermark_ratio",
+            str(self.eviction_high_watermark_ratio),
+            "--eviction_ratio",
+            str(self.eviction_ratio),
+            "--port",
+            str(self.mooncake_port),
+            "--metrics_port",
+            str(self.mooncake_metrics_port),
+        ]
+
+        logger.info("Launching mooncake: %s", " ".join(cmd))
+        curr_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
+        mooncake_ld_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:"
+        os.environ["LD_LIBRARY_PATH"] = mooncake_ld_path + curr_ld_path
+        env = os.environ.copy()
+        self.process = subprocess.Popen(cmd, env=env)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self.process:
+            return
+        logger.info("Stopping mooncake server...")
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+
+
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
@@ -454,9 +500,9 @@ class VllmRunner:
             if images is not None and (image := images[i]) is not None:
                 multi_modal_data["image"] = image
             if videos is not None and (video := videos[i]) is not None:
-                multi_modal_data["video"] = video
+                multi_modal_data["video"] = video # type: ignore
             if audios is not None and (audio := audios[i]) is not None:
-                multi_modal_data["audio"] = audio
+                multi_modal_data["audio"] = audio # type: ignore
 
             text_prompt_kwargs: dict[str, Any] = {
                 "multi_modal_data": multi_modal_data or None
@@ -837,7 +883,8 @@ def ilama_lora_files():
 
 @pytest.fixture(scope="session")
 def llama32_lora_files():
-    return snapshot_download(repo_id="vllm-ascend/llama32-3b-text2sql-spider")
+    from huggingface_hub import snapshot_download as hf_snapshot_download
+    return hf_snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider", local_files_only=True)
 
 
 def qwen_prompt(questions: list[str]) -> list[str]:
