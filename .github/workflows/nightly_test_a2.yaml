@@ -106,10 +106,7 @@ jobs:
       ${{
         github.event_name == 'schedule' ||
         github.event_name == 'workflow_dispatch' ||
-        (
-          contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
-          contains(github.event.pull_request.labels.*.name, 'ready-for-test')
-        )
+        contains(github.event.pull_request.labels.*.name, 'accuracy-test')
       }}
     strategy:
       fail-fast: false
