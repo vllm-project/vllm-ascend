@@ -240,11 +240,13 @@ def _rope_forward_oot(
                 k_pass = key[..., self.rotary_dim:]
                 q_rot = q_rot.contiguous().view(num_tokens, -1)
                 k_rot = k_rot.contiguous().view(num_tokens, -1)
+                # only the rotary part is processed here,
+                # the dimension should be rotary_dim
                 torch_npu._npu_rotary_embedding(
                     positions,
                     q_rot,
                     k_rot,
-                    self.head_size,
+                    self.rotary_dim,
                     self.cos_sin_cache,
                     is_neox_style,
                 )
