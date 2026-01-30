@@ -672,7 +672,7 @@ class NPUModelRunner(GPUModelRunner):
                                      self.input_batch.num_reqs,
                                      self.reorder_batch_threshold,
                                  )
-
+            num_scheduled_tokens_padded = None
             if self.pcp_use_hybrid_attn and tokens_padded is not None:
                 num_scheduled_tokens_padded = np.array(tokens_padded, dtype=np.int32)
             num_scheduled_tokens = np.array(tokens, dtype=np.int32)
@@ -899,7 +899,7 @@ class NPUModelRunner(GPUModelRunner):
                 logits_indices,
                 (0, max_num_reqs_across_dp - logits_indices.shape[0]))
 
-        return logits_indices, spec_decode_metadata, max_num_tokens_across_pcp, pcp_unpad_mask
+        return logits_indices, spec_decode_metadata, max_num_tokens_across_pcp, pcp_unpad_mask, num_scheduled_tokens_padded
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
@@ -1257,6 +1257,7 @@ class NPUModelRunner(GPUModelRunner):
                     spec_decode_metadata,
                     max_num_tokens_across_pcp,
                     pcp_unpad_mask,
+                    num_scheduled_tokens_padded,
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
@@ -1329,6 +1330,7 @@ class NPUModelRunner(GPUModelRunner):
                         num_scheduled_tokens_np=num_scheduled_tokens_np,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                         pcp_unpad_mask=pcp_unpad_mask,
+                        num_scheduled_tokens_padded=num_scheduled_tokens_padded,
                     )
                 )
 
@@ -1977,6 +1979,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         pcp_unpad_mask: torch.Tensor | None = None,
+        num_scheduled_tokens_padded: np.ndarray | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -2004,11 +2007,11 @@ class NPUModelRunner(GPUModelRunner):
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
-        def _get_pcp_metadata(num_tokens, pcp_unpad_mask):
+        def _get_pcp_metadata(num_tokens, pcp_unpad_mask, num_scheduled_tokens_padded):
             if not self.use_cp:
                 return None
             return self.pcp_manager.generate_pcp_metadata(
-                num_tokens if not self.pcp_use_hybrid_attn else sum(num_tokens),
+                num_tokens if not (self.pcp_use_hybrid_attn and self.pcp_size > 1) else sum(num_scheduled_tokens_padded),
                 self.query_lens,
                 self.input_batch,
                 num_scheduled_tokens_np,
@@ -2037,7 +2040,7 @@ class NPUModelRunner(GPUModelRunner):
                 if self.pcp_size > 1:
                     total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
                     if self.pcp_use_hybrid_attn:
-                        maybe_pcp_full_tokens = sum(num_tokens_padded) * self.pcp_size - total_num_pcp_pads
+                        maybe_pcp_full_tokens = sum(num_scheduled_tokens_padded) * self.pcp_size - total_num_pcp_pads
                     else:
                         maybe_pcp_full_tokens = num_tokens * self.pcp_size - total_num_pcp_pads
                 else:
@@ -2054,13 +2057,17 @@ class NPUModelRunner(GPUModelRunner):
                     blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
             if self.pcp_size > 1:
                 slot_mapping = self.pcp_manager.get_padded_slot_mapping(
-                    num_tokens if not self.pcp_use_hybrid_attn else sum(num_tokens_padded),
+                    num_tokens if not self.pcp_use_hybrid_attn else sum(num_scheduled_tokens_padded),
                     num_tokens_padded,
                     slot_mapping,
                 )
             return blk_table_tensor, slot_mapping
 
-        long_seq_metdadata = _get_pcp_metadata(num_tokens, pcp_unpad_mask)
+        long_seq_metdadata = _get_pcp_metadata(
+            num_tokens,
+            pcp_unpad_mask,
+            num_scheduled_tokens_padded,
+        )
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
 
         cm_base = AscendCommonAttentionMetadata(
