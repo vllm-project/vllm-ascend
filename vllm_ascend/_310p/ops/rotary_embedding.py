@@ -41,7 +41,7 @@ def _rope_forward_oot(
     rotary_mode = "half" if is_neox_style else "interleave"
     if self.head_size == 128 and self.cos_sin_cache.shape[-1] == 128:
         query = query.contiguous().view(1, query.shape[0], -1, self.head_size)
-        key = key.contiguous().view(1, query.shape[0], -1, self.head_size)
+        key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
         query, key = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin, rotary_mode=rotary_mode)
     elif self.rotary_dim < self.head_size:
         num_tokens = query.shape[0]
