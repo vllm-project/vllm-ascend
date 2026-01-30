@@ -216,7 +216,7 @@ class AscendFusionConfig:
     """
 
     def __init__(
-        self, fusion_ops_gmmswigluquant: bool = True, fusion_ops_transpose_kvcache_by_block: bool = True, **kwargs
+        self, fusion_ops_gmmswigluquant: bool = True, **kwargs
     ):
         """
         Initialize the configuration.
@@ -225,14 +225,9 @@ class AscendFusionConfig:
             fusion_ops_gmmswigluquant (bool): Whether to use a fused operator gmmswigluquant.
                 When set to True, the system will use a fused operator gmmswigluquant.
                 Default: True
-            fusion_ops_transpose_kvcache_by_block (bool): Whether to use a fused operator transpose_kvcache_by_block.
-                When set to True, the system will use a fused operator transpose_kvcache_by_block.
-                Default: True
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fusion_ops_gmmswigluquant = fusion_ops_gmmswigluquant
-        self.fusion_ops_transpose_kvcache_by_block = fusion_ops_transpose_kvcache_by_block
-
 
 class NpugraphExConfig:
     """
