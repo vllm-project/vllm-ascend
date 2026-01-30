@@ -227,7 +227,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         self.compilation_config = vllm_config.compilation_config
         self.device = device
         self.max_num_blocks_per_req = cdiv(
-            self.model_config.max_model_len, AscendAttentionBackend.get_supported_block_size()[0]
+            self.model_config.max_model_len, AscendAttentionBackend.get_supported_kernel_block_sizes()[0]
         )
 
         self.speculative_config = vllm_config.speculative_config

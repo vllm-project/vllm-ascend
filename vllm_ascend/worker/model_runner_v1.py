@@ -2647,9 +2647,9 @@ class NPUModelRunner(GPUModelRunner):
                     # the min of all `num_blocks`. Verify it here.
                     assert num_blocks >= kv_cache_config.num_blocks
 
-                    if hasattr(attn_backend, "get_supported_block_size"
+                    if hasattr(attn_backend, "get_supported_kernel_block_sizes"
                                ) and self.use_hybrid_blocks:
-                        block_size = attn_backend.get_supported_block_size()[0]
+                        block_size = attn_backend.get_supported_kernel_block_sizes()[0]
 
                         block_size_chunk = kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
