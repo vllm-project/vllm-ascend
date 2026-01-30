@@ -22,6 +22,8 @@
 
 namespace Catlass::Gemm::Block {
 
+constexpr uint16_t CROSS_CORE_FLAG_MAX_SET_COUNT = 15;
+
 template<AscendC::HardEvent event>
 __aicore__ inline void SyncFlagFunc(int32_t eventID)
 {
@@ -271,7 +273,7 @@ public:
     void Finalize(int32_t target, int32_t flag = 0)
     {
         for(;syncGroupIdx <= target; syncGroupIdx++) {
-            int32_t flagId = syncGroupIdx / 8 + flag;
+            int32_t flagId = syncGroupIdx / CROSS_CORE_FLAG_MAX_SET_COUNT + flag;
             AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(flagId);
         }
     }
