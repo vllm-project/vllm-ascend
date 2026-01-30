@@ -25,10 +25,11 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, get_compressed_expert_map)
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import (FusedExpertsResult,
-                                                       setup_moe_comm_method)
+                                                       _MoECommMethods)
 from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
 from .experts_selector import select_experts, zero_experts_compute
 
@@ -181,7 +182,7 @@ class AscendFusedMoE310(FusedMoE):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         if self.enable_shared_expert_dp:
             raise RuntimeError("shared_expert_dp is not supported for 310P.")
-        setup_moe_comm_method(self.moe_config)
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(self.moe_config)
 
     def get_quant_type(self) -> QuantType:
         quant_method = self.quant_method
