@@ -135,7 +135,3 @@ class TestTransposeKvCacheByBlock(unittest.TestCase):
 
         self.assertLessEqual(max_diff, atol,
                              f"Absolute error too large: {max_diff} > {atol}")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
