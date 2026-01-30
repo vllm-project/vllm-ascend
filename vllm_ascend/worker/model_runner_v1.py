@@ -1210,9 +1210,9 @@ class NPUModelRunner(GPUModelRunner):
                 (attn_metadata, spec_decode_common_attn_metadata) = (
                     self._build_attention_metadata(
                         num_tokens=num_tokens_unpadded,
-                        num_tokens_padded=num_tokens_padded if pad_attn else None,
+                        num_tokens_padded=num_tokens_padded,
                         num_reqs=num_reqs,
-                        num_reqs_padded=num_reqs_padded if pad_attn else None,
+                        num_reqs_padded=num_reqs_padded,
                         max_query_len=max_num_scheduled_tokens,
                         ubatch_slices=ubatch_slices_attn,
                         logits_indices=logits_indices,
