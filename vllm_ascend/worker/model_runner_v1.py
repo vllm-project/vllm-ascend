@@ -2770,16 +2770,18 @@ class NPUModelRunner(GPUModelRunner):
                     attn_groups = self.attn_groups[kv_cache_group_id]
                 except IndexError:
                     attn_groups = None
-                # Set the default value first.
-                kernel_block_size_list = [self.cache_config.block_size]
-                # Try to get the supported block sizes from the backend.
                 if attn_groups and self.use_hybrid_blocks:
+                    # Use the backend's supported block size list
                     backend = attn_groups[0].backend
-                    get_supported_kernel_block_sizes = getattr(backend, "get_supported_kernel_block_sizes", None)
-                    # If the backend has the method, call it.
-                    if get_supported_kernel_block_sizes:
-                        if supported_sizes := get_supported_kernel_block_sizes():
-                            kernel_block_size_list = supported_sizes
+                    supported_sizes = backend.get_supported_kernel_block_sizes()
+                    # If no specific sizes supported, use cache config
+                    # block_size
+                    kernel_block_size_list = (supported_sizes
+                                              if supported_sizes else
+                                              [self.cache_config.block_size])
+                else:
+                    # Fallback to cache config block_size if no backend found
+                    kernel_block_size_list = [self.cache_config.block_size]
                 kernel_block_sizes.append(kernel_block_size_list)
             else:
                 # This is likely Mamba or other non-attention cache,
