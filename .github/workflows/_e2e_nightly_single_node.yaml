@@ -20,9 +20,6 @@ name: 'e2e nightly test'
 on:
   workflow_call:
     inputs:
-      vllm:
-        required: true
-        type: string
       runner:
         required: true
         type: string
