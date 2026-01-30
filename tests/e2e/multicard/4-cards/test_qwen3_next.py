@@ -19,9 +19,6 @@
 import os
 from unittest.mock import patch
 
-import pytest
-from modelscope import snapshot_download  # type: ignore
-
 from tests.e2e.conftest import VllmRunner
 
 
@@ -117,7 +114,7 @@ def test_qwen3_next_w8a8dynamic_distributed_tp4_ep():
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8"),
+            "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8",
             max_model_len=4096,
             tensor_parallel_size=4,
             gpu_memory_utilization=0.4,

@@ -194,6 +194,7 @@ class ExecuteModelState(NamedTuple):
     attn_metadata: "PerLayerAttnMetadata"
     positions: torch.Tensor
     ec_connector_output: "ECConnectorOutput | None"
+    cudagraph_stats: CUDAGraphStat | None
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -1466,6 +1467,7 @@ class NPUModelRunner(GPUModelRunner):
                 attn_metadata,
                 positions,
                 ec_connector_output,
+                cudagraph_stats,
             )
             self.kv_connector_output = kv_connector_output
         return None
@@ -1502,6 +1504,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_metadata,
             positions,
             ec_connector_output,
+            cudagraph_stats,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -1579,6 +1582,7 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output
             if self.supports_mm_inputs
             else None,
+            cudagraph_stats=cudagraph_stats,
         )
 
         durations = ProfileExecuteDuration().pop_captured_sync()

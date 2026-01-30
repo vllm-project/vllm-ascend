@@ -733,6 +733,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         vllm_config=None,
         speculative_config=None,
         num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
     ):
         if forward_context.is_draft_model:
             graph_params = get_draft_graph_params()
