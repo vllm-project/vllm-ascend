@@ -64,7 +64,7 @@ def _rope_forward_oot(
                 positions,
                 q_rot,
                 k_rot,
-                self.head_size,
+                self.rotary_dim,
                 self.cos_sin_cache,
                 is_neox_style,
             )
