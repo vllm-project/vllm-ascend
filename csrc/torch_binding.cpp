@@ -725,7 +725,7 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
     return;
 }
 
-at::Tensor& dispatch_ffn_combine(
+std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     const at::Tensor& x,
     const at::TensorList& weight1,
     const at::TensorList& weight2,
@@ -735,7 +735,8 @@ at::Tensor& dispatch_ffn_combine(
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
-    at::Tensor& out
+    at::Tensor& out,
+    at::Tensor& expert_token_nums
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
     bool is_int8 = weight1[0].dtype() == at::kChar;
@@ -750,7 +751,8 @@ at::Tensor& dispatch_ffn_combine(
                  probs,
                  group_ep_ptr,
                  max_output_size,
-                 out);
+                 out,
+                 expert_token_nums);
     } else {
         EXEC_NPU_CMD(aclnnDispatchFFNCombineBF16,
                  x,
@@ -762,9 +764,10 @@ at::Tensor& dispatch_ffn_combine(
                  probs,
                  group_ep_ptr,
                  max_output_size,
-                 out);
+                 out,
+                 expert_token_nums);
     }    
-    return out;
+    return {out, expert_token_nums};
 }
 
 at::Tensor npu_lightning_indexer(
@@ -1234,26 +1237,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_
     return std::tie(expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale);
 }
 
-at::Tensor npu_apply_top_k_top_p(
-    const at::Tensor& logits,
-    const c10::optional<at::Tensor>& p,
-    const c10::optional<at::Tensor>& k)
-{
-    TORCH_CHECK(p.has_value() || k.has_value(),
-                "apply_top_k_top_p: p and k cannot be None at the same time.");
-
-    at::Tensor out = at::empty_like(logits);
-
-    EXEC_NPU_CMD(
-        aclnnApplyTopKTopPCustom,
-        logits,
-        p,
-        k,
-        out);
-
-    return out;
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k(
     const at::Tensor& x,
     int64_t k,
@@ -1306,38 +1289,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k(
                 ); 
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
-}
-
-std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias(
-    const at::Tensor& x1,
-    const at::Tensor& x2,
-    const at::Tensor& gamma,
-    const c10::optional<at::Tensor> &beta,
-    double epsilon)
-{
-    int64_t dim_x = x1.dim();
-    int64_t dim_gamma = gamma.dim();
-    int64_t diff = dim_x - dim_gamma;
-    std::vector<int64_t> new_shape;
-    at::Tensor rstd;
-    
-    if (diff > 0) {
-        new_shape.reserve(dim_x);
-        auto x1_sizes = x1.sizes();
-        for (int64_t i = 0; i < diff; ++i) {
-            new_shape.push_back(x1_sizes[i]);
-        }
-        for (int64_t i = 0; i < dim_gamma; ++i) {
-            new_shape.push_back(1);
-        }
-    } else {
-        new_shape.assign(dim_x, 1);
-    }
-    rstd = at::empty(new_shape, x1.options().dtype(at::kFloat));
-    at::Tensor y = at::empty(x1.sizes(), x1.options());
-    at::Tensor x = at::empty(x1.sizes(), x1.options());
-    EXEC_NPU_CMD(aclnnAddRmsNormBias, x1, x2, gamma, beta, epsilon, y, rstd, x);
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
 } // namespace vllm_ascend
@@ -1452,7 +1403,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
         "                     Tensor[] scale1, Tensor[] scale2, Tensor probs, str group,"
-        "                     int max_output_size, Tensor! out) -> Tensor"
+        "                     int max_output_size, Tensor! out, Tensor! expert_token_nums) -> (Tensor out, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 
@@ -1505,17 +1456,4 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor expert_idx, Tensor out)"
         );
     ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
-
-    ops.def(
-        "npu_add_rms_norm_bias(Tensor x1, "
-                            "Tensor x2, "
-                            "Tensor gamma, "
-                            "Tensor? beta=None, "
-                            "float epsilon=1e-6)"
-        "-> (Tensor y ,Tensor rstd, Tensor x)"
-        );
-    ops.impl("npu_add_rms_norm_bias", torch::kPrivateUse1, &vllm_ascend::npu_add_rms_norm_bias);
-
-    ops.def("npu_apply_top_k_top_p(Tensor logits, Tensor? p=None, Tensor? k=None) -> Tensor");
-    ops.impl("npu_apply_top_k_top_p", torch::kPrivateUse1, &vllm_ascend::npu_apply_top_k_top_p);
 }
