@@ -30,6 +30,9 @@ jobs:
   e2e-2-cards:
     name: multicard-2
     runs-on: linux-arm64-npu-1
+    strategy:
+      matrix:
+        part: [ 0 ]
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
       env:
@@ -38,6 +41,8 @@ jobs:
         HCCL_BUFFSIZE: 1024
         HF_HUB_OFFLINE: 1
     steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -50,9 +55,6 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |

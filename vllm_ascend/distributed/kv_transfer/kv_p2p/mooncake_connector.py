@@ -1544,6 +1544,7 @@ class MooncakeConnectorWorker:
 
             prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
             tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
+            remote_req_id = meta.remote_request_id
 
             if meta.remote_pcp_size * meta.remote_dcp_size > 1:
                 remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
@@ -1562,7 +1563,7 @@ class MooncakeConnectorWorker:
                         )
                         self.kv_recv_thread.add_request(
                             request_id=req_id,
-                            remote_request_id=meta.remote_request_id,
+                            remote_request_id=remote_req_id,
                             local_block_ids=local_block_ids_list[pcp_dcp_rank],
                             remote_block_ids=remote_block_ids_list[pcp_dcp_rank],
                             remote_engine_id=remote_engine_id,
@@ -1576,7 +1577,7 @@ class MooncakeConnectorWorker:
                             ),
                         )
             else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
-                choosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
+                choosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
                 remote_handshake_port_list = [[x + meta.remote_port] for x in choosen_rank_list]
                 for i in range(tp_num_need_pulls * self._prefill_pp_size):
                     assert self.kv_recv_thread is not None
@@ -1589,7 +1590,7 @@ class MooncakeConnectorWorker:
                     )
                     self.kv_recv_thread.add_request(
                         request_id=req_id,
-                        remote_request_id=meta.remote_request_id,
+                        remote_request_id=remote_req_id,
                         local_block_ids=meta.local_block_ids,
                         remote_block_ids=meta.remote_block_ids,
                         remote_engine_id=remote_engine_id,
