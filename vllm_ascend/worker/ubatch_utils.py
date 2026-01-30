@@ -69,7 +69,6 @@ def create_ubatch_slices(
 
 
 def check_enable_ubatch(
-    num_scheduled_tokens_per_request: np.ndarray,
     num_tokens_unpadded: int,
     num_tokens_padded: int,
     uniform_decode: bool,
@@ -99,25 +98,6 @@ def check_enable_ubatch(
             "Empty last µbatch detected: unpadded tokens: %s, padded tokens: %s", num_tokens_unpadded, num_tokens_padded
         )
         return False
-
-    dp_size = vllm_config.parallel_config.data_parallel_size
-    if dp_size == 1:
-        token_split_point = int(num_tokens_unpadded) // 2
-    else:
-        token_split_point = int(num_tokens_padded) // 2
-
-    if request_level_split:
-        # using request-level splitting
-        cu_num_tokens = np.zeros(len(num_scheduled_tokens_per_request) + 1, dtype=np.int32)
-        np.cumsum(num_scheduled_tokens_per_request, dtype=np.int32, out=cu_num_tokens[1:])
-
-        request_split_point = int(np.searchsorted(cu_num_tokens, token_split_point, side="right") - 1)
-        imbalance_ratio = (token_split_point - cu_num_tokens[request_split_point]) / cu_num_tokens[-1]
-        if len(num_scheduled_tokens_per_request) == 1 or imbalance_ratio > 0.5:
-            return False
-        # first/second batch should not be empty
-        if request_split_point == 0 or request_split_point == len(cu_num_tokens) - 1:
-            return False
 
     return True
 
