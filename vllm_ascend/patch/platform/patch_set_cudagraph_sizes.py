@@ -88,6 +88,8 @@ def set_cudagraph_sizes(self):
                 # Step size 16 for larger batch sizes
                 cudagraph_capture_sizes += list(
                     range(256, max_cudagraph_capture_size + 1, 16))
+            if cudagraph_capture_sizes[-1] < max_cudagraph_capture_size:
+                cudagraph_capture_sizes += [max_cudagraph_capture_size]
 
         if (self.parallel_config.tensor_parallel_size > 1
                 and self.compilation_config.pass_config.enable_sp):
