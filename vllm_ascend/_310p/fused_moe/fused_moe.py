@@ -26,8 +26,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
-from vllm_ascend.ops.fused_moe.experts_selector import (select_experts,
-                                                        zero_experts_compute)
+from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import (FusedExpertsResult,
                                                        setup_moe_comm_method)
 from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
@@ -221,12 +220,9 @@ class AscendFusedMoE310(FusedMoE):
         ) -> torch.Tensor:
 
         assert self.quant_method is not None
-        # Load balancing for token distribution among experts in dummy_run
-        # TODO: The community only considers load balancing when DP > 1.
-        # This approach may overlook some extreme scenarios.
+        forward_context = get_forward_context()
         enable_force_load_balance = forward_context.in_profile_run
 
-        forward_context = get_forward_context()
         hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -258,7 +254,7 @@ class AscendFusedMoE310(FusedMoE):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-            enable_force_load_balance=enable_force_load_balance,
+            enable_force_load_balance=False,
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
             mc2_mask=mc2_mask)
