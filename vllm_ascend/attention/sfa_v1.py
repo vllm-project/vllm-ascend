@@ -380,8 +380,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
 
-        # In sfa, prefill and decode have the same calculation formula,
-        # so do not distinguish between prefill and decode here.
+        # The MLAPO operator fuses the pre-processing steps on Q/K/V in MLA into a single operator
+        # NOTE: it imposes a limit on the number of input tokens and conflicts with FlashComm
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
         assert self.indexer is not None, "Indexer is required for DSA."
@@ -401,21 +401,25 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.k_norm = self.indexer.k_norm
         self.cp_size = 1
 
+        # Effective in SFA when FlashComm is enabled.
         self.enable_dsa_cp = enable_dsa_cp()
-        self.enable_dsa_cp_prefill_only = enable_dsa_cp_with_layer_shard()
+
+        # Enable layer shardind via DSA-CP on the P node in the PD-disaggregated setup.
+        self.enable_layer_sharding_in_dsa_cp = enable_dsa_cp_with_layer_shard()
+
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
-        if self.enable_dsa_cp_prefill_only:
-            self.layer_sharding_kwargs = []
-            for layer_name in get_ascend_config().layer_sharding or []:
-                if layer_name in kwargs:
-                    self.layer_sharding_kwargs.append(kwargs[layer_name])
-                else:
-                    logger.warning_once(
-                        f"[SFAImpl init] Layer '{layer_name}' not found in kwargs for layer sharding, "
-                        "skipping sharding configuration"
-                    )
-            register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
+            if self.enable_layer_sharding_in_dsa_cp:
+                self.layer_sharding_kwargs = []
+                for layer_name in get_ascend_config().layer_sharding or []:
+                    if layer_name in kwargs:
+                        self.layer_sharding_kwargs.append(kwargs[layer_name])
+                    else:
+                        logger.warning_once(
+                            f"[SFAImpl init] Layer '{layer_name}' not found in kwargs for layer sharding, "
+                            "skipping sharding configuration"
+                        )
+                register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
@@ -451,7 +455,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
         dispose_layer(self.kv_b_proj)
         if self.enable_dsa_cp:
-            if self.enable_dsa_cp_prefill_only:
+            if self.enable_layer_sharding_in_dsa_cp:
                 for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
                         post_process_after_loading_for_shard_weight_series(layer)
@@ -722,7 +726,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         forward_context = get_forward_context()
         if attn_metadata is None:
             # Profiling run.
-            if self.enable_dsa_cp_prefill_only and not forward_context.in_profile_run:
+            if self.enable_layer_sharding_in_dsa_cp and not forward_context.in_profile_run:
                 for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
@@ -742,7 +746,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         o_proj_full_handle = None
         # if is PD mix stage, using original TP o_proj weight, and also need to full gather for o_proj
         # weight for prefill stage.
-        should_shard_weight = self.enable_dsa_cp_prefill_only or attn_metadata.attn_state not in {
+        should_shard_weight = self.enable_layer_sharding_in_dsa_cp or attn_metadata.attn_state not in {
             AscendAttentionState.DecodeOnly,
             AscendAttentionState.SpecDecoding,
         }
@@ -812,7 +816,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if kv_ag_handle is not None:
                     kv_ag_handle.wait()
 
-                if self.enable_dsa_cp_prefill_only:
+                if self.enable_layer_sharding_in_dsa_cp:
                     for layer in self.layer_sharding_kwargs or []:
                         if is_hidden_layer(layer):
                             reach_layer_for_shard_weight_series(layer)
@@ -874,7 +878,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             enabled=self.enable_prefetch,
         )
 
-        if self.enable_dsa_cp and not self.enable_dsa_cp_prefill_only:
+        if self.enable_dsa_cp and not self.enable_layer_sharding_in_dsa_cp:
             # When using SFA-CP with pd mixed, o_proj has two cases:
             # 1. prefill: o_proj is a TP weight, we need to all-gather o_proj weight to switch TP=1.
             # 2. decode: all-to-all the hidden_state before the o_proj forward.
