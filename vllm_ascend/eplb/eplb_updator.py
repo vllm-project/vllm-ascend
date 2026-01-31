@@ -139,6 +139,7 @@ class EplbUpdator:
     def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload()
 
+        self._gather_buffer = None
         self.world_size = dist.get_world_size()
         self.device = local_load.device
         if self._gather_buffer is None:
@@ -151,14 +152,17 @@ class EplbUpdator:
 
         dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
-        moe_load = self._gather_buffer.permute(1, 0, 2)
+        moe_load_cum = self._gather_buffer.permute(2, 1, 0, 3)
+        moe_load_dff = moe_load_cum[..., 1:] - moe_load_cum.roll(shifts=1,
+                                                                 dims=3)[..., 1:]
+        moe_load = torch.cat([moe_load_cum[..., :1], moe_load_dff], dim=3)
         self.shared_dict["moe_load"] = moe_load.cpu()
         logger.debug(
             f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
         )
 
         if dist.get_rank() == 0:
-            self.compute_moe_imbalance(moe_load)
+            self.compute_moe_imbalance(moe_load.sum(0))
             self.summarize_moe_imbalance()
 
         return moe_load
