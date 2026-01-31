@@ -105,7 +105,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         is_reshaped = query.dim() == 4
 
         assert cu_seqlens is not None
-        if cu_seqlens is not self.last_cu_seqlens:
+        if self.last_cu_seqlens is None or not torch.equal(cu_seqlens, self.last_cu_seqlens):
             self.last_cu_seqlens = cu_seqlens
             # Update seq_lens cpu cache.
             self.seq_lens_cpu_cache = torch.diff(cu_seqlens).to("cpu")
@@ -143,7 +143,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         )
 
         if self.enable_pad:
-            output = output[..., :origin_shape]
+            output = output[..., :origin_shape]  # type: ignore[index]
 
         if is_reshaped:
             output = einops.rearrange(output,
