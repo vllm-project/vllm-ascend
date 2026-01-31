@@ -152,17 +152,14 @@ class SizedDict(OrderedDict):
 class KVCacheSendingLayerThread(threading.Thread):
     def __init__(
         self,
+        vllm_config: VllmConfig,
         engine: TransferEngine,
-        total_layers: int,
         ready_event: threading.Event,
-        tp_rank: int,
         pd_head_ratio: int,
         num_head_replica: int,
         kv_cache_base_addr: list[int],
-        use_mla: bool,
         block_len: list[int],
         decode_tp_size: int,
-        first_kv_cache: torch.Tensor,
         k_buffer: torch.Tensor,
         v_buffer: torch.Tensor,
         resharding_stream: torch.npu.Stream,
@@ -170,13 +167,13 @@ class KVCacheSendingLayerThread(threading.Thread):
     ):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.engine = engine
-        self.tp_rank = tp_rank
+        self.tp_rank = get_tensor_model_parallel_rank()
         self.pd_head_ratio = pd_head_ratio
         self.num_head_replica = num_head_replica
         self.kv_caches_base_addr = kv_cache_base_addr
-        self.total_layers = total_layers
-        self.use_mla = use_mla
-        self.use_sparse = len(block_len) == 3
+        self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.use_mla = vllm_config.model_config.use_mla
+        self.use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
         self.block_len = block_len
         self._decode_tp_size = decode_tp_size
         self.resharding_stream = resharding_stream
@@ -236,10 +233,10 @@ class KVCacheSendingLayerThread(threading.Thread):
             for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
                 zip(layer_local_kv_base_addr, layer_remote_kv_base_addr)
             ):
-                if self.use_mla:
-                    block_len = self.block_len[k % 2]
-                elif self.use_sparse:
+                if self.use_sparse:
                     block_len = self.block_len[k % 3]
+                elif self.use_mla:
+                    block_len = self.block_len[k % 2]
                 else:
                     block_len = self.block_len[0]
                 for group_remote_block_id, group_local_block_id in zip(
@@ -821,8 +818,10 @@ class MooncakeLayerwiseConnectorWorker:
         self.tp_group = get_tp_group()
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
+        self.total_num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+        self.use_mla = vllm_config.model_config.use_mla
+        self.use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-        self.use_mla = self.vllm_config.model_config.use_mla
 
         # Handshake base port
         self.side_channel_port = (
@@ -920,28 +919,7 @@ class MooncakeLayerwiseConnectorWorker:
         first_kv_cache = first_kv_cache_tuple[0]
         self.create_kv_buffer(first_kv_cache)
 
-        # TODO(tms): Find a more robust way to detect and handle MLA
-        self.use_mla = (
-            first_kv_cache_tuple[0].size(-1) != first_kv_cache_tuple[1].size(-1) and len(first_kv_cache_tuple) == 2
-        )
-        self.use_sparse = len(first_kv_cache_tuple) == 3
-        if self.use_mla:
-            # MLA case.[num_block, block_size, 1, hidden_dim]
-            self.num_blocks = first_kv_cache.shape[0]
-            block_rank = 3  # [block_size, latent_dim]
-            block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
-            block_shape_pe = first_kv_cache_tuple[1].shape[-block_rank:]
-            self.block_len = [
-                first_kv_cache[0].element_size() * math.prod(block_shape_norm),
-                first_kv_cache[1].element_size() * math.prod(block_shape_pe),
-            ]
-            logger.info(
-                "num_blocks: %s, block_shape_norm: %s, block_shape_pe: %s",
-                self.num_blocks,
-                block_shape_norm,
-                block_shape_pe,
-            )
-        elif self.use_sparse:
+        if self.use_sparse:
             self.num_blocks = first_kv_cache.shape[0]
             block_rank = 3  # [block_size, latent_dim]
             block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
@@ -958,6 +936,22 @@ class MooncakeLayerwiseConnectorWorker:
                 block_shape_norm,
                 block_shape_pe,
                 block_shape_k,
+            )
+        elif self.use_mla:
+            # MLA case.[num_block, block_size, 1, hidden_dim]
+            self.num_blocks = first_kv_cache.shape[0]
+            block_rank = 3  # [block_size, latent_dim]
+            block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
+            block_shape_pe = first_kv_cache_tuple[1].shape[-block_rank:]
+            self.block_len = [
+                first_kv_cache[0].element_size() * math.prod(block_shape_norm),
+                first_kv_cache[1].element_size() * math.prod(block_shape_pe),
+            ]
+            logger.info(
+                "num_blocks: %s, block_shape_norm: %s, block_shape_pe: %s",
+                self.num_blocks,
+                block_shape_norm,
+                block_shape_pe,
             )
         else:
             # [num_block, block_size, num_head, hidden_dim]
@@ -981,23 +975,22 @@ class MooncakeLayerwiseConnectorWorker:
         lengths = []
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
-            if self.use_mla:
-                for i, cache in enumerate(cache_or_caches, 0):
-                    base_addr = cache.data_ptr()
-                    region_len = self.num_blocks * self.block_len[i % 2]
-                    kv_caches_base_addr.append(base_addr)
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
-            elif self.use_sparse:
+            if self.use_sparse:
                 for i, cache in enumerate(cache_or_caches, 0):
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[i % 3]
                     kv_caches_base_addr.append(base_addr)
                     ptrs.append(base_addr)
                     lengths.append(region_len)
+            elif self.use_mla:
+                for i, cache in enumerate(cache_or_caches, 0):
+                    base_addr = cache.data_ptr()
+                    region_len = self.num_blocks * self.block_len[i % 2]
+                    kv_caches_base_addr.append(base_addr)
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
             else:
-                cache_list = [cache_or_caches] if self.use_mla or self.use_sparse else cache_or_caches
-                for cache in cache_list:
+                for cache in cache_or_caches:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[0]
                     kv_caches_base_addr.append(base_addr)
@@ -1014,17 +1007,14 @@ class MooncakeLayerwiseConnectorWorker:
         if self.vllm_config.kv_transfer_config.is_kv_producer:
             ready_event = threading.Event()
             self.kv_send_layer_thread = KVCacheSendingLayerThread(
+                vllm_config=self.vllm_config,
                 engine=self.engine,
-                total_layers=self.total_layers,
                 ready_event=ready_event,
-                tp_rank=self.tp_rank,
                 pd_head_ratio=self.pd_head_ratio,
                 num_head_replica=self.num_head_replica,
                 kv_cache_base_addr=self.kv_caches_base_addr,
-                use_mla=self.use_mla,
                 block_len=self.block_len,
                 decode_tp_size=self._decode_tp_size,
-                first_kv_cache=first_kv_cache,
                 k_buffer=self.k_buffer,
                 v_buffer=self.v_buffer,
                 resharding_stream=self.resharding_stream,
@@ -1070,14 +1060,17 @@ class MooncakeLayerwiseConnectorWorker:
                     self.kv_recv_layer_thread.request_map[external_req_id] = req_id
         elif self.vllm_config.kv_transfer_config.is_kv_producer:
             # select req to send
-            if self.use_mla or self.use_sparse:
+            if self.use_mla:
                 num_need_send = self._decode_tp_size
             else:
-                num_kv_head = self.vllm_config.model_config.hf_config.num_key_value_heads
-                if self.tp_size <= num_kv_head:
+                if self.tp_size <= self.total_num_kv_heads:
                     num_need_send = self.tp_size
                 else:
-                    num_need_send = self._decode_tp_size if self._decode_tp_size >= num_kv_head else num_kv_head
+                    num_need_send = (
+                        self._decode_tp_size
+                        if self._decode_tp_size >= self.total_num_kv_heads
+                        else self.total_num_kv_heads
+                    )
             num_replica_groups = self.tp_size // num_need_send if self.tp_size >= num_need_send else 1
             replica_group_idx = self.tp_rank % num_replica_groups
             req_ids = sorted(list(metadata.requests.keys()))
@@ -1117,7 +1110,7 @@ class MooncakeLayerwiseConnectorWorker:
         """MooncakeLayerwiseConnector does not save explicitly."""
         if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys():
             # enable decode prefix cache
-            if self.use_mla or self.use_sparse:
+            if self.use_mla:
                 reshape_cache_event = attn_metadata[layer_name].reshape_cache_event
             else:
                 reshape_cache_event = attn_metadata.reshape_cache_event
@@ -1203,7 +1196,7 @@ class MooncakeLayerwiseConnectorWorker:
 
     def update_decoder_info(self, req_id, req_meta):
         req_meta_update = copy.deepcopy(req_meta)
-        if self.use_mla or self.use_sparse:
+        if self.use_mla:
             pd_tp_ratio = self.tp_size // self._decode_tp_size
             req_meta_update.remote_port = (
                 req_meta_update.remote_port + (self.tp_rank // pd_tp_ratio) % self._decode_tp_size
