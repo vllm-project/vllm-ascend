@@ -118,11 +118,10 @@ class ChunkedTokenDatabase:
         block_id = block_ids[start // self.block_size]
         length = len(self.block_len)
         for index, base_addr in enumerate(self.kv_caches_base_addr):
-            block_len = self.block_len[index % length]
-            addr = base_addr + block_id * block_len
-            length = int(block_len / self.block_size * (end - start))
+            addr = base_addr + block_id * self.block_len[index % length]
+            size = int(self.block_len[index % length] / self.block_size * (end - start))
             addr_list.append(addr)
-            size_list.append(length)
+            size_list.append(size)
         return addr_list, size_list, block_id
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
@@ -131,8 +130,10 @@ class ChunkedTokenDatabase:
         size_list = []
         length = len(self.block_len)
         for i in range(length):
-            addr_list.append(self.kv_caches_base_addr[layer_id * length] + block_id * self.block_len[i])
-            size_list.append(int(self.block_len[i] / self.block_size * (end - start)))
+            addr = self.kv_caches_base_addr[layer_id * length] + block_id * self.block_len[i]
+            size = int(self.block_len[i] / self.block_size * (end - start))
+            addr_list.append(addr)
+            size_list.append(size)
         return addr_list, size_list
 
     def process_tokens(
