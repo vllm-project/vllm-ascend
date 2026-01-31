@@ -21,9 +21,14 @@ on:
     inputs:
       tag:
         description: 'Docker tag for build results'
-        type: string
         default: main
         required: true
+        type: choice
+        options:
+          - main
+          - v0.15.0rc1
+          - v0.14.0rc1
+          - v0.13.0rc2
 
 jobs:
   image_build:
