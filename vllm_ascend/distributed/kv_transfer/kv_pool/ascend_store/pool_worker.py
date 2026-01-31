@@ -124,9 +124,7 @@ class KVPoolWorker:
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
 
-        self.token_database = ChunkedTokenDatabase(
-            self.metadata, self.block_size, self.use_mla, self.use_sparse, partitions
-        )
+        self.token_database = ChunkedTokenDatabase(self.metadata, self.block_size, partitions)
 
         real_backend = backend_map.get(self.backend.lower())
 
@@ -205,27 +203,14 @@ class KVPoolWorker:
         lengths = []
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
-            if self.use_sparse:
-                for i, cache in enumerate(cache_or_caches, 0):
-                    base_addr = cache.data_ptr()
-                    region_len = self.num_blocks * self.block_len[i % 3]
-                    self.kv_caches_base_addr.append(base_addr)
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
-            elif self.use_mla:
-                for i, cache in enumerate(cache_or_caches, 0):
-                    base_addr = cache.data_ptr()
-                    self.kv_caches_base_addr.append(base_addr)
-                    region_len = self.num_blocks * self.block_len[i % 2]
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
-            else:
-                for cache in cache_or_caches:
-                    base_addr = cache.data_ptr()
-                    self.kv_caches_base_addr.append(base_addr)
-                    region_len = self.num_blocks * self.block_len[0]
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
+            length = len(self.block_len)
+            for i, cache in enumerate(cache_or_caches, 0):
+                base_addr = cache.data_ptr()
+                region_len = self.num_blocks * self.block_len[i % length]
+                self.kv_caches_base_addr.append(base_addr)
+                ptrs.append(base_addr)
+                lengths.append(region_len)
+
         self.m_store.register_buffer(ptrs, lengths)
         self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
         self.token_database.set_block_len(self.block_len)
