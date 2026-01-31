@@ -20,17 +20,18 @@
 import os
 import pytest
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 os.environ["HCCL_BUFFSIZE"] = "512"
 
+prompts = [
+    "The capital of France is", "Hello, my name is Tom, I am",
+    "The president of United States is", "AI future is"
+]
+model = "wemaster/deepseek_mtp_main_random_bf16"
 
+@wait_until_npu_memory_free()
 def test_pcp_dcp_mtp1_eager():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
-    model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
             model,
             max_model_len=1024,
@@ -50,15 +51,8 @@ def test_pcp_dcp_mtp1_eager():
         runner.generate_greedy(prompts, 32)
 
 
-@pytest.mark.skip(
-    reason="vLLM PR-32118 break this",
-)
+@wait_until_npu_memory_free()
 def test_pcp_dcp_mtp3_eager():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
-    model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
             model,
             max_model_len=1024,
@@ -78,15 +72,8 @@ def test_pcp_dcp_mtp3_eager():
         runner.generate_greedy(prompts, 32)
 
 
-@pytest.mark.skip(
-    reason="vLLM PR-32118 break this",
-)
+@wait_until_npu_memory_free()
 def test_pcp_dcp_mtp3_piecewise_graph():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
-    model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
             model,
             max_model_len=1024,
@@ -109,15 +96,8 @@ def test_pcp_dcp_mtp3_piecewise_graph():
         runner.generate_greedy(prompts, 32)
 
 
-@pytest.mark.skip(
-    reason="vLLM PR-32118 break this",
-)
+@wait_until_npu_memory_free()
 def test_pcp_dcp_mtp3_full_graph():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
-    model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
             model,
             max_model_len=1024,
@@ -140,12 +120,8 @@ def test_pcp_dcp_mtp3_full_graph():
         runner.generate_greedy(prompts, 32)
 
 
+@wait_until_npu_memory_free()
 def test_dcp_mtp3_full_graph():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
-    model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
             model,
             max_model_len=1024,
