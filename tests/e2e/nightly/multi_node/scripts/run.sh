@@ -163,7 +163,7 @@ upgrade_vllm_ascend_scr() {
     cd "$WORKSPACE/vllm-ascend"
     # git pull origin main
     git fetch origin pull/6399/head:pr-6399
-    git checkout pr-6399 1
+    git checkout pr-6399
 
 }
 
