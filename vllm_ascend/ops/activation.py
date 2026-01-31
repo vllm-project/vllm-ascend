@@ -33,7 +33,7 @@ class AscendSiluAndMul(SiluAndMul):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         import torch_npu
 
-        torch.ops.vllm.maybe_prefetch_mlp_down_proj(x)
+        x = torch.ops.vllm.maybe_prefetch_mlp_down_proj(x)
         out = torch_npu.npu_swiglu(x)
-        torch.ops.vllm.maybe_wait_prefetch_done(out)
+        out = torch.ops.vllm.maybe_wait_prefetch_done(out)
         return out
