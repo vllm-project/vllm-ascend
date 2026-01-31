@@ -38,7 +38,9 @@ RUN apt-get update -y && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     cd /vllm-workspace/Mooncake && bash mooncake_installer.sh -y && \
-    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/lib64 && \
+    ARCH=$(uname -m) && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64:$LD_LIBRARY_PATH && \
     mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \
     make -j$(nproc) && make install && \
     rm -fr /vllm-workspace/Mooncake/build && \
