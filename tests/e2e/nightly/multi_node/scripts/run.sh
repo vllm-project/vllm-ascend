@@ -155,6 +155,18 @@ run_tests_with_log() {
     fi
 }
 
+upgrade_vllm_ascend_scr() {
+    # Fix me(Potabk): Remove this once our image build use 
+    # The separate architecture build process currently suffers from errors during cross-compilation
+    # causing the image to fail to build correctly. 
+    # This results in the nightly test code not being the latest version.
+    cd "$WORKSPACE/vllm-ascend"
+    # git pull origin main
+    git fetch origin pull/6399/head:pr-6399
+    git checkout pr-6399
+
+}
+
 main() {
     check_npu_info
     check_and_config
