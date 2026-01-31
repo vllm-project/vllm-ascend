@@ -28,7 +28,7 @@ on:
   pull_request: 
     branches:
       - 'main'
-    types: [ labeled ]
+    types: [ labeled, synchronize ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -44,7 +44,11 @@ concurrency:
 jobs:
   multi-node-tests:
     name: multi-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: >- 
+      ${{ 
+      always() && ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+      (contains(github.event.pull_request.labels.*.name, 'nightly-test') ) )
+      }}
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -52,48 +56,62 @@ jobs:
         test_config:
           - name: multi-node-deepseek-pd
             config_file_path: DeepSeek-V3.yaml
+            index: 11
             size: 2
           - name: multi-node-qwen3-dp
             config_file_path: Qwen3-235B-A22B.yaml
+            index: 12
             size: 2
           # - name: multi-node-dpsk-4node-pd
           #   config_file_path: DeepSeek-R1-W8A8.yaml
+          #   index: 13
           #   size: 4
           - name: multi-node-qwenw8a8-2node
             config_file_path: Qwen3-235B-W8A8.yaml
+            index: 14
             size: 2
           # - name: multi-node-deepseek-r1-w8a8-eplb
           #   config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
+          #   index: 15
           #   size: 4
           - name: multi-node-qwenw8a8-2node-eplb
             config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+            index: 16
             size: 2
           - name: multi-node-dpsk3.2-2node
             config_file_path: DeepSeek-V3_2-W8A8-A3-dual-nodes.yaml
+            index: 17
             size: 2
           - name: multi-node-qwen3-dp-mooncake-layerwise
             config_file_path: Qwen3-235B-A22B-Mooncake-Layerwise.yaml
             size: 2
           - name: multi-node-deepseek-r1-w8a8-longseq
             config_file_path: DeepSeek-R1-W8A8-longseq.yaml
+            index: 18
             size: 2
           - name: multi-node-qwenw8a8-2node-longseq
             config_file_path: Qwen3-235B-W8A8-longseq.yaml
+            index: 19
             size: 2
           - name: multi-node-deepseek-V3_2-W8A8-cp
             config_file_path: DeepSeek-V3_2-W8A8-cp.yaml
+            index: 20
             size: 2
           - name: multi-node-qwen-disagg-pd
             config_file_path: Qwen3-235B-disagg-pd.yaml
+            index: 21
             size: 2
           - name: multi-node-qwen-vl-disagg-pd
             config_file_path: Qwen3-VL-235B-disagg-pd.yaml
+            index: 22
             size: 2
           - name: multi-node-kimi-k2-instruct-w8a8
             config_file_path: Kimi-K2-Instruct-W8A8.yaml
+            index: 23
             size: 2
           - name: multi-node-deepseek-v3.1
             config_file_path: DeepSeek-V3.1-BF16.yaml
+            index: 24
             size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
@@ -103,13 +121,30 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
+      base_image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11'
+      vllm_ascend_ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref_name }}
+      is_pr_test: >-
+        ${{
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
+      is_run: >-
+        ${{ 
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
   
   single-node-tests:
     name: single-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: [multi-node-tests]
+    if: >-
+      ${{
+      always() && ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') ||
+      (contains(github.event.pull_request.labels.*.name, 'nightly-test') ) )
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -117,12 +152,25 @@ jobs:
           - name: qwen3-30b-acc
             os: linux-aarch64-a3-4
             tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
+            index: 43
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
+      base_image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11'
+      is_pr_test: >-
+        ${{
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
+      is_run: >-
+        ${{ 
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
 
   single-node-yaml-tests:
     name: single-node
@@ -190,8 +238,12 @@ jobs:
 
   custom-ops-tests:
     name: test ops
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: multi-node-tests
+    if: >- 
+      ${{ 
+      always() && ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+      (contains(github.event.pull_request.labels.*.name, 'nightly-test') ) )
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -199,9 +251,22 @@ jobs:
           - name: custom-multi-ops
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/
+            index: 44
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
+      base_image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11'
+      is_pr_test: >-
+        ${{
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
+      is_run: >-
+        ${{ 
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
