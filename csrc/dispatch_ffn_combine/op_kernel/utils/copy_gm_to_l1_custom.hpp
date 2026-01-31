@@ -13,7 +13,7 @@ namespace Catlass::Gemm::Tile {
 
         static constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);   // int64, 32/8=4
 
-        // Mehtods  
+        // Methods  
 
         CATLASS_DEVICE
         CopyGmToL1() {};

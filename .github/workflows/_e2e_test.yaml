@@ -20,16 +20,22 @@ on:
         type: boolean
 
 jobs:
-  e2e:
-    name: singlecard
+  e2e-light:
+    name: singlecard-light
+    if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a2b3-1
+    strategy:
+      matrix:
+        part: [0]
     container:
       image: ${{ inputs.image }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
-        TRANSFORMERS_OFFLINE: 1
+        HF_HUB_OFFLINE: 1
     steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -42,9 +48,6 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
@@ -78,67 +81,26 @@ jobs:
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-        if: ${{ inputs.type == 'light' }}
         run: |
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
-          pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
+          python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
 
-      - name: Run e2e test
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
-        if: ${{ inputs.type == 'full' }}
-        run: |
-          # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
-          # the test separately.
-          # basic 
-          pytest -sv --durations=0 tests/e2e/singlecard/test_auto_fit_max_mode_len.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_batch_invariant.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_batch_invariant.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_llama32_lora.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_qwen3_multi_loras.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_sampler.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_xlite.py
-
-          # compile
-          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
-  
-          # model_runner_v2
-          # pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
-
-          # pooling
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_embedding.py
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_scoring.py
-
-          # spec_decode
-          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
-          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
-  
-  e2e-2-cards:
-    name: multicard-2
-    runs-on: linux-aarch64-a3-2
+  e2e-full:
+    name: singlecard-full
+    if: ${{ inputs.type == 'full' }}
+    runs-on: linux-aarch64-a2b3-1
+    strategy:
+      matrix:
+        part: [0, 1]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: ${{ inputs.image }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
-        HCCL_BUFFSIZE: 1024
-        TRANSFORMERS_OFFLINE: 1
+        HF_HUB_OFFLINE: 1
     steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -152,8 +114,202 @@ jobs:
           apt-get update -y
           apt install git -y
 
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+          fetch-depth: 1
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+      - name: Run e2e test
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        run: |
+          python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
+
+  e2e-2-cards-light:
+    name: multicard-2-light
+    if: ${{ inputs.type == 'light' }}
+    runs-on: linux-aarch64-a3-2
+    strategy:
+      matrix:
+        part: [0]
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HCCL_BUFFSIZE: 1024
+        HF_HUB_OFFLINE: 1
+    steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+          fetch-depth: 1
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+      - name: Run vllm-project/vllm-ascend test (light)
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          python3 .github/workflows/scripts/run_suite.py --suite e2e-2card-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+
+  e2e-2-cards-full:
+    name: multicard-2-full
+    if: ${{ inputs.type == 'full' }}
+    runs-on: linux-aarch64-a3-2
+    strategy:
+      matrix:
+        part: [0]
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HCCL_BUFFSIZE: 1024
+        HF_HUB_OFFLINE: 1
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+          fetch-depth: 1
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+      - name: Run vllm-project/vllm-ascend test (full)
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-2-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+
+      - name: Run vllm-project/vllm-ascend test (non triton)
+        if: ${{ inputs.type == 'full' && matrix.part == 0 }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          python3 -m pip uninstall -y triton-ascend
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
+
+  e2e-4-cards-full:
+    name: multicard-4-full
+    if: ${{ inputs.type == 'full' }}
+    runs-on: linux-aarch64-a3-4
+    strategy:
+      matrix:
+        part: [0]
+    container:
+      image: m.daocloud.io/quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HF_HUB_OFFLINE: 1
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
 
       - name: Install system dependencies
         run: |
@@ -183,135 +339,11 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend test (light)
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-        if: ${{ inputs.type == 'light' }}
-        run: |
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep
-
-      - name: Run vllm-project/vllm-ascend test (full)
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-        if: ${{ inputs.type == 'full' }}
-        run: |
-          # this test fail with triton. Fix me.
-          # pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_qwen3_performance.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_data_parallel.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_expert_parallel.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_full_graph_mode.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/spec_decode/test_spec_decode.py
-
-          # To avoid oom, we need to run the test in a single process.
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a8_dynamic_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_sp_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_w4a8_accuracy_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_fc2_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_v2_lite_fc1_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_fc1_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a4_distributed_tp2
-
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_weight_load.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_pipeline_parallel.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_prefix_caching.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_quantization.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_qwen3_moe.py
-          # This test is broken, fix me
-          #pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_shared_expert_dp.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_single_request_aclgraph.py
-
-      - name: Run vllm-project/vllm-ascend test (non triton)
-        if: ${{ inputs.type == 'full' }}
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-        run: |
-          python3 -m pip uninstall -y triton-ascend
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
-
-  e2e-4-cards:
-    name: multicard-4
-    needs: [e2e-2-cards]
-    if: ${{ needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
-    runs-on: linux-aarch64-a3-4
-    container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
-      env:
-        VLLM_LOGGING_LEVEL: ERROR
-        VLLM_USE_MODELSCOPE: True
-        TRANSFORMERS_OFFLINE: 1
-    steps:
-      - name: Check npu and CANN info
-        run: |
-          npu-smi info
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-
-      - name: Config mirrors
-        run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
-          apt-get update -y
-          apt install git wget curl -y
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
-        with:
-          path: ./vllm-ascend
-
-      - name: Install system dependencies
-        run: |
-          apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
-
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ inputs.vllm }}
-          path: ./vllm-empty
-
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
-        run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
-
-      - name: Install vllm-project/vllm-ascend
-        working-directory: ./vllm-ascend
-        run: |
-          export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          pip install -r requirements-dev.txt
-          pip install -v -e .
-
       - name: Run vllm-project/vllm-ascend test for V1 Engine
-        working-directory: ./vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_data_parallel_tp2.py
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_kimi_k2.py
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_qwen3_next.py 
-
-          # recover once aclgraph stream bug fixed.
-          # long_sequence
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_basic.py
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_chunked_prefill.py
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_mtp.py
-
-          # # spec_decode
-          # pytest -sv --durations=0 tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py
+          python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-4-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
 
   e2e_310p:
     name: 310p singlecard
@@ -322,7 +354,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
-        TRANSFORMERS_OFFLINE: 1
+        HF_HUB_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -380,7 +412,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
-        TRANSFORMERS_OFFLINE: 1
+        HF_HUB_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |

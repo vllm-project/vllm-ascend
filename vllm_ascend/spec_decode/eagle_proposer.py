@@ -41,7 +41,7 @@ from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.utils import \
     prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, shared_expert_dp_enabled
+from vllm_ascend.utils import enable_sp, shared_expert_dp_enabled, vllm_version_is
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -198,6 +198,7 @@ class EagleProposer(VllmEagleProposer):
             if self.get_model_name(model) in [
                     "Qwen2_5_VLForConditionalGeneration",
                     "Qwen3VLForConditionalGeneration",
+                    "Qwen3VLMoeForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = model.config.image_token_id
             elif self.get_model_name(
@@ -455,7 +456,11 @@ class EagleProposer(VllmEagleProposer):
         self.input_ids[last_token_indices] = next_token_ids
         if self.use_cuda_graph and \
             num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            if vllm_version_is('0.14.1'):
+                num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            else:
+                num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[
+                    num_tokens]
         else:
             num_input_tokens = num_tokens
 
@@ -1180,7 +1185,8 @@ class EagleProposer(VllmEagleProposer):
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
         update_full_graph_params(
             self.runner.attn_backend, self.update_stream, forward_context, num_tokens,
-            self.vllm_config, self.vllm_config.speculative_config)
+            self.vllm_config, self.vllm_config.speculative_config,
+            draft_attn_metadatas=draft_attn_metadatas)
 
     # padding tensor into desired size
     def _pad_tensor(self, tensor, pad_size):

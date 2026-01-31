@@ -56,7 +56,7 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern:
         def pattern(x, weight, residual, rms_norm_weight):
             mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
             all_reduce_ = tensor_model_parallel_all_reduce(mm)
-            output = torch.ops.npu.npu_add_rms_norm(all_reduce_, residual, rms_norm_weight)
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(all_reduce_, residual, rms_norm_weight, None)
             out0 = output[0]
             out1 = output[2]
 
@@ -103,7 +103,7 @@ class LastLayerMatmulAllReduceAddRMSNormPattern:
         def pattern(x, weight, residual, rms_norm_weight):
             mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
             all_reduce_ = tensor_model_parallel_all_reduce(mm)
-            output = torch.ops.npu.npu_add_rms_norm(all_reduce_, residual, rms_norm_weight)
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(all_reduce_, residual, rms_norm_weight, None)
 
             return output[0]
 
