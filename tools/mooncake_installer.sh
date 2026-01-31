@@ -94,6 +94,18 @@ if [ "$SKIP_CONFIRM" = false ]; then
     fi
 fi
 
+# Define a function to handle the git clone operation
+clone_repo_if_not_exists() {
+    local repo_dir=$1
+    local repo_url=$2
+
+    if [ ! -d "$repo_dir" ]; then
+        git clone --depth 1 "$repo_url"
+    else
+        echo "Directory $repo_dir already exists, skipping clone."
+    fi
+}
+
 
 # Update package lists
 print_section "Updating package lists"
