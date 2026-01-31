@@ -376,6 +376,14 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.addCleanup(patcher12.stop)
         self.mock_repeat_interleave.return_value = torch.arange(16)
 
+        # Mock get_forward_context().dbo_enabled
+        patcher13 = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_forward_context")
+        self.mock_get_forward_context = patcher13.start()
+        self.addCleanup(patcher13.stop)
+        self.mock_get_forward_context.return_value = MagicMock(capturing=False)
+        self.mock_get_forward_context.return_value.dbo_enabled = False
+
         self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2,
                                                       num_experts=4,
                                                       num_local_experts=2,
