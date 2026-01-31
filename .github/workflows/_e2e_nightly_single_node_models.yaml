@@ -40,6 +40,9 @@ on:
         required: false
         type: boolean
         default: false
+      is_run:
+        required: true
+        type: boolean
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -58,6 +61,7 @@ jobs:
   e2e-nightly:
     name: ${{inputs.model_list}} accuracy test
     runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.is_run }}
     container:
       image: "${{ inputs.image }}"
       env:

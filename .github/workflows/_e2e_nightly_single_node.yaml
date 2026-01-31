@@ -27,12 +27,26 @@ on:
         required: false
         type: string
         default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
+      base_image:
+        required: false
+        type: string
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
       tests:
         required: true
         type: string
       name:
         required: false
         type: string
+      vllm_version:
+        required: false
+        type: string
+        default: "v0.15.0"
+      is_pr_test:
+        required: true
+        type: boolean
+      is_run:
+        required: true
+        type: boolean
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -51,9 +65,10 @@ jobs:
   e2e-nightly:
     name: ${{ inputs.tests }}
     runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.is_run }}
     timeout-minutes: 600
     container:
-      image: ${{ inputs.image }}
+      image: ${{ inputs.is_pr_test && inputs.base_image || inputs.image }}
     env:
       HF_HUB_OFFLINE: 1
       VLLM_USE_MODELSCOPE: True
@@ -62,6 +77,73 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+      
+      - name: Config mirrors
+        if: ${{ inputs.is_pr_test }}
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+          mkdir -p /vllm-workspace
+
+      - name: Install system dependencies
+        if: ${{ inputs.is_pr_test }}
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+      - name: Checkout vllm-project/vllm repo
+        if: ${{ inputs.is_pr_test }}
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm_version }}
+          path: ./temp-vllm 
+          fetch-depth: 1
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        if: ${{ inputs.is_pr_test }}
+        uses: actions/checkout@v6
+        with:
+          path: ./temp-vllm-ascend
+          fetch-depth: 1
+
+      - name: Move code to /vllm-workspace
+        if: ${{ inputs.is_pr_test }}
+        run: |
+          mv ./temp-vllm /vllm-workspace/vllm
+          mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
+          ls -R /vllm-workspace
+
+      - name: Install vllm-project/vllm from source
+        if: ${{ inputs.is_pr_test }}
+        working-directory: /vllm-workspace/vllm
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+      
+      - name: Install vllm-project/vllm-ascend
+        if: ${{ inputs.is_pr_test }}
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Install aisbench
+        if: ${{ inputs.is_pr_test }}
+        shell: bash -l {0} 
+        run: |
+          git clone -b v3.0-20250930-master --depth 1 https://gitee.com/aisbench/benchmark.git /vllm-workspace/vllm-ascend/benchmark
+          cd /vllm-workspace/vllm-ascend/benchmark
+          pip install pytest asyncio pytest-asyncio
+          pip install -e . -r requirements/api.txt -r requirements/extra.txt
+          python3 -m pip cache purge
 
       - name: Show vLLM and vLLM-Ascend version
         working-directory: /vllm-workspace

@@ -24,10 +24,10 @@ on:
       # Run test at 24:00 Beijing time (UTC+8)
       - cron: "0 16 * * *"
   workflow_dispatch:
-  pull_request: 
+  pull_request:
     branches:
       - 'main'
-    types: [ labeled ]
+    types: [labeled, synchronize]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -44,7 +44,11 @@ concurrency:
 jobs:
   single-node-tests:
     name: single-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: >- 
+      ${{ 
+      always() && ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+      (contains(github.event.pull_request.labels.*.name, 'nightly-test') ) )
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -52,29 +56,51 @@ jobs:
           - name: qwen3-next
             os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
+            index: 0
           - name: qwen3-32b
             os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_32b.py
+            index: 1
           - name: qwen3-32b-in8-a2
             os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_32b_int8.py
+            index: 2
           - name: test_custom_op
             os: linux-aarch64-a2b3-1
             tests: tests/e2e/nightly/single_node/ops/singlecard_ops
+            index: 3
           - name: test_custom_op_multi_card
             os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
+            index: 4
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
+      vllm_version: v0.15.0
       runner: ${{ matrix.test_config.os }}
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+      base_image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11'
+      is_pr_test: >-
+        ${{
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
+      is_run: >-
+        ${{ 
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
 
   multi-node-tests:
     name: multi-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: single-node-tests
+    if: >- 
+      ${{ 
+      always() && ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+      (contains(github.event.pull_request.labels.*.name, 'nightly-test') ) )
+      }}
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -83,26 +109,41 @@ jobs:
           - name: multi-node-deepseek-dp
             config_file_path: DeepSeek-R1-W8A8-A2.yaml
             size: 2
+            index: 5
           - name: multi-node-qwen3-235b-dp
             config_file_path: Qwen3-235B-A22B-A2.yaml
             size: 2
+            index: 6
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
+      vllm_version: v0.15.0
       soc_version: a2
       runner: linux-amd64-cpu-8-hk
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+      base_image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11'
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
+      vllm_ascend_ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref_name }}
+      is_pr_test: >-
+        ${{
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
+      is_run: >-
+        ${{ 
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
 
   single-node-accuracy-tests:
-    if: >-
-      ${{
-        github.event_name == 'schedule' ||
-        github.event_name == 'workflow_dispatch' ||
-        contains(github.event.pull_request.labels.*.name, 'accuracy-test')
+    if: >- 
+      ${{ 
+      always() && ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+      (contains(github.event.pull_request.labels.*.name, 'nightly-test') ) )
       }}
     strategy:
       fail-fast: false
@@ -115,6 +156,7 @@ jobs:
               - Qwen3-8B-W8A8
               - Qwen3-VL-8B-Instruct
               - Qwen2.5-Omni-7B
+            index: 7
           - os: linux-aarch64-a2b3-1
             model_list:
               - ERNIE-4.5-21B-A3B-PT
@@ -122,21 +164,30 @@ jobs:
               - Molmo-7B-D-0924
               - Llama-3.2-3B-Instruct
               - llava-onevision-qwen2-0.5b-ov-hf
+            index: 8
           - os: linux-aarch64-a2b3-2
             model_list:
               - Qwen3-30B-A3B
               - Qwen3-VL-30B-A3B-Instruct
               - Qwen3-30B-A3B-W8A8
+            index: 9
           - os: linux-aarch64-a2b3-4
             model_list:
               - Qwen3-Next-80B-A3B-Instruct
               - Qwen3-Omni-30B-A3B-Instruct
+            index: 10
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       vllm: v0.15.0
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11'
+      is_run: >-
+        ${{ 
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, 'index-all')) || 
+          (contains(github.event.pull_request.labels.*.name, 'nightly-test') && contains(github.event.pull_request.labels.*.name, format('index-{0}', matrix.test_config.index)))
+        }}
       upload: false
 
   doc-test:

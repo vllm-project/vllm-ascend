@@ -136,6 +136,72 @@ install_extra_components() {
     echo "====> Extra components installation completed"
 }
 
+checkout_src() {
+    echo "====> Checkout source code"
+    cd "$WORKSPACE"
+
+    # ---- vllm-ascend ----
+    if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
+        echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
+        git clone "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
+        cd "$WORKSPACE/vllm-ascend"
+        git fetch --all
+        git checkout "$VLLM_ASCEND_REF"
+    fi
+
+    # ---- vllm ----
+    if [ ! -d "$WORKSPACE/vllm" ]; then
+        echo "Cloning vllm version/ref: $VLLM_VERSION"
+        git clone https://github.com/vllm-project/vllm.git "$WORKSPACE/vllm"
+        cd "$WORKSPACE/vllm"
+        git fetch --all
+        git checkout "$VLLM_VERSION"
+    fi
+}
+
+install_vllm() {
+    echo "====> Install vllm and vllm-ascend"
+    VLLM_TARGET_DEVICE=empty pip install -e "$WORKSPACE/vllm"
+    pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
+    pip install -e "$WORKSPACE/vllm-ascend"
+}
+
+install_sys_dependencies() {
+    echo "====> Install system dependencies for PR test"
+    cd "$WORKSPACE/vllm-ascend"
+    
+    apt-get install -y $(cat packages.txt)
+    
+    apt-get install -y gcc g++ cmake libnuma-dev clang-15
+    
+    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+}
+
+install_aisbench() {
+    echo "====> Install AISBench benchmark"
+    
+    export AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
+    : "${AIS_BENCH_TAG:=v3.0-20250930-master}"  
+
+    BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
+
+    if [ -d "$BENCH_DIR" ]; then
+        echo "Removing existing benchmark directory..."
+        rm -rf "$BENCH_DIR"
+    fi
+
+    git clone -b "${AIS_BENCH_TAG}" --depth 1 \
+        "${AIS_BENCH_URL}" "${BENCH_DIR}"
+
+    cd "$BENCH_DIR"
+    pip install -e . \
+        -r requirements/api.txt \
+        -r requirements/extra.txt
+
+    python3 -m pip cache purge || echo "WARNING: pip cache purge failed, but proceeding..."
+
+}
 
 show_triton_ascend_info() {
     echo "====> Check triton ascend info"
@@ -170,6 +236,12 @@ If this is insufficient to pinpoint the error, please download and review the lo
 main() {
     check_npu_info
     check_and_config
+    if [[ "$IS_PR_TEST" == "true" ]]; then
+        install_sys_dependencies
+        checkout_src
+        install_vllm
+        install_aisbench
+    fi
     show_vllm_info
     show_triton_ascend_info
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
