@@ -661,7 +661,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     -d '{
         "model": "deepseek_v3",
         "prompt": "The future of AI is",
-        "max_tokens": 50,
+        "max_completion_tokens": 50,
         "temperature": 0
     }'
 ```
@@ -699,7 +699,7 @@ The performance result is:
 
 **Input/Output**: 3.5k/1.5k
 
-**Performance**: TTFT = 6.16s, TPOT = 48.82ms, Average performance of each card is 478 TPS (Token Per Secon).
+**Performance**: TTFT = 6.16s, TPOT = 48.82ms, Average performance of each card is 478 TPS (Token Per Second).
 
 ### Using vLLM Benchmark
 

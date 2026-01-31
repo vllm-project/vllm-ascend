@@ -131,6 +131,57 @@ class NPUWorker(WorkerBase):
 
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
 
+        npugraph_ex_config = get_ascend_config().npugraph_ex_config
+        if npugraph_ex_config.enable and npugraph_ex_config.enable_static_kernel:
+            # Prevent duplicate triggers, execute the exit logic only once
+            shutdown_request = False
+
+            def signal_handler(signum, frame):
+                nonlocal shutdown_request
+                if not shutdown_request:
+                    shutdown_request = True
+                    self.uninstall_static_kernel()
+                    raise SystemExit()
+
+            # Either SIGTERM or SIGINT will terminate the worker
+            import signal
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
+
+
+    def uninstall_static_kernel(self):
+        import os
+        import fcntl
+        import subprocess
+
+        ascend_home_path = os.environ["ASCEND_HOME_PATH"]
+        static_kernel_dir_path = os.path.join(ascend_home_path, 'opp/static_kernel')
+        uninstall_script_path = os.path.join(static_kernel_dir_path, 'ai_core/uninstall.sh')
+        lock_file_path = os.path.join(static_kernel_dir_path, 'uninstall.lock')
+
+        if not os.path.exists(uninstall_script_path):
+            return
+        with open(lock_file_path, 'w') as lock_fd:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                subprocess.Popen(
+                    ['bash', uninstall_script_path],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+            except (BlockingIOError, OSError) as e:
+                return
+            finally:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    if os.path.exists(lock_file_path):
+                        os.remove(lock_file_path)
+                except Exception:
+                    return
+
+
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
@@ -510,7 +561,7 @@ class NPUWorker(WorkerBase):
                 aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
                 l2_cache=False,
                 op_attr=False,
-                data_simplification=False,
+                data_simplification=True,
                 record_op_args=False,
                 gc_detect_threshold=None,
             )
@@ -520,9 +571,11 @@ class NPUWorker(WorkerBase):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU,
                 ],
-                with_stack=profiler_config.torch_profiler_with_stack,
+                with_stack=False,
                 profile_memory=profiler_config.torch_profiler_with_memory,
-                with_modules=False,
+                # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
+                # The with_stack option in torch_npu.profiler introduces significant time overhead.
+                with_modules=profiler_config.torch_profiler_with_stack,
                 experimental_config=experimental_config,
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir))

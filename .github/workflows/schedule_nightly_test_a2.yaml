@@ -49,7 +49,7 @@ jobs:
       fail-fast: false
       matrix:
         test_config:
-          - name: qwen3next
+          - name: qwen3-next
             os: linux-aarch64-a2-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
           - name: qwen3-32b
@@ -66,7 +66,6 @@ jobs:
             tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: v0.14.1
       runner: ${{ matrix.test_config.os }}
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
@@ -103,10 +102,7 @@ jobs:
       ${{
         github.event_name == 'schedule' ||
         github.event_name == 'workflow_dispatch' ||
-        (
-          contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
-          contains(github.event.pull_request.labels.*.name, 'ready-for-test')
-        )
+        contains(github.event.pull_request.labels.*.name, 'accuracy-test')
       }}
     strategy:
       fail-fast: false

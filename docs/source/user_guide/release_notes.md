@@ -1,8 +1,57 @@
 # Release Notes
 
+## v0.14.0rc1 - 2026.01.26
+
+This is the first release candidate of v0.14.0 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started. This release includes all the changes in v0.13.0rc2. So We just list the differences from v0.13.0rc2. If you are upgrading from v0.13.0rc1, please read both v0.14.0rc1 and v0.13.0rc2 release notes.
+
+### Highlights
+
+- 310P support is back now. In this release, only basic dense and vl models are supported with eager mode. We'll keep improving and maintaining the support for 310P. [#5776](https://github.com/vllm-project/vllm-ascend/pull/5776)
+- Support compressed tensors moe w8a8-int8 quantization. [#5718](https://github.com/vllm-project/vllm-ascend/pull/5718)
+- Support Medusa speculative decoding. [#5668](https://github.com/vllm-project/vllm-ascend/pull/5668)
+- Support Eagle3 speculative decoding for Qwen3vl. [#4848](https://github.com/vllm-project/vllm-ascend/pull/4848)
+
+### Features
+
+- Xlite Backend supports Qwen3 MoE now. [#5951](https://github.com/vllm-project/vllm-ascend/pull/5951)
+- Support DSA-CP for PD-mix deployment case. [#5702](https://github.com/vllm-project/vllm-ascend/pull/5702)
+- Add support of new W4A4_LAOS_DYNAMIC quantization method. [#5143](https://github.com/vllm-project/vllm-ascend/pull/5143)
+
+### Performance
+
+- The performance of Qwen3-next has been improved. [#5664](https://github.com/vllm-project/vllm-ascend/pull/5664) [#5984](https://github.com/vllm-project/vllm-ascend/pull/5984) [#5765](https://github.com/vllm-project/vllm-ascend/pull/5765)
+- The CPU bind logic and performance has been improved. [#5555](https://github.com/vllm-project/vllm-ascend/pull/5555)
+- Merge Q/K split to simplify AscendApplyRotaryEmb for better performance. [#5799](https://github.com/vllm-project/vllm-ascend/pull/5799)
+- Add Matmul Allreduce Rmsnorm fusion Pass. It's disabled by default. Set `fuse_allreduce_rms=True` in `--additional_config` to enable it. [#5034](https://github.com/vllm-project/vllm-ascend/pull/5034)
+- Optimize rope embedding with triton kernel for huge performance gain. [#5918](https://github.com/vllm-project/vllm-ascend/pull/5918)
+- support advanced apply_top_k_top_p without top_k constraint. [#6098](https://github.com/vllm-project/vllm-ascend/pull/6098)
+- Parallelize Q/K/V padding in AscendMMEncoderAttention for better performance. [#6204](https://github.com/vllm-project/vllm-ascend/pull/6204)
+
+### Others
+
+- model runner v2 support triton of penalty. [#5854](https://github.com/vllm-project/vllm-ascend/pull/5854)
+- model runner v2 support eagle spec decoding. [#5840](https://github.com/vllm-project/vllm-ascend/pull/5840)
+- Fix multi-modal inference OOM issues by setting `expandable_segments:True` by default. [#5855](https://github.com/vllm-project/vllm-ascend/pull/5855)
+- `VLLM_ASCEND_ENABLE_MLAPO` is set to `True` by default. It's enabled automatically on decode node in PD deployment case. Please note that this feature will cost more memory. If you are memory sensitive, please set it to False. [#5952](https://github.com/vllm-project/vllm-ascend/pull/5952)
+- SSL config can be set to kv_extra_config for PD deployment with mooncake layerwise connector. [#5875](https://github.com/vllm-project/vllm-ascend/pull/5875)
+- support `--max_model_len=auto`. [#6193](https://github.com/vllm-project/vllm-ascend/pull/6193)
+
+### Dependencies
+
+- torch-npu is upgraded to 2.9.0 [#6112](https://github.com/vllm-project/vllm-ascend/pull/6112)
+
+### Deprecation & Breaking Changes
+
+- EPLB config options is moved to `eplb_config` in [additional config](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/configuration/additional_config.html). The old ones are removed in this release.
+- The profiler envs, such as `VLLM_TORCH_PROFILER_DIR` and `VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY` do not work with vLLM Ascend now. Please use vLLM `--profiler-config` parameters instead. [#5928](https://github.com/vllm-project/vllm-ascend/pull/5928)
+
+### Known Issues
+
+- If you hit the pickle error from `EngineCore` process sometimes, please cherry-pick the [PR](https://github.com/vllm-project/vllm/pull/32022) into your local vLLM code. This known issue will be fixed in vLLM in the next release.
+
 ## v0.13.0rc2 - 2026.01.24
 
-This is the second release candidate of v0.13.0 for vLLM Ascend. In this rc relesae, we fixed lots of bugs and improved the performance of many models. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.13.0/) to get started. Any feedback is welcome to help us to improve the final version of v0.13.0.
+This is the second release candidate of v0.13.0 for vLLM Ascend. In this rc release, we fixed lots of bugs and improved the performance of many models. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.13.0/) to get started. Any feedback is welcome to help us to improve the final version of v0.13.0.
 
 ### Highlights
 
@@ -19,7 +68,7 @@ We mainly focus on quality and performance improvement in this release. The spec
 
 ### Model Support
 
-- LongCat-Flash is supproted now.[#3833](https://github.com/vllm-project/vllm-ascend/pull/3833)
+- LongCat-Flash is supported now.[#3833](https://github.com/vllm-project/vllm-ascend/pull/3833)
 - minimax_m2 is supported now. [#5624](https://github.com/vllm-project/vllm-ascend/pull/5624)
 - Support for cross-attention and whisper models [#5592](https://github.com/vllm-project/vllm-ascend/pull/5592)
 
@@ -51,7 +100,7 @@ We mainly focus on quality and performance improvement in this release. The spec
 ### Deprecation & Breaking Changes
 
 - `CPUOffloadingConnector` is deprecated. We'll remove it in the next release. It'll be replaced by CPUOffload feature from vLLM in the future.
-- eplb config options is moved to `eplb_config` in [additional config](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/performance_and_debug/profile_execute_duration.html). The old ones will be removed in the next release.
+- eplb config options is moved to `eplb_config` in [additional config](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/configuration/additional_config.html). The old ones will be removed in the next release.
 - `ProfileExecuteDuration` [feature](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/performance_and_debug/profile_execute_duration.html) is deprecated. It's replaced by `ObservabilityConfig` from vLLM.
 - The value of `VLLM_ASCEND_ENABLE_MLAPO` env will be set to True by default in the next release. It'll be enabled in decode node by default. Please note that this feature will cost more memory. If you are memory sensitive, please set it to False.
 

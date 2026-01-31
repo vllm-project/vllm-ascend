@@ -19,6 +19,7 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
+    vllm_version_is,
 )
 
 
@@ -42,20 +43,26 @@ def set_ascend_forward_context(
     batch_descriptor: BatchDescriptor | None = None,
     model_instance: torch.nn.Module = None,
     is_draft_model=False,
+    skip_compiled: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
     """
-    with set_forward_context(
-        attn_metadata,
-        vllm_config,
-        virtual_engine=virtual_engine,
-        num_tokens=num_tokens,
-        num_tokens_across_dp=num_tokens_across_dp,
-        cudagraph_runtime_mode=aclgraph_runtime_mode,
-        batch_descriptor=batch_descriptor,
-    ):
+    forward_context_kwargs = {
+        "attn_metadata": attn_metadata,
+        "vllm_config": vllm_config,
+        "virtual_engine": virtual_engine,
+        "num_tokens": num_tokens,
+        "num_tokens_across_dp": num_tokens_across_dp,
+        "cudagraph_runtime_mode": aclgraph_runtime_mode,
+        "batch_descriptor": batch_descriptor,
+    }
+
+    if not vllm_version_is("0.14.1"):
+        forward_context_kwargs["skip_compiled"] = skip_compiled
+
+    with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
