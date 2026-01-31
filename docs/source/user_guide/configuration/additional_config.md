@@ -76,6 +76,7 @@ The details of each configuration option are as follows:
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
+| `fuse_qknorm`      | bool | `False` | Whether to enable qknorm fusion optimization. |
 | `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
 | `fuse_allreduce_rms` | bool | `False` | Whether to enable fuse_allreduce_rms pass. It's set to False because of conflict with SP. |
 
