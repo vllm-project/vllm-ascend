@@ -16,6 +16,11 @@ on:
         type: string
         description: base image for pods
         default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
+      base_image:
+        required: false
+        type: string
+        description: base image for pods
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
       config_file_path:
         required: true
         type: string
@@ -45,6 +50,12 @@ on:
         default: main
         type: string
         description: used for pr level tests
+      is_pr_test:
+        required: true
+        type: boolean
+      is_run:
+        required: true  
+        type: boolean
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -68,6 +79,7 @@ jobs:
     name: ${{ inputs.config_file_path }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.is_run }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
       env:
@@ -78,8 +90,19 @@ jobs:
         - name: Decode kubeconfig from secrets
           run: |
             # Decode and save kubeconfig
-            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
-
+            if [ "${{ inputs.is_pr_test }}" = "true" ]; then
+              echo "PR test mode"
+              if [ "${{ inputs.soc_version }}" = "a3" ]; then
+                echo "Using A3 cached kubeconfig"
+                cp /root/.cache/.kube/kubeconfig.yaml "$KUBECONFIG"
+              else
+                echo "Using A2 cached kubeconfig"
+                cp /root/.cache/.kube/hk_001_kb.yaml "$KUBECONFIG"
+              fi
+            else
+              echo "Decoding kubeconfig from secrets"
+              echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
+            fi
         - name: Checkout code
           uses: actions/checkout@v6
 
@@ -130,12 +153,16 @@ jobs:
 
             size="${{ inputs.size }}"
             replicas="${{ inputs.replicas }}"
-            image="${{ inputs.image }}"
+            image="${{ inputs.is_pr_test && inputs.base_image || inputs.image }}"
             config_file_path="${{ inputs.config_file_path }}"
             fail_tag=FAIL_TAG_"${{ inputs.config_file_path }}"
-            echo "FAIL_TAG=${fail_tag}" >> "$GITHUB_ENV"
+            is_pr_test="${{ inputs.is_pr_test }}"
+            vllm_version="${{ inputs.vllm_version }}"
+            vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
+            vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
+            echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
-            required_params=("size" "replicas" "image" "config_file_path")
+            required_params=("size" "replicas" "image" "config_file_path" "is_pr_test" "vllm_version" "vllm_ascend_ref" "vllm_ascend_remote_url")
             for param in "${required_params[@]}"; do
               if [ -z "${!param}" ]; then
                 echo "Error: Parameter '$param' is required but empty"
@@ -158,6 +185,10 @@ jobs:
               -D config_file_path="$config_file_path" \
               -D npu_per_node="$npu_per_node" \
               -D fail_tag="$fail_tag" \
+              -D is_pr_test="$is_pr_test" \
+              -D vllm_version="$vllm_version" \
+              -D vllm_ascend_ref="$vllm_ascend_ref" \
+              -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
               --outfile lws.yaml
 
             kubectl apply -f ./lws.yaml
