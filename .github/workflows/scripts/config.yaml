@@ -33,8 +33,6 @@ e2e-singlecard:
     estimated_time: 300
   - name: tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
     estimated_time: 200
-  - name: tests/e2e/singlecard/test_profile_execute_duration.py
-    estimated_time: 10
   - name: tests/e2e/singlecard/test_quantization.py
     estimated_time: 200
   - name: tests/e2e/singlecard/test_sampler.py
