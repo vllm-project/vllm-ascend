@@ -856,7 +856,7 @@ class EagleProposer(VllmEagleProposer):
             block_numbers = clamped_positions[0] // block_size
         else:
             block_numbers = (clamped_positions // block_size)
-        block_ids = old_common_metadata.block_tables.gather(
+        block_ids = old_common_metadata.block_table_tensor.gather(
             dim=1, index=block_numbers.view(-1, 1))
         block_ids = block_ids.view(-1)
         if self.uses_mrope:
