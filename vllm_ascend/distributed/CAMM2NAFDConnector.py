@@ -133,6 +133,9 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             while dst < self.ffn_size:
                 self.dst_list.append(dst)
                 dst += self.min_size
+
+        self.aiv_num = int(self.config.afd_config.multistream_info["core_num"]) if self.config.afd_config.is_multistream else 48
+
         logger.debug(f"[CAM] world_rank={self.rank}, p2p_rank={self.p2p_rank}, min_size={self.min_size}, "
                     f"dst_list={self.dst_list}, cam connector initialized")
         logger.info("m2n connector initialized")
@@ -157,7 +160,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             metadata.connector_data.moe_expert_num = config.n_routed_experts
             # TODO: quant_mode and aiv_num read from config
             metadata.connector_data.quant_mode = 0
-            metadata.connector_data.aiv_num = 48
+            metadata.connector_data.aiv_num = self.aiv_num
             metadata.connector_data.scale = None
             metadata.connector_data.batch_size = batch_size
             metadata.connector_data.h = config.hidden_size
@@ -228,7 +231,8 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                                                 self.max_num_reqs,
                                                 self.hf_config.hidden_size,
                                                 self.hf_config.num_experts_per_tok,
-                                                multistream_enable), None
+                                                multistream_enable,
+                                                self.aiv_num), None
 
 
     # MOE发给ATTN（ATTN接收）
@@ -366,7 +370,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             scale = None,
             handle = None,
             quant_mode = 0,
-            aiv_num = 48,
+            aiv_num = self.aiv_num,
             batch_size = max_num_tokens,
             h = hf_config.hidden_size,
             k = hf_config.num_experts_per_tok
@@ -395,7 +399,8 @@ def cam_send_attn_output_impl(hidden_states: torch.Tensor,
                               batch_size:int,
                               h:int,
                               k:int,
-                              multistream_enable: bool) -> torch.Tensor:
+                              multistream_enable: bool,
+                              aiv_num: int) -> torch.Tensor:
     ubatch_idx = get_forward_context().ubatch_idx
     comm_stream = get_forward_context().comm_stream
     comm_event = get_forward_context().comm_event
@@ -406,7 +411,7 @@ def cam_send_attn_output_impl(hidden_states: torch.Tensor,
                     scale = None,
                     handle = None,
                     quant_mode = 0,
-                    aiv_num = 48,
+                    aiv_num = aiv_num,
                     batch_size = batch_size,
                     h = h,
                     k = k
@@ -460,7 +465,8 @@ def cam_send_attn_output_fake_impl(hidden_states: torch.Tensor,
                                     batch_size:int,
                                     h:int,
                                     k:int,
-                                    multistream_enable: bool) -> torch.Tensor:
+                                    multistream_enable: bool,
+                                    aiv_num: int) -> torch.Tensor:
     return hidden_states
 
 def cam_recv_ffn_output_impl(hidden_states: torch.Tensor,
