@@ -787,6 +787,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         context_output, context_lse = self._update_out_and_lse(
             attn_out_allgather, attn_lse_allgather)
         return context_output, context_lse
+    
+    def _get_attention_profile_run_size(self, output: torch.Tensor):
+        # When the CP function is enabled, the peak GPU memory usage of the attention phase is greater than that of the MoE phase. During profile running, the peak GPU memory usage in the attention phase is estimated.
+        return torch.empty((6 * self.pcp_size * self.dcp_size, self.vllm_config.scheduler_config.max_num_batched_tokens, self.num_heads, self.head_size), dtype=torch.float32, device=output.device)
 
     def forward_impl(
         self,

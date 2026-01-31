@@ -666,6 +666,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
                 actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
             )[0]
+    
+    def _get_attention_profile_run_size(self, output: torch.Tensor):
+        return output.fill_(0)
 
     def reshape_and_cache(
         self,
@@ -761,7 +764,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         num_tokens = query.shape[0]
         if attn_metadata is None:
-            return output.fill_(0)
+            return self._get_attention_profile_run_size(output)
         if key is not None and value is not None:
             key, value = self.reshape_and_cache(key, value, kv_cache,
                                                 attn_metadata)
