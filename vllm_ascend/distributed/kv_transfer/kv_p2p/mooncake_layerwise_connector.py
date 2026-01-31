@@ -152,17 +152,14 @@ class SizedDict(OrderedDict):
 class KVCacheSendingLayerThread(threading.Thread):
     def __init__(
         self,
+        vllm_config: VllmConfig,
         engine: TransferEngine,
-        total_layers: int,
         ready_event: threading.Event,
-        tp_rank: int,
         pd_head_ratio: int,
         num_head_replica: int,
         kv_cache_base_addr: list[int],
-        use_mla: bool,
         block_len: list[int],
         decode_tp_size: int,
-        first_kv_cache: torch.Tensor,
         k_buffer: torch.Tensor,
         v_buffer: torch.Tensor,
         resharding_stream: torch.npu.Stream,
@@ -170,13 +167,13 @@ class KVCacheSendingLayerThread(threading.Thread):
     ):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.engine = engine
-        self.tp_rank = tp_rank
+        self.tp_rank = get_tensor_model_parallel_rank()
         self.pd_head_ratio = pd_head_ratio
         self.num_head_replica = num_head_replica
         self.kv_caches_base_addr = kv_cache_base_addr
-        self.total_layers = total_layers
-        self.use_mla = use_mla
-        self.use_sparse = len(block_len) == 3
+        self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.use_mla = vllm_config.model_config.use_mla
+        self.use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
         self.block_len = block_len
         self._decode_tp_size = decode_tp_size
         self.resharding_stream = resharding_stream
@@ -821,8 +818,10 @@ class MooncakeLayerwiseConnectorWorker:
         self.tp_group = get_tp_group()
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
+        self.total_num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+        self.use_mla = vllm_config.model_config.use_mla
+        self.use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-        self.use_mla = self.vllm_config.model_config.use_mla
 
         # Handshake base port
         self.side_channel_port = (
@@ -920,11 +919,6 @@ class MooncakeLayerwiseConnectorWorker:
         first_kv_cache = first_kv_cache_tuple[0]
         self.create_kv_buffer(first_kv_cache)
 
-        # TODO(tms): Find a more robust way to detect and handle MLA
-        self.use_mla = (
-            first_kv_cache_tuple[0].size(-1) != first_kv_cache_tuple[1].size(-1) and len(first_kv_cache_tuple) == 2
-        )
-        self.use_sparse = len(first_kv_cache_tuple) == 3
         if self.use_mla:
             # MLA case.[num_block, block_size, 1, hidden_dim]
             self.num_blocks = first_kv_cache.shape[0]
@@ -1014,17 +1008,14 @@ class MooncakeLayerwiseConnectorWorker:
         if self.vllm_config.kv_transfer_config.is_kv_producer:
             ready_event = threading.Event()
             self.kv_send_layer_thread = KVCacheSendingLayerThread(
+                vllm_config=self.vllm_config,
                 engine=self.engine,
-                total_layers=self.total_layers,
                 ready_event=ready_event,
-                tp_rank=self.tp_rank,
                 pd_head_ratio=self.pd_head_ratio,
                 num_head_replica=self.num_head_replica,
                 kv_cache_base_addr=self.kv_caches_base_addr,
-                use_mla=self.use_mla,
                 block_len=self.block_len,
                 decode_tp_size=self._decode_tp_size,
-                first_kv_cache=first_kv_cache,
                 k_buffer=self.k_buffer,
                 v_buffer=self.v_buffer,
                 resharding_stream=self.resharding_stream,
@@ -1073,11 +1064,10 @@ class MooncakeLayerwiseConnectorWorker:
             if self.use_mla or self.use_sparse:
                 num_need_send = self._decode_tp_size
             else:
-                num_kv_head = self.vllm_config.model_config.hf_config.num_key_value_heads
-                if self.tp_size <= num_kv_head:
+                if self.tp_size <= self.total_num_kv_heads:
                     num_need_send = self.tp_size
                 else:
-                    num_need_send = self._decode_tp_size if self._decode_tp_size >= num_kv_head else num_kv_head
+                    num_need_send = self._decode_tp_size if self._decode_tp_size >= self.total_num_kv_heads else self.total_num_kv_heads
             num_replica_groups = self.tp_size // num_need_send if self.tp_size >= num_need_send else 1
             replica_group_idx = self.tp_rank % num_replica_groups
             req_ids = sorted(list(metadata.requests.keys()))
