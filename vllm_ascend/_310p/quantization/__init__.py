@@ -15,10 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig
+from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig310
 from vllm_ascend.quantization.compressed_tensors_config import AscendCompressedTensorsConfig  # noqa: F401
 
 __all__ = [
-    "AscendModelSlimConfig",
+    "AscendModelSlimConfig310",
     "AscendCompressedTensorsConfig",
 ]

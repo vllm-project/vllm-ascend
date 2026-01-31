@@ -23,8 +23,18 @@ import torch_npu
 from vllm_ascend.quantization.methods.base import AscendLinearScheme
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, get_weight_prefetch_method
 
+from .registry import register_scheme
 
+
+@register_scheme("W8A8", "linear")
 class AscendW8A8LinearMethod310P(AscendLinearScheme):
+    """310P-only W8A8 static linear scheme.
+
+    Notes:
+      - Keep weight in non-NZ layout to avoid aclnnQuantMatmulWeightNz on 310P.
+      - This scheme is discovered via 310P local registry.
+    """
+
     def get_weight(
         self,
         input_size: int,
@@ -43,7 +53,7 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
         params: dict[str, Any] = {}
         params["quant_bias"] = torch.empty(output_size, dtype=torch.int32)
 
-        # TODO-csx
+        # NOTE: keep identical to your current working behavior.
         if params_dtype == torch.bfloat16:
             params["deq_scale"] = torch.empty(output_size, dtype=torch.float32)
         else:
@@ -54,7 +64,11 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
         return params
 
     def apply(
-        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None, tp_rank: int | None = 0
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
     ) -> torch.Tensor:
         if x.dtype != torch.int8:
             layer_cls_name = layer.__class__.__name__
@@ -66,32 +80,12 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
                     start_flag=x,
                 )
 
-            try:
-                quant_comm_config = layer._quant_comm_config
-            except AttributeError:
-                quant_comm_config = {}
-            comm_fn = quant_comm_config.get("communication_fn")
-            enable_flashcomm2_quant_comm = comm_fn is not None and (
-                "o_proj" in layer.prefix or "out_proj" in layer.prefix
+            x = torch.ops.vllm.quantize(
+                x,
+                layer.aclnn_input_scale,
+                layer.aclnn_input_scale_reciprocal,
+                layer.aclnn_input_offset,
             )
-
-            if enable_flashcomm2_quant_comm:
-                quant_input_x = x.contiguous().view(-1, layer.aclnn_input_scale_reciprocal.size(0))
-                quant_x = torch.ops.vllm.quantize(
-                    quant_input_x,
-                    layer.aclnn_input_scale,
-                    layer.aclnn_input_scale_reciprocal,
-                    layer.aclnn_input_offset,
-                )
-                comm_input = quant_x.view(x.size(0), -1)
-                x = comm_fn(comm_input)
-            else:
-                x = torch.ops.vllm.quantize(
-                    x,
-                    layer.aclnn_input_scale,
-                    layer.aclnn_input_scale_reciprocal,
-                    layer.aclnn_input_offset,
-                )
 
             if weight_prefetch_method:
                 weight_prefetch_method.maybe_prefetch_attn_weight_postprocess(
@@ -100,8 +94,7 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
                 )
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
-        ascend_quant_method = getattr(layer, "ascend_quant_method", "")
-        if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
+        if getattr(layer, "ascend_quant_method", "") == COMPRESSED_TENSORS_METHOD:
             quant_bias = bias
 
         return torch_npu.npu_quant_matmul(
@@ -130,13 +123,9 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
 
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
 
-        # TODO-NZ
-
-        # scale/offset flatten
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
 
-        ascend_quant_method = getattr(layer, "ascend_quant_method", "")
-        if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
+        if getattr(layer, "ascend_quant_method", "") == COMPRESSED_TENSORS_METHOD:
             deq_scale = layer.input_scale.data * layer.weight_scale.data
             layer.deq_scale = torch.nn.Parameter(deq_scale, requires_grad=False)
