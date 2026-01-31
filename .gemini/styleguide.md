@@ -87,4 +87,4 @@ Your assessment of user-facing changes.
 Your description of testing approach.
 ```
 
-And please print your review suggestion in markdown format.
+And please print your review suggestion in markdown format no matter the pull request description is empty or not.
