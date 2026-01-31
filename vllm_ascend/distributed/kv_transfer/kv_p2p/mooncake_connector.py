@@ -527,10 +527,10 @@ class KVCacheRecvingThread(threading.Thread):
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
             zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
         ):
-            if self.use_mla:
-                block_len = self.block_len[k % 2]
-            elif self.use_sparse:
+            if self.use_sparse:
                 block_len = self.block_len[k % 3]
+            elif self.use_mla:
+                block_len = self.block_len[k % 2]
             else:
                 block_len = self.block_len[0]
             inner_block_len = block_len // tp_num_need_pulls
@@ -1157,23 +1157,7 @@ class MooncakeConnectorWorker:
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache = first_kv_cache_tuple[0]
 
-        if self.use_mla:
-            # MLA case.[num_block, block_size, 1, hidden_dim]
-            self.num_blocks = first_kv_cache.shape[0]
-            block_rank = 3  # [block_size, latent_dim]
-            block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
-            block_shape_pe = first_kv_cache_tuple[1].shape[-block_rank:]
-            self.block_len = [
-                first_kv_cache[0].element_size() * math.prod(block_shape_norm),
-                first_kv_cache[1].element_size() * math.prod(block_shape_pe),
-            ]
-            logger.info(
-                "num_blocks: %s, block_shape_norm: %s, block_shape_pe: %s",
-                self.num_blocks,
-                block_shape_norm,
-                block_shape_pe,
-            )
-        elif self.use_sparse:
+        if self.use_sparse:
             self.num_blocks = first_kv_cache.shape[0]
             block_rank = 3  # [block_size, latent_dim]
             block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
@@ -1190,6 +1174,22 @@ class MooncakeConnectorWorker:
                 block_shape_norm,
                 block_shape_pe,
                 block_shape_k,
+            )
+        elif self.use_mla:
+            # MLA case.[num_block, block_size, 1, hidden_dim]
+            self.num_blocks = first_kv_cache.shape[0]
+            block_rank = 3  # [block_size, latent_dim]
+            block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
+            block_shape_pe = first_kv_cache_tuple[1].shape[-block_rank:]
+            self.block_len = [
+                first_kv_cache[0].element_size() * math.prod(block_shape_norm),
+                first_kv_cache[1].element_size() * math.prod(block_shape_pe),
+            ]
+            logger.info(
+                "num_blocks: %s, block_shape_norm: %s, block_shape_pe: %s",
+                self.num_blocks,
+                block_shape_norm,
+                block_shape_pe,
             )
         else:
             # eager:[num_block, block_size, num_head, hidden_dim]
@@ -1215,23 +1215,22 @@ class MooncakeConnectorWorker:
         lengths = []
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
-            if self.use_mla:
-                for i, cache in enumerate(cache_or_caches, 0):
-                    base_addr = cache.data_ptr()
-                    region_len = self.num_blocks * self.block_len[i % 2]
-                    kv_caches_base_addr.append(base_addr)
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
-            elif self.use_sparse:
+            if self.use_sparse:
                 for i, cache in enumerate(cache_or_caches, 0):
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[i % 3]
                     kv_caches_base_addr.append(base_addr)
                     ptrs.append(base_addr)
                     lengths.append(region_len)
+            elif self.use_mla:
+                for i, cache in enumerate(cache_or_caches, 0):
+                    base_addr = cache.data_ptr()
+                    region_len = self.num_blocks * self.block_len[i % 2]
+                    kv_caches_base_addr.append(base_addr)
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
             else:
-                cache_list = [cache_or_caches] if self.use_mla or self.use_sparse else cache_or_caches
-                for cache in cache_list:
+                for cache in cache_or_caches:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[0]
                     kv_caches_base_addr.append(base_addr)
@@ -1652,11 +1651,7 @@ class MooncakeConnectorWorker:
         tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
         # random split prefill tp list
         tp_sampled_nums = []
-        if (
-            prefill_tp_size > self.total_num_kv_heads
-            or self.vllm_config.model_config.is_deepseek_mla
-            or self.use_sparse
-        ):
+        if prefill_tp_size > self.total_num_kv_heads or self.use_mla:
             tp_ori_data = tp_ori_data.reshape(-1, num_groups)
             choosen_group = tp_ori_data[:, [rand_group_index]]
             flattened = choosen_group.reshape(-1).tolist()
@@ -1686,7 +1681,7 @@ class MooncakeConnectorWorker:
             )
             return sampled_nums
         # use deepseek mla, num_key_value_heads == 128, but consider as 1
-        if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
+        if self.use_mla:
             num_kv_head = 1
         else:
             num_kv_head = self.total_num_kv_heads
