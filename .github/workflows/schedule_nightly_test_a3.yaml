@@ -177,7 +177,6 @@ jobs:
             tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: v0.14.0
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
