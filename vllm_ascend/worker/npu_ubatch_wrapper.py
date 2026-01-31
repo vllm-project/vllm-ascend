@@ -248,7 +248,7 @@ class UBatchWrapper(GPUUBatchWrapper):
             forward_context.batch_descriptor = batch_descriptor
             forward_context.afd_metadata = afd_metadata
             forward_context.num_ubatches = len(ubatch_slices)
-            forward_context.comm_event = torch.npu.Event()
+            forward_context.afd_comm_event = torch.npu.Event()
             forward_contexts.append(forward_context)
 
         ubatch_ctxs = make_ubatch_contexts(

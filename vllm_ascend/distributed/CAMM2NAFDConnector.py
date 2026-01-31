@@ -402,8 +402,8 @@ def cam_send_attn_output_impl(hidden_states: torch.Tensor,
                               multistream_enable: bool,
                               aiv_num: int) -> torch.Tensor:
     ubatch_idx = get_forward_context().ubatch_idx
-    comm_stream = get_forward_context().comm_stream
-    comm_event = get_forward_context().comm_event
+    comm_stream = get_forward_context().afd_comm_stream
+    comm_event = get_forward_context().afd_comm_event
     if get_forward_context().cam_afdconnector_data is None:
         cam_afdconnector_data = CAMM2NAFDConnectorMetadata(
                     moe_expert_num = moe_expert_num,
@@ -480,7 +480,7 @@ def cam_recv_ffn_output_impl(hidden_states: torch.Tensor,
     cam_metadata = get_forward_context().cam_afdconnector_data
     assert cam_metadata is not None, "cam_metadata is None"
     ubatch_idx = get_forward_context().ubatch_idx
-    comm_event = get_forward_context().comm_event
+    comm_event = get_forward_context().afd_comm_event
     batch_size = cam_metadata.batch_size
     h = cam_metadata.h
     k = cam_metadata.k
