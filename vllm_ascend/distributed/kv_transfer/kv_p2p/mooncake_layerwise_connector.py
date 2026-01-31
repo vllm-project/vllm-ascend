@@ -980,29 +980,13 @@ class MooncakeLayerwiseConnectorWorker:
         ptrs = []
         lengths = []
         for cache_or_caches in kv_caches.values():
-            # Normalize to always be a list of caches
-            if self.use_mla:
-                for i, cache in enumerate(cache_or_caches, 0):
-                    base_addr = cache.data_ptr()
-                    region_len = self.num_blocks * self.block_len[i % 2]
-                    kv_caches_base_addr.append(base_addr)
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
-            elif self.use_sparse:
-                for i, cache in enumerate(cache_or_caches, 0):
-                    base_addr = cache.data_ptr()
-                    region_len = self.num_blocks * self.block_len[i % 3]
-                    kv_caches_base_addr.append(base_addr)
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
-            else:
-                cache_list = [cache_or_caches] if self.use_mla or self.use_sparse else cache_or_caches
-                for cache in cache_list:
-                    base_addr = cache.data_ptr()
-                    region_len = self.num_blocks * self.block_len[0]
-                    kv_caches_base_addr.append(base_addr)
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
+            length = len(self.block_len)
+            for i, cache in enumerate(cache_or_caches, 0):
+                base_addr = cache.data_ptr()
+                region_len = self.num_blocks * self.block_len[i % length]
+                kv_caches_base_addr.append(base_addr)
+                ptrs.append(base_addr)
+                lengths.append(region_len)
         global_te.register_buffer(ptrs, lengths)
         self.kv_caches_base_addr = kv_caches_base_addr
 
