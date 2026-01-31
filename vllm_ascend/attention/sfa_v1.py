@@ -83,6 +83,10 @@ class AscendSFABackend(AttentionBackend):
     def get_impl_cls() -> type["AscendSFAImpl"]:
         return AscendSFAImpl
 
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [128]
+
 
 @dataclass
 class DSACPContext:
