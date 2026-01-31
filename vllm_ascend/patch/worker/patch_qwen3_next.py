@@ -140,7 +140,7 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-        conv_state = self_kv_cache[0].transpose(-1, -2)
+        conv_state = self_kv_cache[0]
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
@@ -148,8 +148,10 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
-
+         
         # 1. Convolution sequence transformation
+       if hasattr(self.conv1d, 'weight_transposed'):
+            transposed_weights = self.conv1d.weight_transposed
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
         if spec_sequence_masks is not None:
@@ -169,7 +171,7 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,
-                conv_weights,
+                transposed_weights,
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=spec_state_indices_tensor[:, 0]
@@ -201,7 +203,7 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
-                conv_weights,
+                transposed_weights,
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=

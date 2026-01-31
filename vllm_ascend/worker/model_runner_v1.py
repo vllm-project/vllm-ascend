@@ -2386,6 +2386,21 @@ class NPUModelRunner(GPUModelRunner):
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config,
                                                   self.device)
+            attn_layers = get_layers_from_vllm_config(self.vllm_config,
+                                            MambaBase)
+            for layer_name, mamba_module in attn_layers.items():
+                if hasattr(mamba_module, 'conv1d') and mamba_module.conv1d is not None:
+                    # Reshape weight from (out_channels, in_channels, kernel_size) to (dim, width)
+                    # then transpose to (width, dim) for kernel
+                    weight = mamba_module.conv1d.weight
+                    if weight.dim() == 3:
+                        # Reshape from (out_channels, in_channels, kernel_size) to (dim, width)
+                        dim, width = weight.size(0), weight.size(2)
+                        weight_reshaped = weight.view(dim, width)
+                    else:
+                        weight_reshaped = weight
+                    # Transpose from (dim, width) to (width, dim) for kernel and store in new attribute
+                    mamba_module.conv1d.weight_transposed = weight_reshaped.transpose(0, 1).contiguous()
         logger.info("Loading model weights took %.4f GB",
                     m.consumed_memory / float(2**30))
 
@@ -2712,8 +2727,9 @@ class NPUModelRunner(GPUModelRunner):
                     state_tensors = []
                     target_idx = 0
                     start_idx = 0
-                    for shape, dtype in zip(kv_cache_spec.shapes,
-                                            kv_cache_spec.dtypes):
+
+                    for idx, (shape, dtype) in enumerate(zip(kv_cache_spec.shapes,
+                                            kv_cache_spec.dtypes)):
                         # normally, there is conv state and ssm state in this loop. And there is only
                         # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
@@ -2723,6 +2739,8 @@ class NPUModelRunner(GPUModelRunner):
                         tensor = raw_tensor.view(
                             dtype)[start_idx:target_idx].view(target_shape)
                         start_idx = target_idx
+                        if idx == 0 and len(shape) == 2:  # conv_state: (dim, state_len) -> transpose to (state_len, dim)
+                            tensor = tensor.transpose(1, 2).contiguous()
                         state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
                 else:
