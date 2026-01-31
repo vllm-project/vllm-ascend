@@ -38,6 +38,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         scale: float | None = None,
         num_kv_heads: int | None = None,
         prefix: str = "",
+        multimodal_config: MultiModalConfig | None = None,
     ) -> None:
         """
         Args:
@@ -47,6 +48,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             num_kv_heads: number of kv heads.
             prefix: This has no effect, it is only here to make it easier to
                     swap between Attention and MMEncoderAttention.
+            multimodal_config: configs for multi-modal.
         """
         super().__init__(
             num_heads=num_heads,
@@ -54,6 +56,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             scale=scale,
             num_kv_heads=num_kv_heads,
             prefix=prefix,
+            multimodal_config=multimodal_config,
         )
 
         self.enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
