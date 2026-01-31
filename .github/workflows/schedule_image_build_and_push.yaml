@@ -17,6 +17,10 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request: 
+    branches:
+      - 'main'
+    types: [ labeled, synchronize ]
   workflow_dispatch:
     inputs:
       tag:
@@ -28,6 +32,7 @@ on:
 jobs:
   image_build:
     name: Image Build and Push
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'image-build')  }}
     strategy:
       matrix:
         build_meta:
@@ -54,7 +59,7 @@ jobs:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
       quay_username: ${{ vars.QUAY_USERNAME }}
-      should_push: ${{ github.repository_owner == 'vllm-project' }}
+      should_push: ${{ github.repository_owner == 'vllm-project' && (github.event_name != 'pull_request') }}
       workflow_dispatch_tag: ${{ inputs.tag }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
