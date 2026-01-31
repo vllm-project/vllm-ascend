@@ -153,7 +153,7 @@ class NPUPlatform(Platform):
         if not is_310p():
             from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendModelSlimConfig  # noqa: F401
         else:
-            from vllm_ascend._310p.quantization import AscendCompressedTensorsConfig, AscendModelSlimConfig  # noqa: F401
+            from vllm_ascend._310p.quantization import AscendCompressedTensorsConfig, AscendModelSlimConfig310  # noqa: F401
 
         config_deprecated_logging()
 
