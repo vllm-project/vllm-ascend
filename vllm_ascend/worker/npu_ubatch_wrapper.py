@@ -89,7 +89,6 @@ class UBatchWrapper(GPUUBatchWrapper):
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-
         self.comm_stream = torch.npu.Stream(device=device)
 
         self.ready_barrier = threading.Barrier(
@@ -217,7 +216,6 @@ class UBatchWrapper(GPUUBatchWrapper):
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
-
             sorted_results = [value for position, value in sorted(results)]
             result = torch.cat(sorted_results, dim=0)
             return result
@@ -250,6 +248,7 @@ class UBatchWrapper(GPUUBatchWrapper):
             forward_context.batch_descriptor = batch_descriptor
             forward_context.afd_metadata = afd_metadata
             forward_context.num_ubatches = len(ubatch_slices)
+            forward_context.afd_comm_event = torch.npu.Event()
             forward_contexts.append(forward_context)
 
         ubatch_ctxs = make_ubatch_contexts(

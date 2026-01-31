@@ -551,6 +551,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs,
                                                   dtype=torch.int32)
         self.attn_dummy_run_call_cnt = 0
+
+        self.afd_comm_stream = torch.npu.Stream()
+
         # import os
         # experimental_config = torch_npu.profiler._ExperimentalConfig(
         #     export_type=torch_npu.profiler.ExportType.Text,
@@ -2039,7 +2042,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     model_instance=self.model,
                     afd_metadata=afd_metadata,
                     ubatch_slices=ubatch_slices,
-                    weight_prefetch_method=self.weight_prefetch_method):
+                    weight_prefetch_method=self.weight_prefetch_method,
+                    afd_comm_stream=self.afd_comm_stream):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
@@ -2472,7 +2476,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 afd_stage_idx=0,
                 afd_connector=self.afd_connector,
                 afd_tokens_lens=afd_tokens_lens,
-                num_of_stages=len(ubatch_slices) if ubatch_slices else 1,
+                num_of_stages=len(ubatch_slices) if ubatch_slices else 1
             )
         return afd_metadata
 
@@ -2677,7 +2681,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     model_instance=self.model,
                     afd_metadata=afd_metadata,
                     ubatch_slices=ubatch_slices,
-                    weight_prefetch_method=self.weight_prefetch_method):
+                    weight_prefetch_method=self.weight_prefetch_method,
+                    afd_comm_stream=self.afd_comm_stream):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     with_prefill, is_torchair_compile, input_ids, positions,
                     attn_metadata, num_tokens, intermediate_tensors,

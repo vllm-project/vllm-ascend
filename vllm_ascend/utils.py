@@ -650,3 +650,17 @@ def npu_stream_switch(target_stream: torch.npu.Stream,
         return nullcontext()
     assert target_stream is not None
     return torch.npu.stream(target_stream)
+
+def npu_stream_switch_within_graph(curr_stream: torch.npu.Stream, target_stream: torch.npu.Stream, enabled: bool = True):
+    """
+    In graph mode, switch to the target stream if enabled is True.
+    Otherwise, do nothing.
+    """
+    if not enabled:
+        return nullcontext()
+
+    assert curr_stream is not None
+    assert target_stream is not None
+
+    target_stream.wait_stream(curr_stream)
+    return torch.npu.stream(target_stream)
