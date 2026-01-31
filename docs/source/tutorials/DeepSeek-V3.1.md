@@ -25,8 +25,8 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 ### Model Weight
 
 - `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
-- `DeepSeek-V3.1-w8a8`(Quantized version without mtp): [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.1-w8a8).
-- `DeepSeek-V3.1_w8a8mix_mtp`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8). Please modify `torch_dtype` from `float16` to `bfloat16` in `config.json`.
+- `DeepSeek-V3.1-w8a8`(Quantized version without mtp): [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3-w8a8).
+- `DeepSeek-V3.1_w8a8mix_mtp`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot). Please modify `torch_dtype` from `float16` to `bfloat16` in `config.json`.
 - `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
 - `Method of Quantify`: [msmodelslim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v31-w8a8-%E6%B7%B7%E5%90%88%E9%87%8F%E5%8C%96-mtp-%E9%87%8F%E5%8C%96). You can use these methods to quantify the model.
 
@@ -136,7 +136,7 @@ The parameters are explained as follows:
 - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
+- If you use the w4a8 instead of w8a8, you can save more memory space, reserve more space for inference, and increanse the throughput by setting a larger value for  `--max-num-seqs` and `--max-model-len`.
 
 ### Multi-node Deployment
 
@@ -258,7 +258,7 @@ Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes)
 
 - `DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
 
-To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_dp_program.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
+To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
 1. `launch_online_dp.py` to launch external dp vllm servers.
 [launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
@@ -572,7 +572,7 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 **Notice:**
 The parameters are explained as follows:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: indicates that Flashcom1 optimization is enabaled.Currently,this optimization is only supported for MoE in scenarios where rensor-parallel-size > 1.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
 - `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
 - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
