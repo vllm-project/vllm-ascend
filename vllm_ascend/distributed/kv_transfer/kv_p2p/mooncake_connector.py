@@ -1226,7 +1226,7 @@ class MooncakeConnectorWorker:
             for i, cache in enumerate(cache_or_caches, 0):
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len[i % length]
-                self.kv_caches_base_addr.append(base_addr)
+                kv_caches_base_addr.append(base_addr)
                 ptrs.append(base_addr)
                 lengths.append(region_len)
         global_te.register_buffer(ptrs, lengths)
