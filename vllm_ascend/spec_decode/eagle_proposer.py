@@ -592,7 +592,7 @@ class EagleProposer(VllmEagleProposer):
         model_hidden_states, model_positions = self.maybe_pad_and_reduce(
             model_hidden_states, model_positions)
 
-        # Expend the remaining moe layers for suiting vllm
+        # Expend the remaining moe layers for suiting vllm.
         forward_context = get_forward_context()
         if forward_context and hasattr(forward_context, 'remaining_moe_layers'):
             if self.num_speculative_tokens > 1:
