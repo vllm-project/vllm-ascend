@@ -146,9 +146,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             pcp_size = get_pcp_group().world_size
             if self.chunked_prefill_enabled and max_context_len_cpu > 0:
                 local_context_lens_allranks = (
-                    torch.tensor(num_computed_tokens_of_pcp_dcp)[num_decodes:num_reqs]
-                    .to(self.device)
-                    .to(dtype=torch.int32)
+                    num_computed_tokens_of_pcp_dcp[num_decodes:num_reqs].to(self.device).to(dtype=torch.int32)
                 )
                 local_chunked_kv_lens_rank = local_context_lens_allranks[:, self.pcp_rank, self.dcp_rank]
                 actual_seq_lengths_kv = torch.cumsum(local_chunked_kv_lens_rank, dim=0).tolist()
@@ -219,11 +217,11 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             )
 
         if num_decodes > 0:
-            num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
+            num_computed_tokens_array = num_computed_tokens_of_pcp_dcp.numpy()
             num_computed_tokens_array = num_computed_tokens_array[:num_decodes]
             # TODO: numpy array mode of the shared memory is used to improve performance
             decode_metadata = AscendMetadataForDecode(
-                num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
+                num_computed_tokens_of_pcp_dcp_np=num_computed_tokens_array,
                 block_tables=block_table[:num_decodes],
             )
 
@@ -322,7 +320,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     dcp_rank,
                 ) = param
                 attn_metadata = forward_context.attn_metadata[key]
-                actual_seq_lengths_kv = attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:, pcp_rank, dcp_rank]
+                actual_seq_lengths_kv = attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp_np[
+                    :, pcp_rank, dcp_rank
+                ]
                 pad_length = num_tokens - len(actual_seq_lengths_kv)
                 if pad_length > 0:
                     pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
