@@ -28,10 +28,11 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize, PrepareAndFinalizeWithAll2All,
-    PrepareAndFinalizeWithAllGather, PrepareAndFinalizeWithMC2, QuantType)
+    PrepareAndFinalizeWithAllGather, PrepareAndFinalizeWithMC2)
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     MoETokenDispatcher, TokenDispatcherWithAll2AllV,
     TokenDispatcherWithAllGather, TokenDispatcherWithMC2)
+from vllm_ascend.quantization.methods.base import QuantType
 
 _MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
 

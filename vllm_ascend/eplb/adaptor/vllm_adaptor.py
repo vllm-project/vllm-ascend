@@ -23,6 +23,7 @@ import torch.distributed as dist
 from vllm.logger import logger
 
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
+from vllm_ascend.quantization.methods.base import QuantType
 
 
 class VllmEplbAdaptor(EplbAdaptor):
@@ -61,12 +62,25 @@ class VllmEplbAdaptor(EplbAdaptor):
     def init_expert_param_per_layer(self):
         self.param_dict = dict()
         if self.model.quant_config is not None:
-            self.expert_weight_names = [
-                "w13_weight_list",
-                "w2_weight_list",
-                "w13_weight_scale_fp32_list",
-                "w2_weight_scale_list",
-            ]
+            quant_type = self.model.model.layers[self.num_dense_layers].mlp.experts.quant_type
+            if quant_type == QuantType.W8A8:
+                self.expert_weight_names = [
+                    "w13_weight_list",
+                    "w2_weight_list",
+                    "w13_weight_scale_list",
+                    "w2_weight_scale_list",
+                ]
+            elif quant_type == QuantType.W4A8:
+                self.expert_weight_names = [
+                    "w13_weight_list",
+                    "w2_weight_list",
+                    "w13_weight_scale_list",
+                    "w2_weight_scale_list",
+                    "w13_scale_bias_list",
+                    "w2_scale_bias_list",
+                ]
+            else:
+                raise ValueError(f"EPLB not support {quant_type}")
         else:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
 
@@ -74,7 +88,10 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.expert_param_per_layer[layer_idx] = list()
             for name in self.expert_weight_names:
                 param_key = f"model.layers.{layer_idx}.mlp.experts.{name}"
-                param_value = getattr(self.model.model.layers[layer_idx].mlp.experts, name)
+                try:
+                    param_value = getattr(self.model.model.layers[layer_idx].mlp.experts, name)
+                except:
+                    logger.warning(f"layer {layer_idx} has no attribute {param_value}")
                 self.param_dict[param_key] = param_value
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
