@@ -23,7 +23,7 @@ import atexit
 import functools
 import math
 import os
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
 from threading import Lock
@@ -32,7 +32,6 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
-from torch_npu.npu.streams import Event
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -560,53 +559,6 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 # TODO(wxy): Move to ops module
 def dispose_tensor(x: torch.Tensor):
     x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
-
-
-class ProfileExecuteDuration:
-    _instance = None
-    _observations: list[tuple[str, Event, Event]] = []
-    _lock = Lock()
-
-    def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                atexit.register(cls._instance.destroy)
-            return cls._instance
-
-    def destroy(self):
-        with self._lock:
-            self._observations.clear()
-
-    @contextmanager
-    def capture_async(self, duration_tag: str):
-        if not envs_ascend.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
-            yield
-            return
-
-        observe_start = Event(enable_timing=True)
-        observe_start.record()
-        try:
-            yield
-        finally:
-            observe_end = Event(enable_timing=True)
-            observe_end.record()
-            with self._lock:
-                self._observations.append((duration_tag, observe_start, observe_end))
-
-    def pop_captured_sync(self) -> dict:
-        """Pop and synchronize all events in the observation list"""
-        durations: dict[str, float] = {}
-        if not envs_ascend.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
-            return durations
-
-        while self._observations:
-            with self._lock:
-                tag, observe_start, observe_end = self._observations.pop()
-            observe_end.synchronize()
-            durations[tag] = observe_start.elapsed_time(observe_end)
-
-        return durations
 
 
 def register_ascend_customop(vllm_config: VllmConfig | None = None):
