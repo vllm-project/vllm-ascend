@@ -710,8 +710,8 @@ private:
 
         AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);
         AscendC::SyncAll<true>();
-        //第一次swglu
-        if (dequantSum1 > 0) { //开启了swglu深融合
+
+        if (dequantSum1 > 0) {
             uint32_t rowStartThisCore = 0;
             MatrixCoord offsetC{0U, 0};
             MatrixCoord shapeC{dequantSum1, params.problemShape.n()};
@@ -721,9 +721,9 @@ private:
             blockEpilogue(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], params.epilogueCoreNum);
         }
         AscendC::SyncAll<true>();
-        AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C);           // swiglu通知GMM2【1】
+        AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C);     
         if ((params.epilogueGranularity < params.expertPerRank && params.epilogueGranularity > 0)) {
-            AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);        // Swiglu等GMM1【1】
+            AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);
             AscendC::SyncAll<true>();
             if (dequantSum2 > 0) {
                 uint32_t rowStartThisCore = dequantSum1;
@@ -736,7 +736,7 @@ private:
                 blockEpilogue(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], coreNum);
             }
             AscendC::SyncAll<true>();
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C);       // swiglu通知GMM2【2】
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C); 
         }
         blockEpilogue.Finalize();
     }
