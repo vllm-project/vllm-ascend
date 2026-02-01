@@ -711,8 +711,8 @@ private:
         }
         AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);  
         AscendC::SyncAll<true>();
-        //第一次swglu
-        if (dequantSum1 > 0) { //开启了swglu深融合
+
+        if (dequantSum1 > 0) {
             uint32_t rowStartThisCore = 0;
             MatrixCoord offsetC{0U, 0};
             MatrixCoord shapeC{dequantSum1, params.problemShape.n()};
