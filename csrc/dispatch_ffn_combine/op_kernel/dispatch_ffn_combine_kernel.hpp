@@ -691,6 +691,7 @@ private:
             AscendC::SyncAll<true>();
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncgmm1Idx / CROSS_CORE_FLAG_MAX_SET_COUNT);   // V notifies C that the current communication round is complete
              prevGroupSum1 += currentM;
+            syncgmm1Idx ++;
             if (groupIdx + 1 <= params.epilogueGranularity) {
                 if (dequantSum1 + currentM <= params.maxOutputSize) {
                     dequantSum1 += currentM;
