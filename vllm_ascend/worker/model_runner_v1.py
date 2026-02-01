@@ -72,6 +72,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
                                              GPUModelRunner)
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
@@ -104,11 +105,11 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import MedusaProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
-from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
+from vllm_ascend.utils import (AscendDeviceType,
                                enable_sp, get_ascend_device_type,
                                is_drafter_moe_model, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
-                               set_weight_prefetch_method, vllm_version_is)
+                               set_weight_prefetch_method)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
@@ -1104,7 +1105,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        with ProfileExecuteDuration().capture_async("prepare input"):
+        with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
@@ -1268,7 +1269,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         # Run forward pass
-        with ProfileExecuteDuration().capture_async("forward"):
+        with record_function_or_nullcontext("forward"):
             with (
                 set_ascend_forward_context(
                     attn_metadata,
@@ -1286,7 +1287,7 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = self._model_forward(
                     num_tokens_padded, input_ids, positions,
                     intermediate_tensors, inputs_embeds, **model_kwargs)
-        with (ProfileExecuteDuration().capture_async("post process")):
+        with record_function_or_nullcontext("post process"):
             if self.pcp_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
@@ -1408,7 +1409,7 @@ class NPUModelRunner(GPUModelRunner):
                                   self.input_batch, logits)
             logits = logits.to(self.device).to(logits_dtype)
 
-        with ProfileExecuteDuration().capture_async("Sample"):
+        with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         def propose_draft_token_ids(sampled_token_ids):
@@ -1444,7 +1445,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
         )
 
-        with ProfileExecuteDuration().capture_async("Draft"):
+        with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
                 use_padded_batch_for_eagle = self.speculative_config and \
                     self.speculative_config.use_eagle() and \
@@ -1474,15 +1475,6 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
         )
 
-        durations = ProfileExecuteDuration().pop_captured_sync()
-        if durations:
-            dr_str = [
-                f"[{tag}]:{duration:.2f}ms"
-                for tag, duration in durations.items()
-            ]
-            captured_name = "Decode" if self.attn_state == AscendAttentionState.DecodeOnly else "Prefill"
-            logger.info("Profile execute duration [%s]:%s", captured_name,
-                        " ".join(dr_str))
         if self.dynamic_eplb:
             self.eplb_updator.forward_end()
 
