@@ -10,6 +10,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
+from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -17,7 +18,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
-from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable, vllm_version_is
+from vllm_ascend.utils import lmhead_tp_enable, vllm_version_is
 
 
 class MtpProposer(EagleProposer):
@@ -311,7 +312,7 @@ class MtpProposer(EagleProposer):
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=num_tokens,
                     is_draft_model=True):
-                with ProfileExecuteDuration().capture_async('mtp_forward'):
+                with record_function_or_nullcontext('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata
                     input_ids = self.input_ids[:num_input_tokens]
