@@ -693,7 +693,6 @@ private:
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncgmm1Idx / CROSS_CORE_FLAG_MAX_SET_COUNT);   // V notifies C that the current communication round is complete            prevGroupSum1 += currentM;
             syncgmm1Idx++;
             prevGroupSum1 += currentM;
-            //第一次swglu的token数以及截断逻辑
             if (groupIdx + 1 <= params.epilogueGranularity) {
                 if (dequantSum1 + currentM <= params.maxOutputSize) {
                     dequantSum1 += currentM;
@@ -702,7 +701,6 @@ private:
                 }
             }
 
-            //第二次swglu的token数以及截断逻辑
             if (groupIdx + 1 > params.epilogueGranularity && dequantSum1 < params.maxOutputSize) {
                 if (dequantSum1 + dequantSum2 + currentM <= params.maxOutputSize) {
                     dequantSum2 += currentM;
@@ -711,7 +709,7 @@ private:
                 }
             }
         }
-        AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);        // Swiglu等GMM1【1】
+        AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);  
         AscendC::SyncAll<true>();
         //第一次swglu
         if (dequantSum1 > 0) { //开启了swglu深融合
@@ -724,9 +722,9 @@ private:
             blockEpilogue(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], params.epilogueCoreNum);
         }
         AscendC::SyncAll<true>();
-        AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C);           // swiglu通知GMM2【1】
+        AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C); 
         if ((params.epilogueGranularity < params.expertPerRank && params.epilogueGranularity > 0)) {
-            AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);        // Swiglu等GMM1【1】
+            AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);  
             AscendC::SyncAll<true>();
             if (dequantSum2 > 0) {
                 uint32_t rowStartThisCore = dequantSum1;
@@ -739,7 +737,7 @@ private:
                 blockEpilogue(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], coreNum);
             }
             AscendC::SyncAll<true>();
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C);       // swiglu通知GMM2【2】
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C); 
         }
         blockEpilogue.Finalize();
     }
