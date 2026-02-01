@@ -54,9 +54,7 @@ exclude = [
     # (7)
     "vllm_ascend/quantization/**",
     "vllm_ascend/sample/*.py",
-    "vllm_ascend/worker/v2/**",
     "vllm_ascend/worker/block_table.py",
-    "vllm_ascend/worker/npu_input_batch.py",
     # (8)
     "vllm_ascend/ops/__init__.py",
     "vllm_ascend/ops/activation.py",
@@ -65,13 +63,9 @@ exclude = [
     "vllm_ascend/ops/mla.py",
     "vllm_ascend/ops/mm_encoder_attention.py",
     "vllm_ascend/ops/register_custom_ops.py",
-    "vllm_ascend/ops/rotary_embedding.py",
     "vllm_ascend/ops/vocab_parallel_embedding.py",
     "vllm_ascend/ops/weight_prefetch.py",
     "vllm_ascend/spec_decode/**",
-    # (9)
-    "vllm_ascend/worker/model_runner_v1.py",
-    "vllm_ascend/worker/pcp_utils.py",
     # (10)
     "vllm_ascend/ops/*linear*.py",
     "vllm_ascend/worker/worker.py",
@@ -79,6 +73,9 @@ exclude = [
     "vllm_ascend/distributed/utils.py",
     "vllm_ascend/xlite/*.py",
     "vllm_ascend/patch/worker/patch_*.py",
+    "vllm_ascend/worker/v2/**",
+    "vllm_ascend/worker/npu_input_batch.py",
+    "vllm_ascend/ops/rotary_embedding.py",
     # (11)
     "vllm_ascend/ops/fused_moe/**",
 ]
