@@ -418,6 +418,32 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm_meta(
+    const at::Tensor& x,
+    const at::Tensor& gamma,
+    double epsilon)
+{
+    int64_t dim_x = x.dim();
+    int64_t dim_gamma = gamma.dim();
+    int64_t diff = dim_x - dim_gamma;
+    c10::SymDimVector new_shape;
+    at::Tensor rstd;
+    if (diff > 0) {
+        new_shape.reserve(dim_x);
+        auto x_sizes = x.sym_sizes();
+        for (int64_t i = 0; i < diff; ++i) {
+            new_shape.push_back(x_sizes[i]);
+        }
+        for (int64_t i = 0; i < dim_gamma; ++i) {
+            new_shape.push_back(c10::SymInt(1));
+        }
+    } else {
+        new_shape.assign(dim_x, c10::SymInt(1));
+    }
+    rstd = at::empty_symint(new_shape, x.options().dtype(at::kFloat));
+    at::Tensor y = at::empty_symint(x.sym_sizes(), x.options());
+    return std::tuple<at::Tensor, at::Tensor>(y, rstd);
+
 void transpose_kv_cache_by_block_meta(
     const at::TensorList &k_cache,
     const at::TensorList &v_cache,
@@ -438,7 +464,8 @@ namespace {
 // Register the meta implementations of the custom kernels for symbolic tracing, this will also
 // the custom kernel been captured into aclgraph
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
-
+    //Gemma rmsnorm meta implementation
+    ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // Masked input and mask meta implementation
     ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
     // Bgmv expand
