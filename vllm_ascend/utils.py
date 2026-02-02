@@ -23,7 +23,7 @@ import atexit
 import functools
 import math
 import os
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
 from threading import Lock
@@ -32,7 +32,6 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
-from torch_npu.npu.streams import Event
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -427,53 +426,6 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
     vllm_config.compilation_config.post_init_cudagraph_sizes()
 
 
-def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
-    """
-    Check whether it is vLLM default capture sizes.
-    """
-
-    max_cudagraph_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
-    cudagraph_capture_sizes = [i for i in [1, 2, 4] if i <= max_cudagraph_capture_size]
-    if max_cudagraph_capture_size >= 8:
-        # Step size 8 for small batch sizes, up to 256(not included)
-        cudagraph_capture_sizes += list(range(8, min(max_cudagraph_capture_size + 1, 256), 8))
-    if max_cudagraph_capture_size >= 256:
-        # Step size 16 for larger batch sizes
-        cudagraph_capture_sizes += list(range(256, max_cudagraph_capture_size + 1, 16))
-    # in newer version, vLLM use ascending order of cudagraph_capture_sizes.
-    target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes)
-    return target_cudagraph_capture_sizes == vllm_config.compilation_config.cudagraph_capture_sizes
-
-
-def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
-    """
-    Update ACL graph default capture sizes, so that new sizes
-    are more friendly to ascend ops && hardware.
-    """
-
-    if (
-        vllm_config.model_config is None
-        or vllm_config.model_config.enforce_eager
-        or not _is_default_capture_sizes(vllm_config)
-    ):
-        return
-
-    # modify the default capture_sizes for Qwen3-MoE models on dp settings.
-    # this is mainly because performance of _npu_paged_attention might degrades
-    # on special shapes.
-    # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
-    # replaced by npu_fused_infer_attention_score which does not contain such bugs.
-    if (
-        vllm_config.model_config
-        and vllm_config.model_config.hf_text_config.model_type == "qwen3_moe"
-        and vllm_config.parallel_config.tensor_parallel_size == 1
-        and vllm_config.parallel_config.data_parallel_size > 1
-    ):
-        max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
-        new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [i for i in range(24, max_capture_size + 1, 8)]
-        update_cudagraph_capture_sizes(vllm_config, new_cudagraph_capture_sizes)
-
-
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
     # NOTE: Currently, we can only capture 1800 graphs at most,
@@ -609,53 +561,6 @@ def dispose_tensor(x: torch.Tensor):
     x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
 
 
-class ProfileExecuteDuration:
-    _instance = None
-    _observations: list[tuple[str, Event, Event]] = []
-    _lock = Lock()
-
-    def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                atexit.register(cls._instance.destroy)
-            return cls._instance
-
-    def destroy(self):
-        with self._lock:
-            self._observations.clear()
-
-    @contextmanager
-    def capture_async(self, duration_tag: str):
-        if not envs_ascend.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
-            yield
-            return
-
-        observe_start = Event(enable_timing=True)
-        observe_start.record()
-        try:
-            yield
-        finally:
-            observe_end = Event(enable_timing=True)
-            observe_end.record()
-            with self._lock:
-                self._observations.append((duration_tag, observe_start, observe_end))
-
-    def pop_captured_sync(self) -> dict:
-        """Pop and synchronize all events in the observation list"""
-        durations: dict[str, float] = {}
-        if not envs_ascend.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
-            return durations
-
-        while self._observations:
-            with self._lock:
-                tag, observe_start, observe_end = self._observations.pop()
-            observe_end.synchronize()
-            durations[tag] = observe_start.elapsed_time(observe_end)
-
-        return durations
-
-
 def register_ascend_customop(vllm_config: VllmConfig | None = None):
     """Register Ascend CustomOP
 
@@ -721,16 +626,17 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
+        from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
         from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
-        from vllm_ascend._310p.ops.rotary_embedding import (
-            AscendMRotaryEmbedding310,
-        )
+        from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 
         REGISTERED_ASCEND_OPS.update(
             {
                 "SiluAndMul": AscendSiluAndMul310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
-                "MRotaryEmbedding": AscendMRotaryEmbedding310,
+                "RotaryEmbedding": AscendRotaryEmbedding310,
+                "RMSNorm": AscendRMSNorm310,
+                "GemmaRMSNorm": AscendGemmaRMSNorm310,
             }
         )
 
@@ -869,13 +775,22 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
 
 
 def speculative_enable_dispatch_gmm_combine_decode(vllm_config: VllmConfig) -> bool:
+    """When draft contains MOE Arch and non-w8a8, disable dispatch_gmm_combine_decode."""
     if vllm_config.speculative_config is None:
         return True
     speculative_method = getattr(vllm_config.speculative_config, "method", None)
     if speculative_method in [None, "ngram", "suffix"]:
         return True
     if speculative_method in ["eagle", "eagle3"]:
-        return False
+        if is_drafter_moe_model(vllm_config):
+            draft_model_config = vllm_config.speculative_config.draft_model_config
+            hf_text_config = draft_model_config.hf_text_config
+            quant_type = getattr(hf_text_config, "moe_quantize", None)
+            if quant_type is None:
+                quant_type = getattr(hf_text_config, "quantize", None)
+            return quant_type == "w8a8_dynamic"
+        else:
+            return True
     if speculative_method == "mtp":
         mtp_quant_type = getattr(vllm_config.model_config.hf_text_config, "mtp_quantize", None)
         return mtp_quant_type == "w8a8_dynamic"

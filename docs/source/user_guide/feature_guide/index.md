@@ -22,4 +22,5 @@ Fine_grained_TP
 layer_sharding
 speculative_decoding
 context_parallel
+npugraph_ex
 :::

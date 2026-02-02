@@ -18,7 +18,7 @@
 import torch_npu
 from vllm.logger import logger
 
-from vllm_ascend._310p.modelrunner_310p import NPUModelRunner310
+from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
@@ -26,12 +26,13 @@ class NPUWorker310(NPUWorker):
     def init_device(self):
         self.device = self._init_device()
 
-        torch_npu.npu.set_compile_mode(jit_compile=False)
+        # TODO: There is accuracy issue when jit_compile is disabled currently.
+        torch_npu.npu.set_compile_mode(jit_compile=True)
 
         init_workspace_manager(self.device, num_ubatches=1)
 
         self.model_runner = NPUModelRunner310(self.vllm_config, self.device)
 
     def _warm_up_atb(self):
-        # 310p device donot support torch_npu._npu_matmul_add_fp32 atb ops
-        logger.info("Skip warm-up atb ops for 310P device")
+        # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops
+        logger.info("Skip warm-up atb ops for 310P device.")

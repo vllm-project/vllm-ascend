@@ -74,25 +74,7 @@ def npugraph_ex_compile(
     compile_range: Range,
     key: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
-    # When currently using the FULL_DECODE_ONLY mode,
-    # the piecewise compilation level slicing process
-    # in vllm is also encountered.
-    # This process causes the output to no longer be
-    # wrapped as a tuple when the fx graph has a single
-    # output, but torch.compile has a mandatory check.
-    fx_graph = graph.graph
-    if not graph_returns_tuple(graph):
-        output_node = fx_graph.output_node()
-        with fx_graph.inserting_before(output_node):
-            return_value = output_node.args[0]
-            tuple_node = fx_graph.create_node("call_function", tuple, args=([return_value],))
-        output_node.args = (tuple_node,)
-        graph.recompile()
     import torchair
-
-    # TODO: use a better way to lazy register replacement, instead of import one by one
-    # As an example, we directly import here to register replacement.
-    # import vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant  # noqa
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()
@@ -108,18 +90,20 @@ def npugraph_ex_compile(
         # affecting program execution.
         num_spec_tokens = vllm_config.speculative_config.num_speculative_token if vllm_config.speculative_config else 0
         uniform_decode_query_len = num_spec_tokens + 1
-        max_num_tokens = vllm_config.scheduler_config.max_num_seq * uniform_decode_query_len
+        max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
         decode_cudagraph_batch_sizes = [
             x
-            for x in vllm_config.compilation_config.cudagraph_capture_size
+            for x in vllm_config.compilation_config.cudagraph_capture_sizes
             if max_num_tokens >= x >= uniform_decode_query_len
         ]
         config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
 
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
 
-    compile_graph = npugraph_ex(graph, example_inputs)
-    return compile_graph, None
+    # torch.compile requires the output of the fx graph to be a tuple
+    if not graph_returns_tuple(graph):
+        return make_graph_return_tuple(graph, example_inputs, npugraph_ex), None
+    return npugraph_ex(graph, example_inputs), None
 
 
 class AscendCompiler(CompilerInterface):

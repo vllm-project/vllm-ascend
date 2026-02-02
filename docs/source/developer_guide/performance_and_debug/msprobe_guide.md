@@ -112,7 +112,7 @@ JSON
      -d '{
            "model": "Qwen/Qwen2.5-0.5B-Instruct",
            "prompt": "Explain gravity in one sentence.",
-           "max_tokens": 32,
+           "max_completion_tokens": 32,
            "temperature": 0
          }' | python -m json.tool
    ```

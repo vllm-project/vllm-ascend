@@ -43,14 +43,10 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (AllGatherCommImpl,
                                                        FusedExpertsResult,
                                                        setup_moe_comm_method)
 from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
-from vllm_ascend.quantization.w4a8_dynamic import \
-    AscendW4A8DynamicFusedMoEMethod
-from vllm_ascend.quantization.w8a8_dynamic import \
-    AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                get_ascend_device_type, maybe_trans_nz,
                                npu_stream_switch, shared_expert_dp_enabled,
-                               shared_experts_calculation_stream, vllm_version_is)
+                               shared_experts_calculation_stream)
 
 @dataclass
 class FusedMoEResult:
@@ -106,6 +102,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               expert_map: Optional[torch.Tensor] = None,
               apply_router_weight_on_input: bool = False,
               enable_force_load_balance: bool = False,
+              log2phy: torch.Tensor = None,
               **kwargs) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -153,6 +150,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb,
+            log2phy=log2phy,
             mc2_mask=kwargs.get("mc2_mask", None))
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
@@ -251,12 +249,16 @@ class AscendFusedMoE(FusedMoE):
 
         method = quant_method.quant_method
 
-        if isinstance(method, AscendW8A8DynamicFusedMoEMethod):
-            return QuantType.W8A8
-        elif isinstance(method, AscendW4A8DynamicFusedMoEMethod):
-            return QuantType.W4A8
-        else:
-            return QuantType.NONE
+        if hasattr(method, "quant_type"):
+            from vllm_ascend.quantization.methods.base import \
+                QuantType as SchemeQuantType
+            scheme_quant_type = method.quant_type
+            if scheme_quant_type == SchemeQuantType.W8A8:
+                return QuantType.W8A8
+            elif scheme_quant_type == SchemeQuantType.W4A8:
+                return QuantType.W4A8
+
+        return QuantType.NONE
 
     def update_expert_map(self, new_expert_map):
         self._expert_map = new_expert_map
@@ -380,9 +382,9 @@ class AscendFusedMoE(FusedMoE):
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, \
                 "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
-            self.moe_load += expert_tokens if group_list_type == 1 else \
+            local_load = expert_tokens if group_list_type == 1 else \
                 torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-
+            self.moe_load.add_(local_load)
         routed_out = forward_context.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
@@ -413,8 +415,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
         ascend_config = get_ascend_config()
-        self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert
-        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
+        self.multistream_overlap_shared_expert = \
+            ascend_config.multistream_overlap_shared_expert and \
+            self._shared_experts is not None
+        self.multistream_overlap_gate = \
+            ascend_config.multistream_overlap_gate and \
+            self._shared_experts is not None
         if enable_sp():
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
@@ -422,19 +428,20 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
         self._gate = gate
 
-        # Wrap the quant_method's process_weights_after_loading to validate that
-        # splitting shared expert computation (gate_up projection + activation,
-        # then down projection) yields identical results to integrated
-        # computation after weight loading.
-        original_process_weights = self.quant_method.process_weights_after_loading
+        if self.multistream_overlap_shared_expert:
+            # Wrap the quant_method's process_weights_after_loading to validate that
+            # splitting shared expert computation (gate_up projection + activation,
+            # then down projection) yields identical results to integrated
+            # computation after weight loading.
+            original_process_weights = self.quant_method.process_weights_after_loading
 
-        @wraps(original_process_weights)
-        def wrapped_process_weights(*args, **kwargs):
-            result = original_process_weights(*args, **kwargs)
-            self._validate_shared_expert_consistency()
-            return result
+            @wraps(original_process_weights)
+            def wrapped_process_weights(*args, **kwargs):
+                result = original_process_weights(*args, **kwargs)
+                self._validate_shared_expert_consistency()
+                return result
 
-        self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+            self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
     def _shared_experts_part1(self, hidden_states: torch.Tensor):
         shared_gate_up, _ = self._shared_experts.gate_up_proj(
@@ -451,12 +458,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # Qwen3-Next specific gating mechanism
         if hasattr(self._shared_experts, "expert_gate") and \
             self._shared_experts.expert_gate is not None:
-            if vllm_version_is('0.13.0'):
-                # TODO(jianzs): remove this branch after vLLM new version is
-                # released
-                gate_out = self._shared_experts.expert_gate(hidden_states)  # type: ignore
-            else:
-                gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
+            gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
             shared_out = F.sigmoid(gate_out) * shared_out
         return shared_out
 
@@ -510,6 +512,14 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._shared_experts is None:
+            fused_out = AscendFusedMoE.forward(
+                self,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+            shared_out = None
+            return shared_out, fused_out
         shared_out, fused_out = AscendFusedMoE.forward(
             self,
             hidden_states=hidden_states,
@@ -519,6 +529,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
     def _forward_shared_experts(self, hidden_states: torch.Tensor,
                                 fused_moe_evts: FusedMoEEvents):
+        if self._shared_experts is None:
+            return None
 
         def maybe_wait_event(evt: torch.npu.Event | None):
             if evt is not None:
@@ -566,6 +578,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             return_with_event=True,
         )
         routed_out = fused_moe_results.routed_out
+
+        if self._shared_experts is None:
+            return routed_out
 
         if self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()

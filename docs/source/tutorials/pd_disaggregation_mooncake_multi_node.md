@@ -177,7 +177,7 @@ Mooncake is the serving platform for Kimi, a leading LLM service provided by Moo
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
-git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+git clone -b v0.3.8.post1 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 ```
 
 (Optional) Replace go install url if the network is poor
@@ -223,6 +223,19 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LI
 ## Prefiller/Decoder Deployment
 
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
+
+### kv_port Configuration Guide
+
+On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node × 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:
+
+| NPUs per Node | Reserved Port Range | Recommended kv_port |
+|---------------|---------------------|---------------------|
+| 8             | 20000 - 27999       | >= 28000            |
+| 16            | 20000 - 35999       | >= 36000            |
+
+```{warning}
+If you occasionally see `zmq.error.ZMQError: Address already in use` during startup, it may be caused by kv_port conflicting with randomly allocated AscendDirectTransport ports. Increase your kv_port value to avoid the reserved range.
+```
 
 ### launch_online_dp.py
 
@@ -281,7 +294,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_producer",
-  "kv_port": "30000",
+  "kv_port": "36000",
   "engine_id": "0",
   "kv_connector_extra_config": {
             "prefill": {
@@ -340,7 +353,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_producer",
-  "kv_port": "30100",
+  "kv_port": "36100",
   "engine_id": "1",
   "kv_connector_extra_config": {
             "prefill": {
@@ -370,7 +383,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=600
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -400,7 +412,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_consumer",
-  "kv_port": "30200",
+  "kv_port": "36200",
   "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
@@ -429,7 +441,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=600
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -459,7 +470,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_consumer",
-  "kv_port": "30200",
+  "kv_port": "36200",
   "engine_id": "2",
   "kv_connector_extra_config": {
             
@@ -526,7 +537,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
-  "kv_port": "30000",
+  "kv_port": "36000",
   "engine_id": "0",
   "kv_connector_extra_config": {
             "prefill": {
@@ -585,7 +596,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
-  "kv_port": "30100",
+  "kv_port": "36100",
   "engine_id": "1",
   "kv_connector_extra_config": {
             "prefill": {
@@ -615,7 +626,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=600
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -645,7 +655,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
-  "kv_port": "30200",
+  "kv_port": "36200",
   "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
@@ -674,7 +684,6 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=600
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -704,7 +713,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
-  "kv_port": "30200",
+  "kv_port": "36200",
   "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
@@ -936,7 +945,7 @@ curl http://192.0.0.1:8080/v1/completions \
     -d '{
         "model": "qwen3-moe",
         "prompt": "Who are you?",
-        "max_tokens": 100,
+        "max_completion_tokens": 100,
         "temperature": 0
     }'
 ```

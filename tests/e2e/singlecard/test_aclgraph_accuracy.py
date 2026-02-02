@@ -16,6 +16,7 @@
 #
 
 import pytest
+import os
 
 from tests.e2e.singlecard.utils import (PROMPTS_LONG, PROMPTS_SHORT,
                                         LLMTestCase, gen_and_valid)
@@ -48,8 +49,8 @@ CASE_QWEN_FULL_DECODE_ONLY = LLMTestCase(
     prompts=PROMPTS_LONG,
     golden_answers=[
         ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
-        " \n\nTo solve this problem, we can use the following approach: Let $ABCD$ be a unit square with coordinates $A(0,0), B",
-        ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
+        " \n\nTo solve this problem, we can use the following approach: Let $P$ be the perimeter of the square. Then, the expected value of the area",
+        ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations $x^2 +'
     ])
 
 CASE_DS_FULL_DECODE_ONLY = LLMTestCase(
@@ -57,9 +58,9 @@ CASE_DS_FULL_DECODE_ONLY = LLMTestCase(
     quantization="ascend",
     prompts=PROMPTS_LONG,
     golden_answers=[
-        '\n\nSelect an assignment template',
-        '\n\nSelect an assignment template',
-        '\n\nSelect an assignment template'
+        "\n\nSelect an assignment template",
+        "\n\nI'm not sure how to approach this problem. I'm not sure if I should use the law of total probability or if I should use",
+        "\n\n## Answer\n\n$a + b + c = 0$\n\nSolution\n\nLet $x$ be the common root of the equations"
     ])
 
 CASE_QWEN_EX = LLMTestCase(
@@ -67,7 +68,7 @@ CASE_QWEN_EX = LLMTestCase(
     prompts=PROMPTS_LONG,
     golden_answers=[
         ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
-        " \n\nTo solve this problem, we can use the fact that the expected value of the area of a triangle formed by two random points on a square's perimeter is",
+        " \n\nTo solve this problem, we can use the following approach: Let $P$ be the perimeter of the square. Then, the expected value of the area",
         ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
     ])
 
@@ -75,11 +76,10 @@ CASE_DS_EX = LLMTestCase(model="vllm-ascend/DeepSeek-V2-Lite-W8A8",
                          quantization="ascend",
                          prompts=PROMPTS_LONG,
                          golden_answers=[
-                             '\n\nSelect an assignment template',
-                             '\n\nSelect an assignment template',
-                             '\n\nSelect an assignment template'
+                             "\n\nSelect an assignment template",
+                             "\n\nI'm not sure how to approach this problem. I'm not sure if I should use the law of total probability or if I should use",
+                             "\n\n## Answer\n\n$a + b + c = 0$\n\nSolution\n\nLet $x$ be the common root of the equations"
                          ])
-
 
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH])
 def test_piecewise_res_consistency(cur_case: LLMTestCase):
@@ -113,7 +113,6 @@ def test_full_decode_only_res_consistency(cur_case: LLMTestCase, monkeypatch):
                   sampling_params=cur_case.sampling_params,
                   golden_answers=cur_case.golden_answers)
 
-
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_EX, CASE_DS_EX])
 def test_npugraph_ex_res_consistency(cur_case: LLMTestCase, monkeypatch):
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
@@ -135,3 +134,34 @@ def test_npugraph_ex_res_consistency(cur_case: LLMTestCase, monkeypatch):
                   prompts=cur_case.prompts,
                   sampling_params=cur_case.sampling_params,
                   golden_answers=cur_case.golden_answers)
+
+# The accuracy has already been verified in the previous test case.
+# This test case is used to check whether the functionality works properly
+# after enabling the static kernel and whether it is uninstalled as expected.
+@pytest.mark.parametrize("cur_case", [CASE_QWEN_EX])
+def test_npugraph_ex_with_static_kernel(cur_case: LLMTestCase, monkeypatch):
+    monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
+    runner_kwargs = {
+        "model_name": cur_case.model,
+        "quantization": cur_case.quantization,
+        "max_model_len": 1024,
+        "compilation_config": {
+            "cudagraph_capture_sizes": [4, 8],
+            "cudagraph_mode": "FULL_DECODE_ONLY"
+        },
+        "additional_config": {
+            "npugraph_ex_config": {
+                "enable": True,
+                "enable_static_kernel": True,
+            }
+        },
+    }
+    gen_and_valid(runner_kwargs=runner_kwargs,
+                  prompts=cur_case.prompts,
+                  sampling_params=cur_case.sampling_params,
+                  golden_answers=cur_case.golden_answers)
+
+    # Check whether the static kernel is properly uninstall
+    ascend_home_path = os.environ["ASCEND_HOME_PATH"]
+    static_kernel_install_path = os.path.join(ascend_home_path, 'opp/static_kernel/ai_core')
+    assert not os.path.exists(static_kernel_install_path)

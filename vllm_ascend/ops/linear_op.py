@@ -62,7 +62,7 @@ from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
-from vllm_ascend.utils import (enable_dsa_cp, enable_sp, flashcomm2_enable,
+from vllm_ascend.utils import (enable_dsa_cp, enable_dsa_cp_with_layer_shard, enable_sp, flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
                                oproj_tp_enable, shared_expert_dp_enabled)
@@ -368,7 +368,8 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             "communication_fn"] = otp_maybe_quant_comm
         actual_quant_method = getattr(self.quant_method, 'quant_method',
                                       self.quant_method)
-        from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+        from vllm_ascend.quantization.methods.w8a8_static import \
+            AscendW8A8LinearMethod
         if not isinstance(actual_quant_method, AscendW8A8LinearMethod):
             # Check if w8a8 quantization is enabled. If not, communicate immediately.
             input_parallel = otp_maybe_quant_comm(input_parallel)
@@ -575,7 +576,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             return tensor_model_parallel_all_reduce(output_parallel)
 
         pad_size = forward_context.pad_size
-        if pad_size > 0:
+        if pad_size > 0 and not (enable_dsa_cp()
+                                 and "o_proj" in self.layer.prefix):
             x = F.pad(x, (0, 0, 0, pad_size))
 
         world_size = self.layer.tp_size
@@ -585,8 +587,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
-        from vllm_ascend.quantization.quant_config import AscendLinearMethod
-        from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+        from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
+        from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 
         # For unquant
         if mmrs_fusion and isinstance(self.layer.quant_method,
@@ -728,7 +730,7 @@ def _get_row_parallel_op(
 ) -> Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                     Flashcomm2OProjRowParallelOp, MatmulAllreduceRowParallelOp,
                     SequenceRowParallelOp, ShardedCPRowParallelOp]]:
-    if enable_dsa_cp() and "o_proj" in prefix:
+    if enable_dsa_cp_with_layer_shard() and "o_proj" in prefix:
         return ShardedCPRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPRowParallelOp(layer)

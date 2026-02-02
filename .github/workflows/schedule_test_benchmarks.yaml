@@ -51,11 +51,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - vllm_branch: v0.13.0
+          - vllm_branch: v0.15.0
             vllm_ascend_branch: main
       max-parallel: 1
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
       volumes:
         - /usr/local/dcmi:/usr/local/dcmi
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
@@ -130,7 +130,7 @@ jobs:
       - name: Generate step summary
         if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
         run: |
-          cat ./benchmarks/results/benchmark_results.md >> $GITHUB_STEP_SUMMARY
+          cat ./benchmarks/results/benchmark_results.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark artifacts
         if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
@@ -172,9 +172,9 @@ jobs:
             commit_id=${line%% *}
             commit_title=${line#* }
 
-            git checkout $commit_id
-            commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
-            commit_time_no_tz=${commit_time::19}
+            git checkout "$commit_id"
+            commit_time=$(git show -s --format=%cd "$commit_id" --date=iso-strict)
+            commit_time_no_tz="${commit_time::19}"
             pip install -e .
 
             echo "------------------------"
@@ -191,9 +191,9 @@ jobs:
               ERROR_MSG="Benchmark failed to run"
             fi
             # send the result to es
-            escli add --vllm_branch ${{ matrix.vllm_branch }} \
-            --vllm_ascend_branch ${{ matrix.vllm_ascend_branch }} \
-            --commit_id $commit_id \
+            escli add --vllm_branch "${{ matrix.vllm_branch }}" \
+            --vllm_ascend_branch "${{ matrix.vllm_ascend_branch }}" \
+            --commit_id "$commit_id" \
             --commit_title "$commit_title" \
             --created_at "$commit_time_no_tz" \
             --res_dir ./benchmarks/results \

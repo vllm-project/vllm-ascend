@@ -21,9 +21,14 @@ on:
     inputs:
       tag:
         description: 'Docker tag for build results'
-        type: string
         default: main
         required: true
+        type: choice
+        options:
+          - main
+          - v0.15.0rc1
+          - v0.14.0rc1
+          - v0.13.0rc2
 
 jobs:
   image_build:
@@ -43,10 +48,12 @@ jobs:
           - name: A3 openEuler
             dockerfile: Dockerfile.a3.openEuler
             suffix: 'a3-openeuler'
-          # - name: 310P Ubuntu
-          #   dockerfile: Dockerfile.310p
-          # - name: 310P openEuler
-          #   dockerfile: Dockerfile.310p.openEuler
+          - name: 310P Ubuntu
+            dockerfile: Dockerfile.310p
+            suffix: '310p'
+          - name: 310P openEuler
+            dockerfile: Dockerfile.310p.openEuler
+            suffix: '310p-openeuler'
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
