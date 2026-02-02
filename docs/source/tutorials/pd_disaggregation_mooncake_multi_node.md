@@ -224,6 +224,19 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LI
 
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
+### kv_port Configuration Guide
+
+On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node × 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:
+
+| NPUs per Node | Reserved Port Range | Recommended kv_port |
+|---------------|---------------------|---------------------|
+| 8             | 20000 - 27999       | >= 28000            |
+| 16            | 20000 - 35999       | >= 36000            |
+
+```{warning}
+If you occasionally see `zmq.error.ZMQError: Address already in use` during startup, it may be caused by kv_port conflicting with randomly allocated AscendDirectTransport ports. Increase your kv_port value to avoid the reserved range.
+```
+
 ### launch_online_dp.py
 
 Use `launch_online_dp.py` to launch external dp vllm servers.
@@ -281,7 +294,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_producer",
-  "kv_port": "30000",
+  "kv_port": "36000",
   "engine_id": "0",
   "kv_connector_extra_config": {
             "prefill": {
@@ -340,7 +353,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_producer",
-  "kv_port": "30100",
+  "kv_port": "36100",
   "engine_id": "1",
   "kv_connector_extra_config": {
             "prefill": {
@@ -399,7 +412,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_consumer",
-  "kv_port": "30200",
+  "kv_port": "36200",
   "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
@@ -457,7 +470,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_consumer",
-  "kv_port": "30200",
+  "kv_port": "36200",
   "engine_id": "2",
   "kv_connector_extra_config": {
             
@@ -524,7 +537,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
-  "kv_port": "30000",
+  "kv_port": "36000",
   "engine_id": "0",
   "kv_connector_extra_config": {
             "prefill": {
@@ -583,7 +596,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
-  "kv_port": "30100",
+  "kv_port": "36100",
   "engine_id": "1",
   "kv_connector_extra_config": {
             "prefill": {
@@ -642,7 +655,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
-  "kv_port": "30200",
+  "kv_port": "36200",
   "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
@@ -700,7 +713,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
-  "kv_port": "30200",
+  "kv_port": "36200",
   "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
