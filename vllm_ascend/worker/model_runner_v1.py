@@ -1170,7 +1170,8 @@ class NPUModelRunner(GPUModelRunner):
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
-                if cudagraph_mode != CUDAGraphMode.NONE:
+                if num_tokens_padded != num_tokens_unpadded:
+                    # Currently, Graph Mode and SP will both pad num_tokens
                     num_reqs_padded = self._pad_query_start_loc_for_fia(
                         num_tokens_padded, num_reqs_padded, num_reqs
                     )
