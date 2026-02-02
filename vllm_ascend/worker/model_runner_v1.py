@@ -229,7 +229,8 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
         self.query_start_loc = self._make_buffer(
-            self.max_num_reqs + 2, dtype=torch.int32  # type: ignore[has-type]
+            self.max_num_reqs + 2,  # type: ignore[has-type]
+            dtype=torch.int32,
         )
 
         vllm_config.scheduler_config.max_num_batched_tokens -= max_pcp_pad_tokens
@@ -503,9 +504,7 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
-    def _pad_query_start_loc_for_fia(
-        self, num_tokens_padded: int, num_reqs_padded: int, num_reqs: int
-    ) -> int:
+    def _pad_query_start_loc_for_fia(self, num_tokens_padded: int, num_reqs_padded: int, num_reqs: int) -> int:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
@@ -517,9 +516,7 @@ class NPUModelRunner(GPUModelRunner):
 
             last_loc = self.query_start_loc.np[num_reqs]
             self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
-                self.arange_np[1 : num_reqs_padded + 1 - num_reqs]
-                * self.uniform_decode_query_len
-                + last_loc
+                self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * self.uniform_decode_query_len + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
@@ -1172,9 +1169,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 if num_tokens_padded != num_tokens_unpadded:
                     # Currently, Graph Mode and SP will both pad num_tokens
-                    num_reqs_padded = self._pad_query_start_loc_for_fia(
-                        num_tokens_padded, num_reqs_padded, num_reqs
-                    )
+                    num_reqs_padded = self._pad_query_start_loc_for_fia(num_tokens_padded, num_reqs_padded, num_reqs)
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
@@ -2146,9 +2141,7 @@ class NPUModelRunner(GPUModelRunner):
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
 
-            num_reqs_padded = self._pad_query_start_loc_for_fia(
-                num_tokens_padded, num_reqs_padded, num_reqs
-            )
+            num_reqs_padded = self._pad_query_start_loc_for_fia(num_tokens_padded, num_reqs_padded, num_reqs)
 
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             attn_metadata, _ = self._build_attention_metadata(
