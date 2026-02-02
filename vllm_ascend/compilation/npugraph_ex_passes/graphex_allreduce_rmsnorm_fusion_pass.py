@@ -23,13 +23,15 @@ from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
 
+from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
+
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THREHOLD = 512
 
 
 def extra_check_for_allreduce_rmsnorm_fusion_pass(match: Match) -> bool:
     compile_range = get_pass_context().compile_range
-    return compile_range.start > ALLREDUCE_NORM_FUSE_THREHOLD
+    return extra_stream_scope_check(match) and compile_range.start > ALLREDUCE_NORM_FUSE_THREHOLD
 
 
 class GraphEXMiddleLayerMatmulAllReduceAddRMSNormPattern:
