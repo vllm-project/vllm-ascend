@@ -276,6 +276,7 @@ class EplbProcess:
         """
         if self.policy_type == 3:
             from vllm_ascend.eplb.core.policy.policy_flashlb import warm_up
+
             warm_up()
         while True:
             try:
