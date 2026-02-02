@@ -36,8 +36,9 @@ class FaultTolerance:
 
         self.state_backup = {}
         self.aware_event = threading.Event()
+        self.stop_event = threading.Event()
         FaultAware(
-            self.rank,self.world_size,self.fault_queue,aware_event=self.aware_event
+            self.rank,self.world_size,self.fault_queue,aware_event=self.aware_event,stop_event=self.stop_event
         ).start()
 
     def _init_recovery_group(self):
@@ -99,7 +100,6 @@ class FaultTolerance:
                     ft_action = self._handle_exception(recovery_context)
                     if torch.equal(ft_action, FaultAction.RECOMPUTE):
                         self.aware_event.set()
-                        self.execute_model_decorator(*ctx.back_up['args'], **ctx.back_up['kwargs'])
                         logger.info(f"Begin token re-inference at rank {self.rank}")
                         continue
                     elif torch.equal(ft_action, FaultAction.RAISE_EXCEPTION):
@@ -165,6 +165,9 @@ class FaultTolerance:
         # No target exception ,return raise Exception
         if handler is None:
             return FaultAction.RAISE_EXCEPTION
+        # wait until stop_device finished
+        self.stop_event.wait()
+        self.stop_event.clear()
         # Rank Status
         _ = self._all_gather_for_recovery_group()
         logger.info("Synchronized Successfully,Begin restart and reinit")
