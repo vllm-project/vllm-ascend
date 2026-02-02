@@ -19,10 +19,10 @@ import einops
 import torch
 import torch_npu
 
-from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention as _Base
+from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
 
 
-class AscendMMEncoderAttention310(_Base):
+class AscendMMEncoderAttention310(AscendMMEncoderAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
