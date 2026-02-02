@@ -371,6 +371,10 @@ class NPUModelRunner(GPUModelRunner):
 
 
         if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
+
+            print(f"VLLM_ASCEND_ENABLE_KVCOMP_SPARSE: {os.getenv('VLLM_ASCEND_ENABLE_KVCOMP_SPARSE')}")
+            print(f"KVComp is enabled")
+
             from vllm_ascend.worker.kvcomp_utils import KVCompConfig, HashEncoder, KVCompMetaData
             from vllm.utils.math_utils import cdiv
 
@@ -410,6 +414,8 @@ class NPUModelRunner(GPUModelRunner):
                 hashk_cache_nope=hashk_cache_nope,
                 hashk_cache_rope=hashk_cache_rope,
             )
+
+            print(f"kvcomp_meta_data: {self.kvcomp_meta_data}")
 
     @property
     def use_cp(self) -> bool:
@@ -2384,8 +2390,8 @@ class NPUModelRunner(GPUModelRunner):
                 hashk_caches = {}
             for layer_name, kv_cache in kv_caches.items():
                 layer_index = extract_layer_index(layer_name, num_attn_module)
-                is_rollback_layer = layer_index in self.vllm_hash_attention_rollback_layers
-                is_skip_layer = layer_index in self.vllm_hash_attention_skip_layers
+                is_rollback_layer = layer_index in self.kvcomp_meta_data.kvcomp_config.vllm_hash_attention_rollback_layers
+                is_skip_layer = layer_index in self.kvcomp_meta_data.kvcomp_config.vllm_hash_attention_skip_layers
                 if is_rollback_layer or is_skip_layer:
                     if self.vllm_config.model_config.use_mla:
                         hashk_caches_nope[layer_name] = None
