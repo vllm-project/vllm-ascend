@@ -28,10 +28,10 @@ on:
   pull_request: 
     branches:
       - 'releases/*'
-    # types: [ labeled ]
-  push:
-    branches:
-      - 'releases/*'
+    types: [ labeled ]
+  # push:
+  #   branches:
+  #     - 'releases/*'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
