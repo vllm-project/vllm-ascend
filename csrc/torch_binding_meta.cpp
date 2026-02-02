@@ -434,6 +434,40 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     at::Tensor x = at::empty_symint(x1.sym_sizes(), x1.options());
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
+
+at::Tensor npu_reshape_and_cache_bnsd_meta(const at::Tensor& hashq, 
+                                           const at::Tensor& hashkCache,
+                                           const at::Tensor& slotMapping,
+                                           const at::Tensor& seqLen,
+                                           const at::Tensor& hashkCacheOut) {
+    at::Tensor output = at::empty(hashkCache.sizes(), hashkCache.options().dtype(hashkCache.dtype()).device(hashkCache.device()));                                        
+    return output;
+}
+
+
+at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq, 
+                                       const at::Tensor &hashkCache,
+                                       const at::Tensor& hashkCacheRope,
+                                       const at::Tensor &topN,
+                                       const at::Tensor &seqLen, 
+                                       const c10::optional<at::Tensor> &chunkSize,
+                                       const c10::optional<int64_t> maxSeqLen, 
+                                       const c10::optional<int64_t> sink, 
+                                       const c10::optional<int64_t> recent, 
+                                       const c10::optional<int64_t> supportOffload,
+                                       const c10::optional<at::Tensor> &blockTable,
+                                       const c10::optional<at::Tensor> &mask,
+                                       const c10::optional<at::Tensor>& indices) {
+    if (indices.has_value()) {
+        return at::empty_like(indices.value());
+    }
+
+    auto n_bs = hashq.size(0);
+    auto n_kv_heads = hashkCache.size(1); 
+    auto n_max_kv = 512; // 设置和hamming_dist_top_k算子实现一致
+    at::Tensor out = at::empty({n_bs, n_kv_heads, n_max_kv}, torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
+    return out;
+}
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -474,5 +508,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
+    // hamming_dist_top_k
+    ops.impl("npu_hamming_dist_top_k", &vllm_ascend::meta::npu_hamming_dist_top_k_meta);
+    // reshape_and_cache_bnsd
+    ops.impl("npu_reshape_and_cache_bnsd", &vllm_ascend::meta::npu_reshape_and_cache_bnsd_meta);
 }
 }
