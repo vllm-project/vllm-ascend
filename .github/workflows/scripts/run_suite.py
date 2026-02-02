@@ -189,7 +189,7 @@ def main():
     arg_parser.add_argument(
         "--continue-on-error",
         action="store_true",
-        default=False,
+        default=True,
         help="Continue running remaining tests even if one fails (useful for nightly tests)",
     )
     args = arg_parser.parse_args()

@@ -25,6 +25,7 @@ jobs:
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a2b3-1
     strategy:
+      fail-fast: false
       matrix:
         part: [0]
     container:
@@ -154,6 +155,7 @@ jobs:
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a3-2
     strategy:
+      fail-fast: false
       matrix:
         part: [0]
     container:
@@ -217,6 +219,7 @@ jobs:
     if: ${{ inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-2
     strategy:
+      fail-fast: false
       matrix:
         part: [0]
     container:
@@ -288,6 +291,7 @@ jobs:
     if: ${{ inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     strategy:
+      fail-fast: false
       matrix:
         part: [0]
     container:

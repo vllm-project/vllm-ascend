@@ -30,7 +30,7 @@ class TestFile:
 
 def run_e2e_files(
     files: list[TestFile],
-    continue_on_error: bool = True,
+    continue_on_error: bool = False,
 ):
     """
     Run a list of test files.
