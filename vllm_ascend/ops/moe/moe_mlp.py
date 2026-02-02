@@ -243,6 +243,7 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                                w2_scale=w2_scale,
                                group_list=group_list,
                                group_list_type=group_list_type,
+                               dynamic_scale=dynamic_scale,
                                w1_scale_bias=w1_scale_bias,
                                w2_scale_bias=w2_scale_bias,
                                fusion=fusion)
