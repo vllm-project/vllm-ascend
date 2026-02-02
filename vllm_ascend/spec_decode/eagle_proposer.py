@@ -198,6 +198,7 @@ class EagleProposer(VllmEagleProposer):
             if self.get_model_name(model) in [
                     "Qwen2_5_VLForConditionalGeneration",
                     "Qwen3VLForConditionalGeneration",
+                    "Qwen3VLMoeForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = model.config.image_token_id
             elif self.get_model_name(
@@ -1184,7 +1185,8 @@ class EagleProposer(VllmEagleProposer):
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
         update_full_graph_params(
             self.runner.attn_backend, self.update_stream, forward_context, num_tokens,
-            self.vllm_config, self.vllm_config.speculative_config)
+            self.vllm_config, self.vllm_config.speculative_config,
+            draft_attn_metadatas=draft_attn_metadatas)
 
     # padding tensor into desired size
     def _pad_tensor(self, tensor, pad_size):

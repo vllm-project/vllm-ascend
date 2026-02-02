@@ -18,7 +18,7 @@ export VLLM_LOGGING_LEVEL="INFO"
 # Reduce glog verbosity for mooncake
 export GLOG_minloglevel=1
 # Set transformers to offline mode to avoid downloading models during tests
-export TRANSFORMERS_OFFLINE="1"
+export HF_HUB_OFFLINE="1"
 
 # Function to print section headers
 print_section() {
