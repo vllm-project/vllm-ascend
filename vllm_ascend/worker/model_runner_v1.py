@@ -537,14 +537,14 @@ class NPUModelRunner(GPUModelRunner):
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
-        if self.pcp_size * self.dcp_size > 1:
+        if self.use_cp:
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 self.input_batch.num_reqs,
             )
 
         # for pcp, prefill mtp should use origin scheduleroutput ,
-        if self.speculative_config and self.pcp_size * self.dcp_size > 1:
+        if self.speculative_config and self.use_cp:
             self.pcp_manager.generate_pcp_mtp_input(
                 total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens,
@@ -703,7 +703,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata = None
             num_draft_tokens = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
-            if self.pcp_size * self.dcp_size > 1:
+            if self.use_cp:
                 logits_indices = self.pcp_manager.get_logits_indices(cu_num_tokens)
                 logits_indices = logits_indices.pin_memory().to(self.device, non_blocking=True)
             else:
@@ -925,7 +925,7 @@ class NPUModelRunner(GPUModelRunner):
                     self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
                 req_scheduled_tokens = scheduler_output.num_scheduled_tokens
-                if self.pcp_size * self.dcp_size > 1:
+                if self.use_cp:
                     long_seq_metadata = self.long_seq_metadata  # type: ignore
                     input_ids_pcp_full = self.pcp_manager.input_ids_pcp_full.gpu
                     query_start_loc_pcp_full = self.pcp_manager.query_start_loc_pcp_full.gpu
@@ -1869,6 +1869,34 @@ class NPUModelRunner(GPUModelRunner):
             prefill_context_parallel_metadata=self.long_seq_metadata,
         )
 
+        if self.speculative_config and self.use_cp:
+            # For pcp + spec decode, we flatten block_table
+            # to avoid irregular attn_mask shape, e.g.,
+            # num_decode_req=2, num_prefill_req=3, num_speculative_tokens=1,
+            # ori block_table: # [d0, d1, p0, p1, p2]
+            # (num_reqs_d + num_reqs_p, max_num_blocks),
+            # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
+            # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
+            ori_query_lens_cpu = self.pcp_manager.query_lens_pcp_full.cpu[:num_reqs_padded]
+            ori_query_lens = self.pcp_manager.query_lens_pcp_full.gpu[:num_reqs_padded]
+            num_prefill_reqs = self.pcp_manager.num_prefill_reqs
+            num_decode_reqs = self.pcp_manager.num_decode_reqs
+            num_decode_reqs_flatten = ori_query_lens_cpu[:num_decode_reqs].sum().item()
+            block_table_gid_0[num_decode_reqs_flatten : num_decode_reqs_flatten + num_prefill_reqs].copy_(
+                block_table_gid_0[num_decode_reqs : num_decode_reqs + num_prefill_reqs].clone()
+            )
+            block_table_gid_0[:num_decode_reqs_flatten].copy_(
+                block_table_gid_0[:num_decode_reqs].repeat_interleave(ori_query_lens[:num_decode_reqs], dim=0)
+            )
+            cm_base.block_table_tensor = block_table_gid_0[: num_decode_reqs_flatten + num_prefill_reqs]
+            assert self.long_seq_metadata is not None
+            self.long_seq_metadata.query_lens_pcp_full_cpu = ori_query_lens_cpu
+
+            if num_reqs_padded and num_reqs_padded > num_reqs:
+                pad_size = num_reqs_padded - num_reqs
+                ori_query_lens_cpu[-pad_size:] = torch.full([pad_size], ori_query_lens_cpu[-pad_size - 1].item())
+            self.long_seq_metadata.max_query_len_pcp_full = ori_query_lens_cpu.max().item()
+
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(logits_indices)
@@ -2040,11 +2068,14 @@ class NPUModelRunner(GPUModelRunner):
             # LoRA state when determining the batch descriptor for capture
             force_has_lora=activate_lora,
         )
-        if self.pcp_size * self.dcp_size > 1:
+        if self.use_cp:
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 num_reqs,
             )
+            if self.speculative_config:
+                self.pcp_manager.query_lens_pcp_full.cpu[:num_reqs] = torch.from_numpy(num_scheduled_tokens)
+                self.pcp_manager.query_lens_pcp_full.copy_to_gpu()
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode
         else:
