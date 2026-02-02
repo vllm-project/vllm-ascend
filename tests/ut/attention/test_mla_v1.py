@@ -17,7 +17,6 @@ from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLAPrefillMetadata,
                                           ChunkedContextMetadata)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.utils import vllm_version_is
 
 
 class TestAscendMLABackend(TestBase):
@@ -224,9 +223,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
             )
 
         self.parent_init_patcher = patch(
-            ("vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__"
- if vllm_version_is('0.14.1') else
- "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__"),
+            "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__",
             mock_parent_init)
         self.parent_init_patcher.start()
 
@@ -452,9 +449,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             )
 
         self.parent_init_patcher = patch(
-            ("vllm.v1.attention.backends.mla.common.MLACommonMetadataBuilder.__init__"
- if vllm_version_is('0.14.1') else
- "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__"),
+            "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__",
             mock_parent_init)
         self.parent_init_patcher.start()
 

@@ -512,6 +512,14 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._shared_experts is None:
+            fused_out = AscendFusedMoE.forward(
+                self,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+            shared_out = None
+            return shared_out, fused_out
         shared_out, fused_out = AscendFusedMoE.forward(
             self,
             hidden_states=hidden_states,
@@ -570,6 +578,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             return_with_event=True,
         )
         routed_out = fused_moe_results.routed_out
+
+        if self._shared_experts is None:
+            return routed_out
 
         if self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
