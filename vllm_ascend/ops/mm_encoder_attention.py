@@ -47,7 +47,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             num_kv_heads: number of kv heads.
             prefix: This has no effect, it is only here to make it easier to
                     swap between Attention and MMEncoderAttention.
-            multimodal_config: configs for multi-modal.
         """
         super().__init__(
             num_heads=num_heads,
@@ -82,13 +81,12 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         return query, key, value
 
     def forward_oot(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            cu_seqlens: torch.Tensor | None = None,
-            max_seqlen: torch.Tensor
-        | None = None,  # Only used for Flash Attention
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
     ):
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
