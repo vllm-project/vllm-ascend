@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch_npu
 from vllm.distributed.parallel_state import (
     get_dp_group, get_pcp_group, get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_world_size, set_substitute_tp)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
@@ -126,8 +126,11 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
 
     def _restore_tp_across_dp(self):
         """Restore original TP configuration (same as MC2)."""
+        # TODO(lxf) temperory solution for ffn support dp
+        set_substitute_tp(1)
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+        set_substitute_tp(0)
 
     def prepare(
         self,
@@ -223,8 +226,11 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         vLLM flattens TP and DP into a single dimension; this method recovers
         the true TP world size and rank for correct tensor slicing.
         """
+        # TODO(lxf) temperory solution for ffn support dp
+        set_substitute_tp(1)
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+        set_substitute_tp(0)
 
     def prepare(
         self,

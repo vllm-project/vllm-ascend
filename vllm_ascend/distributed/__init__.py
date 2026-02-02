@@ -17,7 +17,9 @@
 
 from vllm.distributed.kv_transfer.kv_connector.factory import \
     KVConnectorFactory
-
+from vllm.distributed.afd_transfer.afd_connector.factory import \
+    AFDConnectorFactory
+from .M2NAFDConnector import *
 
 def register_connector():
     KVConnectorFactory.register_connector(
@@ -42,3 +44,20 @@ def register_connector():
     KVConnectorFactory.register_connector(
         "UCMConnector", "vllm_ascend.distributed.ucm_connector",
         "UCMConnectorV1")
+
+def register_afd_connector():
+    AFDConnectorFactory.register_connector(
+        "m2nconnector", "vllm_ascend.distributed.M2NAFDConnector",
+        "M2NAFDConnector")
+
+    AFDConnectorFactory.register_connector(
+        "camm2nconnector", "vllm_ascend.distributed.CAMM2NAFDConnector",
+        "CAMM2NAFDConnector")
+
+    AFDConnectorFactory.register_connector(
+        "camp2pconnector", "vllm_ascend.distributed.CAMP2PAFDConnector",
+        "CAMP2PAFDConnector")
+
+    AFDConnectorFactory.register_connector(
+        "npup2pconnector", "vllm_ascend.distributed.NPUP2PAFDConnector",
+        "NPUP2PAFDConnector")

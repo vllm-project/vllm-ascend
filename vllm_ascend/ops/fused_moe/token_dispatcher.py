@@ -139,7 +139,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             max_num_tokens = compilation_config.max_cudagraph_capture_size
         else:
             max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
-        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        if vllm_config.afd_config and vllm_config.afd_config.afd_role == "ffn":
+            num_tokens_per_tp_rank = max_num_tokens
+        else:
+            num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
         self.global_bs = num_tokens_per_tp_rank * self.ep_world_size
         self.fused_global_bs = max_num_tokens * self.ep_world_size
 

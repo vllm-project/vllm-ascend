@@ -23,6 +23,9 @@ from vllm_ascend.spec_decode.suffix_proposer import SuffixDecodingProposer
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
+    afd_config = vllm_config.afd_config
+    if afd_config and afd_config.afd_role == "ffn":
+        return None
     if method == "ngram":
         return NgramProposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3"):

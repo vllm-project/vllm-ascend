@@ -132,6 +132,9 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         else:
             if w1_scale[0].dtype != torch.float32:
                 w1_scale[0] = w1_scale[0].to(torch.float32)
+            if hidden_states.dtype != w1[0].dtype:
+                hidden_states, _ = torch_npu.npu_dynamic_quant(
+                    hidden_states, dst_dtype=w1[0].dtype)
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
@@ -261,7 +264,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             x=[hidden_states],
             weight=w2,
             scale=w2_scale,
-            bias=bias2,
+            bias=[bias.to(torch.int32) for bias in bias2],
             per_token_scale=[swiglu_out_scale],
             split_item=2,
             group_list_type=group_list_type,
@@ -352,3 +355,38 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                                  group_list_type=group_list_type,
                                  topk_scales=topk_scales,
                                  need_trans=need_trans)
+
+
+def fused_experts(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w1_scale: torch.Tensor,
+        w2: torch.Tensor,
+        w2_scale: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        x_active_mask: torch.Tensor,
+        group_ep: str,
+        ep_rank_size: int,
+        ep_rank_id: int,
+        moe_expert_num:int,
+    ):
+    output, _ = torch.ops.umdk_cam_op_lib.dispatch_gmm_combine_decode(
+        x=hidden_states,
+        expert_ids=topk_ids,
+        gmm1_permuted_weight=w1,
+        gmm1_permuted_weight_scale=w1_scale,
+        gmm2_weight=w2,
+        gmm2_weight_scale=w2_scale,
+        expert_scales=topk_weights,
+        expert_smooth_scales=None,
+        x_active_mask=x_active_mask,
+        group_ep=group_ep,
+        ep_rank_size=ep_rank_size,
+        ep_rank_id=ep_rank_id,
+        moe_expert_num=moe_expert_num,
+        shared_expert_num=1,
+        shared_expert_rank_num=0,
+        quant_mode=0,
+        global_bs=0)
+    return output

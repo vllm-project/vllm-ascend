@@ -107,6 +107,10 @@ def check_npu_moe_gating_top_k(
         num_expert_group: Optional[int] = None,
         scoring_func: str = "softmax",
         custom_routing_function: Optional[Callable] = None):
+    # During torch.compile, we fallback to native implementation to avoid
+    # dynamic shape issues with the custom op.
+    if torch.compiler.is_compiling():
+        return False
     if scoring_func == "sigmoid" and not renormalize:  #sigmoid + renorm=0 is not supported in current branch
         return False
     if custom_routing_function is not None:
