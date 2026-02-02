@@ -12,7 +12,7 @@ class FaultAware:
     _fault_aware_group = None
 
     def __init__(self,rank:int,world_size:int,fault_queue:queue.Queue,interval_s=1,
-                 aware_event:threading.Event=None):
+                 aware_event:threading.Event=None,stop_event:threading.Event=None):
         self.rank = rank
         self.world_size = world_size
         self.npu_id = torch.npu.current_device()
@@ -21,6 +21,7 @@ class FaultAware:
 
         self._fault_aware_thread = None
         self.aware_event = aware_event
+        self.stop_event = stop_event
 
     def init_fault_aware_group(self):
         """
@@ -158,7 +159,9 @@ class FaultAware:
     def _stop_device(self):
         try:
             torch_npu.npu.stop_device(self.npu_id)
-            logger.info(f"NPU {self.npu_id} execute stop device")
+            if self.stop_event:
+                logger.info(f"NPU {self.npu_id} execute stop device")
+                self.stop_event.set()
 
             if self.aware_event:
                 logger.info("Waiting for recovery event")
