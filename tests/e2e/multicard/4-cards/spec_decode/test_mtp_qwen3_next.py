@@ -156,7 +156,7 @@ def test_qwen3_next_mtp_correctness_tp4(model_name: str,
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("num_speculative_tokens", [1])
-def test_qwen3_next_mtp_correctness_tp4_ss(model_name: str,
+def test_qwen3_next_mtp_full_decode(model_name: str,
                                         num_speculative_tokens: int):
     example_prompts = [
         "Hello, my name is",
