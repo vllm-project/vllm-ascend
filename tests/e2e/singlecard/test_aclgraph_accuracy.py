@@ -25,7 +25,7 @@ CASE_QWEN_ACLGRAPH = LLMTestCase(
     model="Qwen/Qwen3-0.6B",
     prompts=PROMPTS_SHORT,
     golden_answers=[
-        " Lina. I'm a 2-year-old student from China. I'm interested in studying in the US. I want to know if there are any",
+        " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I want to know if there are any",
         ' the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
         ' Paris. The capital of France is also the capital of the Republic of France. The capital of France is also the capital of the European Union. The capital of',
         ' not just a technological frontier but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and'

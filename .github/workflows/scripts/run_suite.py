@@ -74,6 +74,7 @@ def auto_partition(files, rank, size):
 
     # Return the files corresponding to the indices in the specified rank's partition
     indices = partitions[rank]
+    indices.sort(key=lambda i: files[i].estimated_time)
     return [files[i] for i in indices]
 
 
