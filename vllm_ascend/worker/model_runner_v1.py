@@ -377,19 +377,19 @@ class NPUModelRunner(GPUModelRunner):
             kvcomp_config = KVCompConfig.from_json(os.getenv("VLLM_ASCEND_KVCOMP_CONFIG_PATH"))
             chunk_sizes_for_hamming_full = torch.full([self.max_num_reqs], fill_value=self.block_size, dtype=torch.int32, device=self.device)
             topk_for_hamming_full = torch.full([self.max_num_reqs], fill_value=kvcomp_config.vllm_hash_attention_topk // self.block_size, dtype=torch.int32, device=self.device)
-            topk_for_hamming_full_cpu = torch.full([self.max_num_reqs], fill_value=self.kvcomp_config.vllm_hash_attention_topk // self.block_size, dtype=torch.int32, device="cpu")
+            topk_for_hamming_full_cpu = torch.full([self.max_num_reqs], fill_value=kvcomp_config.vllm_hash_attention_topk // self.block_size, dtype=torch.int32, device="cpu")
             seq_lens_for_hamming = torch.zeros([self.max_num_reqs], dtype=torch.int32, device=self.device)
             hamming_output = torch.zeros([self.max_num_reqs, self.model_config.get_num_kv_heads(self.parallel_config), cdiv(self.vllm_config.model_config.max_model_len, self.block_size)] , dtype=torch.int32, device=self.device)
 
             if self.vllm_config.model_config.use_mla:
-                hash_encoder_nope = HashEncoder(self.kvcomp_config.kv_lora_rank, self.kvcomp_config.hash_bits_kv_lora, self.dtype, self.device)
-                hash_encoder_rope = HashEncoder(self.kvcomp_config.qk_rope_head_dim, self.kvcomp_config.hash_bits_qk_rope, self.dtype, self.device)
+                hash_encoder_nope = HashEncoder(kvcomp_config.kv_lora_rank, kvcomp_config.hash_bits_kv_lora, self.dtype, self.device)
+                hash_encoder_rope = HashEncoder(kvcomp_config.qk_rope_head_dim, kvcomp_config.hash_bits_qk_rope, self.dtype, self.device)
                 hashk_cache_nope = []
                 hashk_cache_rope = []
                 hash_encoder = None
                 hashk_caches = None
             else: #GQA
-                hash_encoder = HashEncoder(self.kvcomp_config.head_dim, self.kvcomp_config.hash_bits, self.dtype, self.device)
+                hash_encoder = HashEncoder(kvcomp_config.head_dim, kvcomp_config.hash_bits, self.dtype, self.device)
                 hashk_caches = []
                 hash_encoder_nope = None
                 hash_encoder_rope = None
