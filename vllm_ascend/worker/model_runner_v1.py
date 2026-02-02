@@ -149,9 +149,6 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
-if get_ascend_device_type() == AscendDeviceType._310P:
-    torch_npu.npu.set_compile_mode(jit_compile=False)
-
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
@@ -2527,9 +2524,7 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
-                    if get_ascend_device_type() == AscendDeviceType._310P:
-                        k_cache = maybe_trans_nz(k_cache)
-                        v_cache = maybe_trans_nz(v_cache)
+
                     if self.use_sparse and raw_dsa_k_tensor is not None:
                         dsa_k_cache_shape = (num_blocks, kv_cache_spec.block_size, 1, 128)
                         dsa_k_cache_size = (num_blocks) * kv_cache_spec.block_size * 128 * dtype.itemsize
