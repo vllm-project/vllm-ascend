@@ -372,7 +372,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
             from vllm_ascend.worker.kvcomp_utils import KVCompConfig, HashEncoder, KVCompMetaData
-            from vllm.utils import cdiv
+            from vllm.utils.math_utils import cdiv
 
             kvcomp_config = KVCompConfig.from_json(os.getenv("VLLM_ASCEND_KVCOMP_CONFIG_PATH"))
             chunk_sizes_for_hamming_full = torch.full([self.max_num_reqs], fill_value=self.block_size, dtype=torch.int32, device=self.device)
