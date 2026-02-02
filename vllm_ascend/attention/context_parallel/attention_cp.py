@@ -874,8 +874,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 cp_chunkedprefill_comm_stream().wait_stream(
                     torch.npu.current_stream())
                 with torch_npu.npu.stream(cp_chunkedprefill_comm_stream()):
+                    # If only local_context_output is used, the NPU memory cannot be released.
+                    # This problem can be avoided by using clone
+                    tmp_local_context_output = local_context_output.clone()
                     global_context_output = self._gather_global_context_output(
-                        local_context_output)
+                        tmp_local_context_output)
 
             if self.pcp_size > 1:
                 # compute the tail part and reorg output&lse // overlap the communication of output
