@@ -127,7 +127,7 @@ class AscendAttentionBackend(AttentionBackend):
             value_caches[dst_indices] = value_caches[src_indices]
 
     @staticmethod
-    def get_supported_block_size() -> list[int]:
+    def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
 
 
@@ -227,7 +227,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         self.compilation_config = vllm_config.compilation_config
         self.device = device
         self.max_num_blocks_per_req = cdiv(
-            self.model_config.max_model_len, AscendAttentionBackend.get_supported_block_size()[0]
+            self.model_config.max_model_len, AscendAttentionBackend.get_supported_kernel_block_sizes()[0]
         )
 
         self.speculative_config = vllm_config.speculative_config
