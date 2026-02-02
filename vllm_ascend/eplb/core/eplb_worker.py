@@ -411,6 +411,9 @@ class EplbProcess:
         """
         Subprocess entry: bind to specified NPU, loop waiting for planner_q to wake up, call do_update, then notify main process update is complete.
         """
+        if self.policy_type == 3:
+            from vllm_ascend.eplb.core.policy.policy_flashlb import warm_up
+            warm_up()
         while True:
             try:
                 planner_q.get()
