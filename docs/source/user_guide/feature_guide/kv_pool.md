@@ -607,7 +607,7 @@ vllm serve xxxxxxx/Qwen3-32B \
   --gpu-memory-utilization 0.9 \
   --max-num_seqs 20 \
   --no-enable-prefix-caching \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false, "chunked_prefill_for_mla":true}' \
+  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false}' \
   --kv-transfer-config \
     '{
             "kv_connector": "MultiConnector",
