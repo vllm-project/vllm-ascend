@@ -368,7 +368,7 @@ curl -s http://localhost:8100/v1/completions -H "Content-Type: application/json"
 
 ### Installing Memcache
 
-MemCache depends on MemFabric. Therefore, MemFabric must be installed.Installing the memcache after the memfabric is installed.
+**MemCache depends on MemFabric. Therefore, MemFabric must be installed.Installing the memcache after the memfabric is installed.**
 
 * **memfabric_hybrid**: <https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>
 
@@ -519,7 +519,7 @@ ock.mmc.client.write_thread_pool.size = 2
 * ock.mmc.meta_service_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
 * ock.mmc.local_service.config_store_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
 * ock.mmc.local_service.world_size：Total number of cards for starting services.
-* ock.mmc.local_service.protocol：800I A2/800T A2 Series uses device_rdma，A800I A3/800T A3 Series uses device_sdma
+* ock.mmc.local_service.protocol：host_rdma (default), device_rdma (supported for A2 and A3 when device ROCE avaliable, recommended for A2), device_sdma (supported for A3 when HCCS avaliable, recommended for A3)
 * ock.mmc.local_service.dram.size：Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card.
 * To disable TLS authentication modification, set the following parameters to false:：ock.mmc.meta.ha.enable、ock.mmc.config_store.tls.enable
 
@@ -559,7 +559,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/python3.11.10/lib/
 
 #### 1.Run `prefill` Node and `decode` Node
 
-Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` serves as the prefix-cache node.
+Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` enables KV Cache Pool
 
 #### 800I A2/800T A2 Series
 
@@ -577,6 +577,7 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 export MMC_LOCAL_CONFIG_PATH=/home/memcache/mmc-local.conf
 
+# nic_name can be looked up in ifconfig
 nic_name="xxxxxx"
 local_ip="xx.xx.xx.xx"
 export HCCL_IF_IP=$local_ip
@@ -659,6 +660,7 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 export MMC_LOCAL_CONFIG_PATH=/home/memcache/mmc-local.conf
 
+# nic_name can be looked up in ifconfig
 nic_name="xxxxxx"
 local_ip="xx.xx.xx.xx"
 export HCCL_IF_IP=$local_ip
@@ -688,13 +690,12 @@ vllm serve xxxxxxx/Qwen3-32B \
   --gpu-memory-utilization 0.9 \
   --max-num_seqs 20 \
   --no-enable-prefix-caching \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false, "chunked_prefill_for_mla":true}' \
+  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false}' \
   --kv-transfer-config \
   '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
         "kv_connector_extra_config": {
-                "use_layerwise": false,
                 "connectors": [
                 {
                                 "kv_connector": "MooncakeConnectorV1",
@@ -718,8 +719,9 @@ vllm serve xxxxxxx/Qwen3-32B \
                                "kv_connector": "AscendStoreConnector",
                                "kv_role": "kv_consumer",
                                "kv_connector_extra_config":{
-                                       "backend": "memcache",
-                                       "mooncake_rpc_port":"1"
+                                    "use_layerwise": false,
+                                    "backend": "memcache",
+                                    "lookup_rpc_port":"1"
                                }
                        }  
 
@@ -755,13 +757,13 @@ python -m vllm.entrypoints.openai.api_server \
   --served-model-name dsv3 \
   --trust-remote-code \
   --enforce-eager \
-  -dp 2 \
-  -tp 8 \
+  --data-parallel-size 2 \
+  --tensor-parallel-size 8 \
   --port 30050 \
   --max-num_seqs 28 \
   --max-model-len 16384 \
   --max-num-batched-tokens 16384 \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false, "torchair_graph_config":{"enabled":false},"chunked_prefill_for_mla":true}' \
+  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false}' \
   --enable_expert_parallel \
   --quantization ascend \
   --gpu-memory-utilization 0.90 \
@@ -796,7 +798,7 @@ python -m vllm.entrypoints.openai.api_server \
      "kv_role": "kv_producer",
      "kv_connector_extra_config":{
       "backend": "memcache",
-      "mooncake_rpc_port":"0"
+      "lookup_rpc_port":"0"
      }
     }  
    ]
@@ -827,8 +829,8 @@ python -m vllm.entrypoints.openai.api_server \
   --model=xxxxxxxxxxxxxxxx/DeepSeek \
   --served-model-name dsv3 \
   --trust-remote-code \
-  -dp 2 \
-  -tp 8 \
+  --data-parallel-size 2 \
+  --tensor-parallel-size 8 \
   --port 30060 \
   --max-model-len 16384 \
   --max-num-batched-tokens 5200 \
@@ -838,14 +840,13 @@ python -m vllm.entrypoints.openai.api_server \
   --max-num_seqs 28 \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
   --enable_expert_parallel \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false, "torchair_graph_config":{"enabled": false},"chunked_prefill_for_mla":true}' \
+  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false}' \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{
  "kv_connector": "MultiConnector",
  "kv_role": "kv_consumer",
  "kv_connector_extra_config": {
-  "use_layerwise": false,
   "connectors": [
   {
     "kv_connector": "MooncakeConnectorV1",
@@ -869,8 +870,9 @@ python -m vllm.entrypoints.openai.api_server \
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_consumer",
     "kv_connector_extra_config":{
-                    "backend": "memcache",
-     "mooncake_rpc_port":"1"
+                "use_layerwise": false,
+                "backend": "memcache",
+                "lookup_rpc_port":"1"
     }
    }  
   ]
@@ -882,7 +884,7 @@ python -m vllm.entrypoints.openai.api_server \
 
 #### [3、run-inference](#3run-inference)
 
-### Colocation Scenario
+### PD-Mixed Scenario
 
 #### 1.Run Mixed Department Script
 
@@ -904,6 +906,7 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 export MMC_LOCAL_CONFIG_PATH=/home/memcache/mmc-local.conf
 
+# nic_name can be looked up in ifconfig
 nic_name="xxxxxxx"
 local_ip="xx.xx.xx.xx"
 export HCCL_IF_IP=$local_ip
@@ -940,14 +943,14 @@ vllm serve xxxxxxx/DeepSeek-R1 \
   --max-num_seqs 20 \
   --enable-expert-parallel \
   --no-enable-prefix-caching \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false, "chunked_prefill_for_mla":true}' \
+  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false}' \
   --kv-transfer-config \
   '{
         "kv_connector": "AscendStoreConnector",
         "kv_role": "kv_both",
         "kv_connector_extra_config": {
                 "backend": "memcache",
-                "mooncake_rpc_port":"0"
+                "lookup_rpc_port":"0"
            }
   }' > log_hunbu_1.log 2>&1
 
@@ -967,6 +970,7 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 export MMC_LOCAL_CONFIG_PATH=/home/memcache/mmc-local.conf
 
+# nic_name can be looked up in ifconfig
 nic_name="xxxxxxx"
 local_ip="xx.xx.xx.xx"
 export HCCL_IF_IP=$local_ip
