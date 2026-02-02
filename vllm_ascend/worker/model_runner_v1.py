@@ -77,7 +77,6 @@ from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
                                              GPUModelRunner)
-from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -518,6 +517,7 @@ class NPUModelRunner(GPUModelRunner):
         req_ids = self.input_batch.req_ids
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+        num_scheduled_tokens_np = num_scheduled_tokens
 
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
@@ -706,7 +706,7 @@ class NPUModelRunner(GPUModelRunner):
         self.query_start_loc.copy_to_gpu()
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+        # Disable cascade attention when using microbatching (DBO)
         cascade_attn_prefix_lens = None
 
         uniform_decode = (max_num_scheduled_tokens == self.uniform_decode_query_len
@@ -714,7 +714,7 @@ class NPUModelRunner(GPUModelRunner):
 
         (
             cudagraph_mode,
-            batch_desc,
+            batch_descriptor,
             should_ubatch,
             num_tokens_across_dp,
             cudagraph_stats,
@@ -731,15 +731,16 @@ class NPUModelRunner(GPUModelRunner):
             "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
             "should_ubatch: %s, num_tokens_across_dp: %s",
             cudagraph_mode,
-            batch_desc,
+            batch_descriptor,
             should_ubatch,
             num_tokens_across_dp,
         )
 
-        num_tokens_padded = batch_desc.num_tokens
+        num_tokens_padded = batch_descriptor.num_tokens
         num_reqs_padded = (
-            batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+            batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else num_reqs
         )
+
         ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
             should_ubatch,
             num_scheduled_tokens_np,
@@ -752,11 +753,11 @@ class NPUModelRunner(GPUModelRunner):
         ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
         # send is_ubatch to ffn side
-        logger.info(f"prepare_inpute: should_ubatch is {should_ubatch}, ubatch_slices: {ubatch_slices}")
         # support inequal AF,[ffn_size,ffn_size + min_size) send
         if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
             self.afd_connector.send_is_ubatch(should_ubatch)
-            logger.info(f'afd_connector.rank in prepare input is {self.afd_connector.rank}, should_ubatch: {should_ubatch}')
+            logger.info(f'afd_connector.rank in prepare input is {self.afd_connector.rank}, '
+                        f'should_ubatch: {should_ubatch}, ubatch_slices: {ubatch_slices_attn}')
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -2172,200 +2173,6 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = hidden_states
         return hidden_states
 
-    def _sync_batch_across_dp(
-            self,
-            num_tokens_padded: int,
-            cudagraph_mode: int = 0,
-    ) -> tuple[bool, torch.Tensor | None, int]:
-        """
-        Coordinates amongst all DP ranks to determine if and how the full batch
-        should be split into microbatches.
-
-        Args:
-            num_tokens_padded: Number of tokens including any non-DP padding (CUDA graphs,
-                TP, etc)
-            cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL)
-
-        Returns: tuple[
-            ubatch_slices: if this is set then all DP ranks have agreed to
-            microbatch
-            num_tokens_after_padding: A tensor containing the total number of
-            tokens per-microbatch for each DP rank including padding. Will be
-            padded up to the max value across all DP ranks when allow_dp_padding
-            is True.
-            synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
-        ]
-
-        """
-
-        # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
-        # our case, we still need to sync the other two flags as well. So we need to
-        # include them in the all_reduce operation, and more over, we CANNOT skip it
-        # even if we are running in eager mode, which harms performance.
-        # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
-        # immediately once the other two flags are no longer needed.
-
-        if self.dp_size == 1:
-            should_ubatch = check_enable_ubatch(
-                num_tokens_padded,
-                num_tokens_padded,
-                uniform_decode=False,
-                vllm_config=self.vllm_config,
-                moe_comm_type=select_moe_comm_method(num_tokens_padded,
-                                                     self.vllm_config),
-            )
-
-            return should_ubatch, None, cudagraph_mode
-
-        if self._skip_all_reduce_across_dp_group():
-            num_tokens_after_padding = torch.tensor([num_tokens_padded] *
-                                                    self.dp_size,
-                                                    device="cpu",
-                                                    dtype=torch.int32)
-            return False, num_tokens_after_padding, cudagraph_mode
-
-        tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
-        tensor[0][self.dp_rank] = num_tokens_padded
-        tensor[1][self.dp_rank] = cudagraph_mode
-        dist.all_reduce(tensor, group=get_dp_group().cpu_group)
-
-        num_tokens_across_dp = tensor[0, :]
-        max_num_tokens = int(num_tokens_across_dp.max().item())
-        min_num_tokens = int(num_tokens_across_dp.min().item())
-        num_tokens_after_padding = torch.tensor(
-            [max_num_tokens] * len(num_tokens_across_dp),
-            device="cpu",
-            dtype=torch.int32,
-        )
-        # Synchronize cudagraph_mode across ranks (take min)
-        synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
-
-        logger.info(f"ttg _sync_batch_across_dp num_tokens_after_padding: {num_tokens_after_padding}, "
-                    f"min_num_tokens: {min_num_tokens}, max_num_tokens: {max_num_tokens}")
-
-        should_ubatch = check_enable_ubatch(
-            min_num_tokens,
-            max_num_tokens,
-            uniform_decode=False,
-            vllm_config=self.vllm_config,
-            moe_comm_type=select_moe_comm_method(num_tokens_padded,
-                                                 self.vllm_config),
-        )
-        return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
-
-    def _determine_batch_execution_and_padding(
-            self,
-            num_tokens: int,
-            num_reqs: int,
-            num_scheduled_tokens_np: np.ndarray,
-            max_num_scheduled_tokens: int,
-            use_cascade_attn: bool,
-            allow_microbatching: bool = False,
-            force_eager: bool = False,
-            # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
-            # be improved in model runner v2)
-            force_uniform_decode: bool | None = None,
-            force_has_lora: bool | None = None,
-            num_encoder_reqs: int = 0,
-    ) -> tuple[CUDAGraphMode, BatchDescriptor, bool,
-               torch.Tensor | None, CUDAGraphStat | None]:
-
-        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        uniform_decode = (
-            ((max_num_scheduled_tokens == self.uniform_decode_query_len) and
-             (num_tokens == max_num_scheduled_tokens * num_reqs))
-            if force_uniform_decode is None else force_uniform_decode)
-        # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
-        # is present). Also, chunked-prefill is disabled, so batch are uniform.
-        has_encoder_output = (self.model_config.is_encoder_decoder
-                              and num_encoder_reqs > 0)
-        has_lora = (len(self.input_batch.lora_id_to_lora_request) > 0
-                    if force_has_lora is None else force_has_lora)
-
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.
-                dispatch(
-                num_tokens=num_tokens,
-                has_lora=has_lora,
-                uniform_decode=uniform_decode,
-                disable_full=disable_full,
-            ) if not force_eager else
-            (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded)))
-        cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded, use_cascade_attn or has_encoder_output)
-        
-        # When VLLM_COMPILE is enabled, AscendCompiler uses PiecewiseBackend which
-        # bucketizes inputs to capture sizes. If Dispatcher returns NONE (Eager) 
-        # but inputs match a bucket, Backend might pad internally, causing mismatch 
-        # with ModelRunner's metadata. We force padding here to align them.
-        if cudagraph_mode == CUDAGraphMode.NONE and \
-           self.compilation_config.mode == CompilationMode.VLLM_COMPILE and \
-           self.compilation_config.cudagraph_capture_sizes:
-            for size in sorted(self.compilation_config.cudagraph_capture_sizes):
-                if size >= batch_descriptor.num_tokens:
-                    batch_descriptor = BatchDescriptor(
-                        num_tokens=size,
-                        num_reqs=batch_descriptor.num_reqs,
-                        uniform=batch_descriptor.uniform,
-                        has_lora=batch_descriptor.has_lora
-                    )
-                    break
-
-        num_tokens_padded = batch_descriptor.num_tokens
-        if enable_sp(self.vllm_config):
-            assert (batch_descriptor.num_tokens %
-                    self.vllm_config.parallel_config.tensor_parallel_size == 0
-                    ), ("Sequence parallelism requires num_tokens to be "
-                        "a multiple of tensor parallel size")
-        # Extra coordination when running data-parallel since we need to coordinate
-        # across ranks
-        should_ubatch, num_tokens_across_dp = False, None
-        if self.vllm_config.parallel_config.data_parallel_size > 1:
-            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = self._sync_batch_across_dp(
-                num_tokens_padded=num_tokens_padded,
-                cudagraph_mode=cudagraph_mode.value,
-            )
-            logger.info(f"ttg determine_batch_execution_and_padding num_tokens_padded: {num_tokens_padded}, "
-                        f"num_tokens_across_dp: {num_tokens_across_dp}")
-
-            # Extract DP padding if there is any
-            if num_tokens_across_dp is not None:
-                dp_rank = self.parallel_config.data_parallel_rank
-                num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
-                # Re-dispatch with DP padding
-                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-                    num_tokens_padded,
-                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value, )
-                # Assert to make sure the agreed upon token count is correct otherwise
-                # num_tokens_across_dp will no-longer be valid
-                assert batch_descriptor.num_tokens == num_tokens_padded
-        else:
-            # dp == 1
-            should_ubatch = check_enable_ubatch(
-                num_tokens_padded,
-                num_tokens_padded,
-                uniform_decode=False,
-                vllm_config=self.vllm_config,
-                moe_comm_type=select_moe_comm_method(num_tokens_padded,
-                                                     self.vllm_config),
-            )
-        cudagraph_stats = None
-        if self.vllm_config.observability_config.cudagraph_metrics:
-            cudagraph_stats = CUDAGraphStat(
-                num_unpadded_tokens=num_tokens,
-                num_padded_tokens=batch_descriptor.num_tokens,
-                num_paddings=batch_descriptor.num_tokens - num_tokens,
-                runtime_mode=str(cudagraph_mode),
-            )
-
-        return (
-            cudagraph_mode,
-            batch_descriptor,
-            should_ubatch,
-            num_tokens_across_dp,
-            cudagraph_stats,
-        )
-
     def _build_afd_metadata(
         self, ubatch_slices: UBatchSlices | None, num_tokens_unpadded: int
     ):
@@ -3526,8 +3333,6 @@ def check_enable_ubatch(
         num_tokens_unpadded,
         uniform_decode=uniform_decode,
     )
-    logger.info(f"ttg check_enable_ubatch should_attempt_ubatching: {should_attempt_ubatching}, "
-                f"moe_comm_type: {moe_comm_type}")
 
     # if not parallel_config.enable_dbo or not should_attempt_ubatching or moe_comm_type == MoECommType.MC2:
     #     return False
