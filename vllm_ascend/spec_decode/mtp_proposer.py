@@ -18,7 +18,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
-from vllm_ascend.utils import lmhead_tp_enable
+from vllm_ascend.utils import lmhead_tp_enable, vllm_version_is
 
 
 class MtpProposer(EagleProposer):
@@ -110,6 +110,11 @@ class MtpProposer(EagleProposer):
         positions = self._get_positions(num_tokens)
         previous_hidden_states = self.hidden_states[:num_tokens]
         for i in range(self.num_speculative_tokens):
+            if not vllm_version_is("v0.15.0"):
+                # Reset MOE layer index for each MTP step iteration
+                forward_context = get_forward_context()
+                if forward_context is not None:
+                    forward_context.moe_layer_index = 0
             if i > 0 and not in_graph_capturing and aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 aclgraph_runtime_mode = CUDAGraphMode.NONE
             with set_ascend_forward_context(
@@ -330,6 +335,13 @@ class MtpProposer(EagleProposer):
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=num_tokens,
                     is_draft_model=True):
+                
+                if not vllm_version_is("v0.15.0"):
+                    # Reset MOE layer index for each MTP step to match all_moe_layers registration
+                    forward_context = get_forward_context()
+                    if forward_context is not None:
+                        forward_context.moe_layer_index = 0
+
                 with record_function_or_nullcontext('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata
