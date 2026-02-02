@@ -96,49 +96,50 @@
 
 import argparse
 import asyncio
+import base64
 import functools
 import heapq
+import io
+import ipaddress
+import math
 import os
 import sys
 import uuid
-import threading
 from contextlib import asynccontextmanager
-from typing import List
-import base64, io
+
 import httpx
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, JSONResponse
-from vllm.logger import init_logger
-import time
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
-import math
+from vllm.logger import init_logger
+
 logger = init_logger(__name__)
 
 # Add uvloop for faster event loop if available
 try:
     import uvloop
+
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
     pass
 
 
 class ServerState:
-
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.url = f'http://{host}:{port}/v1'
+        self.url = f"http://{host}:{port}/v1"
         try:
             ip = ipaddress.ip_address(self.host)
             if isinstance(ip, ipaddress.IPv6Address):
-                self.url = f'http://[{host}]:{port}/v1'
+                self.url = f"http://[{host}]:{port}/v1"
         except Exception:
             pass
-        self.client = httpx.AsyncClient(timeout=None,
-                                        base_url=self.url,
-                                        limits=httpx.Limits(
-                                            max_connections=100000,
-                                            max_keepalive_connections=100000))
+        self.client = httpx.AsyncClient(
+            timeout=None,
+            base_url=self.url,
+            limits=httpx.Limits(max_connections=100000, max_keepalive_connections=100000),
+        )
         self.active_tokens = 0
         self.active_kv_cache = 0
         self.active_requests = 0
@@ -146,30 +147,18 @@ class ServerState:
 
 
 class ProxyState:
-
     def __init__(self, prefiller_instances, decoder_instances, encoder_instances=None, pd_instances=None):
-        self.prefillers: List[ServerState] = [
-            ServerState(h, p) for h, p in prefiller_instances
-        ]
-        self.decoders: List[ServerState] = [
-            ServerState(h, p) for h, p in decoder_instances
-        ]
-        self.encoders: List[ServerState] = [
-            ServerState(h, p) for h, p in (encoder_instances or [])
-        ]
-        self.pds: List[ServerState] = [
-            ServerState(h, p) for h, p in pd_instances
-        ]
+        self.prefillers: list[ServerState] = [ServerState(h, p) for h, p in prefiller_instances]
+        self.decoders: list[ServerState] = [ServerState(h, p) for h, p in decoder_instances]
+        self.encoders: list[ServerState] = [ServerState(h, p) for h, p in (encoder_instances or [])]
+        self.pds: list[ServerState] = [ServerState(h, p) for h, p in pd_instances]
 
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
 
-        self.prefiller_heap = [(0, i, server)
-                               for i, server in enumerate(self.prefillers)]
-        self.decoder_heap = [(0, i, server)
-                             for i, server in enumerate(self.decoders)]
-        self.encoder_heap = [(0, i, server)
-                             for i, server in enumerate(self.encoders)]
+        self.prefiller_heap = [(0, i, server) for i, server in enumerate(self.prefillers)]
+        self.decoder_heap = [(0, i, server) for i, server in enumerate(self.decoders)]
+        self.encoder_heap = [(0, i, server) for i, server in enumerate(self.encoders)]
         self.pd_heap = [(0, i, server) for i, server in enumerate(self.pds)]
 
         heapq.heapify(self.prefiller_heap)
@@ -275,7 +264,6 @@ class ProxyState:
         self._update_encoder_priority(chosen)
         return chosen
 
-
     def release_encoder(self, idx, token_count):
         self.encoders[idx].active_tokens -= token_count
         self._update_encoder_priority(idx)
@@ -304,15 +292,10 @@ def parse_args():
     parser.add_argument("--encoder-ports", type=int, nargs="+", default=[])
     parser.add_argument("--pd-hosts", type=str, nargs="+", default=[])
     parser.add_argument("--pd-ports", type=int, nargs="+", default=[])
-    parser.add_argument("--max-retries",
-                        type=int,
-                        default=3,
-                        help="Maximum number of retries for HTTP requests")
+    parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries for HTTP requests")
     parser.add_argument(
-        "--retry-delay",
-        type=float,
-        default=0.001,
-        help="Base delay (seconds) for exponential backoff retries")
+        "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
+    )
     args = parser.parse_args()
     if len(args.pd_hosts) != len(args.pd_ports):
         raise ValueError("Number of pd hosts must match number of pd ports")
@@ -332,11 +315,16 @@ def parse_args():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global proxy_state
-    proxy_state = ProxyState(global_args.prefiller_instances,
-                             global_args.decoder_instances,
-                             global_args.encoder_instances,
-                             global_args.pd_instances,)
-    print(f"Initialized {len(proxy_state.encoders)} encode clients, {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients, {len(proxy_state.pds)} pd clients.")
+    proxy_state = ProxyState(
+        global_args.prefiller_instances,
+        global_args.decoder_instances,
+        global_args.encoder_instances,
+        global_args.pd_instances,
+    )
+    print(
+        f"Initialized {len(proxy_state.encoders)} encode clients, {len(proxy_state.prefillers)} prefill clients \
+            and \{len(proxy_state.decoders)} decode clients, {len(proxy_state.pds)} pd clients."
+    )
     yield
     for e in proxy_state.encoders:
         await e.client.aclose()
@@ -367,59 +355,53 @@ def with_cancellation(handler_func):
         if handler_task in done:
             return handler_task.result()
         return None
+
     return wrapper
 
 
 app = FastAPI(lifespan=lifespan)
 
 
-async def send_request_to_encode_service(client: httpx.AsyncClient,
-                                  encoder_id: int,
-                                  endpoint: str,
-                                  req_data: dict,
-                                  request_id: str,
-                                  max_retries: int = 3,
-                                  base_delay: float = 0.2):
+async def send_request_to_encode_service(
+    client: httpx.AsyncClient,
+    encoder_id: int,
+    endpoint: str,
+    req_data: dict,
+    request_id: str,
+    max_retries: int = 3,
+    base_delay: float = 0.2,
+):
     encoder_req = req_data.copy()
     encoder_req["stream"] = False
     encoder_req["max_tokens"] = 1
     encoder_req["min_tokens"] = 1
     if "stream_options" in encoder_req:
         del encoder_req["stream_options"]
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-        "X-Request-Id": request_id
-    }
+    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
     for attempt in range(1, max_retries + 1):
         try:
-            response = await client.post(endpoint,
-                                         json=encoder_req,
-                                         headers=headers)
+            response = await client.post(endpoint, json=encoder_req, headers=headers)
             response.raise_for_status()
             return response
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning(
-                f"Attempt {attempt} failed for {endpoint}: {str(e)}")
+            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
             last_exc = e
             if attempt < max_retries:
-                await asyncio.sleep(base_delay * (2**(attempt - 1)))
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(
-                    f"All {max_retries} attempts failed for {endpoint}.")
+                logger.error(f"All {max_retries} attempts failed for {endpoint}.")
                 raise last_exc
 
 
-
-async def stream_service_response_with_retry(client: httpx.AsyncClient,
-                                             endpoint: str,
-                                             req_data: dict,
-                                             request_id: str,
-                                             max_retries: int = 3,
-                                             base_delay: float = 0.2):
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-        "X-Request-Id": request_id
-    }
+async def stream_service_response_with_retry(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    req_data: dict,
+    request_id: str,
+    max_retries: int = 3,
+    base_delay: float = 0.2,
+):
+    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
     for attempt in range(1, max_retries + 1):
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
@@ -437,7 +419,7 @@ async def stream_service_response_with_retry(client: httpx.AsyncClient,
                 logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                 raise e
         except Exception as e:
-            if 'first_chunk_sent' in locals() and first_chunk_sent:
+            if "first_chunk_sent" in locals() and first_chunk_sent:
                 logger.error(f"Streaming to client interrupted after response started: {str(e)}")
                 return
             else:
@@ -448,23 +430,35 @@ async def stream_service_response_with_retry(client: httpx.AsyncClient,
                     logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                     raise e
 
+
 def fast_get_hw(b64_str):
     img_bytes = base64.b64decode(b64_str.split(",")[1])
     img = Image.open(io.BytesIO(img_bytes))
     return img.width, img.height
 
+
 SOF_MARKERS = {
-    0xC0, 0xC1, 0xC2, 0xC3,
-    0xC5, 0xC6, 0xC7,
-    0xC9, 0xCA, 0xCB,
-    0xCD, 0xCE, 0xCF,
+    0xC0,
+    0xC1,
+    0xC2,
+    0xC3,
+    0xC5,
+    0xC6,
+    0xC7,
+    0xC9,
+    0xCA,
+    0xCB,
+    0xCD,
+    0xCE,
+    0xCF,
 }
+
 
 def parse_jpeg_size(data: bytes):
     idx = 0
     length = len(data)
 
-    if length < 2 or data[0:2] != b'\xFF\xD8':
+    if length < 2 or data[0:2] != b"\xff\xd8":
         raise ValueError("Not a JPEG")
 
     idx = 2
@@ -481,8 +475,8 @@ def parse_jpeg_size(data: bytes):
             continue
 
         if marker in SOF_MARKERS:
-            h = (data[idx+5] << 8) | data[idx+6]
-            w = (data[idx+7] << 8) | data[idx+8]
+            h = (data[idx + 5] << 8) | data[idx + 6]
+            w = (data[idx + 7] << 8) | data[idx + 8]
             return w, h
 
         if marker in (0xD9, 0xDA):
@@ -491,7 +485,7 @@ def parse_jpeg_size(data: bytes):
         if idx + 3 >= length:
             break
 
-        seg_len = (data[idx+2] << 8) | data[idx+3]
+        seg_len = (data[idx + 2] << 8) | data[idx + 3]
         if seg_len < 2:
             break
 
@@ -505,6 +499,7 @@ def parse_png_size(data: bytes):
     h = int.from_bytes(data[20:24], "big")
     return w, h
 
+
 def get_hw_from_local(path: str):
     if path.startswith("file://"):
         path = path[7:]
@@ -516,8 +511,9 @@ def get_hw_from_local(path: str):
         return parse_png_size(data)
     return parse_jpeg_size(data)
 
+
 def calculate_messages_size(ori_req_data, ori_req_body):
-    messages = ori_req_data.get('messages')
+    messages = ori_req_data.get("messages")
     stats = {
         "text_char_count": 0,
         "mul_token": 0,
@@ -541,15 +537,18 @@ def calculate_messages_size(ori_req_data, ori_req_body):
                     h, w = fast_get_hw(img_url)
                 else:
                     h, w = get_hw_from_local(img_url)
-                stats["mul_token"] += math.ceil(h/32) * math.ceil(w/32)
+                stats["mul_token"] += math.ceil(h / 32) * math.ceil(w / 32)
             elif content_type == "video_url":
                 stats["mul_token"] += len(ori_req_body) * 32
     return stats
+
+
 def get_api_request_id(api, req_id):
     if api == "/completions":
         return "cmpl-" + req_id + "-0"
     elif api == "/chat/completions":
         return "chatcmpl-" + req_id
+
 
 def get_origin_request_id(api, req_id):
     if api == "/completions":
@@ -557,9 +556,8 @@ def get_origin_request_id(api, req_id):
     elif api == "/chat/completions":
         return req_id.replace("chatcmpl-", "")
 
-async def non_stream_retry_wrap(
-    forward_func, max_retries: int = 3, delay: float = 0.001
-):
+
+async def non_stream_retry_wrap(forward_func, max_retries: int = 3, delay: float = 0.001):
     last_exc = None
     for attempt in range(max_retries):
         try:
@@ -577,6 +575,7 @@ async def non_stream_retry_wrap(
             await asyncio.sleep(delay * (attempt + 1))
     raise RuntimeError(f"all {max_retries} retries failed.") from last_exc
 
+
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
@@ -584,7 +583,6 @@ async def _handle_completions(api: str, request: Request):
         request_id = await proxy_state.next_req_id()
         request_id_api = get_api_request_id(api, request_id)
         mul_flag = False
-
 
         stats_info = calculate_messages_size(req_data, req_body)
         text_length = stats_info["text_char_count"]
@@ -596,32 +594,33 @@ async def _handle_completions(api: str, request: Request):
             encoder_idx = proxy_state.select_encoder(encoder_score)
             encoder = proxy_state.encoders[encoder_idx]
             logger.debug("Sending to encoder: %s", encoder.url)
-            encode_resp = await send_request_to_encode_service(
+            _ = await send_request_to_encode_service(
                 encoder.client,
                 encoder_idx,
                 api,
                 req_data,
                 request_id,
                 max_retries=global_args.max_retries,
-                base_delay=global_args.retry_delay)
+                base_delay=global_args.retry_delay,
+            )
             proxy_state.release_encoder(encoder_idx, encoder_score)
-            encode_json = encode_resp.json() or {}
 
         token_score = encoder_score + text_length
-
 
         if proxy_state.pds:
             pd_idx = proxy_state.select_pd(token_score)
             pd = proxy_state.pds[pd_idx]
+
             async def generate_stream():
                 try:
                     async for chunk in stream_service_response_with_retry(
-                            pd.client,
-                            api,
-                            req_data,
-                            request_id=request_id,
-                            max_retries=global_args.max_retries,
-                            base_delay=global_args.retry_delay):
+                        pd.client,
+                        api,
+                        req_data,
+                        request_id=request_id,
+                        max_retries=global_args.max_retries,
+                        base_delay=global_args.retry_delay,
+                    ):
                         yield chunk
                 except Exception as e:
                     logger.error(f"Error during streaming from pd {pd.url}: {str(e)}")
@@ -631,15 +630,11 @@ async def _handle_completions(api: str, request: Request):
 
             return StreamingResponse(generate_stream(), media_type="application/json")
         else:
-
             proxy_state.req_data_dict[request_id_api] = (req_data, token_score, api)
-            req_data['kv_transfer_params'] = {
-                "do_remote_decode":
-                    False,
-                "do_remote_prefill":
-                    True,
-                "metaserver":
-                    f"http://{global_args.host}:{global_args.port}/v1/metaserver"
+            req_data["kv_transfer_params"] = {
+                "do_remote_decode": False,
+                "do_remote_prefill": True,
+                "metaserver": f"http://{global_args.host}:{global_args.port}/v1/metaserver",
             }
 
             # Select decoder
@@ -647,7 +642,7 @@ async def _handle_completions(api: str, request: Request):
             logger.debug("Decoder score: %f", decoder_score)
             # Use the prefiller's kv_transfer_params to select decoder
             decoder_idx = proxy_state.select_decoder(decoder_score)
-            print('d', decoder_idx, decoder_score)
+            print("d", decoder_idx, decoder_score)
             decoder = proxy_state.decoders[decoder_idx]
             # logger.debug("Using %s %s", prefiller.url, decoder.url)
             # Stream response from decoder
@@ -657,16 +652,18 @@ async def _handle_completions(api: str, request: Request):
                 nonlocal released_kv
                 try:
                     async for chunk in stream_service_response_with_retry(
-                            decoder.client,
-                            api,
-                            req_data,
-                            request_id=request_id,
-                            max_retries=global_args.max_retries,
-                            base_delay=global_args.retry_delay):
+                        decoder.client,
+                        api,
+                        req_data,
+                        request_id=request_id,
+                        max_retries=global_args.max_retries,
+                        base_delay=global_args.retry_delay,
+                    ):
                         yield chunk
                 except Exception as e:
                     logger.error(
-                        f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} will be routing to the target prefiller when new request is ready to dispatch to it"
+                        f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} \
+                            will be routing to the target prefiller when new request is ready to dispatch to it"
                     )
 
                 # After streaming done, release tokens
@@ -676,8 +673,9 @@ async def _handle_completions(api: str, request: Request):
 
     except Exception as e:
         import traceback
+
         exc_info = sys.exc_info()
-        print("Error occurred in disagg prefill proxy server" f" - {api} endpoint")
+        print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
         raise
@@ -702,19 +700,19 @@ async def healthcheck():
         "encode_instances": len(proxy_state.encoders),
         "prefill_instances": len(proxy_state.prefillers),
         "decode_instances": len(proxy_state.decoders),
-        "pd_instances": len(proxy_state.pds)
+        "pd_instances": len(proxy_state.pds),
     }
 
 
-async def send_request_to_service(client: httpx.AsyncClient,
-                                  prefiller_id: int,
-                                  endpoint: str,
-                                  req_data: dict,
-                                  request_id: str,
-                                  max_retries: int = 3,
-                                  base_delay: float = 0.2):
-    aborted_requests = proxy_state.aquire_aborted_prefiller_requests(
-        prefiller_id)
+async def send_request_to_service(
+    client: httpx.AsyncClient,
+    prefiller_id: int,
+    endpoint: str,
+    req_data: dict,
+    request_id: str,
+    max_retries: int = 3,
+    base_delay: float = 0.2,
+):
     req_data = req_data.copy()
     req_data["stream"] = False
     req_data["max_tokens"] = 1
@@ -723,31 +721,25 @@ async def send_request_to_service(client: httpx.AsyncClient,
         req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-        "X-Request-Id": request_id
-    }
+    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
     last_exc = None
     for attempt in range(1, max_retries + 1):
         try:
-            response = await client.post(endpoint,
-                                         json=req_data,
-                                         headers=headers)
+            response = await client.post(endpoint, json=req_data, headers=headers)
             response.raise_for_status()
             if request_id in proxy_state.req_id_future:
                 result_future = proxy_state.req_id_future[request_id]
                 result_future.set_result(response.json()["kv_transfer_params"])
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning(
-                f"Attempt {attempt} failed for {endpoint}: {str(e)}")
+            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
             last_exc = e
             if attempt < max_retries:
-                await asyncio.sleep(base_delay * (2**(attempt - 1)))
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(
-                    f"All {max_retries} attempts failed for {endpoint}.")
+                logger.error(f"All {max_retries} attempts failed for {endpoint}.")
                 raise last_exc
+
 
 @app.post("/v1/metaserver")
 async def metaserver(request: Request):
@@ -760,25 +752,24 @@ async def metaserver(request: Request):
         req_data, token_score, api = proxy_state.req_data_dict[request_id]
         request_id = get_origin_request_id(api, request_id)
         req_data["kv_transfer_params"] = kv_transfer_params
-        logger.debug(
-            f"Prefiller score: {token_score}"
-        )
+        logger.debug(f"Prefiller score: {token_score}")
 
         # Select prefiller
         prefiller_idx = proxy_state.select_prefiller(token_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
         logger.debug(f"Using prefill {prefiller.url=} {req_data=}")
         # Send request to prefiller
-        response = await send_request_to_service(
+        _ = await send_request_to_service(
             prefiller.client,
             prefiller_idx,
             api,
             req_data,
             request_id,
             max_retries=global_args.max_retries,
-            base_delay=global_args.retry_delay)
+            base_delay=global_args.retry_delay,
+        )
         proxy_state.release_prefiller(prefiller_idx, token_score)
-        proxy_state.release_prefiller_kv(prefiller_idx,token_score)
+        proxy_state.release_prefiller_kv(prefiller_idx, token_score)
 
     except Exception as e:
         logger.error(f"Post metaserver failed with: {str(e)}")
@@ -788,7 +779,10 @@ async def metaserver(request: Request):
 
 ######################################     profile     ######################################
 
-async def _forward_profile(service_name: str, idx: int, client, host: str, port: int, endpoint: str, req_data: dict, headers: dict):
+
+async def _forward_profile(
+    service_name: str, idx: int, client, host: str, port: int, endpoint: str, req_data: dict, headers: dict
+):
     """Forward profiling request to one service and return raw response or error."""
     url = f"http://{host}:{port}{endpoint}"
     try:
@@ -799,6 +793,7 @@ async def _forward_profile(service_name: str, idx: int, client, host: str, port:
     except Exception as e:
         return service_name, idx, {"error": str(e)}
 
+
 @app.post("/start_profile")
 async def start_profile(request: Request):
     """
@@ -807,7 +802,8 @@ async def start_profile(request: Request):
     try:
         try:
             req_data = await request.json()
-        except:
+        except Exception as e:
+            print(f"Error in stop_profile while waiting request data: {e}")
             req_data = {}
 
         headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
@@ -815,15 +811,27 @@ async def start_profile(request: Request):
 
         # encoder
         for idx, encoder in enumerate(proxy_state.encoders):
-            tasks.append(_forward_profile("encoder", idx, encoder.client, encoder.host, encoder.port, "/start_profile", req_data, headers))
+            tasks.append(
+                _forward_profile(
+                    "encoder", idx, encoder.client, encoder.host, encoder.port, "/start_profile", req_data, headers
+                )
+            )
 
         # prefiller
         for idx, prefill in enumerate(proxy_state.prefillers):
-            tasks.append(_forward_profile("prefill", idx, prefill.client, prefill.host, prefill.port, "/start_profile", req_data, headers))
+            tasks.append(
+                _forward_profile(
+                    "prefill", idx, prefill.client, prefill.host, prefill.port, "/start_profile", req_data, headers
+                )
+            )
 
         # decoder
         for idx, decoder in enumerate(proxy_state.decoders):
-            tasks.append(_forward_profile("decoder", idx, decoder.client, decoder.host, decoder.port, "/start_profile", req_data, headers))
+            tasks.append(
+                _forward_profile(
+                    "decoder", idx, decoder.client, decoder.host, decoder.port, "/start_profile", req_data, headers
+                )
+            )
 
         # pds
         for idx, pd in enumerate(proxy_state.pds):
@@ -847,7 +855,8 @@ async def stop_profile(request: Request):
     try:
         try:
             req_data = await request.json()
-        except:
+        except Exception as e:
+            print(f"Error in stop_profile while waiting request data: {e}")
             req_data = {}
 
         headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
@@ -855,15 +864,27 @@ async def stop_profile(request: Request):
 
         # encoder
         for idx, encoder in enumerate(proxy_state.encoders):
-            tasks.append(_forward_profile("encoder", idx, encoder.client, encoder.host, encoder.port, "/stop_profile", req_data, headers))
+            tasks.append(
+                _forward_profile(
+                    "encoder", idx, encoder.client, encoder.host, encoder.port, "/stop_profile", req_data, headers
+                )
+            )
 
         # prefiller
         for idx, prefill in enumerate(proxy_state.prefillers):
-            tasks.append(_forward_profile("prefill", idx, prefill.client, prefill.host, prefill.port, "/stop_profile", req_data, headers))
+            tasks.append(
+                _forward_profile(
+                    "prefill", idx, prefill.client, prefill.host, prefill.port, "/stop_profile", req_data, headers
+                )
+            )
 
         # decoder
         for idx, decoder in enumerate(proxy_state.decoders):
-            tasks.append(_forward_profile("decoder", idx, decoder.client, decoder.host, decoder.port, "/stop_profile", req_data, headers))
+            tasks.append(
+                _forward_profile(
+                    "decoder", idx, decoder.client, decoder.host, decoder.port, "/stop_profile", req_data, headers
+                )
+            )
 
         # pds
         for idx, pd in enumerate(proxy_state.pds):
@@ -883,4 +904,5 @@ if __name__ == "__main__":
     global global_args
     global_args = parse_args()
     import uvicorn
+
     uvicorn.run(app, host=global_args.host, port=global_args.port)
