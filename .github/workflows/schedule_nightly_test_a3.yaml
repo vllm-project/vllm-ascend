@@ -103,7 +103,8 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+      # image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+      image: 'quay.io/ascend/vllm-ascend:main-a3'
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
@@ -178,7 +179,8 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+      # image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+      image: 'quay.io/ascend/vllm-ascend:main-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
 
@@ -196,6 +198,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+      # image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+      image: 'quay.io/ascend/vllm-ascend:main-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
