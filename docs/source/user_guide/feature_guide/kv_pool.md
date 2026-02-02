@@ -364,23 +364,23 @@ Long question:
 curl -s http://localhost:8100/v1/completions -H "Content-Type: application/json" -d '{ "model": "/xxxxx/Qwen2.5-7B-Instruct", "prompt": "Given the accelerating impacts of climate change—including rising sea levels, increasing frequency of extreme weather events, loss of biodiversity, and adverse effects on agriculture and human health—there is an urgent need for a robust, globally coordinated response. However, international efforts are complicated by a range of factors: economic disparities between high-income and low-income countries, differing levels of industrialization, varying access to clean energy technologies, and divergent political systems that influence climate policy implementation. In this context, how can global agreements like the Paris Accord be redesigned or strengthened to not only encourage but effectively enforce emission reduction targets? Furthermore, what mechanisms can be introduced to promote fair and transparent technology transfer, provide adequate financial support for climate adaptation in vulnerable regions, and hold nations accountable without exacerbating existing geopolitical tensions or disproportionately burdening those with historically lower emissions?", "max_completion_tokens": 256, "temperature":0.0 }'
 ```
 
-
 ## Example of using Memcache as a KV Pool backend
 
 ### Installing Memcache
+
 MemCache depends on MemFabric. Therefore, MemFabric must be installed.Installing the memcache after the memfabric is installed.
 
-* **memfabric_hybrid**: https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md 
+* **memfabric_hybrid**: <https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>
 
-* **memcache**: https://gitcode.com/Ascend/memcache/blob/master/doc/build.md
+* **memcache**: <https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>
 
 ### Configuring the memcache Config File
+
     config Path：/usr/local/memcache_hybrid/latest/config/
-    **Configuration item description**：https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md
-
-
+    **Configuration item description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>
 
     Set TLS certificate configurations. If TLS is disabled, you do not need to upload a certificate. If TLS is enabled, you need to upload a certificate.
+
 ```shell
 # mmc-meta.conf
 ock.mmc.tls.enable = false
@@ -395,6 +395,7 @@ ock.mmc.local_service.hcom.tls.enable = false
 You are advised to copy mmc-local.conf and mmc-meta.conf to your own path and modify them, and set the MMC_META_CONFIG_PATH environment variable to the path of your own mmc-meta.conf file.
 
 **mmc-meta.conf：**
+
 ```shell
 # Meta service start-up url
 # It will automatically modified to PodIP at Pod startup in K8s meta service cluster master-standby high availability scenario
@@ -448,12 +449,8 @@ ock.mmc.config_store.tls.decrypter.path =
 * ock.mmc.meta_service.config_store_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
 * To disable TLS authentication modification, set the following parameters to false:ock.mmc.meta.ha.enable、ock.mmc.config_store.tls.enable
 
-
-
-
-
-
 **mmc-local.conf：**
+
 ```shell
 # Meta service start-up url
 # K8s meta service cluster master-standby high availability scenario: ClusterIP address
@@ -518,6 +515,7 @@ ock.mmc.client.write_thread_pool.size = 2
 ```
 
 **Key Focuses：**
+
 * ock.mmc.meta_service_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
 * ock.mmc.local_service.config_store_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
 * ock.mmc.local_service.world_size：Total number of cards for starting services.
@@ -525,7 +523,8 @@ ock.mmc.client.write_thread_pool.size = 2
 * ock.mmc.local_service.dram.size：Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card.
 * To disable TLS authentication modification, set the following parameters to false:：ock.mmc.meta.ha.enable、ock.mmc.config_store.tls.enable
 
-### Memcache environment variables.
+### Memcache environment variables
+
 ```shell
 source /usr/local/memcache_hybrid/set_env.sh
 source /usr/local/memfabric_hybrid/set_env.sh
@@ -557,12 +556,15 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/python3.11.10/lib/
 ```
 
 ### PD Disaggregation Scenario
+
 #### 1.Run `prefill` Node and `decode` Node
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` serves as the prefix-cache node.
 
 #### 800I A2/800T A2 Series
+
 `prefill` Node：
+
 ```shell
 rm -rf /root/ascend/log/*
 
@@ -644,6 +646,7 @@ vllm serve xxxxxxx/Qwen3-32B \
 ```
 
 `decode` Node：
+
 ```shell
 rm -rf /root/ascend/log/*
 
@@ -725,7 +728,6 @@ vllm serve xxxxxxx/Qwen3-32B \
   }' > log_d.log 2>&1
 ```
 
-
 #### 800I A3/800T A3 Series
 
 `prefill` Node：
@@ -765,44 +767,45 @@ python -m vllm.entrypoints.openai.api_server \
   --gpu-memory-utilization 0.90 \
   --no-enable-prefix-caching \
   --kv-transfer-config \
-	'{
-		"kv_connector": "MultiConnector",
-		"kv_role": "kv_producer",
-		"engine_id": "2",
-		"kv_connector_extra_config": {
-			"connectors": [
-			{
-					"kv_connector": "MooncakeConnectorV1",
-					"kv_role": "kv_producer",
-					"kv_buffer_device": "npu",
-					"kv_rank": 0,
-					"kv_port": "20001",
-					"kv_connector_extra_config": {
-						"use_ascend_direct": true,
-						"prefill": {
-							"dp_size": 2,
-							"tp_size": 8
-						},
-						"decode": {
-							"dp_size": 2,
-							"tp_size": 8
-						}
-					}
-				},
-				{
-					"kv_connector": "AscendStoreConnector",
-					"kv_role": "kv_producer",
-					"kv_connector_extra_config":{
-						"backend": "memcache",
-						"mooncake_rpc_port":"0"
-					}
-				}  
-			]
-		}
-	}' > log_p.log 2>&1 
+ '{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_producer",
+  "engine_id": "2",
+  "kv_connector_extra_config": {
+   "connectors": [
+   {
+     "kv_connector": "MooncakeConnectorV1",
+     "kv_role": "kv_producer",
+     "kv_buffer_device": "npu",
+     "kv_rank": 0,
+     "kv_port": "20001",
+     "kv_connector_extra_config": {
+      "use_ascend_direct": true,
+      "prefill": {
+       "dp_size": 2,
+       "tp_size": 8
+      },
+      "decode": {
+       "dp_size": 2,
+       "tp_size": 8
+      }
+     }
+    },
+    {
+     "kv_connector": "AscendStoreConnector",
+     "kv_role": "kv_producer",
+     "kv_connector_extra_config":{
+      "backend": "memcache",
+      "mooncake_rpc_port":"0"
+     }
+    }  
+   ]
+  }
+ }' > log_p.log 2>&1 
 ```
 
 `decode` Node：
+
 ```shell
 rm -rf /root/ascend/log/*
 
@@ -839,48 +842,52 @@ python -m vllm.entrypoints.openai.api_server \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{
-	"kv_connector": "MultiConnector",
-	"kv_role": "kv_consumer",
-	"kv_connector_extra_config": {
-		"use_layerwise": false,
-		"connectors": [
-		{
-				"kv_connector": "MooncakeConnectorV1",
-				"kv_role": "kv_consumer",
-				"kv_buffer_device": "npu",
-				"kv_rank": 1,
-				"kv_port": "20002",
-				"kv_connector_extra_config": {
+ "kv_connector": "MultiConnector",
+ "kv_role": "kv_consumer",
+ "kv_connector_extra_config": {
+  "use_layerwise": false,
+  "connectors": [
+  {
+    "kv_connector": "MooncakeConnectorV1",
+    "kv_role": "kv_consumer",
+    "kv_buffer_device": "npu",
+    "kv_rank": 1,
+    "kv_port": "20002",
+    "kv_connector_extra_config": {
                     "use_ascend_direct": true,
-					"prefill": {
-						"dp_size": 2,
-						"tp_size": 8
-					},
-					"decode": {
-						"dp_size": 2,
-						"tp_size": 8
-					}
-				}
-			},
+     "prefill": {
+      "dp_size": 2,
+      "tp_size": 8
+     },
+     "decode": {
+      "dp_size": 2,
+      "tp_size": 8
+     }
+    }
+   },
             {
-				"kv_connector": "AscendStoreConnector",
-				"kv_role": "kv_consumer",
-				"kv_connector_extra_config":{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_consumer",
+    "kv_connector_extra_config":{
                     "backend": "memcache",
-					"mooncake_rpc_port":"1"
-				}
-			}  
-		]
-	}
+     "mooncake_rpc_port":"1"
+    }
+   }  
+  ]
+ }
   }' > log_d.log 2>&1
 ```
+
 #### [2、Start proxy_server](#2start-proxy_server)
 
 #### [3、run-inference](#3run-inference)
+
 ### Colocation Scenario
 
 #### 1.Run Mixed Department Script
+
 #### 800I A2/800T A2 Series
+
 The deepseek model needs to be run in a two-node cluster.
 
 **Run_hunbu_1.sh:**
@@ -1018,6 +1025,7 @@ bash mixed_department.sh
 ```
 
 Content of mixed_department.sh:
+
 ```shell
 rm -rf /root/ascend/log/*
 
