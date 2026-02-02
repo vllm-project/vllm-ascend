@@ -18,6 +18,7 @@
 #
 
 import math
+import os
 import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -367,6 +368,48 @@ class NPUModelRunner(GPUModelRunner):
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
+
+
+        if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
+            from vllm_ascend.worker.kvcomp_utils import KVCompConfig, HashEncoder, KVCompMetaData
+            from vllm.utils import cdiv
+
+            kvcomp_config = KVCompConfig.from_json(os.getenv("VLLM_ASCEND_KVCOMP_CONFIG_PATH"))
+            chunk_sizes_for_hamming_full = torch.full([self.max_num_reqs], fill_value=self.block_size, dtype=torch.int32, device=self.device)
+            topk_for_hamming_full = torch.full([self.max_num_reqs], fill_value=kvcomp_config.vllm_hash_attention_topk // self.block_size, dtype=torch.int32, device=self.device)
+            topk_for_hamming_full_cpu = torch.full([self.max_num_reqs], fill_value=self.kvcomp_config.vllm_hash_attention_topk // self.block_size, dtype=torch.int32, device="cpu")
+            seq_lens_for_hamming = torch.zeros([self.max_num_reqs], dtype=torch.int32, device=self.device)
+            hamming_output = torch.zeros([self.max_num_reqs, self.model_config.get_num_kv_heads(self.parallel_config), cdiv(self.vllm_config.model_config.max_model_len, self.block_size)] , dtype=torch.int32, device=self.device)
+
+            if self.vllm_config.model_config.use_mla:
+                hash_encoder_nope = HashEncoder(self.kvcomp_config.kv_lora_rank, self.kvcomp_config.hash_bits_kv_lora, self.dtype, self.device)
+                hash_encoder_rope = HashEncoder(self.kvcomp_config.qk_rope_head_dim, self.kvcomp_config.hash_bits_qk_rope, self.dtype, self.device)
+                hashk_cache_nope = []
+                hashk_cache_rope = []
+                hash_encoder = None
+                hashk_caches = None
+            else: #GQA
+                hash_encoder = HashEncoder(self.kvcomp_config.head_dim, self.kvcomp_config.hash_bits, self.dtype, self.device)
+                hashk_caches = []
+                hash_encoder_nope = None
+                hash_encoder_rope = None
+                hashk_cache_nope = None
+                hashk_cache_rope = None
+
+            self.kvcomp_meta_data = KVCompMetaData(
+                kvcomp_config=kvcomp_config,
+                chunk_sizes_for_hamming_full=chunk_sizes_for_hamming_full,
+                topk_for_hamming_full=topk_for_hamming_full,
+                topk_for_hamming_full_cpu=topk_for_hamming_full_cpu,
+                seq_lens_for_hamming=seq_lens_for_hamming,
+                hamming_output=hamming_output,
+                hash_encoder=hash_encoder,
+                hashk_caches=hashk_caches,
+                hash_encoder_nope=hash_encoder_nope,
+                hash_encoder_rope=hash_encoder_rope,
+                hashk_cache_nope=hashk_cache_nope,
+                hashk_cache_rope=hashk_cache_rope,
+            )
 
     @property
     def use_cp(self) -> bool:

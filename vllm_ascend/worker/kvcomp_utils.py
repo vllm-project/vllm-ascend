@@ -530,3 +530,25 @@ class HashEncoder:
         unpacked_bits = unpacked_bits_flat.view(out_shape)
 
         return unpacked_bits
+
+
+
+@dataclass
+class KVCompMetaData:
+    # for both GQA and MLA
+    kvcomp_config: KVCompConfig 
+    chunk_sizes_for_hamming_full: torch.Tensor 
+    topk_for_hamming_full: torch.Tensor 
+    topk_for_hamming_full_cpu: torch.Tensor 
+    seq_lens_for_hamming: torch.Tensor 
+    hamming_output: torch.Tensor 
+
+    # for GQA
+    hash_encoder: Optional[HashEncoder] = None
+    hashk_caches: Optional[list[torch.Tensor]] = None
+
+    # for MLA
+    hash_encoder_nope: Optional[HashEncoder] = None
+    hash_encoder_rope: Optional[HashEncoder] = None
+    hashk_cache_nope: Optional[list[torch.Tensor]] = None
+    hashk_cache_rope: Optional[list[torch.Tensor]] = None
