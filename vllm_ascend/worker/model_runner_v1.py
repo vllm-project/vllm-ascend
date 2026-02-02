@@ -30,7 +30,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from vllm.attention.layer import Attention, MLAAttention
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
@@ -137,6 +136,12 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("v0.15.0"):
+    from vllm.attention.layer import Attention, MLAAttention  # type: ignore
+else:
+    from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
