@@ -113,13 +113,10 @@ from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import MedusaProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (
-    AscendDeviceType,
     enable_sp,
-    get_ascend_device_type,
     is_drafter_moe_model,
     is_moe_model,
     lmhead_tp_enable,
-    maybe_trans_nz,
     set_weight_prefetch_method,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -140,7 +137,6 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
-import torch_npu
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
