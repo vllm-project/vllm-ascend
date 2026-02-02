@@ -773,7 +773,6 @@ private:
         
         uint32_t curGroupOffset = 0;
         int32_t prevSumBeforeRank = 0;
-        int32_t groupIdxDeq = 0;
         int32_t prevSum = 0;
         if (coreIdx < params.EP) {
             prevSum = preSumBeforeRank(coreIdx * params.expertPerRank);
