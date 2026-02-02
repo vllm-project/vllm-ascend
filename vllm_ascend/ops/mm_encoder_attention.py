@@ -38,7 +38,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         scale: float | None = None,
         num_kv_heads: int | None = None,
         prefix: str = "",
-        multimodal_config: MultiModalConfig | None = None,
     ) -> None:
         """
         Args:
@@ -56,7 +55,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             scale=scale,
             num_kv_heads=num_kv_heads,
             prefix=prefix,
-            multimodal_config=multimodal_config,
         )
 
     def reshape_qkv_to_3d(

@@ -278,6 +278,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
+        # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
+        # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
         if isinstance(self.kv_cache_spec, CrossAttentionSpec):
             seq_lens = common_attn_metadata.seq_lens
             slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
@@ -873,7 +875,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value=value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value,
                 key_cache=self.key_cache,
                 value_cache=self.value_cache,
-                slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots,
+                # quick fix to make sure slots is int32 for cross attention case.
+                # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
+                slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32),
             )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()

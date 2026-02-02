@@ -41,7 +41,7 @@ from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.utils import \
     prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, shared_expert_dp_enabled, vllm_version_is
+from vllm_ascend.utils import enable_sp, shared_expert_dp_enabled
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -456,11 +456,8 @@ class EagleProposer(VllmEagleProposer):
         self.input_ids[last_token_indices] = next_token_ids
         if self.use_cuda_graph and \
             num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
-            if vllm_version_is('0.14.1'):
-                num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
-            else:
-                num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[
-                    num_tokens]
+            num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[
+                num_tokens]
         else:
             num_input_tokens = num_tokens
 
