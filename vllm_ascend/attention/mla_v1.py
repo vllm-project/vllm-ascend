@@ -22,7 +22,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     enable_cp,
-    enabling_malpo,
+    enabling_mlapo,
     maybe_save_kv_layer_to_connector,
     split_decodes_and_prefills,
     trans_rope_weight,
@@ -710,7 +710,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.enable_mlapo = enabling_malpo(self.vllm_config)
+        self.enable_mlapo = enabling_mlapo(self.vllm_config)
 
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
