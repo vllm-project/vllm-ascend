@@ -24,17 +24,13 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          AscendPrefillContextParallelMetadata)
-from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is('0.14.1'):
-    from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
-else:
-    from vllm.v1.attention.backend import AttentionMetadataBuilder
 
 _ATTENTION_MASK_BUILDER = None
 
