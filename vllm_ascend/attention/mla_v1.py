@@ -89,6 +89,10 @@ class AscendMLABackend(AttentionBackend):
             return AscendMlaCPImpl
         return AscendMLAImpl
 
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [128]
+
 
 @dataclass
 class ChunkedContextMetadata:
