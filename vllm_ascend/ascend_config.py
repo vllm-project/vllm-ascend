@@ -311,6 +311,7 @@ class WeightPrefetchConfig:
             "o": 1.0,
         },
         "moe": {"gate_up": 0.8},
+        "mlp": {"gate_up": 1, "down": 1.0},
     }
 
     def __init__(self, weight_prefetch_config: dict):
