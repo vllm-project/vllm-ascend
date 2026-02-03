@@ -521,7 +521,7 @@ class PCPManager:
         total_num_scheduled_tokens: int,
         query_lens: torch.Tensor,
         input_batch: "NPUInputBatch",
-        num_scheduled_tokens: np.ndarray,
+        num_scheduled_tokens: np.ndarray | None,
         block_table_tensor: torch.Tensor,
         num_reqs_padded: int,
         num_reqs: int,
@@ -532,6 +532,7 @@ class PCPManager:
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
         long_seq_metadata = None
         if self.pcp_world_size * self.dcp_world_size > 1:
+            assert num_scheduled_tokens is not None
             decode_context_lens = (
                 input_batch.num_computed_tokens_cpu[: self.num_decode_reqs]
                 + num_scheduled_tokens[: self.num_decode_reqs]
