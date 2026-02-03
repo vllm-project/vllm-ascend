@@ -65,7 +65,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             prefix=prefix,
         )
 
-        self.layer_index = int(prefix.split('.')[2])
+        self.layer_index = int(''.join(filter(str.isdigit, prefix)))
         self.enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
                            and self.head_size > MIN_PAD_SIZE
                            and self.head_size < MAX_PAD_SIZE)
