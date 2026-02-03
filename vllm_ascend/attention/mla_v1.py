@@ -8,6 +8,7 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
+from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MLAAttentionImpl  # type: ignore
@@ -22,7 +23,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     enable_cp,
-    enabling_malpo,
+    enabling_mlapo,
     maybe_save_kv_layer_to_connector,
     split_decodes_and_prefills,
     trans_rope_weight,
@@ -44,18 +45,12 @@ from vllm_ascend.ops.layer_shard_linear import (
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, maybe_trans_nz, vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, maybe_trans_nz, weak_ref_tensors
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
-# isort: off
-if vllm_version_is("0.14.1"):
-    from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder  # type: ignore
-else:
-    from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
-# isort: on
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 BUILD_METADATA_STEP_PREFILL = 0
@@ -93,6 +88,10 @@ class AscendMLABackend(AttentionBackend):
 
             return AscendMlaCPImpl
         return AscendMLAImpl
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [128]
 
 
 @dataclass
@@ -710,7 +709,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.enable_mlapo = enabling_malpo(self.vllm_config)
+        self.enable_mlapo = enabling_mlapo(self.vllm_config)
 
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
