@@ -1798,11 +1798,17 @@ class NPUModelRunner(GPUModelRunner):
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
-        def _get_pcp_metadata(num_tokens):
+        def _get_pcp_metadata(block_table_tensor):
             if not self.use_cp:
-                return None
+                return None, block_table_tensor
             return self.pcp_manager.generate_pcp_metadata(
-                num_tokens, self.query_lens, self.input_batch, num_scheduled_tokens_np
+                num_tokens,
+                self.query_lens,
+                self.input_batch,
+                num_scheduled_tokens_np,
+                block_table_tensor,
+                num_reqs_padded,
+                num_reqs,
             )
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
@@ -1843,8 +1849,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
             return blk_table_tensor, slot_mapping
 
-        self.long_seq_metadata = _get_pcp_metadata(num_tokens)
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
+        self.long_seq_metadata, block_table_gid_0 = _get_pcp_metadata(block_table_gid_0)
 
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
@@ -1868,34 +1874,6 @@ class NPUModelRunner(GPUModelRunner):
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
         )
-
-        if self.speculative_config and self.use_cp:
-            # For pcp + spec decode, we flatten block_table
-            # to avoid irregular attn_mask shape, e.g.,
-            # num_decode_req=2, num_prefill_req=3, num_speculative_tokens=1,
-            # ori block_table: # [d0, d1, p0, p1, p2]
-            # (num_reqs_d + num_reqs_p, max_num_blocks),
-            # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
-            # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-            ori_query_lens_cpu = self.pcp_manager.query_lens_pcp_full.cpu[:num_reqs_padded]
-            ori_query_lens = self.pcp_manager.query_lens_pcp_full.gpu[:num_reqs_padded]
-            num_prefill_reqs = self.pcp_manager.num_prefill_reqs
-            num_decode_reqs = self.pcp_manager.num_decode_reqs
-            num_decode_reqs_flatten = ori_query_lens_cpu[:num_decode_reqs].sum().item()
-            block_table_gid_0[num_decode_reqs_flatten : num_decode_reqs_flatten + num_prefill_reqs].copy_(
-                block_table_gid_0[num_decode_reqs : num_decode_reqs + num_prefill_reqs].clone()
-            )
-            block_table_gid_0[:num_decode_reqs_flatten].copy_(
-                block_table_gid_0[:num_decode_reqs].repeat_interleave(ori_query_lens[:num_decode_reqs], dim=0)
-            )
-            cm_base.block_table_tensor = block_table_gid_0[: num_decode_reqs_flatten + num_prefill_reqs]
-            assert self.long_seq_metadata is not None
-            self.long_seq_metadata.query_lens_pcp_full_cpu = ori_query_lens_cpu
-
-            if num_reqs_padded and num_reqs_padded > num_reqs:
-                pad_size = num_reqs_padded - num_reqs
-                ori_query_lens_cpu[-pad_size:] = torch.full([pad_size], ori_query_lens_cpu[-pad_size - 1].item())
-            self.long_seq_metadata.max_query_len_pcp_full = ori_query_lens_cpu.max().item()
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
