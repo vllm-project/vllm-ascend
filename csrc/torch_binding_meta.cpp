@@ -209,7 +209,7 @@ at::Tensor& dispatch_ffn_combine_meta(
     return out;
 }
 
-at::Tensor npu_lightning_indexer_meta(
+at::Tensor npu_lightning_indexer_custom_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const c10::optional<at::Tensor> &actual_seq_lengths_query,
     const c10::optional<at::Tensor> &actual_seq_lengths_key,
@@ -243,11 +243,11 @@ at::Tensor npu_lightning_indexer_meta(
         output_size = {query.size(DIM_0), key.size(n_dim_index), sparse_count};
     }
     // construct the output tensor
-    at::Tensor lightning_indexer_output = at::empty(output_size, query.options().dtype(at::kInt));
-    return lightning_indexer_output;
+    at::Tensor lightning_indexer_custom_output = at::empty(output_size, query.options().dtype(at::kInt));
+    return lightning_indexer_custom_output;
 }
 
-at::Tensor npu_sparse_flash_attention_meta(
+at::Tensor npu_sparse_flash_attention_custom_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &sparse_indices, double scale_value, int64_t sparse_block_size,
     const c10::optional<at::Tensor> &block_table,
@@ -460,10 +460,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("dispatch_gmm_combine_decode", &vllm_ascend::meta::dispatch_gmm_combine_decode_meta);
     // batch_matmul_transpose
     ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
-    // Lightning indexer
-    ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
-    // Sparse flash attention
-    ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    // Lightning indexer custom
+    ops.impl("npu_lightning_indexer_custom", &vllm_ascend::meta::npu_lightning_indexer_custom_meta);
+    // Sparse flash attention custom
+    ops.impl("npu_sparse_flash_attention_custom", &vllm_ascend::meta::npu_sparse_flash_attention_custom_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // matmul allreduce add rmsnorm

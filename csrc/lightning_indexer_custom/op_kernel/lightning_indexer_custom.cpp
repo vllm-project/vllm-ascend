@@ -9,14 +9,14 @@
  */
 
 /*!
- * \file lightning_indexer.cpp
+ * \file lightning_indexer_custom.cpp
  * \brief
  */
 
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
-#include "lightning_indexer_template_tiling_key.h"
-#include "lightning_indexer_kernel.h"
+#include "lightning_indexer_custom_template_tiling_key.h"
+#include "lightning_indexer_custom_kernel.h"
 
 using namespace LIKernel;
 
@@ -35,7 +35,7 @@ using namespace LIKernel;
 
 
 template <int DT_Q, int DT_K, int DT_OUT, int PAGE_ATTENTION, int LAYOUT_T, int K_LAYOUT_T>
-__global__ __aicore__ void lightning_indexer(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights,
+__global__ __aicore__ void lightning_indexer_custom(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights,
                                              __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
                                              __gm__ uint8_t *blocktable, __gm__ uint8_t *sparseIndices,
                                              __gm__ uint8_t *workspace, __gm__ uint8_t *tiling)

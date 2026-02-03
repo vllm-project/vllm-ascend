@@ -9,19 +9,19 @@
  */
 
 /*!
- * \file lightning_indexer_service_vector.h
+ * \file lightning_indexer_custom_service_vector.h
  * \brief
  */
-#ifndef LIGHTNING_INDEXER_SERVICE_VECTOR_H
-#define LIGHTNING_INDEXER_SERVICE_VECTOR_H
+#ifndef lightning_indexer_custom_SERVICE_VECTOR_H
+#define lightning_indexer_custom_SERVICE_VECTOR_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "lightning_indexer_common.h"
-#include "lightning_indexer_vector.h"
+#include "lightning_indexer_custom_common.h"
+#include "lightning_indexer_custom_vector.h"
 
 namespace LIKernel {
 using namespace LICommon;

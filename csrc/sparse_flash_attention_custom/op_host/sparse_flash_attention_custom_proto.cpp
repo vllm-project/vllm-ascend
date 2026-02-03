@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file sparse_flash_attention_proto.cpp
+ * \file sparse_flash_attention_custom_proto.cpp
  * \brief
  */
 
@@ -22,9 +22,9 @@ using namespace ge;
 namespace ops {
 constexpr size_t QUERY_INPUT_INDEX = 0;
 
-ge::graphStatus InferShapeSparseFlashAttention(gert::InferShapeContext *context)
+ge::graphStatus InferShapeSparseFlashAttentionCustom(gert::InferShapeContext *context)
 {
-    OPS_ERR_IF(context == nullptr, OPS_LOG_E("SparseFlashAttention", "InferShapeContext is nullptr"),
+    OPS_ERR_IF(context == nullptr, OPS_LOG_E("SparseFlashAttentionCustom", "InferShapeContext is nullptr"),
                return ge::GRAPH_FAILED);
     const gert::Shape *queryShape = context->GetInputShape(QUERY_INPUT_INDEX);
     OPS_LOG_E_IF_NULL(context, queryShape, return ge::GRAPH_FAILED)
@@ -34,15 +34,15 @@ ge::graphStatus InferShapeSparseFlashAttention(gert::InferShapeContext *context)
     return GRAPH_SUCCESS;
 }
 
-ge::graphStatus InferDataTypeSparseFlashAttention(gert::InferDataTypeContext *context)
+ge::graphStatus InferDataTypeSparseFlashAttentionCustom(gert::InferDataTypeContext *context)
 {
-    OPS_ERR_IF(context == nullptr, OPS_LOG_E("SparseFlashAttention", "InferShapeContext is nullptr"),
+    OPS_ERR_IF(context == nullptr, OPS_LOG_E("SparseFlashAttentionCustom", "InferShapeContext is nullptr"),
                return ge::GRAPH_FAILED);
     const auto inputDataType = context->GetInputDataType(QUERY_INPUT_INDEX);
     context->SetOutputDataType(0, inputDataType);
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP(SparseFlashAttention).InferShape(InferShapeSparseFlashAttention).InferDataType(InferDataTypeSparseFlashAttention);
+IMPL_OP(SparseFlashAttentionCustom).InferShape(InferShapeSparseFlashAttentionCustom).InferDataType(InferDataTypeSparseFlashAttentionCustom);
 } // namespace ops
   

@@ -9,18 +9,18 @@
  */
 
 /*!
- * \file sparse_flash_attention_service_vector_mla.h
+ * \file sparse_flash_attention_custom_service_vector_mla.h
  * \brief
  */
-#ifndef SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
-#define SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
+#ifndef sparse_flash_attention_custom_SERVICE_VECTOR_MLA_H
+#define sparse_flash_attention_custom_SERVICE_VECTOR_MLA_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "sparse_flash_attention_common.h"
+#include "sparse_flash_attention_custom_common.h"
 
 using AscendC::CrossCoreSetFlag;
 using AscendC::CrossCoreWaitFlag;
@@ -39,7 +39,7 @@ public:
     __aicore__ inline void ProcessVec2L(const RunInfo &info);
     __aicore__ inline void InitBuffers(TPipe *pipe);
     __aicore__ inline void InitParams(const struct ConstInfo &constInfo,
-                                      const SparseFlashAttentionTilingDataMla *__restrict tilingData);
+                                      const SparseFlashAttentionCustomTilingDataMla *__restrict tilingData);
     __aicore__ inline void InitMm2ResInt32GmGlobalTensor(GlobalTensor<int32_t> mm2ResInt32Gm);
     __aicore__ inline void InitVec0GlobalTensor(const GlobalTensor<int32_t> &kvValidSizeGm,
                                                 const GlobalTensor<KV_T> &kvMergeGm,
@@ -140,7 +140,7 @@ private:
     static constexpr T RECIP_OF_LN2 = 1 / LN2;
     static constexpr T SOFTMAX_MIN_NUM = -2e38;
 
-    const SparseFlashAttentionTilingDataMla *__restrict tilingData;
+    const SparseFlashAttentionCustomTilingDataMla *__restrict tilingData;
 
     uint32_t pingpongFlag = 0U;
     ConstInfo constInfo = {};
@@ -239,7 +239,7 @@ template <typename SFAT> __aicore__ inline void SFAVectorService<SFAT>::InitBuff
 template <typename SFAT>
 __aicore__ inline void
 SFAVectorService<SFAT>::InitParams(const struct ConstInfo &constInfo,
-                                                 const SparseFlashAttentionTilingDataMla *__restrict tilingData)
+                                                 const SparseFlashAttentionCustomTilingDataMla *__restrict tilingData)
 {
     this->constInfo = constInfo;
     this->tilingData = tilingData;
@@ -1326,4 +1326,4 @@ SFAVectorService<SFAT>::RowMuls(LocalTensor<T> dstUb, LocalTensor<T> src0Ub, Loc
     }
 }
 
-#endif // SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
+#endif // sparse_flash_attention_custom_SERVICE_VECTOR_MLA_H
