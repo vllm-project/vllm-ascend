@@ -19,7 +19,7 @@ export ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
 export VLLM_USE_V1=1
 export VLLM_VERSION=0.14.1
 
-export MODEL_PATH=/home/tim/models/DeepSeek-V2-Lite
+export MODEL_PATH=/path/to/your/model
 export ELASTIC=1
 export KV_GPU_BLOCKS=100
 export INFER_STATUS=0

@@ -1,7 +1,7 @@
 import torch
 import torch_npu
 import torchair
-from worm_ipc._ops_loader import ensure_ops_loaded
+from worm_server._ops_loader import ensure_ops_loaded
 
 ensure_ops_loaded()
 

@@ -22,4 +22,4 @@ export SKIP_LOAD_FROM_DISK=""
 export HCCL_HOST_SOCKET_PORT_RANGE="60100-60150"
 export HCCL_NPU_SOCKET_PORT_RANGE="60100-60150"
 
-python worm_ipc/worm_server.py
+python worm_server/worm_server.py

@@ -38,7 +38,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 
 from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.utils.torch_utils import set_default_torch_dtype
-from worm_ipc.worm_client import WormNPUClient
+from worm_server.worm_client import WormNPUClient
 
 from vllm_ascend.worker.model_runner_v1 import ExecuteModelState, NPUModelRunner, _torch_cuda_wrapper
 

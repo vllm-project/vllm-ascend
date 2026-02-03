@@ -7,8 +7,8 @@ from vllm.config.vllm import set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.v1.core.kv_cache_utils import _report_kv_cache_config
-from worm_ipc.mla import __init__
-from worm_ipc.utils import initialize_fake_model_parallel
+from worm_server.mla import __init__
+from worm_server.utils import initialize_fake_model_parallel
 
 logger = init_logger(__name__)
 

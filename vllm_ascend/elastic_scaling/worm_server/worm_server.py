@@ -9,7 +9,7 @@ import ray
 import uvicorn
 from fastapi import Body, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from worm_ipc.worm_servlet import WORMServlet
+from worm_server.worm_servlet import WORMServlet
 
 # NEWFORMWARE SERVER SPECS
 os.environ["MASTER_ADDR"] = os.environ["HEAD_IP"]
