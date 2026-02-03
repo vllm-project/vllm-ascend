@@ -45,6 +45,9 @@ class WeightPrefetchMethod:
     MLP_GATE_UP: str = "gate_up"
     MLP_DOWN: str = "down"
 
+    # backward compatibility: delete in future versions
+    mlp_pre_version_compatibale_config: dict = {}
+
     def __init__(self, weight_prefetch_config: WeightPrefetchConfig) -> None:
         self.is_moe = is_moe_model(get_current_vllm_config())
 
@@ -68,6 +71,7 @@ class WeightPrefetchMethod:
             enable=weight_prefetch_config.enabled and not self.is_moe,
             prefetch_ratio=weight_prefetch_config.prefetch_ratio.get(
                 "mlp", {}) or {'gate_up': 1.0, 'down': 1.0})
+        self.mlp_pre_version_compatibale_config = weight_prefetch_config.mlp_pre_version_compatibale_config
 
     def maybe_prefetch_attn_weight_preprocess(
             self, layer_cls_name: str, weight: torch.Tensor,
@@ -113,7 +117,7 @@ class WeightPrefetchMethod:
 
     # x_dependency only eager mode can pass None
     def maybe_prefetch_mlp_weight_preprocess(self, prefetch_layer_name: str, x_dependency: torch.Tensor | None, curr_layer_prefix: str | None = None):
-        if not self.mlp.enable:
+        if not self.mlp.enable and not self.mlp_pre_version_compatibale_config:
             self.mlp.is_active_this_forward = False
             return
 
@@ -145,7 +149,10 @@ class WeightPrefetchMethod:
             model_instance = forward_context.model_instance
             layer_idx = int(curr_layer_prefix.split('.')[2])
             weight = model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight
-            weight_size = weight.data.element_size() * weight.data.numel() * self.mlp.prefetch_ratio.get("gate_up", 0)
+            if self.mlp_pre_version_compatibale_config:
+                weight_size = self.mlp_pre_version_compatibale_config.get(self.MLP_GATE_UP, 0)
+            else:
+                weight_size = weight.data.element_size() * weight.data.numel() * self.mlp.prefetch_ratio.get(self.MLP_GATE_UP, 0)
             if weight_size > MAX_PREFETCH_WEIGHT_SIZE:
                 weight_size = MAX_PREFETCH_WEIGHT_SIZE
             torch.ops.vllm.prefetch_preprocess(weight=weight,
@@ -157,7 +164,10 @@ class WeightPrefetchMethod:
         layer_idx = forward_context.layer_idx
         model_instance = forward_context.model_instance
         weight = model_instance.model.layers[layer_idx].mlp.down_proj.weight
-        weight_size = weight.data.element_size() * weight.data.numel() * self.mlp.prefetch_ratio.get("down", 0)
+        if self.mlp_pre_version_compatibale_config:
+            weight_size = self.mlp_pre_version_compatibale_config.get(self.MLP_DOWN, 0)
+        else:
+            weight_size = weight.data.element_size() * weight.data.numel() * self.mlp.prefetch_ratio.get(self.MLP_DOWN, 0)
         if weight_size > MAX_PREFETCH_WEIGHT_SIZE:
             weight_size = MAX_PREFETCH_WEIGHT_SIZE
         torch.ops.vllm.prefetch_preprocess(weight=weight,

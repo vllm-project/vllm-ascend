@@ -75,6 +75,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     # For a detailed introduction to the parameters and the differences and applicable scenarios
     # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
     "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
+    # Whether to enable MLP weight prefetch, only used in small concurrency.
+    "VLLM_ASCEND_ENABLE_PREFETCH_MLP": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0"))),
+    # buffer size for gate up prefetch
+    "VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE": lambda: int(
+        os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", 18 * 1024 * 1024)
+    ),
+    # buffer size for down proj prefetch
+    "VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE": lambda: int(
+        os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", 18 * 1024 * 1024)
+    ),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
     # Whether to enable MLAPO optimization for DeepSeek W8A8 series models.
