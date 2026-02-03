@@ -625,7 +625,9 @@ class DisaggEpdProxy(RemoteEPDServer):
             proxy_args_list = proxy_args
 
         self.proxy_args = proxy_args_list
-        self.env_dict = env_dict
+        self.env_dict: dict[str, str] = {}
+        if env_dict is not None:
+            self.env_dict.update(env_dict)
         self._proc_list = list()
         self.host = server_host
 
@@ -634,14 +636,14 @@ class DisaggEpdProxy(RemoteEPDServer):
         proc = self._start_server_with_prefix(proxy_cmd, self.env_dict, "[PROXY] ")
         self._proc_list.append(proc)
 
-        if "--port" not in proxy_args:
+        if "--port" not in self.proxy_args:
             raise ValueError("You have manually specified the port ")
         else:
             try:
-                index = proxy_cmd.index("--port")
+                index = self.proxy_args.index("--port")
             except ValueError:
                 raise ValueError("--port not found in proxy args")
-            port_str = proxy_cmd[index + 1]
+            port_str = self.proxy_args[index + 1]
             self.port = int(port_str)
 
         timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
