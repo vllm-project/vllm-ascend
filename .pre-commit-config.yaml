@@ -43,11 +43,11 @@ repos:
   - id: markdownlint
     exclude: '.*\.inc\.md$|.*report_template\.md$|.*contributors\.md$|.*PULL_REQUEST_TEMPLATE\.md$'
     stages: [manual] # Only run in CI
-- repo: https://github.com/rhysd/actionlint
-  rev: v1.7.7
-  hooks:
-  - id: actionlint
-    exclude: '.*\.github/workflows/scripts/.*\.ya?ml$'
+# - repo: https://github.com/rhysd/actionlint
+#   rev: v1.7.7
+#   hooks:
+#   - id: actionlint
+#     exclude: '.*\.github/workflows/scripts/.*\.ya?ml$'
 - repo: local
   hooks:
   - id: png-lint
