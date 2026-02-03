@@ -696,7 +696,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         num_input_tokens = batch_descriptor.num_tokens
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
-
         # Get info across DP ranks.
         # NOTE: maybe_padded_num_tokens is only used when using TorchAir with DP,
         # Otherwise, it's just max_tokens_across_dp_cpu
@@ -707,7 +706,6 @@ class NPUModelRunner(GPUModelRunner):
         # TODO: Now that num_input_tokens is basically identical with maybe_padded_num_tokens
         # We should consider removing maybe_padded_num_tokens later
         num_input_tokens = maybe_padded_num_tokens
-
         # Hot-Swap lora model
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
@@ -1650,7 +1648,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
-                    maybe_padded_num_tokens, input_ids_reorder_pad, positions_reorder_pad,
+                    maybe_padded_num_tokens, input_ids, positions,
                     intermediate_tensors, inputs_embeds, model_kwargs)
             hidden_states = torch.index_select(hidden_states, 0, self.skip_li_metadata.li_reorder_indices.argsort())
 
