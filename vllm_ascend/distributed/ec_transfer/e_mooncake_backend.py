@@ -4,7 +4,7 @@ from safetensors.torch import save as safetensors_save
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import MooncakeBackend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
 logger = init_logger(__name__)
 
