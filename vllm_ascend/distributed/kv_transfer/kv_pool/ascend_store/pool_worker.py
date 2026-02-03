@@ -94,6 +94,11 @@ class KVPoolWorker:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
 
+        # be removed later
+        if self.backend == "mooncake":
+            self.head_or_tp_rank = self.tp_rank
+            self.put_step = 1
+
         self.metadata = KeyMetadata(
             model_config.model.rstrip("/").split("/")[-1],
             self.head_or_tp_rank,
@@ -136,11 +141,6 @@ class KVPoolWorker:
         assert backend_path is not None and backend_name is not None
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
-
-        # be removed later
-        if self.backend == "mooncake":
-            self.head_or_tp_rank = self.tp_rank
-            self.put_step = 1
 
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config
