@@ -1,8 +1,8 @@
 import logging
 import os
-from typing import Any, Optional
-
 import re
+from typing import Any
+
 import yaml
 
 CONFIG_BASE_PATH = "tests/e2e/nightly/single_node/config"
@@ -48,7 +48,7 @@ class SingleNodeConfigLoader:
     DEFAULT_CONFIG_NAME = "Qwen3-32B.yaml"
 
     @classmethod
-    def from_yaml(cls, yaml_path: Optional[str] = None) -> SingleNodeConfig:
+    def from_yaml(cls, yaml_path: str | None = None) -> SingleNodeConfig:
         config = cls._load_yaml(yaml_path)
         cls._validate_root(config)
         benchmarks = cls._parse_benchmarks(config)
@@ -62,14 +62,14 @@ class SingleNodeConfigLoader:
         )
 
     @classmethod
-    def _load_yaml(cls, yaml_path: Optional[str]) -> dict:
+    def _load_yaml(cls, yaml_path: str | None) -> dict:
         if not yaml_path:
             yaml_path = os.getenv("CONFIG_YAML_PATH", cls.DEFAULT_CONFIG_NAME)
 
         full_path = os.path.join(CONFIG_BASE_PATH, yaml_path)
         logger.info("Loading config yaml: %s", full_path)
 
-        with open(full_path, "r") as f:
+        with open(full_path) as f:
             return yaml.safe_load(f)
 
     @staticmethod

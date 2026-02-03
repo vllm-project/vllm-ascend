@@ -16,7 +16,6 @@ api_keyword_args = {
 }
 
 @pytest.mark.asyncio
-@wait_until_npu_memory_free(target_free_percentage=0.9, max_wait_seconds=300)
 async def test_single_node() -> None:
     config = SingleNodeConfigLoader.from_yaml()
 

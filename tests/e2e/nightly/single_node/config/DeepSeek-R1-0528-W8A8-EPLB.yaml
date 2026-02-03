@@ -32,7 +32,18 @@ server_cmd: >
     --gpu-memory-utilization 0.92
     --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}'
     --compilation-config '{"cudagraph_capture_sizes": [24], "cudagraph_mode": "FULL_DECODE_ONLY"}'
-    --additional-config '{"enable_shared_expert_dp": false, "multistream_overlap_shared_expert": false, "eplb_config": {"dynamic_eplb": true, "expert_heat_collection_interval": 512, "algorithm_execution_interval": 100, "num_redundant_experts": 0}}'
+    --additional-config
+    '{
+    "enable_shared_expert_dp": false,
+    "multistream_overlap_shared_expert": false,
+    "eplb_config":
+      {
+      "dynamic_eplb": true,
+      "expert_heat_collection_interval": 512,
+      "algorithm_execution_interval": 100,
+      "num_redundant_experts": 0
+      }
+    }'
 
 benchmarks:
   acc:
