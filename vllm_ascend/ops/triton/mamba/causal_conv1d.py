@@ -119,7 +119,6 @@ def causal_conv1d_fn(
     splits = torch.split(x, seqlens, dim=-1)
     width = weight.shape[1]
     last_width_prefill_x = extract_last_width(x, query_start_loc[num_decodes:], conv_states.shape[-1])
-    # print("query_start_loc", query_start_loc)
 
     if get_pcp_group().world_size > 1:
         all_last_width_prefill_x = get_pcp_group().all_gather(last_width_prefill_x.unsqueeze(0).contiguous(), 0)

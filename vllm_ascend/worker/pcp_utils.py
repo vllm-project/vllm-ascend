@@ -361,6 +361,8 @@ class PCPManager:
                 )
 
                 max_scheduled_prefill_tokens = sum(num_prefill_tokens_allranks[:, 0, 0])
+                num_prefill_tokens = sum(num_scheduled_tokens[num_decode_reqs:])
+                self.total_pcp_padding_tokens_fla = max_scheduled_prefill_tokens & self.pcp_world_size - num_prefill_tokens
                 self.pcp_padded_tokens_fla += max_scheduled_prefill_tokens - sum(num_prefill_scheduled_tokens_linear)
             
             max_scheduled_tokens = max_scheduled_prefill_tokens + num_decode_tokens
@@ -504,10 +506,8 @@ class PCPManager:
             if self.pcp_padded_tokens_fla > 0:
                 hidden_states = F.pad(hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode='constant', value=0)
             hidden_states = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
-            restore_idx = self.pcp_enter_fa_restore_idx[:hidden_states.shape[0]]
-            return torch.index_select(
-                hidden_states, 0,
-                self.pcp_enter_fa_restore_idx[:hidden_states.shape[0]])
+            restore_idx = self.pcp_enter_fa_restore_idx[:hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
+            return torch.index_select(hidden_states, 0, restore_idx)
 
     def generate_pcp_mtp_input(
         self,

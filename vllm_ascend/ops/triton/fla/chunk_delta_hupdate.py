@@ -167,7 +167,7 @@ def chunk_gated_delta_rule_fwd_hupdate(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
-    B, T, Hg, K, V = *k.shape, u.shape[-1]
+    B, T, Hg, K, _ = *k.shape, u.shape[-1]
     H = u.shape[-2]
     BT = chunk_size
 
@@ -207,7 +207,5 @@ def chunk_gated_delta_rule_fwd_hupdate(
         num_warps=4,
         num_stages=2,
     )
-    # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 1:
-    #     print(">>>>>>>>", h_update.dtype, h_update.shape)
     h_update[:, : num_decodes * 2, :, :, :] = torch.zeros((K, K), dtype=h_update.dtype, device=h_update.device)
     return h_update

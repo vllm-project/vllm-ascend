@@ -846,7 +846,11 @@ class NPUModelRunner(GPUModelRunner):
                         self.device, non_blocking=True)
                 else:
                     tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
-                    tokens_logits = tokens_original_tensor + self.pcp_manager.pcp_pads_logits_hybrid_attn[:tokens_original_tensor.shape[0]]
+                    num_prefill_reqs = (tokens_original_tensor > self.decode_threshold).sum().item()
+                    num_decode_reqs = num_reqs - num_prefill_reqs
+                    decode_pads = self.pcp_manager.pcp_pads_logits_hybrid_attn[:num_decode_reqs]
+                    pad_len = tokens_original_tensor.shape[0] - num_decode_reqs
+                    tokens_logits = tokens_original_tensor + F.pad(decode_pads, (0, pad_len), value=0)
                     logits_indices = torch.cumsum(tokens_logits, dim=0) - 1
                     logits_indices = logits_indices.pin_memory().to(
                         self.device, non_blocking=True)
