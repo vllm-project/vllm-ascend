@@ -55,7 +55,7 @@ class WeightPrefetchMethod:
             module_name="attn",
             enable=weight_prefetch_config.enabled,
             prefetch_ratio=weight_prefetch_config.prefetch_ratio.get(
-                "attn", {}),
+                "attn", {}) or {'qkv': 1.0, 'o': 1.0},
             linear_prefix_map={
                 AscendQKVParallelLinear.__name__: "qkv",
                 AscendRowParallelLinear.__name__: "o",
@@ -64,7 +64,7 @@ class WeightPrefetchMethod:
             module_name="moe",
             enable=weight_prefetch_config.enabled and self.is_moe,
             prefetch_ratio=weight_prefetch_config.prefetch_ratio.get(
-                "moe", {}))
+                "moe", {})) or {'gate_up': 0.8}
 
         self.mlp = ModuleWeightPrefetchConfig(
             module_name="mlp",

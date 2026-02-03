@@ -62,14 +62,6 @@ The details of each configuration option are as follows:
 | `enabled`        | bool | `False`                                                     | Whether to enable weight prefetch. |
 | `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}, "mlp": { "gate_up": 1.0,  "down": 1.0}}` | Prefetch ratio of each weight.     |
 
-Weight prefetching optimizes memory usage by preloading weights into the cache before they are needed, minimizing delays caused by memory access during model execution. Linear layers sometimes exhibit relatively high MTE utilization. To address this, we create a separate pipeline specifically for weight prefetching, which runs in parallel with the original vector computation pipeline, such as quantize, MoE gating top_k, RMSNorm and SiLU. This approach allows the weights to be preloaded to L2 cache ahead of time, reducing MTE utilization during the linear layer computations and indirectly improving Cube computation efficiency by minimizing resource contention and optimizing data flow.
-
-The “attn” and “moe” configuration options are used to optimize the performance of the MoE model, while the “mlp” configuration option is used to optimize the performance of the Dense model.
-
-Additionally, if you prioritize low latency over high throughput, then do not enable prefetching.
-
-It is important to emphasize that, since we use vector computations to hide the weight prefetching pipeline, the setting of the prefetch buffer size is crucial. If the buffer size is too small, the optimization benefits will not be fully realized, while a larger buffer size may lead to resource contention, resulting in performance degradation.
-
 **finegrained_tp_config**
 
 | Name | Type | Default | Description |
@@ -123,6 +115,10 @@ An example of additional configuration is as follows:
             },
             "moe": {
                 "gate_up": 0.8
+            },
+            "mlp": {
+                "gate_up": 1.0,
+                "down": 1.0
             }
         },
     },
