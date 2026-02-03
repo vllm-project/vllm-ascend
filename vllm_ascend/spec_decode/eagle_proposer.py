@@ -388,7 +388,9 @@ class EagleProposer(VllmEagleProposer):
         ) = self.runner._sync_metadata_across_dp(num_tokens,
                                                  is_draft_model=True)
 
-        batch_size = num_tokens // (self.num_speculative_tokens + 1) if not is_profile else self.runner.max_num_reqs
+        batch_size = num_tokens // (
+            self.num_speculative_tokens +
+            1) if not is_profile else self.runner.max_num_reqs
         with set_ascend_forward_context(
                 multi_steps_attn_metadata[0]
                 if multi_steps_attn_metadata else None,
