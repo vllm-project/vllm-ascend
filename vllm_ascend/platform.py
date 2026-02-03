@@ -658,20 +658,8 @@ class NPUPlatform(Platform):
                 )
                 model_config.disable_cascade_attn = False
 
-        # ==================== 2. Parallel Config ====================
-        if vllm_config.parallel_config:
-            # Only allow the default all2all backend; others like deepep are not supported
-            default_backend = "allgather_reducescatter"
-            current_backend = getattr(vllm_config.parallel_config, "all2all_backend", default_backend)
-            if current_backend != default_backend:
-                logger.warning(
-                    "Parameter '--all2all-backend' is set to '%s', which may be "
-                    "incompatible with Ascend. Using internal plugin mechanisms.",
-                    current_backend,
-                )
-                vllm_config.parallel_config.all2all_backend = default_backend
-
-            # ==================== 3. Cache Config ====================
+        # ==================== 2. Cache Config ====================
+        if vllm_config.cache_config:
             # Check and reset cpu_kvcache_space_bytes
             if getattr(vllm_config.cache_config, "cpu_kvcache_space_bytes", False):
                 logger.warning(
@@ -679,7 +667,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.cache_config.cpu_kvcache_space_bytes = None
 
-        # ==================== 4. MultiModal Config ====================
+        # ==================== 3. MultiModal Config ====================
         multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
         if multimodal_config:
             # Ascend uses a different mechanism for Multi-Modal attention
@@ -690,7 +678,7 @@ class NPUPlatform(Platform):
                 )
                 multimodal_config.mm_encoder_attn_backend = None
 
-        # ==================== 5. Observability Config ====================
+        # ==================== 4. Observability Config ====================
         if vllm_config.observability_config:
             # NVTX tracing is NVIDIA specific
             if getattr(vllm_config.observability_config, "enable_layerwise_nvtx_tracing", False):
@@ -700,7 +688,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.observability_config.enable_layerwise_nvtx_tracing = False
 
-        # ==================== 6. Scheduler Config ====================
+        # ==================== 5. Scheduler Config ====================
         if vllm_config.scheduler_config:
             # Partial prefills are specific to ROCm optimization
             if getattr(vllm_config.scheduler_config, "max_num_partial_prefills", 1) != 1:
@@ -709,7 +697,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.scheduler_config.max_num_partial_prefills = 1
 
-        # ==================== 7. Speculative Config ====================
+        # ==================== 6. Speculative Config ====================
         if vllm_config.speculative_config:
             # Ascend automatically inherits main model quantization
             if getattr(vllm_config.speculative_config, "quantization", None) is not None:
@@ -719,7 +707,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.speculative_config.quantization = None
 
-        # ==================== 8. KV Transfer Config ====================
+        # ==================== 7. KV Transfer Config ====================
         if vllm_config.kv_transfer_config:
             # Buffer size is primarily tied to NCCL (GPU) backends
             current_buffer_size = getattr(vllm_config.kv_transfer_config, "kv_buffer_size", 1e9)
@@ -739,7 +727,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.kv_transfer_config.enable_permute_local_kv = False
 
-        # ==================== 9. Attention Config ====================
+        # ==================== 8. Attention Config ====================
         if vllm_config.attention_config:
             att_config = vllm_config.attention_config
 
