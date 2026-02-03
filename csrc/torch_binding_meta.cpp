@@ -443,6 +443,7 @@ std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm_meta(
     rstd = at::empty_symint(new_shape, x.options().dtype(at::kFloat));
     at::Tensor y = at::empty_symint(x.sym_sizes(), x.options());
     return std::tuple<at::Tensor, at::Tensor>(y, rstd);
+}
 
 void transpose_kv_cache_by_block_meta(
     const at::TensorList &k_cache,
