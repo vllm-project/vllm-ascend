@@ -198,7 +198,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         input_positions = common_attn_metadata.positions[:
                                                          num_input_tokens].long(
                                                          )
-
         cum_query_lens = common_attn_metadata.query_start_loc[1:num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
@@ -286,20 +285,25 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_actual_seqs = num_reqs
         if self.enable_li_skip:
             li_reorder_indices = common_attn_metadata.li_skip_metadata.li_reorder_indices
-            li_cum_query_lens = common_attn_metadata.li_skip_metadata.li_cum_query_lens
-            li_seq_lens = common_attn_metadata.li_skip_metadata.li_seq_lens
+            input_positions_pad = torch.torch.zeros_like(input_positions)
+            input_positions_pad[:num_actual_tokens] = input_positions[li_reorder_indices]
+            slot_mapping_pad = torch.torch.zeros_like(slot_mapping)
+            slot_mapping_pad[:num_actual_tokens] = slot_mapping[li_reorder_indices]
+
+            cum_query_lens = common_attn_metadata.li_skip_metadata.li_cum_query_lens
+            seq_lens = common_attn_metadata.li_skip_metadata.li_seq_lens
             li_skip_request_mask = common_attn_metadata.li_skip_metadata.li_skip_request_mask
-            common_attn_metadata.num_reqs = li_seq_lens.shape[0]
+            common_attn_metadata.num_reqs = seq_lens.shape[0]
             block_table = torch.cat([block_table, block_table[li_skip_request_mask]], dim=0)
-            slot_mapping = slot_mapping[li_reorder_indices]
-            input_positions = input_positions[li_reorder_indices]
+            slot_mapping = slot_mapping_pad
+            input_positions = input_positions_pad
             cos, sin = get_cos_and_sin_mla(input_positions, True)
-            
+
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
-            cum_query_lens=li_cum_query_lens,
-            seq_lens=li_seq_lens,
+            cum_query_lens=cum_query_lens,
+            seq_lens=seq_lens,
             slot_mapping=slot_mapping,
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(
@@ -1079,13 +1083,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                         actual_seq_lengths_query=actual_seq_lengths_query,
                         actual_seq_lengths_key=actual_seq_lengths_key,
                         num_actual_seqs=attn_metadata.num_actual_seqs,
-                        sparse_count=2048)        
+                        sparse_count=2048)
             top_k_indices = torch.cat([top_k_indices_no_skip_li_query, 
                                     top_k_indices_skip_li_query], dim=0)
         else:
             top_k_indices = top_k_indices_no_skip_li_query
 
-        return top_k_indices
+        indices_pad = torch.full((attn_metadata.num_input_tokens-top_k_indices.shape[0], 1, 2048), -1, device=q.device, dtype=torch.int32)
+
+        return torch.cat([top_k_indices, indices_pad], dim=0)
 
     def _init_o_proj_tp_full_params(self):
         """
