@@ -345,7 +345,7 @@ Weight prefetching optimizes memory usage by preloading weights into the cache b
 
 In dense model scenarios, the MLP's gate_up_proj and down_proj linear layers often exhibit relatively high MTE utilization. To address this, we create a separate pipeline specifically for weight prefetching, which runs in parallel with the original vector computation pipeline, such as RMSNorm and SiLU, before the MLP. This approach allows the weights to be preloaded to L2 cache ahead of time, reducing MTE utilization during the MLP computations and indirectly improving Cube computation efficiency by minimizing resource contention and optimizing data flow.
 
-Previously, the environment variables VLLM_ASCEND_ENABLE_PREFETCH_MLP used to enable MLP weight prefetch and VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE and VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE used to set the weight prefetch size for MLP gate_up_proj and down_proj were deprecated. Please use the following configuration instead: "weight_prefetch_config": { "enabled": true, "prefetch_ratio": { "mlp": { "gate_up": 1.0, "down": 1.0}}}. See User Guide->Configuration Guide->Additional Configuration for details.
+Previously, the environment variables VLLM_ASCEND_ENABLE_PREFETCH_MLP used to enable MLP weight prefetch and VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE and VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE used to set the weight prefetch size for MLP gate_up_proj and down_proj were deprecated. Please use the following configuration instead: "weight_prefetch_config": { "enabled": true, "prefetch_ratio": { "mlp": { "gate_up": 1.0, "down": 1.0}}}. See User Guide->Feature Guide->Weight Prefetch Guide for details.
 
 ### 6. Zerolike Elimination
 

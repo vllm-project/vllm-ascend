@@ -64,7 +64,7 @@ class WeightPrefetchMethod:
             module_name="moe",
             enable=weight_prefetch_config.enabled and self.is_moe,
             prefetch_ratio=weight_prefetch_config.prefetch_ratio.get(
-                "moe", {})) or {'gate_up': 0.8}
+                "moe", {}) or {'gate_up': 0.8})
 
         self.mlp = ModuleWeightPrefetchConfig(
             module_name="mlp",
