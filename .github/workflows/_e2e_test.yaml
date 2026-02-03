@@ -18,6 +18,10 @@ on:
       contains_310:
         required: true
         type: boolean
+      collect_test_stats:
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   e2e-light:
@@ -82,8 +86,17 @@ jobs:
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_COLLECT_TEST_STATS: ${{ inputs.collect_test_stats }}
+          VLLM_TEST_STATS_FILE: test_stats_e2e-light_${{ matrix.part }}.json
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+
+      - name: Upload test stats artifact
+        if: ${{ always() && inputs.collect_test_stats }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stats-e2e-light-${{ matrix.part }}
+          path: test_stats_e2e-light_${{ matrix.part }}.json
 
   e2e-full:
     name: singlecard-full
@@ -147,8 +160,17 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_COLLECT_TEST_STATS: ${{ inputs.collect_test_stats }}
+          VLLM_TEST_STATS_FILE: test_stats_e2e-full_${{ matrix.part }}.json
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
+
+      - name: Upload test stats artifact
+        if: ${{ always() && inputs.collect_test_stats }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stats-e2e-full-${{ matrix.part }}
+          path: test_stats_e2e-full_${{ matrix.part }}.json
 
   e2e-2-cards-light:
     name: multicard-2-light
@@ -211,8 +233,17 @@ jobs:
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_COLLECT_TEST_STATS: ${{ inputs.collect_test_stats }}
+          VLLM_TEST_STATS_FILE: test_stats_e2e-2-cards-light_${{ matrix.part }}.json
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-2card-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+
+      - name: Upload test stats artifact
+        if: ${{ always() && inputs.collect_test_stats }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stats-e2e-2-cards-light-${{ matrix.part }}
+          path: test_stats_e2e-2-cards-light_${{ matrix.part }}.json
 
   e2e-2-cards-full:
     name: multicard-2-full
@@ -275,8 +306,17 @@ jobs:
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_COLLECT_TEST_STATS: ${{ inputs.collect_test_stats }}
+          VLLM_TEST_STATS_FILE: test_stats_e2e-2-cards-full_${{ matrix.part }}.json
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-2-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+
+      - name: Upload test stats artifact
+        if: ${{ always() && inputs.collect_test_stats }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stats-e2e-2-cards-full-${{ matrix.part }}
+          path: test_stats_e2e-2-cards-full_${{ matrix.part }}.json
 
       - name: Run vllm-project/vllm-ascend test (non triton)
         if: ${{ inputs.type == 'full' && matrix.part == 0 }}
@@ -347,8 +387,17 @@ jobs:
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_COLLECT_TEST_STATS: ${{ inputs.collect_test_stats }}
+          VLLM_TEST_STATS_FILE: test_stats_e2e-4-cards-full_${{ matrix.part }}.json
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-4-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+
+      - name: Upload test stats artifact
+        if: ${{ always() && inputs.collect_test_stats }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stats-e2e-4-cards-full-${{ matrix.part }}
+          path: test_stats_e2e-4-cards-full_${{ matrix.part }}.json
 
   e2e_310p:
     name: 310p singlecard
