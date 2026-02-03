@@ -25,8 +25,17 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderA
 import vllm_ascend.envs as envs_ascend
 
 
-MIN_PAD_SIZE = 64  # min_size to pad weight
-MAX_PAD_SIZE = 128  # max_size to pad weight
+MIN_PAD_SIZE: int = 64  # min_size to pad weight
+MAX_PAD_SIZE: int = 128  # max_size to pad weight
+
+# Use seq_lens CPU cache to avoid frequent d2h copy. AscendMMEncoderAttention 
+# will copy the cu_seqlens from NPU to CPU in every forward, since the 
+# op _npu_flash_attention_unpad() requires CPU cu_seqlens (otherwise it will 
+# crash). Thus, we use seq_lens_cpu_cache to cache this tensor, since it's 
+# shared between all layers, but may change in different forward step. When the 
+# current layer_index is 0, we update the cache, otherwise we directly use the 
+# cache to avoid frequent diff and copy operations, which are costful.
+seq_lens_cpu_cache: torch.Tensor = None
 
 
 class AscendMMEncoderAttention(MMEncoderAttention):
@@ -38,7 +47,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         scale: float | None = None,
         num_kv_heads: int | None = None,
         prefix: str = "",
-        multimodal_config: MultiModalConfig | None = None,
     ) -> None:
         """
         Args:
@@ -48,7 +56,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             num_kv_heads: number of kv heads.
             prefix: This has no effect, it is only here to make it easier to
                     swap between Attention and MMEncoderAttention.
-            multimodal_config: configs for multi-modal.
         """
         super().__init__(
             num_heads=num_heads,
@@ -56,16 +63,14 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             scale=scale,
             num_kv_heads=num_kv_heads,
             prefix=prefix,
-            multimodal_config=multimodal_config,
         )
 
+        self.layer_index = int(prefix.split('.')[2])
         self.enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
                            and self.head_size > MIN_PAD_SIZE
                            and self.head_size < MAX_PAD_SIZE)
-        self.last_cu_seqlens = None
-        self.seq_lens_cpu_cache = None
-        self.out_buffer = None
         self.scale_value = self.head_size ** -0.5
+        
 
     def reshape_qkv_to_3d(
         self,
@@ -92,25 +97,28 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         return query, key, value
 
     def forward_oot(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            cu_seqlens: torch.Tensor | None = None,
-            max_seqlen: torch.Tensor
-        | None = None,  # Only used for Flash Attention
-    ):
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # No use on NPU.
+    ) -> torch.Tensor:
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
         is_reshaped = query.dim() == 4
 
-        assert cu_seqlens is not None
-        if self.last_cu_seqlens is None or not torch.equal(cu_seqlens, self.last_cu_seqlens):
-            self.last_cu_seqlens = cu_seqlens
+        global seq_lens_cpu_cache
+        if self.layer_index == 0:
+            if cu_seqlens is None:
+                cu_seqlens = torch.arange(0, (bsz + 1) * q_len,
+                                          step=q_len,
+                                          dtype=torch.int32,
+                                          device="cpu")
             # Update seq_lens cpu cache.
-            self.seq_lens_cpu_cache = torch.diff(cu_seqlens).to("cpu")
+            seq_lens_cpu_cache = torch.diff(cu_seqlens).to("cpu")
         # Directly use seq_lens cpu cache to avoid d2h copy.
-        seq_lens_cpu = self.seq_lens_cpu_cache
+        seq_lens_cpu = seq_lens_cpu_cache
 
         # q, k, v: [b, s, head, head_dim] -> [b * s, head, head_dim]
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
@@ -125,10 +133,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             qkv = F.pad(qkv, (0, pad_len), mode="constant", value=0)
             q, k, v = qkv.unbind(dim=0)
 
-        if self.out_buffer is None or self.out_buffer.shape != q.shape:
-            self.out_buffer = torch.empty_like(q)
-        # Directly use out_buffer to avoid frequently create the same tensor.
-        output = self.out_buffer
+        output = torch.empty_like(q)
 
         # operator requires pta version >= 2.5.1
         torch_npu._npu_flash_attention_unpad(
