@@ -1,4 +1,19 @@
-from typing import Optional
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
 
 import torch
 import triton  # type: ignore
@@ -194,9 +209,7 @@ def split_qkv_rmsnorm_mrope_kernel(
         # out_q
         out_q_offset = out_q_ptr + (block_offset + index) * q_size
         out_q_indices = tl.arange(0, q_size)
-        out_q_mask = out_q_indices < q_size
-        tl.store(out_q_offset + out_q_indices, roped_q.reshape(q_size),
-                 mask=out_q_mask)
+        tl.store(out_q_offset + out_q_indices, roped_q.reshape(q_size))
 
         # out_k
         out_k_offset = out_k_ptr + (block_offset + index) * kv_size
