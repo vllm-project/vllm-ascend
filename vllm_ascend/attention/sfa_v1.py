@@ -6,7 +6,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
@@ -416,6 +416,14 @@ class AscendSFAImpl(MLAAttentionImpl):
                         "skipping sharding configuration"
                     )
             register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
+
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        self.pcp_group = get_pcp_group().device_group if self.pcp_size > 1 else None
+
+        self.dcp_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
+        self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
@@ -849,18 +857,26 @@ class AscendSFAImpl(MLAAttentionImpl):
             need_gather_q_kv=need_gather_q_kv,
         )
 
+        block_tables = attn_metadata.block_tables
+        kv = kv_cache[0]
+        key_rope = kv_cache[1]
+        if self.pcp_size * self.dcp_size > 1:
+            kv, block_tables = self.gather_kv_cross_cp(kv, block_tables)
+            key_rope, _ = self.gather_kv_cross_cp(key_rope)
+            assert block_tables is not None
+
         attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
-            key=kv_cache[0],
-            value=kv_cache[0],
+            key=kv,
+            value=kv,
             sparse_indices=topk_indices,
             scale_value=self.scale,
             sparse_block_size=1,
-            block_table=attn_metadata.block_tables,
+            block_table=block_tables,
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_kv=actual_seq_lengths_key,
             query_rope=q_pe,
-            key_rope=kv_cache[1],
+            key_rope=key_rope,
             layout_query="TND",
             layout_kv="PA_BSND",
             sparse_mode=3,
@@ -893,6 +909,22 @@ class AscendSFAImpl(MLAAttentionImpl):
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
         return output_padded
+
+    def gather_kv_cross_cp(
+        self, kv_cache: torch.Tensor, block_tables: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # Note(qcs): we need set kv_cache_interleave_size = block_size for sfa!!!
+        block_num = kv_cache.shape[0]
+        if self.dcp_size > 1:
+            kv_cache = get_dcp_group().all_gather(kv_cache, 0)
+        if self.pcp_size > 1:
+            kv_cache = get_pcp_group().all_gather(kv_cache, 0)
+        if block_tables is not None:
+            block_tables = (
+                block_tables.unsqueeze(-1)
+                + (torch.arange(self.pcp_size * self.dcp_size) * block_num).view(1, 1, -1).to(block_tables)
+            ).reshape(block_tables.shape[0], -1)
+        return kv_cache, block_tables
 
     def indexer_select_pre_process(
         self,
@@ -969,11 +1001,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         weights, _ = self.weights_proj(x)
         weights = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(weights, need_gather_q_kv)
 
+        key = kv_cache[2]
         block_table = attn_metadata.block_tables
+        if self.pcp_size * self.dcp_size > 1:
+            key, block_table = self.gather_kv_cross_cp(key, block_table)
 
         topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
             query=q,
-            key=kv_cache[2],
+            key=key,
             weights=weights,
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_key=actual_seq_lengths_key,
