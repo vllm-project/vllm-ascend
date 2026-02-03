@@ -464,4 +464,6 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          pytest -sv --durations=0 tests/e2e/310p/test_offline_inference_parallel_310p.py
+          pytest -sv --durations=0 \
+          tests/e2e/310p/test_offline_inference_parallel_310p.py \
+          tests/e2e/310p/test_offline_inference_w8a8_310p.py
