@@ -95,7 +95,7 @@ ASCEND_RT_VISIBLE_DEVICES="$CARD_E" vllm serve "$MODEL" \
     --max-num-batched-tokens 114688 \
     --max-num-seqs 128 \
     --ec-transfer-config '{
-        "ec_connector": "ECSharedStorageConnector",
+        "ec_connector": "ECExampleConnector",
         "ec_role": "ec_producer",
         "ec_connector_extra_config": {
             "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
@@ -115,7 +115,7 @@ ASCEND_RT_VISIBLE_DEVICES="$CARD_PD" vllm serve "$MODEL" \
     --enable-request-id-headers \
     --max-num-seqs 128 \
     --ec-transfer-config '{
-        "ec_connector": "ECSharedStorageConnector",
+        "ec_connector": "ECExampleConnector",
         "ec_role": "ec_consumer",
         "ec_connector_extra_config": {
             "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"

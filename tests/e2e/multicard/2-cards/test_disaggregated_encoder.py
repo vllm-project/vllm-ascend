@@ -19,48 +19,13 @@ import pytest
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer
-from tools.aisbench import run_aisbench_cases
+from tools.send_mm_request import send_image_request
 
 MODELS = [
     "Qwen/Qwen2.5-VL-7B-Instruct",
 ]
 SHARED_STORAGE_PATH = "/dev/shm/epd/storage"
 TENSOR_PARALLELS = [1]
-
-warmup_cases = [{
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/textvqa-perf-1080p",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "textvqa/textvqa_gen_base64",
-    "num_prompts": 50,
-    "max_out_len": 20,
-    "batch_size": 32,
-    "request_rate": 0,
-    "baseline": 1,
-    "threshold": 0.97
-}]
-aisbench_cases = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/textvqa-lite",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "textvqa/textvqa_gen_base64",
-    "max_out_len": 2048,
-    "batch_size": 128,
-    "baseline": 82.05,
-    "threshold": 5
-}, {
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/textvqa-perf-1080p",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "textvqa/textvqa_gen_base64",
-    "num_prompts": 512,
-    "max_out_len": 256,
-    "batch_size": 128,
-    "request_rate": 0,
-    "baseline": 1,
-    "threshold": 0.97
-}]
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
@@ -101,10 +66,6 @@ async def test_models(model: str, tp_size: int) -> None:
     ]
 
     with RemoteEPDServer(vllm_serve_args=vllm_server_args) as _:
-        with DisaggEpdProxy(proxy_args=proxy_args) as _:
-            # warm up
-            run_aisbench_cases(model=model,
-                               port=proxy_port,
-                               aisbench_cases=warmup_cases)
-            # aisbench test
-            run_aisbench_cases(model, proxy_port, aisbench_cases)
+        with DisaggEpdProxy(proxy_args=proxy_args) as proxy:
+            send_image_request(model, proxy)
+
