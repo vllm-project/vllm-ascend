@@ -173,13 +173,13 @@ class ProxyState:
         server = self.pds[server_idx]
         priority = server.active_tokens + server.active_kv_cache * 0.3
         self.pd_heap = [(p, i, s) for p, i, s in self.pd_heap if i != server_idx]
-        heapq.heappush(self.pd_heap, (priority, server_idx, server))
+        heapq.heappush(self.pd_heap, (priority, server_idx, server))  # type: ignore[misc]
 
     def _update_prefiller_priority(self, server_idx: int):
         server = self.prefillers[server_idx]
         priority = server.active_tokens + server.active_kv_cache * 0.3
         self.prefiller_heap = [(p, i, s) for p, i, s in self.prefiller_heap if i != server_idx]
-        heapq.heappush(self.prefiller_heap, (priority, server_idx, server))
+        heapq.heappush(self.prefiller_heap, (priority, server_idx, server))  # type: ignore[misc]
 
     def _update_decoder_priority(self, server_idx: int):
         server = self.decoders[server_idx]
