@@ -151,7 +151,7 @@ def __init__(self, *args, **kwargs):
     )
 
     # Maybe overwrite
-    if int(os.getenv("GLOBAL_NUM_EXPERTS", "")) > 1:
+    if int(os.getenv("GLOBAL_NUM_EXPERTS", "0")) > 1:
         self.global_num_experts = int(os.getenv("GLOBAL_NUM_EXPERTS", "0"))
         self.num_experts = self.global_num_experts
         self.local_num_experts = int(os.getenv("LOCAL_NUM_EXPERTS", "0"))

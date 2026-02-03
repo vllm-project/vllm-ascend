@@ -4,7 +4,7 @@ export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
 
 cd $SCRIPT_DIR
 
-export HEAD_IP=$(hostname -I | awek '{print $1}')
+export HEAD_IP=$(hostname -I | awk '{print $1}')
 
 export VLLM_USE_V1=1
 export VLLM_VERSION=0.14.1
