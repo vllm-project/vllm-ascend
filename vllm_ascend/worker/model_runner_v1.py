@@ -1167,8 +1167,10 @@ class NPUModelRunner(GPUModelRunner):
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
-                if num_tokens_padded != num_tokens_unpadded:
-                    # Currently, Graph Mode and SP will both pad num_tokens
+                if cudagraph_mode == CUDAGraphMode.FULL or enable_sp():
+                    # Currently, Graph Mode and SP will both pad num_tokens,
+                    # Another possible condition is num_tokens_padded != num_tokens_unpadded
+                    # but this scope is way too big and the consequences are unpredictable
                     num_reqs_padded = self._pad_query_start_loc_for_fia(num_tokens_padded, num_reqs_padded, num_reqs)
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
@@ -1887,13 +1889,6 @@ class NPUModelRunner(GPUModelRunner):
         self.long_seq_metadata = _get_pcp_metadata(num_tokens)
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
 
-        actual_last_loc = self.query_start_loc.np[num_reqs_padded]
-        error_msg = (
-            f"Due to FIA kernel constraints, when the layout is TND, "
-            f"the first dimension of `hidden_states` ({num_tokens_padded}) "
-            f"must equal the last element of `actual_seq_lengths_q` ({actual_last_loc})."
-        )
-        assert self.query_start_loc.np[num_reqs_padded] == num_tokens_padded, error_msg
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
