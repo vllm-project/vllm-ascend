@@ -18,6 +18,7 @@
 #
 
 import math
+import os
 import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -367,6 +368,54 @@ class NPUModelRunner(GPUModelRunner):
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
+
+
+        if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
+
+            print(f"VLLM_ASCEND_ENABLE_KVCOMP_SPARSE: {os.getenv('VLLM_ASCEND_ENABLE_KVCOMP_SPARSE')}")
+            print(f"KVComp is enabled")
+
+            from vllm_ascend.worker.kvcomp_utils import KVCompConfig, HashEncoder, KVCompMetaData
+            from vllm.utils.math_utils import cdiv
+
+            kvcomp_config = KVCompConfig.from_json(os.getenv("VLLM_ASCEND_KVCOMP_CONFIG_PATH"))
+            chunk_sizes_for_hamming_full = torch.full([self.max_num_reqs], fill_value=self.block_size, dtype=torch.int32, device=self.device)
+            topk_for_hamming_full = torch.full([self.max_num_reqs], fill_value=kvcomp_config.vllm_hash_attention_topk // self.block_size, dtype=torch.int32, device=self.device)
+            topk_for_hamming_full_cpu = torch.full([self.max_num_reqs], fill_value=kvcomp_config.vllm_hash_attention_topk // self.block_size, dtype=torch.int32, device="cpu")
+            seq_lens_for_hamming = torch.zeros([self.max_num_reqs], dtype=torch.int32, device=self.device)
+            hamming_output = torch.zeros([self.max_num_reqs, self.model_config.get_num_kv_heads(self.parallel_config), cdiv(self.vllm_config.model_config.max_model_len, self.block_size)] , dtype=torch.int32, device=self.device)
+
+            if self.vllm_config.model_config.use_mla:
+                hash_encoder_nope = HashEncoder(kvcomp_config.kv_lora_rank, kvcomp_config.hash_bits_kv_lora, self.dtype, self.device)
+                hash_encoder_rope = HashEncoder(kvcomp_config.qk_rope_head_dim, kvcomp_config.hash_bits_qk_rope, self.dtype, self.device)
+                hashk_cache_nope = []
+                hashk_cache_rope = []
+                hash_encoder = None
+                hashk_caches = None
+            else: #GQA
+                hash_encoder = HashEncoder(kvcomp_config.head_dim, kvcomp_config.hash_bits, self.dtype, self.device)
+                hashk_caches = []
+                hash_encoder_nope = None
+                hash_encoder_rope = None
+                hashk_cache_nope = None
+                hashk_cache_rope = None
+
+            self.kvcomp_meta_data = KVCompMetaData(
+                kvcomp_config=kvcomp_config,
+                chunk_sizes_for_hamming_full=chunk_sizes_for_hamming_full,
+                topk_for_hamming_full=topk_for_hamming_full,
+                topk_for_hamming_full_cpu=topk_for_hamming_full_cpu,
+                seq_lens_for_hamming=seq_lens_for_hamming,
+                hamming_output=hamming_output,
+                hash_encoder=hash_encoder,
+                hashk_caches=hashk_caches,
+                hash_encoder_nope=hash_encoder_nope,
+                hash_encoder_rope=hash_encoder_rope,
+                hashk_cache_nope=hashk_cache_nope,
+                hashk_cache_rope=hashk_cache_rope,
+            )
+
+            print(f"kvcomp_meta_data: {self.kvcomp_meta_data}")
 
     @property
     def use_cp(self) -> bool:
@@ -2328,6 +2377,52 @@ class NPUModelRunner(GPUModelRunner):
 
         num_attn_module = 2 if self.model_config.hf_text_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches, num_attn_module)
+
+
+        if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
+            from vllm_ascend.worker.kvcomp_utils import bind_hashk_cache, bind_hashk_cache_nope, bind_hashk_cache_rope
+            from vllm.model_executor.models.utils import extract_layer_index
+            #(ldeng) allocate hashk cache tensors here
+            if self.vllm_config.model_config.use_mla:
+                hashk_caches_nope = {}
+                hashk_caches_rope = {}
+            else:
+                hashk_caches = {}
+            for layer_name, kv_cache in kv_caches.items():
+                layer_index = extract_layer_index(layer_name, num_attn_module)
+                is_rollback_layer = layer_index in self.kvcomp_meta_data.kvcomp_config.vllm_hash_attention_rollback_layers
+                is_skip_layer = layer_index in self.kvcomp_meta_data.kvcomp_config.vllm_hash_attention_skip_layers
+                if is_rollback_layer or is_skip_layer:
+                    if self.vllm_config.model_config.use_mla:
+                        hashk_caches_nope[layer_name] = None
+                        hashk_caches_rope[layer_name] = None
+                    else:
+                        hashk_caches[layer_name] = None
+                else: # computing-hamming layer
+                    if self.vllm_config.model_config.use_mla:
+                        num_blocks_nope, block_size_nope, num_kv_heads_nope, head_size_nope = kv_cache[0].shape
+                        num_blocks_rope, block_size_rope, num_kv_heads_rope, head_size_rope = kv_cache[1].shape
+                        hashk_cache_nope = torch.zeros((num_blocks_nope, num_kv_heads_nope, block_size_nope, head_size_nope // 8),
+                                            dtype=torch.uint8,
+                                            device=self.device)
+                        hashk_cache_rope = torch.zeros((num_blocks_rope, num_kv_heads_rope, block_size_rope, head_size_rope // 8),
+                                            dtype=torch.uint8,
+                                            device=self.device)
+
+            # bind hashk cache to forward context and model runner
+            if self.vllm_config.model_config.use_mla:
+                bind_hashk_cache_nope(hashk_caches_nope,
+                                     self.compilation_config.static_forward_context,
+                                     self.kvcomp_meta_data.hashk_cache_nope, num_attn_module)
+                bind_hashk_cache_rope(hashk_caches_rope,
+                                     self.compilation_config.static_forward_context,
+                                     self.kvcomp_meta_data.hashk_cache_rope, num_attn_module)
+            else:
+                bind_hashk_cache(hashk_caches,
+                             self.compilation_config.static_forward_context,
+                             self.kvcomp_meta_data.hashk_caches, num_attn_module)
+
+
         return kv_caches
 
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
