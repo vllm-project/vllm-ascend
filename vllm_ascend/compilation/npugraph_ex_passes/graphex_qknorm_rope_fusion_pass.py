@@ -23,7 +23,10 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import Range
 from vllm.logger import logger
 
-from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
+from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import (
+    extra_stream_scope_check,
+    check_and_register_fusion_pass,
+)
 
 
 class GraphEXQKNormRopeFusionPattern:
@@ -202,20 +205,22 @@ class GraphEXQKNormRopeFusionPass:
             if layer.head_size != 128:
                 logger.debug("QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128", layer.head_size)
                 continue
-            GraphEXQKNormRopeFusionPattern(
+            check_and_register_fusion_pass(
+                GraphEXQKNormRopeFusionPattern,
                 vllm_config=vllm_config,
                 head_dim=layer.head_size,
                 num_heads=layer.num_heads,
                 num_kv_heads=layer.num_kv_heads,
                 eps=epsilon,
-            ).register()
-            GraphEXQKNormRopeFusionPatternWithBias(
+            )
+            check_and_register_fusion_pass(
+                GraphEXQKNormRopeFusionPatternWithBias,
                 vllm_config=vllm_config,
                 head_dim=layer.head_size,
                 num_heads=layer.num_heads,
                 num_kv_heads=layer.num_kv_heads,
                 eps=epsilon,
-            ).register()
+            )
 
     def __call__(self, graph: torch.fx.Graph):
         pass

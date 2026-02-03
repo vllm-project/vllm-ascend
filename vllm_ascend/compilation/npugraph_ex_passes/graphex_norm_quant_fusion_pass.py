@@ -22,7 +22,10 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.logger import logger
 
-from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
+from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import (
+    extra_stream_scope_check,
+    check_and_register_fusion_pass,
+)
 
 
 class GraphEXAddRMSNormQuantPattern:
@@ -301,10 +304,10 @@ class GraphEXAddRMSNormFusionPass:
 
         common_epsilons = [1e-5, 1e-6]
         for eps in common_epsilons:
-            GraphEXAddRMSNormQuantPattern(vllm_config, eps=eps).register()
-            GraphEXAddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register()
-            GraphEXAddRMSNormQuantSPPattern(vllm_config, eps=eps).register()
-            GraphEXAddRMSNormQuantSPPatternWithBias(vllm_config, eps=eps).register()
+            check_and_register_fusion_pass(GraphEXAddRMSNormQuantPattern, vllm_config=vllm_config, eps=eps)
+            check_and_register_fusion_pass(GraphEXAddRMSNormQuantPatternWithBias, vllm_config=vllm_config, eps=eps)
+            check_and_register_fusion_pass(GraphEXAddRMSNormQuantSPPattern, vllm_config=vllm_config, eps=eps)
+            check_and_register_fusion_pass(GraphEXAddRMSNormQuantSPPatternWithBias, vllm_config=vllm_config, eps=eps)
 
     def __call__(self, graph: torch.fx.Graph):
         pass
