@@ -28,12 +28,15 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.model_config.uses_xdrope_dim = 0
         self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
         ])
+        self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
         self.vllm_config.additional_config = None
 
         self.mock_cpugpubuffer = patch(
@@ -141,12 +144,15 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.model_config.uses_xdrope_dim = 0
         self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
         ])
+        self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
@@ -285,12 +291,15 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.model_config.uses_xdrope_dim = 0
         self.vllm_config.model_config.use_mla = False
         self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(4)
         ])
+        self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
@@ -404,12 +413,15 @@ class TestEagleProposerHelperMethods(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.model_config.uses_xdrope_dim = 0
         self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
         self.vllm_config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
         ])
+        self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
