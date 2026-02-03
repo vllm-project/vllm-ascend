@@ -78,6 +78,7 @@ PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 logger = logging.getLogger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
+_LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 
 
 def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: float):
