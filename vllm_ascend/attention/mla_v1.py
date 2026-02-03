@@ -428,6 +428,13 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         block_table_size = self.get_block_table_size(common_attn_metadata, BUILD_METADATA_STEP_PREFILL)
         self.block_table = common_attn_metadata.block_table_tensor[:block_table_size]
 
+        # (ldeng) we can get kvcomp_metadata from common_attn_metadata now just like this, should add it to decode_metadata
+        if hasattr(common_attn_metadata, "kvcomp_metadata"):
+            kvcomp_metadata = common_attn_metadata.kvcomp_metadata
+        else:
+            kvcomp_metadata = None
+        print(f"mla_v1 kvcomp_metadata: {kvcomp_metadata}")
+
         prefill_metadata = None
         if self.num_prefills > 0:
             prefill_metadata = self.build_prefill_metadata(common_prefix_len, common_attn_metadata)

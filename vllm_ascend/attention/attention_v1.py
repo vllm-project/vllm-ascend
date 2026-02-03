@@ -296,6 +296,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
+        # (ldeng) we can get kvcomp_metadata from common_attn_metadata now just like this, should add it to the attn_metadata
+        if hasattr(common_attn_metadata, "kvcomp_metadata"):
+            kvcomp_metadata = common_attn_metadata.kvcomp_metadata
+        else:
+            kvcomp_metadata = None
+        print(f"attention_v1 kvcomp_metadata: {kvcomp_metadata}")
+
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
