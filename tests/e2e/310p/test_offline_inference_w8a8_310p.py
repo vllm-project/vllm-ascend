@@ -12,7 +12,7 @@ def test_qwen3_w8a8_e2e_310p(dtype: str, max_tokens: int) -> None:
 
     with VllmRunner(
         "vllm-ascend/Qwen3-32B-W8A8",
-        tensor_parallel_size=2,
+        tensor_parallel_size=4,
         dtype=dtype,
         max_model_len=8192,
         enforce_eager=True,
