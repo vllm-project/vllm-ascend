@@ -96,6 +96,7 @@ public:
         LayoutD1 layoutD1;
         LayoutD2 layoutD2;
         GM_ADDR ptrWorkspace;
+        GM_ADDR ptrExpertTokenNums;
         int32_t EP;
         int32_t listLen;
         int32_t expertPerRank;
@@ -139,7 +140,7 @@ public:
             GM_ADDR expertIdx_, GM_ADDR moeInitRoutingQuantV2Scale_,
             GM_ADDR moeInitRoutingQuantV2Offset_,
             GM_ADDR expertTokensBeforeCapacity_, GM_ADDR probs_,
-            GM_ADDR ptrWorkspace_, int32_t ubMoveNum_,
+            GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_, int32_t ubMoveNum_,
             optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_
         ) : problemShape(problemShape_),
             EP(EP_), listLen(listLen_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
@@ -155,7 +156,7 @@ public:
             expertIdx(expertIdx_), moeInitRoutingQuantV2Scale(moeInitRoutingQuantV2Scale_),
             moeInitRoutingQuantV2Offset(moeInitRoutingQuantV2Offset_), 
             expertTokensBeforeCapacity(expertTokensBeforeCapacity_), probs(probs_),
-            ptrWorkspace(ptrWorkspace_), ubMoveNum(ubMoveNum_),
+            ptrWorkspace(ptrWorkspace_), ptrExpertTokenNums(gmExpertTokenNums_), ubMoveNum(ubMoveNum_),
             moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_)
         {
         }
@@ -228,7 +229,7 @@ private:
 
         tokenPerExpert.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(shmem() + peermemInfo.offsetPeerTokenPerExpert));
 
-        tokenPerExpertLayout = Layout3D( AlignUp(params.EP * params.expertPerRank, ALIGN_128), params.expertPerRank);
+        tokenPerExpertLayout = Layout3D(AlignUp(params.EP * params.expertPerRank, ALIGN_128), params.expertPerRank);
     }
 
     template<typename T>
@@ -335,15 +336,6 @@ private:
         AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx / CROSS_CORE_FLAG_MAX_SET_COUNT); // Wait for AIV to finish cumsum for matmul
         syncgmmIdx++;
 
-        constexpr uint32_t MAX_EXPERTS_PER_RANK = 32;
-        __gm__ ElementB* weight1Array[MAX_EXPERTS_PER_RANK];
-        __gm__ ElementScale * scale1Array[MAX_EXPERTS_PER_RANK];
-
-        int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
-        for (uint32_t loopIdx = 0; loopIdx < loopCount; ++loopIdx) {
-            weight1Array[loopIdx] = reinterpret_cast<__gm__ ElementB*>(GetTensorAddr<int8_t>(loopIdx, params.ptrB1));
-            scale1Array[loopIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(loopIdx, params.ptrScale1));
-        }
         AscendC::PipeBarrier<PIPE_ALL>();
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
@@ -356,8 +348,8 @@ private:
             AscendC::GlobalTensor<ElementB> gmB1;
             AscendC::GlobalTensor<ElementScale> gmS;
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
-            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight1Array[arrayGroupIdx]));
-            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale1Array[arrayGroupIdx]));
+            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(arrayGroupIdx, params.ptrB1)));
+            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(arrayGroupIdx, params.ptrScale1)));
 
             AscendC::PipeBarrier<PIPE_ALL>();
 
@@ -455,14 +447,6 @@ private:
             lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
         }
 
-        constexpr uint32_t MAX_EXPERTS_PER_RANK = 8;
-        __gm__ ElementB* weight2Array[MAX_EXPERTS_PER_RANK];
-        __gm__ ElementScale * scale2Array[MAX_EXPERTS_PER_RANK];
-        int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
-        for (uint32_t loopIdx = 0; loopIdx < loopCount; ++loopIdx) {
-            weight2Array[loopIdx] = reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(loopIdx, params.ptrB2));
-            scale2Array[loopIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(loopIdx, params.ptrScale2));
-        }
         AscendC::PipeBarrier<PIPE_ALL>();
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
@@ -476,8 +460,8 @@ private:
             AscendC::GlobalTensor<ElementScale> gmS2;
             AscendC::PipeBarrier<PIPE_ALL>();
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
-            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight2Array[arrayGroupIdx]));
-            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale2Array[arrayGroupIdx]));
+            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(arrayGroupIdx, params.ptrB2)));
+            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(arrayGroupIdx, params.ptrScale2)));
 
             if (currentM <= L1TileShape::M) {
                 gmB2.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
@@ -596,7 +580,6 @@ private:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         }
-
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
             if (dstEpIdx == params.rank) {
                 continue;
@@ -638,6 +621,13 @@ private:
         if (coreIdx == 0) {
             GetCumsumForMMAIV(tokenPerExpert, cumsumMM, params.expertPerRank, params.rank, params.EP);
         }
+        AscendC::SyncAll<true>();
+        
+        AscendC::GlobalTensor<int32_t> ExpertTokenNums;
+        ExpertTokenNums.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.ptrExpertTokenNums));
+        AscendC::GlobalTensor<int32_t> LcalCumsumMM;
+        LcalCumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrcumsumMM + (params.EP - 1) * params.expertPerRank * sizeof(int32_t)));
+        CopyGMToGM(ExpertTokenNums, LcalCumsumMM, params.expertPerRank, params.ubMoveNum);
         AscendC::SyncAll<true>();
         uint16_t syncgmm1Idx = 0;
         AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncgmm1Idx / CROSS_CORE_FLAG_MAX_SET_COUNT);
