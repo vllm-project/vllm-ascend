@@ -138,24 +138,13 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
             quant_bias = bias
 
-        if get_ascend_device_type() == AscendDeviceType._310P:
-            # On 300I Duo platform, we need transpose again if
-            # using nz. This transpose can be skipped in torchair.
-            output = torch_npu.npu_quant_matmul(
-                x,
-                layer.weight.data.transpose(1, 0),
-                layer.deq_scale,
-                bias=quant_bias,
-                output_dtype=layer.params_dtype,
-            )
-        else:
-            output = torch_npu.npu_quant_matmul(
-                x,
-                layer.weight,
-                layer.deq_scale,
-                bias=quant_bias,
-                output_dtype=layer.params_dtype,
-            )
+        output = torch_npu.npu_quant_matmul(
+            x,
+            layer.weight,
+            layer.deq_scale,
+            bias=quant_bias,
+            output_dtype=layer.params_dtype,
+        )
         return output
 
     def process_weights_after_loading(self, layer):
@@ -169,8 +158,8 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         layer.aclnn_input_offset = torch.nn.Parameter(
             layer.input_offset.data.repeat(expanding_factor),
             requires_grad=False).to(layer.aclnn_input_scale.dtype)
-        if get_ascend_device_type() != AscendDeviceType._310P:
-            layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+
+        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
