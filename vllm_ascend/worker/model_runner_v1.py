@@ -113,13 +113,10 @@ from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import MedusaProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (
-    AscendDeviceType,
     enable_sp,
-    get_ascend_device_type,
     is_drafter_moe_model,
     is_moe_model,
     lmhead_tp_enable,
-    maybe_trans_nz,
     set_weight_prefetch_method,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -140,7 +137,6 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
-import torch_npu
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -148,9 +144,6 @@ torch.npu.config.allow_internal_format = True
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
-
-if get_ascend_device_type() == AscendDeviceType._310P:
-    torch_npu.npu.set_compile_mode(jit_compile=False)
 
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
@@ -2492,8 +2485,8 @@ class NPUModelRunner(GPUModelRunner):
                     # the min of all `num_blocks`. Verify it here.
                     assert num_blocks >= kv_cache_config.num_blocks
 
-                    if hasattr(attn_backend, "get_supported_block_size") and self.use_hybrid_blocks:
-                        block_size = attn_backend.get_supported_block_size()[0]
+                    if hasattr(attn_backend, "get_supported_kernel_block_sizes") and self.use_hybrid_blocks:
+                        block_size = attn_backend.get_supported_kernel_block_sizes()[0]
 
                         block_size_chunk = kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
@@ -2527,9 +2520,7 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
-                    if get_ascend_device_type() == AscendDeviceType._310P:
-                        k_cache = maybe_trans_nz(k_cache)
-                        v_cache = maybe_trans_nz(v_cache)
+
                     if self.use_sparse and raw_dsa_k_tensor is not None:
                         dsa_k_cache_shape = (num_blocks, kv_cache_spec.block_size, 1, 128)
                         dsa_k_cache_size = (num_blocks) * kv_cache_spec.block_size * 128 * dtype.itemsize
@@ -2609,7 +2600,7 @@ class NPUModelRunner(GPUModelRunner):
                 if attn_groups and self.use_hybrid_blocks:
                     # Use the backend's supported block size list
                     backend = attn_groups[0].backend
-                    supported_sizes = backend.get_supported_block_size()
+                    supported_sizes = backend.get_supported_kernel_block_sizes()
                     # If no specific sizes supported, use cache config
                     # block_size
                     kernel_block_size_list = supported_sizes if supported_sizes else [self.cache_config.block_size]
