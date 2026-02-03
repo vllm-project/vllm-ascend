@@ -22,8 +22,8 @@ from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_
 from vllm.distributed.parallel_state import get_tp_group
 
 from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import (
-    extra_stream_scope_check,
     check_and_register_fusion_pass,
+    extra_stream_scope_check,
 )
 
 # computation-communication tiling block is 512

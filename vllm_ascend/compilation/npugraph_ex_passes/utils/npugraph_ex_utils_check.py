@@ -17,7 +17,6 @@
 #
 
 from torch._inductor.pattern_matcher import Match
-from vllm.config import VllmConfig
 from vllm.logger import logger
 
 
@@ -58,10 +57,10 @@ _register_patterns = set()
 
 
 def check_and_register_fusion_pass(pattern_class: type, **kwargs):
-    global _resgister_patterns
+    global _register_patterns
     eps = kwargs.get("eps", 1e-6)
     pattern_key = str(pattern_class.__name__) + str(eps)
-    if pattern_key in _resgister_patterns:
+    if pattern_key in _register_patterns:
         return
 
     pattern = pattern_class(**kwargs)
