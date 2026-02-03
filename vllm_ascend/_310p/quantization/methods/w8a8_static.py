@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import torch
 import torch_npu
 
 from vllm_ascend.quantization.methods.base import AscendLinearScheme
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, get_weight_prefetch_method
 
 from .registry import register_scheme
 
@@ -31,7 +30,6 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
     """310P-only W8A8 static linear scheme.
 
     Notes:
-      - Keep weight in non-NZ layout to avoid aclnnQuantMatmulWeightNz on 310P.
       - This scheme is discovered via 310P local registry.
     """
 
@@ -71,15 +69,6 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
         if x.dtype != torch.int8:
-            layer_cls_name = layer.__class__.__name__
-            weight_prefetch_method = get_weight_prefetch_method()
-            if weight_prefetch_method:
-                weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
-                    layer_cls_name=layer_cls_name,
-                    weight=layer.weight,
-                    start_flag=x,
-                )
-
             x = torch.ops.vllm.quantize(
                 x,
                 layer.aclnn_input_scale,
@@ -87,15 +76,7 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
                 layer.aclnn_input_offset,
             )
 
-            if weight_prefetch_method:
-                weight_prefetch_method.maybe_prefetch_attn_weight_postprocess(
-                    layer_cls_name=layer_cls_name,
-                    stop_flag=x,
-                )
-
         quant_bias = layer.quant_bias if tp_rank == 0 else None
-        if getattr(layer, "ascend_quant_method", "") == COMPRESSED_TENSORS_METHOD:
-            quant_bias = bias
 
         return torch_npu.npu_quant_matmul(
             x,
@@ -106,14 +87,13 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # input quant params broadcast
         expanding_factor = layer.weight.data.shape[1]
         layer.aclnn_input_scale = torch.nn.Parameter(
             layer.input_scale.data.repeat(expanding_factor),
             requires_grad=False,
         )
-        layer.aclnn_input_scale_reciprocal = 1 / torch.nn.Parameter(
-            layer.input_scale.data.repeat(expanding_factor),
+        layer.aclnn_input_scale_reciprocal = torch.nn.Parameter(
+            1.0 / layer.aclnn_input_scale.data,
             requires_grad=False,
         )
         layer.aclnn_input_offset = torch.nn.Parameter(
@@ -125,7 +105,3 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
 
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
-
-        if getattr(layer, "ascend_quant_method", "") == COMPRESSED_TENSORS_METHOD:
-            deq_scale = layer.input_scale.data * layer.weight_scale.data
-            layer.deq_scale = torch.nn.Parameter(deq_scale, requires_grad=False)

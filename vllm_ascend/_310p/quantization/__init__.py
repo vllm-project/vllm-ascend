@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,9 +16,7 @@
 #
 
 from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig310
-from vllm_ascend.quantization.compressed_tensors_config import AscendCompressedTensorsConfig  # noqa: F401
 
 __all__ = [
     "AscendModelSlimConfig310",
-    "AscendCompressedTensorsConfig",
 ]

@@ -1,3 +1,20 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
 from __future__ import annotations
 
 from typing import Any
@@ -27,41 +44,6 @@ from vllm_ascend.quantization.modelslim_config import (
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 logger = init_logger(__name__)
-
-
-def get_linear_quant_type(
-    quant_description: dict[str, Any], prefix: str, packed_modules_mapping: dict[str, Any]
-) -> str | None:
-    """Determine the quantization type for a linear layer.
-
-    Args:
-        quant_description: The quantization description dictionary.
-        prefix: The layer prefix.
-        packed_modules_mapping: Mapping for packed/fused modules.
-
-    Returns:
-        The quantization type string (e.g., "W8A8_DYNAMIC").
-    """
-    proj_name = prefix.split(".")[-1]
-    if proj_name in packed_modules_mapping:
-        quant_type = None
-        shard_prefixes = [
-            prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]
-        ]
-        for shard_prefix in shard_prefixes:
-            shard_quant_type = quant_description[shard_prefix + ".weight"]
-
-            if quant_type is None:
-                quant_type = shard_quant_type
-            elif shard_quant_type != quant_type:
-                raise ValueError(
-                    f"Not all shards of {prefix} are quantized with same quant type."
-                    f"Shard {proj_name} uses {shard_quant_type}, but another shard"
-                    f"use {quant_type}. Please check quantization config."
-                )
-    else:
-        quant_type = quant_description[prefix + ".weight"]
-    return quant_type
 
 
 def create_scheme_for_layer_310p(
