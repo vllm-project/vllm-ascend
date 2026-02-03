@@ -84,7 +84,7 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         "ascend", "--gpu-memory-utilization", "0.98", "--compilation-config",
         '{"cudagraph_capture_sizes":[8, 16, 24, 32], "cudagraph_mode":"FULL_DECODE_ONLY"}',
         "--speculative-config",
-        '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}',
+        '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}',
         "--additional-config",
         '{"layer_sharding": ["q_b_proj", "o_proj"]}',
         "--reasoning-parser", "deepseek_v3", "--tokenizer_mode", "deepseek_v32"
