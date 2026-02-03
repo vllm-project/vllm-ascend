@@ -1,25 +1,29 @@
-
 import base64
+
 import torch
 import torch_npu
 import torchair
+
 from ._ops_loader import ensure_ops_loaded
+
 ensure_ops_loaded()
+
 
 def print_from_all_ranks(msg):
     current_device = torch.npu.current_device()
     print(f"[Rank {current_device}] {msg}", flush=True)
 
-class NPUIPCCore():
+
+class NPUIPCCore:
     def __init__(self, ipc_config):
         # Local (per machine) parameters
-        self.tp_rank = ipc_config['tp_rank']
-        self.tp_size = ipc_config['tp_size']
-        self.device_id = ipc_config['device_id']
+        self.tp_rank = ipc_config["tp_rank"]
+        self.tp_size = ipc_config["tp_size"]
+        self.device_id = ipc_config["device_id"]
 
         # Global parameters (acorss machine)
-        self.dp_rank = ipc_config['dp_rank']
-        self.dp_size = ipc_config['dp_size']
+        self.dp_rank = ipc_config["dp_rank"]
+        self.dp_size = ipc_config["dp_size"]
         self.world_size = self.dp_size * self.tp_size
         self.global_rank = self.dp_rank * self.tp_size + self.tp_rank
 
@@ -29,15 +33,17 @@ class NPUIPCCore():
         self.cached_handles = {}
         self.whitelisted_clients = []
         self.tgid = torch.ops.tensor_ipc_utils.rt_get_tgid()
-        print(f'[NPUIPCCore] DP {self.dp_rank}/{self.dp_size}, TP {self.tp_rank}/{self.tp_size}, NPU {self.current_device}, Global NPU {self.global_rank}/{self.world_size}, TGID {self.tgid}')
+        print(
+            f"[NPUIPCCore] DP {self.dp_rank}/{self.dp_size}, TP {self.tp_rank}/{self.tp_size}, NPU {self.current_device}, Global NPU {self.global_rank}/{self.world_size}, TGID {self.tgid}"
+        )
 
     @property
     def current_device(self):
         return torch_npu.npu.current_device()
-    
+
     def current_device(self, device_id, force=False):
         if (self.current_device != device_id) or force:
-            torch_npu.npu.set_device(f'npu:{device_id}')
+            torch_npu.npu.set_device(f"npu:{device_id}")
 
     def initialize_context(self, device_id):
         _ = torch.ones(1, device=f"npu:{device_id}", dtype=torch.float16)
@@ -49,34 +55,50 @@ class NPUIPCCore():
         assert isinstance(tgid_list, list) and all(isinstance(x, int) for x in tgid_list), "Expected a list of integers"
         self.whitelisted_clients += tgid_list
 
-    def _whitelist_handle(self, ipc_handle, param_name='sample'):
+    def _whitelist_handle(self, ipc_handle, param_name="sample"):
         if ipc_handle.device != torch.device("cpu"):
             ipc_handle = ipc_handle.to("cpu")
-        if len(self.whitelisted_clients)>0:
+        if len(self.whitelisted_clients) > 0:
             ret_code = torch.ops.tensor_ipc_utils.rt_set_ipc_mem_pid(ipc_handle, self.whitelisted_clients)
             if ret_code != 0:
-                print(f"[NPUIPCCore] Whiltelisting FAIELD for tensor {param_name} with self.whitelisted_clients {self.whitelisted_clients}. Code: {ret_code}")
+                print(
+                    f"[NPUIPCCore] Whiltelisting FAIELD for tensor {param_name} with self.whitelisted_clients {self.whitelisted_clients}. Code: {ret_code}"
+                )
                 return False
             else:
                 return True
         else:
-            print(f"[NPUIPCCore] Skipping whitelisting for tensor {param_name} as the self.whitelisted_clients is empty {self.whitelisted_clients}")
+            print(
+                f"[NPUIPCCore] Skipping whitelisting for tensor {param_name} as the self.whitelisted_clients is empty {self.whitelisted_clients}"
+            )
             return False
 
     def whitelist_cached_handles(self):
         for tensor_name, (handle_data, ipc_handle) in self.cached_handles.items():
             whitelist_status = self._whitelist_handle(ipc_handle, tensor_name)
-            handle_data['whitelist_status'] = whitelist_status
-        whitelist_success = [param_name for param_name, (handle_data, _) in self.cached_handles.items() if handle_data['whitelist_status'] == True]
-        whitelist_failed = [param_name for param_name, (handle_data, _) in self.cached_handles.items() if handle_data['whitelist_status'] == False]
+            handle_data["whitelist_status"] = whitelist_status
+        whitelist_success = [
+            param_name
+            for param_name, (handle_data, _) in self.cached_handles.items()
+            if handle_data["whitelist_status"] == True
+        ]
+        whitelist_failed = [
+            param_name
+            for param_name, (handle_data, _) in self.cached_handles.items()
+            if handle_data["whitelist_status"] == False
+        ]
         return whitelist_success, whitelist_failed
 
     def _export_handle(self, tensor, param_name="sample"):
         data_ptr = tensor.data_ptr()
         dtype_str = str(tensor.dtype).split(".")[1]
-        ret_code, ipc_handle = torch.ops.tensor_ipc_utils.rt_export_tensor_ipc_handle(data_ptr, list(tensor.shape), dtype_str)
+        ret_code, ipc_handle = torch.ops.tensor_ipc_utils.rt_export_tensor_ipc_handle(
+            data_ptr, list(tensor.shape), dtype_str
+        )
         if ret_code != 0:
-            print(f'[NPUIPCCore] Export IPC handle failed: param_name: {param_name} | Shape: {list(tensor.shape)} | Dtype: {dtype_str} | Ptr: {data_ptr}')
+            print(
+                f"[NPUIPCCore] Export IPC handle failed: param_name: {param_name} | Shape: {list(tensor.shape)} | Dtype: {dtype_str} | Ptr: {data_ptr}"
+            )
             handle_b64 = None
         else:
             handle_b64 = base64.b64encode(ipc_handle.numpy().tobytes()).decode()
@@ -107,7 +129,7 @@ class NPUIPCCore():
         ret, ptr = torch.ops.tensor_ipc_utils.rt_open_ipc_handle(ipc_handle)
 
         if ret != 0:
-            print(f"[NPUIPCCore] Failed to open IPC handle (rt_open_ipc_handle)")
+            print("[NPUIPCCore] Failed to open IPC handle (rt_open_ipc_handle)")
             return None
 
         return self.create_tensor(handle_data["shape"], handle_data["dtype"], ptr)
@@ -121,18 +143,20 @@ class NPUIPCCore():
         self.cached_handles.clear()
         self.whitelisted_clients = []
 
-class WORMBase():
+
+class WORMBase:
     def inference(self, model_path, model, max_tokens):
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         input_text = "Once upon a time in a futuristic world,"
         device_id = next(model.parameters()).device.index
         inputs = tokenizer(input_text, return_tensors="pt").to(f"npu:{device_id}")
         with torch.no_grad():
             outputs = model.generate(**inputs, max_new_tokens=max_tokens)
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)        
-        return generated_text    
-    
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return generated_text
+
     def check_all_weights_on_npu(self, named_parameters_dict):
         params_on_npu = []
         all_on_npu = True
@@ -150,15 +174,16 @@ class WORMBase():
             print_from_all_ranks("⚠️ Some parameters are on CPU")
         print_from_all_ranks(params_on_npu)
 
+
 if __name__ == "__main__":
     print("[Test] Starting NPUIPCCore self-tests...")
 
     ipc_config = {
-        'dp_rank': 0,
-        'dp_size': 2,
-        'tp_rank': 0,
-        'tp_size': 2,
-        'device_id': 0,
+        "dp_rank": 0,
+        "dp_size": 2,
+        "tp_rank": 0,
+        "tp_size": 2,
+        "device_id": 0,
     }
 
     core = NPUIPCCore(ipc_config)

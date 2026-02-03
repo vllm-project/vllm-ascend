@@ -14,12 +14,11 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import uvloop
+import vllm.envs as envs
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
-
-import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -61,7 +60,6 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger("vllm.entrypoints.openai.api_server")
 
-from vllm_ascend import elastic_scaling
 
 @asynccontextmanager
 async def build_async_engine_client(
@@ -154,9 +152,7 @@ async def build_async_engine_client_from_engine_args(
 
 def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> FastAPI:
     if args.disable_fastapi_docs:
-        app = FastAPI(
-            openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
-        )
+        app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan)
     elif args.enable_offline_docs:
         app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
     else:
@@ -244,9 +240,7 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
         elif inspect.iscoroutinefunction(imported):
             app.middleware("http")(imported)
         else:
-            raise ValueError(
-                f"Invalid middleware {middleware}. Must be a function or a class."
-            )
+            raise ValueError(f"Invalid middleware {middleware}. Must be a function or a class.")
 
     app = sagemaker_standards_bootstrap(app)
     return app
@@ -270,9 +264,7 @@ async def init_app_state(
     else:
         request_logger = None
 
-    base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
-    ]
+    base_model_paths = [BaseModelPath(name=name, model_path=args.model) for name in served_model_names]
 
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
@@ -281,11 +273,7 @@ async def init_app_state(
     resolved_chat_template = load_chat_template(args.chat_template)
 
     # Merge default_mm_loras into the static lora_modules
-    default_mm_loras = (
-        vllm_config.lora_config.default_mm_loras
-        if vllm_config.lora_config is not None
-        else {}
-    )
+    default_mm_loras = vllm_config.lora_config.default_mm_loras if vllm_config.lora_config is not None else {}
     lora_modules = process_lora_modules(args.lora_modules, default_mm_loras)
 
     state.openai_serving_models = OpenAIServingModels(
@@ -307,18 +295,14 @@ async def init_app_state(
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import init_generate_state
 
-        await init_generate_state(
-            engine_client, state, args, request_logger, supported_tasks
-        )
+        await init_generate_state(engine_client, state, args, request_logger, supported_tasks)
 
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.translations.api_router import (
             init_transcription_state,
         )
 
-        init_transcription_state(
-            engine_client, state, args, request_logger, supported_tasks
-        )
+        init_transcription_state(engine_client, state, args, request_logger, supported_tasks)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import init_pooling_state
@@ -352,8 +336,7 @@ def validate_api_server_args(args):
     valid_tool_parses = ToolParserManager.list_registered()
     if args.enable_auto_tool_choice and args.tool_call_parser not in valid_tool_parses:
         raise KeyError(
-            f"invalid tool call parser: {args.tool_call_parser} "
-            f"(chose from {{ {','.join(valid_tool_parses)} }})"
+            f"invalid tool call parser: {args.tool_call_parser} (chose from {{ {','.join(valid_tool_parses)} }})"
         )
 
     valid_reasoning_parsers = ReasoningParserManager.list_registered()
@@ -361,8 +344,7 @@ def validate_api_server_args(args):
         reasoning_parser := args.structured_outputs_config.reasoning_parser
     ) and reasoning_parser not in valid_reasoning_parsers:
         raise KeyError(
-            f"invalid reasoning parser: {reasoning_parser} "
-            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
+            f"invalid reasoning parser: {reasoning_parser} (chose from {{ {','.join(valid_reasoning_parsers)} }})"
         )
 
 
@@ -420,9 +402,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 
-async def run_server_worker(
-    listen_address, sock, args, client_config=None, **uvicorn_kwargs
-) -> None:
+async def run_server_worker(listen_address, sock, args, client_config=None, **uvicorn_kwargs) -> None:
     """Run a single API server worker."""
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
@@ -478,12 +458,14 @@ async def run_server_worker(
     finally:
         sock.close()
 
+
 @router.post("/reload_models")
 async def reload_models(raw_request: Request):
     """Initialize the models for specified accelerators."""
     request_content = await raw_request.json()
     await engine_client(raw_request).reload_models()
     return Response(status_code=200)
+
 
 @router.post("/reload_kvcache")
 async def reload_kvcache(raw_request: Request):
@@ -492,14 +474,13 @@ async def reload_kvcache(raw_request: Request):
     await engine_client(raw_request).reload_kvcache()
     return Response(status_code=200)
 
+
 if __name__ == "__main__":
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
     # entrypoints.
     cli_env_setup()
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server."
-    )
+    parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()
     validate_parsed_serve_args(args)

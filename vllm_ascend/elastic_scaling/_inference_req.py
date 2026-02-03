@@ -1,6 +1,6 @@
-import httpx
-import json
 import argparse
+
+import httpx
 
 parser = argparse.ArgumentParser(description="Query vLLM server with a prompt.")
 parser.add_argument(

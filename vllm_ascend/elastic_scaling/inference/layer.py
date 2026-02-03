@@ -1,8 +1,7 @@
-import torch
-
 from collections.abc import Callable
 from typing import get_args
 
+import torch
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
@@ -18,6 +17,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -26,22 +32,14 @@ from vllm.utils.torch_utils import (
     aux_stream,
 )
 
-from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-    FusedMoEMethodBase,
-)
-from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
-    UnquantizedFusedMoEMethod,
-)
-
 logger = init_logger(__name__)
 
 from vllm.model_executor.layers.fused_moe.layer import (
-    maybe_roundup_hidden_size, 
+    FusedMoE,
+    FusedMoERouterImpl,
     determine_expert_placement_strategy,
     get_compressed_expert_map,
-    FusedMoERouterImpl,
-    FusedMoE
+    maybe_roundup_hidden_size,
 )
 
 
@@ -90,7 +88,6 @@ def determine_expert_map(
 
     EXPERT_PARTITION_SPLIT = os.getenv("EXPERT_PARTITION_SPLIT", "")
     if EXPERT_PARTITION_SPLIT:
-
         EXPERT_PARTITION_SPLIT = int(EXPERT_PARTITION_SPLIT)
 
         LOCAL_NUM_EXPERTS = os.getenv("LOCAL_NUM_EXPERTS", "0")
@@ -103,19 +100,15 @@ def determine_expert_map(
         representative_ep_rank = ep_rank % EXPERT_PARTITION_SPLIT
 
         # Create expert map
-        expert_map = torch.full(
-            (global_num_experts,), -1, dtype=torch.int32
-        )
+        expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
 
         start = representative_ep_rank * local_num_experts
         end = start + local_num_experts
-        
+
         print(f"{start=} {end=} {representative_ep_rank=} {local_num_experts=}")
 
-        expert_map[start:end] = torch.arange(
-            0, local_num_experts, dtype=torch.int32
-        )
-        
+        expert_map[start:end] = torch.arange(0, local_num_experts, dtype=torch.int32)
+
         expert_mask = None
         if return_expert_mask:
             expert_mask = torch.ones(
@@ -130,10 +123,7 @@ def determine_expert_map(
                     (
                         expert_map,
                         torch.tensor(
-                            [
-                                local_num_experts + i
-                                for i in range(num_fused_shared_experts)
-                            ],
+                            [local_num_experts + i for i in range(num_fused_shared_experts)],
                             dtype=torch.int32,
                         ),
                     ),
@@ -152,17 +142,11 @@ def determine_expert_map(
     # Create an expert map for the local experts
     if expert_placement_strategy == "linear":
         start_idx = ep_rank * base_experts + min(ep_rank, remainder)
-        expert_map[start_idx : start_idx + local_num_experts] = torch.arange(
-            0, local_num_experts, dtype=torch.int32
-        )
+        expert_map[start_idx : start_idx + local_num_experts] = torch.arange(0, local_num_experts, dtype=torch.int32)
     elif expert_placement_strategy == "round_robin":
-        local_log_experts = torch.arange(
-            ep_rank, global_num_experts, ep_size, dtype=torch.int32
-        )
+        local_log_experts = torch.arange(ep_rank, global_num_experts, ep_size, dtype=torch.int32)
 
-        expert_map[local_log_experts] = torch.arange(
-            0, local_num_experts, dtype=torch.int32
-        )
+        expert_map[local_log_experts] = torch.arange(0, local_num_experts, dtype=torch.int32)
     else:
         raise ValueError(
             "Unsupported expert placement strategy "
@@ -172,9 +156,7 @@ def determine_expert_map(
 
     expert_mask = None
     if return_expert_mask:
-        expert_mask = torch.ones(
-            (global_num_experts + num_fused_shared_experts + 1,), dtype=torch.int32
-        )
+        expert_mask = torch.ones((global_num_experts + num_fused_shared_experts + 1,), dtype=torch.int32)
         expert_mask[-1] = 0
         expert_mask[:global_num_experts] = expert_map > -1
         expert_map = torch.cat(
@@ -227,6 +209,7 @@ def __init__(
 ):
     super(FusedMoE, self).__init__()
     import os
+
     num_experts = int(os.getenv("GLOBAL_NUM_EXPERTS", "0"))
 
     # Allow disabling of the separate shared experts stream for
@@ -241,9 +224,7 @@ def __init__(
         # aux_stream() returns None on non-cuda-alike platforms.
         self.shared_experts_stream = aux_stream()
         if self.shared_experts_stream is not None:
-            logger.debug_once(
-                "Enabled separate cuda stream for MoE shared_experts", scope="local"
-            )
+            logger.debug_once("Enabled separate cuda stream for MoE shared_experts", scope="local")
 
     if params_dtype is None:
         params_dtype = torch.get_default_dtype()
@@ -262,9 +243,7 @@ def __init__(
         # since model_config is not set in the pytest test.
         moe_in_dtype = params_dtype
 
-    tp_size_ = (
-        tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
-    )
+    tp_size_ = tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
     dp_size_ = dp_size if dp_size is not None else get_dp_group().world_size
     pcp_size_ = pcp_size if pcp_size is not None else get_pcp_group().world_size
 
@@ -304,41 +283,28 @@ def __init__(
     self.expert_load_view: torch.Tensor | None = None
     self.logical_to_physical_map: torch.Tensor | None = None
     self.logical_replica_count: torch.Tensor | None = None
-    self.expert_placement_strategy: ExpertPlacementStrategy = (
-        vllm_config.parallel_config.expert_placement_strategy
-    )
+    self.expert_placement_strategy: ExpertPlacementStrategy = vllm_config.parallel_config.expert_placement_strategy
 
     # ROCm aiter shared experts fusion
     self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-    self.aiter_fmoe_shared_expert_enabled = (
-        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-    )
+    self.aiter_fmoe_shared_expert_enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
 
     self.num_fused_shared_experts = (
-        n_shared_experts
-        if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
-        else 0
+        n_shared_experts if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled else 0
     )
-    if (
-        not self.aiter_fmoe_shared_expert_enabled
-        and self.num_fused_shared_experts != 0
-    ):
+    if not self.aiter_fmoe_shared_expert_enabled and self.num_fused_shared_experts != 0:
         raise ValueError(
-            "n_shared_experts is only supported on ROCm aiter when "
-            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
+            "n_shared_experts is only supported on ROCm aiter when VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
         )
 
     # Determine expert maps
     if self.use_ep:
         if self.enable_eplb:
             assert self.global_num_experts % self.ep_size == 0, (
-                "EPLB currently only supports even distribution of "
-                "experts across ranks."
+                "EPLB currently only supports even distribution of experts across ranks."
             )
         else:
-            assert num_redundant_experts == 0, (
-                "Redundant experts are only supported with EPLB."
-            )
+            assert num_redundant_experts == 0, "Redundant experts are only supported with EPLB."
 
         self.expert_placement_strategy = determine_expert_placement_strategy(
             expert_placement_strategy=self.expert_placement_strategy,
@@ -382,13 +348,11 @@ def __init__(
 
     self.top_k = top_k
 
-    self._init_aiter_shared_experts_topK_buffer(
-        vllm_config=vllm_config, dp_size=dp_size_
-    )
+    self._init_aiter_shared_experts_topK_buffer(vllm_config=vllm_config, dp_size=dp_size_)
     if self.use_ep and self.rocm_aiter_fmoe_enabled:
-        assert self.expert_mask is None or torch.all(
-            (expert_mask == 0) | (expert_mask == 1)
-        ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
+        assert self.expert_mask is None or torch.all((expert_mask == 0) | (expert_mask == 1)), (
+            "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
+        )
 
     assert intermediate_size % self.tp_size == 0
     self.hidden_size = hidden_size
@@ -422,9 +386,7 @@ def __init__(
         )
 
     if self.scoring_func != "softmax" and not self.use_grouped_topk:
-        raise ValueError(
-            "Only softmax scoring function is supported for non-grouped topk."
-        )
+        raise ValueError("Only softmax scoring function is supported for non-grouped topk.")
 
     # ToDo: Better logic to determine the routing method type
     if routing_method_type is not None:
@@ -437,9 +399,7 @@ def __init__(
                 self.routing_method_type = RoutingMethodType.Llama4
         elif self.scoring_func == "softmax":
             self.routing_method_type = (
-                RoutingMethodType.Renormalize
-                if not self.renormalize
-                else RoutingMethodType.RenormalizeNaive
+                RoutingMethodType.Renormalize if not self.renormalize else RoutingMethodType.RenormalizeNaive
             )
         else:
             self.routing_method_type = RoutingMethodType.TopK
@@ -457,9 +417,7 @@ def __init__(
         is_act_and_mul=is_act_and_mul,
         is_lora_enabled=vllm_config.lora_config is not None,
     )
-    self.moe_config_use_flashinfer_cutlass_kernels = (
-        self.moe_config.use_flashinfer_cutlass_kernels
-    )
+    self.moe_config_use_flashinfer_cutlass_kernels = self.moe_config.use_flashinfer_cutlass_kernels
 
     self.quant_config = quant_config
 
@@ -496,13 +454,10 @@ def __init__(
             ),
         ):
             raise NotImplementedError(
-                "is_act_and_mul=False is supported only for unquantized "
-                ", ModelOpt FP8, and ModelOpt NvFp4 checkpoints"
+                "is_act_and_mul=False is supported only for unquantized , ModelOpt FP8, and ModelOpt NvFp4 checkpoints"
             )
         if not current_platform.is_cuda():
-            raise NotImplementedError(
-                "is_act_and_mul=False is supported only for CUDA for now"
-            )
+            raise NotImplementedError("is_act_and_mul=False is supported only for CUDA for now")
 
     if self.enable_eplb and not self.quant_method.supports_eplb:
         # TODO: Add support for additional quantization methods.

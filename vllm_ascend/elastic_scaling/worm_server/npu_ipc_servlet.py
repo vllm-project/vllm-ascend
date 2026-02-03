@@ -1,8 +1,9 @@
-import zmq
 import os
 import pickle
-import torch
 import threading
+
+import torch
+import zmq
 from worm_ipc.npu_ipc_core import NPUIPCCore, WORMBase
 
 
@@ -42,8 +43,11 @@ class NPUIPCServlet(WORMBase):
         new_allocations = []
         for param_name, param in self.named_parameters.items():
             handle_info = self.ipc_core.export_handle(param, param_name)
-            if handle_info is None: new_allocations.append(param_name)
-        print(f'[NPUIPCServlet] Model Parameters Handle Info Cached Successfully. New allocations - {len(new_allocations)}/{len(self.named_parameters)}={round(len(new_allocations)/len(self.named_parameters)*100,2)}%')
+            if handle_info is None:
+                new_allocations.append(param_name)
+        print(
+            f"[NPUIPCServlet] Model Parameters Handle Info Cached Successfully. New allocations - {len(new_allocations)}/{len(self.named_parameters)}={round(len(new_allocations) / len(self.named_parameters) * 100, 2)}%"
+        )
 
     def set_kv_caches(self, kv_caches):
         self.kv_caches = kv_caches
@@ -59,28 +63,26 @@ class NPUIPCServlet(WORMBase):
         self.ipc_core.set_tgid([client_tgid])
         self.ipc_core.current_device(self.ipc_core.device_id, force=True)
         whitelist_success, whitelist_failed = self.ipc_core.whitelist_cached_handles()
-        print(f'\nWhitelist completed. TGIDs {self.ipc_core.whitelisted_clients} Failed percentage {len(whitelist_failed)}/{len(whitelist_success)+len(whitelist_failed)} = {round(len(whitelist_failed)/(len(whitelist_success)+len(whitelist_failed))*100,2)}%')
+        print(
+            f"\nWhitelist completed. TGIDs {self.ipc_core.whitelisted_clients} Failed percentage {len(whitelist_failed)}/{len(whitelist_success) + len(whitelist_failed)} = {round(len(whitelist_failed) / (len(whitelist_success) + len(whitelist_failed)) * 100, 2)}%"
+        )
         return server_tgid
 
     def handle_request(self, request):
         cmd = request.pop("cmd")
 
         if cmd == "handshake":
-            print(f'tgid {request["client_tgid"]}')
-            print(f'client_device {request["client_device"]}')
+            print(f"tgid {request['client_tgid']}")
+            print(f"client_device {request['client_device']}")
             server_tgid = self.handshake(request["client_tgid"], request["client_device"])
-            return {"server_tgid": server_tgid,
-                    "server_device": self.ipc_core.device_id}
+            return {"server_tgid": server_tgid, "server_device": self.ipc_core.device_id}
 
         elif cmd == "zero_copy":
             param_name = request["param_name"]
-            return self.ipc_core.export_handle(None, param_name) # assumes its already cached
+            return self.ipc_core.export_handle(None, param_name)  # assumes its already cached
 
         elif cmd == "zero_copy_batch":
-            return {
-                name: self.ipc_core.export_handle(tensor, name)
-                for name, tensor in self.named_parameters.items()
-            }
+            return {name: self.ipc_core.export_handle(tensor, name) for name, tensor in self.named_parameters.items()}
 
         elif cmd == "zero_copy_kv_handles":
             kv_cache_handles = {}
@@ -88,14 +90,14 @@ class NPUIPCServlet(WORMBase):
                 if isinstance(cache_tensor, tuple):
                     kv_cache_handles[cache_key] = (
                         self.ipc_core.export_handle(cache_tensor[0], f"kv0_{cache_key}"),
-                        self.ipc_core.export_handle(cache_tensor[1], f"kv1_{cache_key}")
+                        self.ipc_core.export_handle(cache_tensor[1], f"kv1_{cache_key}"),
                     )
                 else:
                     kv_cache_handles[cache_key] = self.ipc_core.export_handle(cache_tensor, f"kv_{cache_key}")
             return kv_cache_handles
-        
+
         else:
-            print(f'[NPUIPCServlet] Unknown command received! {cmd}')
+            print(f"[NPUIPCServlet] Unknown command received! {cmd}")
             return {"error": f"Unknown command: {cmd}"}
 
     def reset(self):
@@ -103,16 +105,17 @@ class NPUIPCServlet(WORMBase):
         self.kv_caches = {}
         self.ipc_core.reset()
 
-if __name__=='__main__':
+
+if __name__ == "__main__":
     ipc_config = {
-        'dp_rank': 0,
-        'dp_size': 2,
-        'tp_rank': 0,
-        'tp_size': 2,
-        'device_id': 0,
+        "dp_rank": 0,
+        "dp_size": 2,
+        "tp_rank": 0,
+        "tp_size": 2,
+        "device_id": 0,
     }
-    ipc_engine = NPUIPCServlet(ipc_config, stamp='test')
-    sample_tensor = torch.ones((5000,50000), dtype=torch.int8, device=f'npu:{ipc_config["device_id"]}')
-    handle_info = ipc_engine.ipc_core.export_handle(sample_tensor, 'sample')
+    ipc_engine = NPUIPCServlet(ipc_config, stamp="test")
+    sample_tensor = torch.ones((5000, 50000), dtype=torch.int8, device=f"npu:{ipc_config['device_id']}")
+    handle_info = ipc_engine.ipc_core.export_handle(sample_tensor, "sample")
     print(handle_info, sample_tensor)
-    input('press any key to exit')
+    input("press any key to exit")

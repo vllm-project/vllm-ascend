@@ -1,5 +1,7 @@
 import os
+
 from vllm.tasks import SupportedTask
+
 
 def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
     tasks = list[SupportedTask]()

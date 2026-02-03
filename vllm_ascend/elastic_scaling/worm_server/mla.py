@@ -1,9 +1,7 @@
-from vllm.model_executor.layers.mla import MLAModules
-from vllm.model_executor.layers.mla import MLAModules
-from vllm.config import CacheConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.attention.layer import MLAAttention
-from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.config import CacheConfig
+from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
+from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
 def __init__(
@@ -21,7 +19,6 @@ def __init__(
     quant_config: QuantizationConfig | None = None,
     prefix: str = "",
 ) -> None:
-
     super(MultiHeadLatentAttentionWrapper, self).__init__()
     self.hidden_size = hidden_size
     self.qk_nope_head_dim = qk_nope_head_dim
@@ -66,7 +63,7 @@ def __init__(
         ## Adding missing arguments
         rotary_emb=self.rotary_emb,
         q_proj=self.q_proj,
-        o_proj=self.o_proj
+        o_proj=self.o_proj,
     )
 
     self.prefix = prefix
