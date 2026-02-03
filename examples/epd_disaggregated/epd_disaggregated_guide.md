@@ -1,6 +1,7 @@
 # EPD disaggregated deployment Guide
 
 ## Environmental Dependencies
+
 * Software:
     * Python >= 3.10, < 3.12
     * CANN == 8.5.0
@@ -9,12 +10,17 @@
     * mooncake-transfer-engine reference documentation(pd disaggregated needed): <https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md>
 
 ## run
+
 The EPD disaggregated technology accelerates model inference by decoupling the visual encoding computation and LLM computation stages. Currently, the EPD separation feature can achieve different data transmissions between E and P/PD nodes by configuring different connector backends. Vllm-ascend currently supports the ECexample-connector backend implemented on vllm, and will support Mooncake as well as shared memory(SHM) backend transmission methods in the future.
 
 ### ECexample-connector deployment guide
+
 Using the Qwen3-VL-8B model inference as an example.
+
 #### 1. run 1e1pd case
+
 ##### 1.1 run e node
+
 ```shell
 bash run_e.sh
 ```
@@ -50,9 +56,12 @@ vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
         }
     }'
 ```
+
 `--gpu-memory-utilization`:For LLM Model, It is usually used to control the kv cache allocation.For model architectures like vision encoder that do not require KV Cache, it is usually set to 0.01 to minimize HBM usage.<br>
 `--ec-transfer-config`:Specify ec-transfer connector settings.For ECExampleConnector, you need to specify the role played by the current node(For e node, set it to 'ec_producer') and the local memory address for data transfer between nodes.<br>
+
 ##### 1.2 run pd node
+
 ```shell
 bash run_pd.sh
 ```
@@ -84,12 +93,17 @@ vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
         }
     }'
 ```
+
 `--ec-transfer-config`:Same as e node,but ec_role is set to 'ec_consumer'.<br>
+
 ##### 1.3 run proxy node
+
 ```shell
 bash run_proxy.sh
 ```
+
 Content of the run_proxy.sh script
+
 ```bash
 python3 epd_load_balance_proxy_layerwise_server_example.py \
     --encoder-hosts 127.0.0.1 \
@@ -99,6 +113,7 @@ python3 epd_load_balance_proxy_layerwise_server_example.py \
     --host 127.0.0.1 \
     --port 8001
 ```
+
 TODO: explain the param.<br>
 `--encoder-hosts`: E node IP address.<br>
 `--encoder-ports`: The E node port number. It needs to be consistent with the --port in the E node's startup script.<br>
@@ -106,7 +121,9 @@ TODO: explain the param.<br>
 `--pd-ports`: The PD node port number. It needs to be consistent with the --port in the PD node's startup script.<br>
 `--host`: Proxy node IP address.<br>
 `--port`: Proxy node port number.<br>
+
 ##### 1.4 run inference
+
 ```bash
 curl http://localhost:8001/v1/chat/completions \
     -H "Content-Type: application/json" \
@@ -121,8 +138,11 @@ curl http://localhost:8001/v1/chat/completions \
     ]
     }'
 ```
+
 #### 2.run 1e1p1d case
+
 ##### 2.1 run e node
+
 ```shell
 bash run_e.sh
 ```
@@ -160,6 +180,7 @@ vllm serve "/home/p00929506/Qwen3-VL-8B-Instruct" \
 ```
 
 ##### 2.2 run p node
+
 ```shell
 bash run_p.sh
 ```
@@ -209,7 +230,9 @@ vllm serve "/home/p00929506/Qwen3-VL-8B-Instruct" \
           }
       }'
 ```
+
 ##### 2.3 run d node
+
 ```shell
 bash run_d.sh
 ```
@@ -250,7 +273,9 @@ vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
                 }
         }'
 ```
+
 ##### 2.4 run proxy node
+
 ```shell
 bash run_proxy.sh
 ```
@@ -268,11 +293,14 @@ python3 epd_load_balance_proxy_layerwise_server_example.py \
     --host 127.0.0.1 \
     --port 8001
 ```
+
 `--prefiller-hosts`: Prefill node IP address.<br>
 `--prefiller-ports`: The Prefill node port number. It needs to be consistent with the --port in the Prefill node's startup script.<br>
 `--decoder-hosts`: Decode node IP address.<br>
 `--decoder-ports`: The Decode node port number. It needs to be consistent with the --port in the Decode node's startup script.<br>
+
 ##### 2.5 run inference
+
 ```bash
 curl http://localhost:8001/v1/chat/completions \
     -H "Content-Type: application/json" \
@@ -287,5 +315,3 @@ curl http://localhost:8001/v1/chat/completions \
     ]
     }'
 ```
-
-
