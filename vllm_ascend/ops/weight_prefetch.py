@@ -138,9 +138,9 @@ class WeightPrefetchMethod:
         elif prefetch_layer_name == self.MLP_DOWN:
             self._maybe_prefetch_mlp_down_weight_preprocess(x_dependency, forward_context)
         else:
-            raise ValueError(f"Unsupported prefetch weight name: {prefetch_weight_name}")
+            raise ValueError(f"Unsupported prefetch weight name: {prefetch_layer_name}")
 
-    def _maybe_prefetch_mlp_gate_up_weight_preprocess(self, x_dependency: torch.Tensor, forward_context: ForwardContext, curr_layer_prefix: str):
+    def _maybe_prefetch_mlp_gate_up_weight_preprocess(self, x_dependency: torch.Tensor, forward_context: ForwardContext, curr_layer_prefix: str | None):
         if not curr_layer_prefix:
             raise ValueError("curr_layer_prefix must been specified when prefetching mlp gate_up_proj weight")
 
