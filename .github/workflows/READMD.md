@@ -47,8 +47,10 @@ To speed up CI execution, we support splitting large test suites into multiple p
 The partitioning algorithm uses a Greedy Approach to achieve load balancing, aiming to make the total estimated runtime of each partition as equal as possible.
 
 1. **Read Configuration**: The script reads all non-skipped test cases and their `estimated_time` from `config.yaml`.
-2. **Sort**: Test cases are sorted by `estimated_time` in descending order.
+2. **Sort(Balanced Assignment)**: Test cases are sorted by `estimated_time` in descending order. This ensures that the heaviest tasks are distributed first to achieve optimal load balancing across partitions.
 3. **Assign**: Iterating through the sorted test cases, each case is assigned to the partition (Bucket) with the current minimum total time.
+4. **Re-sort (Fast Feedback)**: Within each partition, tests are re-sorted by `estimated_time` in ascending order. This allows the CI to cover as many test cases as possible in the early stages.
+    > TIP: If you need to prioritize a new test case, you can temporarily set its estimated_time to 0 to ensure it runs first, then update it to the actual value later.
 
 ### How to Modify Partitioning Logic
 
