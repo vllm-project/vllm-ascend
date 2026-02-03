@@ -1469,7 +1469,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         need_gather_q_kv: bool = False,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert output is not None, "Output tensor must be provided."
+        assert output is not None, " Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
             for layer in (self.layer_sharding_kwargs or []):
