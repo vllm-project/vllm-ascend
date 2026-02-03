@@ -126,6 +126,7 @@ class TestDisptachFFNCombine:
             scale2_npu.append(scale2[i].npu())
 
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
+        expert_token_nums = self.generate_random_tensor((1, e), dtype=torch.int32).npu()
 
         torch.ops._C_ascend.dispatch_ffn_combine(
             x=x,
@@ -138,6 +139,7 @@ class TestDisptachFFNCombine:
             group=self.hcomm_info,
             max_output_size=512,
             out=out,
+            expert_token_nums=expert_token_nums,
         )
         return True
 
@@ -177,6 +179,7 @@ class TestDisptachFFNCombine:
         scale2_npu.append(scale2.npu())
 
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
+        expert_token_nums = self.generate_random_tensor((1, e), dtype=torch.int32).npu()
 
         torch.ops._C_ascend.dispatch_ffn_combine(
             x=x,
@@ -189,6 +192,7 @@ class TestDisptachFFNCombine:
             group=self.hcomm_info,
             max_output_size=512,
             out=out,
+            expert_token_nums=expert_token_nums,
         )
         return True
 
