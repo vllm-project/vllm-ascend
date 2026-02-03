@@ -134,8 +134,8 @@ class NPUModelRunner310(NPUModelRunner):
                     num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
 
-                    if hasattr(attn_backend, "get_supported_block_size") and self.use_hybrid_blocks:
-                        block_size = attn_backend.get_supported_block_size()[0]
+                    if hasattr(attn_backend, "get_supported_kernel_block_sizes") and self.use_hybrid_blocks:
+                        block_size = attn_backend.get_supported_kernel_block_sizes()[0]
 
                         block_size_chunk = kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
