@@ -36,12 +36,10 @@ def post_broadcast_metadata():
 
 
 def post_scaleup(num_npus=2):
-    import subprocess
-
     url = f"{BASE}/scaleup?num_npus={num_npus}"
-    cmd = f'curl -v -X POST "{url}"'
-    r = subprocess.run(cmd, shell=True)
-    return r
+    r = requests.post(url, timeout=300)
+    r.raise_for_status()
+    return r.json()
 
 
 def post_scaledown(num_npus=2):
