@@ -12,10 +12,10 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 8.3.RC2                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.8.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.8.0                          | Required for torch-npu and vllm           |
-    | NNAL          | == 8.3.RC2                       | Required for libatb.so, enables advanced tensor operations |
+    | CANN          | == 8.5.0                       | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
+    | NNAL          | == 8.5.0                       | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 
@@ -90,19 +90,18 @@ source vllm-ascend-env/bin/activate
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run --full
-# https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/Milan-ASL/Milan-ASL%20V100R001C22B800TP052/Ascend-cann-kernels-910b_8.3.rc2_linux-aarch64.run
-
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-toolkit_8.5.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.5.0_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.5.0_linux-"$(uname -i)".run --full
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run
-./Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run
-./Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-910b-ops_8.5.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-910b-ops_8.5.0_linux-"$(uname -i)".run
+./Ascend-cann-910b-ops_8.5.0_linux-"$(uname -i)".run --install
+
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-nnal_8.5.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.5.0_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.5.0_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```

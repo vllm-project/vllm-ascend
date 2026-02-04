@@ -20,16 +20,13 @@ name: 'e2e nightly test'
 on:
   workflow_call:
     inputs:
-      vllm:
-        required: true
-        type: string
       runner:
         required: true
         type: string
       image:
         required: false
         type: string
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
       tests:
         required: true
         type: string
@@ -58,7 +55,7 @@ jobs:
     container:
       image: ${{ inputs.image }}
     env:
-      TRANSFORMERS_OFFLINE: 1
+      HF_HUB_OFFLINE: 1
       VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
@@ -110,30 +107,12 @@ jobs:
           fi
           cd ..
 
-      - name: Install custom-ops (for DeepSeek-V3.2-Exp)
-        if: ${{ inputs.name == 'deepseek3_2-exp-w8a8' }}
-        shell: bash -l {0}
-        run: |
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
-          chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-          ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-          export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-          export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-          pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-
-      - name: Install Ascend toolkit & triton_ascend
+      - name: Install clang
         shell: bash -l {0}
         run: |
           apt-get update && apt-get -y install clang-15
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
-          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
 
       - name: Run vllm-project/vllm-ascend test
         env:

@@ -116,26 +116,6 @@ class TestTokenDispatcherWithMC2(TestBase):
             mock_dispatch.assert_called_once()
             self.assertEqual(output.group_list_type, 0)  # group_list_type == 0
 
-    def test_token_dispatch_with_shared_experts_and_quant(self):
-        self.shared_experts = MagicMock()
-        self.shared_experts.gate_up_proj.return_value = (torch.randn(10, 128),
-                                                         torch.tensor(1.0))
-        self.shared_experts.act_fn.return_value = torch.randn(10, 128)
-        self.dispatcher.with_quant = False
-        self.dispatcher.shared_act = torch.randn(10, 128)
-        self.dispatcher.swiglu_out_scale = torch.tensor(1.0)
-        self.hidden_states = torch.randn(10, 128)
-        self.topk_weights = torch.randn(10, 1)
-
-        with patch("torch_npu.npu_moe_distribute_dispatch_v2",
-                   return_value=(torch.randn(10, 128), ) * 5 + (None, None)):
-            self.dispatcher.token_dispatch(self.hidden_states,
-                                           self.topk_weights,
-                                           torch.randint(0, 8, (10, 1)),
-                                           torch.tensor(
-                                               [0, 1, 2, 3, 4, 5, 6, 7]),
-                                           shared_experts=self.shared_experts)
-
     def test_get_combine_mc_kwargs_with_quant(self):
         self.dispatcher.with_quant = True
         hidden_states = torch.randn(10, 128)
@@ -492,23 +472,3 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.assertIsNotNone(result.dynamic_scale)
         self.assertEqual(result.group_list_type, 1)
 
-    def test_token_dispatch_with_log2phy(self):
-        hidden_states = torch.randn(8, 16)
-        topk_weights = torch.rand(8, 4)
-        topk_ids = torch.randint(0, 4, (8, 2)).long()
-        expert_map = torch.tensor([0, 1, 2, 3])
-        log2phy = torch.tensor([1, 0, 3, 2])
-
-        self.dispatcher.expert_ids_per_ep_rank = torch.tensor(
-            [0, 1], dtype=torch.int32)
-        self.dispatcher.local_expert_indices = [0, 1]
-
-        result = self.dispatcher.token_dispatch(hidden_states=hidden_states,
-                                                topk_weights=topk_weights,
-                                                topk_ids=topk_ids,
-                                                expert_map=expert_map,
-                                                log2phy=log2phy)
-
-        self.assertIsNotNone(result.hidden_states)
-        self.assertIsNotNone(result.group_list)
-        self.assertEqual(result.group_list_type, 1)

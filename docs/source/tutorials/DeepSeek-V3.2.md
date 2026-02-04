@@ -31,28 +31,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can using our official docker image to run `DeepSeek-V3.2` directly..
 
-:::{note}
-We strongly recommend you to install triton ascend package to speed up the inference.
-
-The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is for better performance, please follow the instructions below to install it and its dependency.
-
-Install the Ascend BiSheng toolkit, execute the command:
-
-```bash
-BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20260105.run"
-BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-```
-
-Install Triton Ascend:
-
-```bash
-python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
-```
-
-:::
-
 :::::{tab-set}
 :sync-group: install
 
@@ -147,6 +125,264 @@ If you want to deploy multi-node environment, you need to set up environment on 
 :::{note}
 In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`. Feel free to change it to your own path.
 :::
+
+### Single-node Deployment
+
+- Quantized model `DeepSeek-V3.2-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16).
+
+Run the following script to execute online inference.
+
+```shell
+export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=200
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+--host 0.0.0.0 \
+--port 8000 \
+--data-parallel-size 2 \
+--tensor-parallel-size 8 \
+--quantization ascend \
+--seed 1024 \
+--served-model-name deepseek_v3_2 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 8192 \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.92 \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+
+```
+
+### Multi-node Deployment
+
+- `DeepSeek-V3.2-w8a8`: require at least 2 Atlas 800 A2 (64G × 8).
+
+Run the following scripts on two nodes respectively.
+
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
+
+**Node0**
+
+```{code-block} bash
+   :substitutions:
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxx"
+local_ip="xxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxxx"
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=200
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+--host 0.0.0.0 \
+--port 8077 \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 12890 \
+--tensor-parallel-size 16 \
+--quantization ascend \
+--seed 1024 \
+--served-model-name deepseek_v3_2 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 8192 \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.92 \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+```
+
+**Node1**
+
+```{code-block} bash
+   :substitutions:
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxx"
+local_ip="xxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxxx"
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=200
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+--host 0.0.0.0 \
+--port 8077 \
+--headless \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-start-rank 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 12890 \
+--tensor-parallel-size 16 \
+--quantization ascend \
+--seed 1024 \
+--served-model-name deepseek_v3_2 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 8192 \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.92 \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+```
+
+::::
+::::{tab-item} A2 series
+:sync: A2
+
+**Node0**
+
+```{code-block} bash
+   :substitutions:
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxx"
+local_ip="xxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxxx"
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=100
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=200
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
+export HCCL_CONNECT_TIMEOUT=120
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+--host 0.0.0.0 \
+--port 8077 \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 13389 \
+--tensor-parallel-size 8 \
+--quantization ascend \
+--seed 1024 \
+--served-model-name deepseek_v3_2 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 8192 \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.92 \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48]}' \
+--speculative-config '{"num_speculative_tokens": 2, "method": "deepseek_mtp"}'
+
+```
+
+**Node1**
+
+```{code-block} bash
+   :substitutions:
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxx"
+local_ip="xxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxxx"
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=100
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=200
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
+export HCCL_CONNECT_TIMEOUT=120
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+--host 0.0.0.0 \
+--port 8077 \
+--headless \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-start-rank 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 13389 \
+--tensor-parallel-size 8 \
+--quantization ascend \
+--seed 1024 \
+--served-model-name deepseek_v3_2 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 8192 \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.92 \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48]}' \
+--speculative-config '{"num_speculative_tokens": 2, "method": "deepseek_mtp"}'
+
+```
+
+::::
+:::::
 
 ### Prefill-Decode Disaggregation
 
@@ -278,9 +514,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
@@ -302,6 +535,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -312,6 +549,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -351,9 +589,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
@@ -376,6 +611,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -386,6 +625,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -426,8 +666,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
 
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
@@ -438,8 +676,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
-        export VLLM_ASCEND_ENABLE_MLAPO=1
 
 
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
@@ -452,6 +688,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -504,9 +744,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-        export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-        export VLLM_TORCH_PROFILER_WITH_STACK=0
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
@@ -516,8 +753,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
-        export VLLM_ASCEND_ENABLE_MLAPO=1
 
 
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
@@ -530,6 +765,10 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
@@ -601,7 +840,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     -d '{
         "model": "deepseek_v3.2",
         "prompt": "The future of AI is",
-        "max_tokens": 50,
+        "max_completion_tokens": 50,
         "temperature": 0
     }'
 ```

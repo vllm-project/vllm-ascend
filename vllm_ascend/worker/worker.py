@@ -58,16 +58,13 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
                                enable_sp, get_ascend_device_type,
-                               register_ascend_customop, vllm_version_is)
+                               register_ascend_customop)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 
-if vllm_version_is("0.13.0"):
-    from vllm.model_executor.utils import set_random_seed
-else:
-    from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 
 torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
     ["torch.npu.current_stream"],
@@ -121,13 +118,6 @@ class NPUWorker(WorkerBase):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
 
-        if vllm_version_is('0.13.0'):
-            if self.model_config.trust_remote_code:
-                # note: lazy import to avoid importing torch before initializing
-                from vllm.utils.import_utils import init_cached_hf_modules
-
-                init_cached_hf_modules()
-
         self.profiler = self._init_profiler()
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
@@ -140,6 +130,57 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+
+        npugraph_ex_config = get_ascend_config().npugraph_ex_config
+        if npugraph_ex_config.enable and npugraph_ex_config.enable_static_kernel:
+            # Prevent duplicate triggers, execute the exit logic only once
+            shutdown_request = False
+
+            def signal_handler(signum, frame):
+                nonlocal shutdown_request
+                if not shutdown_request:
+                    shutdown_request = True
+                    self.uninstall_static_kernel()
+                    raise SystemExit()
+
+            # Either SIGTERM or SIGINT will terminate the worker
+            import signal
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
+
+
+    def uninstall_static_kernel(self):
+        import os
+        import fcntl
+        import subprocess
+
+        ascend_home_path = os.environ["ASCEND_HOME_PATH"]
+        static_kernel_dir_path = os.path.join(ascend_home_path, 'opp/static_kernel')
+        uninstall_script_path = os.path.join(static_kernel_dir_path, 'ai_core/uninstall.sh')
+        lock_file_path = os.path.join(static_kernel_dir_path, 'uninstall.lock')
+
+        if not os.path.exists(uninstall_script_path):
+            return
+        with open(lock_file_path, 'w') as lock_fd:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                subprocess.Popen(
+                    ['bash', uninstall_script_path],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+            except (BlockingIOError, OSError) as e:
+                return
+            finally:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    if os.path.exists(lock_file_path):
+                        os.remove(lock_file_path)
+                except Exception:
+                    return
+
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
@@ -376,7 +417,6 @@ class NPUWorker(WorkerBase):
 
     def compile_or_warm_up_model(self) -> None:
         # Note: need to adapt for graph mode.
-        self.model_runner.eplb_warmup()
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
                         or []).copy()
         if not self.model_config.enforce_eager:
@@ -437,6 +477,19 @@ class NPUWorker(WorkerBase):
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Update max_model_len after auto-fit to NPU memory.
+
+        This is called when max_model_len=-1 is used and the engine
+        automatically determines the maximum context length that fits
+        in GPU memory. Workers need to update their cached max_model_len
+        to match the engine's decision.
+        """
+        self.model_config.max_model_len = max_model_len
+        if self.model_runner is not None:
+            self.model_runner.update_max_model_len(max_model_len)
+        logger.debug("Updated max_model_len to %d", max_model_len)
+
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -489,14 +542,15 @@ class NPUWorker(WorkerBase):
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        if envs_vllm.VLLM_TORCH_PROFILER_DIR:
+        # Torch profiler. Enabled through profiler_config:
+        # --profiler-config.profiler=torch --profiler-config.torch_profiler_dir=/path/to/save/trace
+        profiler_config = self.vllm_config.profiler_config
+        if profiler_config.profiler == "torch" and profiler_config.torch_profiler_dir:
             if envs_ascend.MSMONITOR_USE_DAEMON:
                 raise RuntimeError(
-                    "MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time."
+                    "MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time."
                 )
-            torch_profiler_trace_dir = envs_vllm.VLLM_TORCH_PROFILER_DIR
+            torch_profiler_trace_dir = profiler_config.torch_profiler_dir
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
 
@@ -507,7 +561,7 @@ class NPUWorker(WorkerBase):
                 aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
                 l2_cache=False,
                 op_attr=False,
-                data_simplification=False,
+                data_simplification=True,
                 record_op_args=False,
                 gc_detect_threshold=None,
             )
@@ -517,10 +571,11 @@ class NPUWorker(WorkerBase):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU,
                 ],
-                with_stack=envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK,
-                profile_memory=envs_vllm.\
-                    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                with_modules=False,
+                with_stack=False,
+                profile_memory=profiler_config.torch_profiler_with_memory,
+                # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
+                # The with_stack option in torch_npu.profiler introduces significant time overhead.
+                with_modules=profiler_config.torch_profiler_with_stack,
                 experimental_config=experimental_config,
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir))

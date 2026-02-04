@@ -21,9 +21,9 @@ This module generates the service_profiling_symbols.yaml configuration file
 to ~/.config/vllm_ascend/ directory.
 """
 
+import contextlib
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import vllm
 from vllm.logger import logger
@@ -98,10 +98,6 @@ SERVICE_PROFILING_SYMBOLS_YAML = """
   name: _prepare_inputs
   domain: ModelExecute
 
-- symbol: vllm_ascend.utils:ProfileExecuteDuration.capture_async
-  min_version: "0.9.1"
-  handler: msserviceprofiler.vllm_profiler.vllm_v1.model_hookers:capture_async
-
 # ===== Request Lifecycle =====
 - symbol: vllm.v1.engine.async_llm:AsyncLLM.add_request
   min_version: "0.9.1"
@@ -120,7 +116,7 @@ SERVICE_PROFILING_SYMBOLS_YAML = """
 def get_config_dir() -> Path:
     """
     Get the vllm_ascend configuration directory path.
-    
+
     Returns:
         Path: The path to ~/.config/vllm_ascend/ directory.
     """
@@ -129,32 +125,30 @@ def get_config_dir() -> Path:
     return config_dir
 
 
-def _cleanup_temp_file(tmp_path: Optional[Path]) -> None:
+def _cleanup_temp_file(tmp_path: Path | None) -> None:
     """
     Clean up a temporary file if it exists.
-    
+
     Args:
         tmp_path: Path to the temporary file to clean up.
     """
     if tmp_path is not None and tmp_path.exists():
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass  # Ignore cleanup errors
 
 
-def generate_service_profiling_config() -> Optional[Path]:
+def generate_service_profiling_config() -> Path | None:
     """
     Generate the service_profiling_symbols.yaml configuration file
     to ~/.config/vllm_ascend/ directory.
-    
+
     If the configuration file already exists, this function will skip
     creating it and return the existing file path.
-    
+
     If any error occurs during file creation, it will be logged but
     will not interrupt the execution. The function will return None
     to indicate that the file could not be created.
-    
+
     Returns:
         Optional[Path]: The path to the generated (or existing) configuration file.
                        Returns None if file creation failed.
@@ -170,9 +164,7 @@ def generate_service_profiling_config() -> Optional[Path]:
     try:
         config_dir.mkdir(parents=True, exist_ok=True)
     except (OSError, PermissionError) as e:
-        logger.error(
-            f"Failed to create configuration directory {config_dir}: {e}",
-            exc_info=True)
+        logger.error(f"Failed to create configuration directory {config_dir}: {e}", exc_info=True)
         return None
 
     # Write the configuration file atomically using a temporary file
@@ -180,13 +172,9 @@ def generate_service_profiling_config() -> Optional[Path]:
     tmp_path = None
     try:
         # Create a temporary file in the same directory for atomic write
-        with tempfile.NamedTemporaryFile(mode='w',
-                                         encoding='utf-8',
-                                         dir=config_dir,
-                                         delete=False,
-                                         suffix='.tmp',
-                                         prefix=CONFIG_FILENAME +
-                                         '.') as tmp_file:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=config_dir, delete=False, suffix=".tmp", prefix=CONFIG_FILENAME + "."
+        ) as tmp_file:
             tmp_file.write(SERVICE_PROFILING_SYMBOLS_YAML)
             tmp_path = Path(tmp_file.name)
 
@@ -194,8 +182,7 @@ def generate_service_profiling_config() -> Optional[Path]:
         tmp_path.replace(config_file)
         return config_file
     except (OSError, PermissionError) as e:
-        logger.error(f"Failed to write configuration file {config_file}: {e}",
-                     exc_info=True)
+        logger.error(f"Failed to write configuration file {config_file}: {e}", exc_info=True)
         return None
     finally:
         # Clean up the temporary file if it wasn't successfully replaced

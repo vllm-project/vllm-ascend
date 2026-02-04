@@ -53,25 +53,6 @@ docker run --rm \
 
 The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
 
-### Install Triton Ascend
-
-The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required when you run Qwen3 Next, please follow the instructions below to install it and its dependency.
-
-Install the Ascend BiSheng toolkit, execute the command:
-
-```bash
-BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20260105.run"
-BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-```
-
-Install Triton Ascend:
-
-```bash
-python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
-```
-
 ### Inference
 
 :::::{tab-set}
@@ -94,7 +75,7 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
   "temperature": 0.6,
   "top_p": 0.95,
   "top_k": 20,
-  "max_tokens": 32
+  "max_completion_tokens": 32
 }'
 ```
 
@@ -122,7 +103,7 @@ if __name__ == '__main__':
     prompts = [
         "Who are you?",
     ]
-    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_tokens=32)
+    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_completion_tokens=32)
     llm = LLM(model="Qwen/Qwen3-Next-80B-A3B-Instruct",
               tensor_parallel_size=4,
               enforce_eager=True,

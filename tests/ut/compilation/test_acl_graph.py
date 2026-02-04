@@ -24,12 +24,15 @@ from vllm.forward_context import BatchDescriptor, ForwardContext
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (AscendMetadata,
                                                 AscendMetadataForDecode)
+from vllm_ascend.attention.context_parallel.attention_cp import \
+    AscendAttentionCPImpl
+from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl
 from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                           AscendMLAMetadata)
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry, ACLGraphWrapper, get_draft_graph_params, get_graph_params,
-    set_draft_graph_params, set_graph_params, update_attn_dcp_pcp_params,
-    update_draft_graph_params_workspaces, update_mla_attn_dcp_pcp_params)
+    set_draft_graph_params, set_graph_params,
+    update_draft_graph_params_workspaces)
 
 
 class TestACLGraphEntry(TestBase):
@@ -295,6 +298,7 @@ class TestACLGraphWrapper(TestBase):
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        self.mock_forward_context.is_draft_model = False
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
@@ -366,6 +370,7 @@ class TestACLGraphWrapper(TestBase):
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        self.mock_forward_context.is_draft_model = False
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
@@ -754,7 +759,7 @@ class TestPCPDCPGraphParams(TestBase):
 
     @patch('torch.npu.graph_task_update_end', )
     @patch('torch.npu.graph_task_update_begin', MagicMock())
-    @patch('torch_npu.atb.npu_multi_head_latent_attention', MagicMock())
+    @patch('torch_npu.npu_fused_infer_attention_score.out', MagicMock())
     def test_update_mla_dcp_pcp_params(self, _mock_graph_task_end):
         input_positions = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])
         block_table = torch.zeros(2, 5, dtype=torch.long)
@@ -793,20 +798,25 @@ class TestPCPDCPGraphParams(TestBase):
         qk_rope_head_dim = 32
         qk_nope_head_dim = 64
         query = torch.randn(4, num_heads, qk_head_dim)
-        q_pe = query[..., qk_nope_head_dim:]
+
         q_nope = query[..., :qk_nope_head_dim]
+        q_pe = query[..., qk_rope_head_dim:]
         k_nope = torch.randn(4, num_heads, qk_nope_head_dim)
         k_pe = torch.randn(4, num_heads, qk_rope_head_dim)
+        input_layout = "BNSD"
+        actual_seq_lengths_kv = [1, 1]
         out = torch.randn(2, 16, 128)
         lse = torch.randn(2, 16, 8)
         self.graph_params.attn_params[4] = []
         self.graph_params.attn_params[4].append(
-            (q_nope, q_pe, k_nope, k_pe, block_table, seq_lens, num_heads,
-             scale, num_kv_heads, out, lse))
+            (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
+             None, 0, scale, block_table, 128, None, actual_seq_lengths_kv,
+             out, lse))
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
-            update_mla_attn_dcp_pcp_params(self.update_stream, forward_context,
-                                           4)
+            AscendMlaCPImpl.update_graph_params(
+                self.update_stream, forward_context, 4
+            )
 
         _mock_graph_task_end.assert_called_once()
 
@@ -846,6 +856,8 @@ class TestPCPDCPGraphParams(TestBase):
              out, lse, 2, 0, 0))
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
-            update_attn_dcp_pcp_params(self.update_stream, forward_context, 4)
+            AscendAttentionCPImpl.update_graph_params(
+                self.update_stream, forward_context, 4, None
+            )
 
         _mock_graph_task_end.assert_called_once()

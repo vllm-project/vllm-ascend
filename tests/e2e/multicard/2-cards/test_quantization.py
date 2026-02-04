@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-from modelscope import snapshot_download  # type: ignore
+import pytest
 
 from tests.e2e.conftest import VllmRunner
 
@@ -27,7 +27,7 @@ def test_qwen2_5_w8a8_external_quantized_tp2():
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download("neuralmagic/Qwen2.5-3B-quantized.w8a8"),
+            "neuralmagic/Qwen2.5-3B-quantized.w8a8",
             tensor_parallel_size=2,
             cudagraph_capture_sizes=[1, 2, 4, 8],
             max_model_len=4096,
@@ -50,8 +50,28 @@ def test_qwen3_moe_w8a8_dynamic_llm_compressor():
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download(
-                "vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w8a8"),
+            "vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w8a8",
+            tensor_parallel_size=2,
+            max_model_len=4096,
+            gpu_memory_utilization=0.8,
+    ) as vllm_model:
+        vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+    golden_results = [
+        'The president of the United States is the head of state and',
+    ]
+
+    for i in range(len(vllm_output)):
+        assert golden_results[i] == vllm_output[i][1]
+        print(f"Generated text: {vllm_output[i][1]!r}")
+
+def test_qwen3_moe_w4a8_dynamic_llm_compressor():
+    example_prompts = [
+        "The president of the United States is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+            "vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w4a8",
             tensor_parallel_size=2,
             max_model_len=4096,
             gpu_memory_utilization=0.8,

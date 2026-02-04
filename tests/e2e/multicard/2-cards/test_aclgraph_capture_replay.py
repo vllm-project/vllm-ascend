@@ -26,6 +26,7 @@ import torch
 from vllm.utils.network_utils import get_open_port
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from tests.e2e.conftest import wait_until_npu_memory_free
 
 MODELS = [
     # Offline data parallel mode will be not supported/useful for dense models
@@ -108,8 +109,6 @@ def _run_worker_process(
             quantization="ascend" if "W8A8" in model_path else None,
             enable_expert_parallel=True if "DeepSeek" in model_path else False,
             trust_remote_code=True,
-            # vllm enables async scheduling by default, remove below when vllm >= 0.14.0
-            async_scheduling=False,
         )
 
         # Expose model config to the main test process
@@ -137,6 +136,7 @@ def _run_worker_process(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4, 36])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
+@wait_until_npu_memory_free(target_free_percentage=0.6)
 def test_models_aclgraph_capture_replay_metrics_dp2(
     model: str,
     max_tokens: int,
@@ -204,7 +204,8 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     # 2. Generation steps (max_tokens)
     # 3. Final step (likely EOS/idle step), no replay here
     total_steps = max_tokens + 1  # this includes the 1 and 2 above
-    expected_exec_model = (total_steps + 1) * dp_size
+    # vllm default enables Async scheduler, this will take 1 more steps
+    expected_exec_model = (total_steps + 1 + 1) * dp_size
 
     assert (
         num_execute_model == expected_exec_model

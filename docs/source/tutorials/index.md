@@ -13,7 +13,9 @@ Qwen3-VL-30B-A3B-Instruct.md
 Qwen3-VL-235B-A22B-Instruct.md
 Qwen3-Coder-30B-A3B.md
 Qwen3_embedding.md
+Qwen3-VL-Embedding.md
 Qwen3_reranker.md
+Qwen3-VL-Reranker.md
 Qwen3-8B-W4A8.md
 Qwen3-32B-W4A4.md
 Qwen3-Next.md
@@ -34,6 +36,7 @@ pd_disaggregation_mooncake_single_node.md
 pd_disaggregation_mooncake_multi_node.md
 long_sequence_context_parallel_single_node.md
 long_sequence_context_parallel_multi_node.md
+suffix_speculative_decoding.md
 ray
 :::
 

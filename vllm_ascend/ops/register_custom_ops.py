@@ -14,7 +14,8 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
-
+from typing import Optional, Tuple
+from vllm_ascend.ops.triton.rope import rope_forward_triton
 
 def _maybe_chunk_residual_impl(x: torch.Tensor,
                                residual: torch.Tensor) -> torch.Tensor:
@@ -109,33 +110,6 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor,
                                              0)
 
 
-def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
-                                          prefix: str) -> None:
-    try:
-        forward_context = get_forward_context()
-    except AssertionError:
-        return
-
-    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
-        return
-    model_instance = forward_context.model_instance
-    weight_prefetch_stream = prefetch_stream()
-    layer_idx = int(prefix.split('.')[2])
-
-    # start point of gate_up_proj weight prefetch
-    if prefix.split('.')[-2] == "self_attn":
-        forward_context.prefetch_mlp_gate_up_proj = True
-    if forward_context.prefetch_mlp_gate_up_proj:
-        weight_prefetch_stream.wait_stream(torch.npu.current_stream())
-
-        with torch.npu.stream(weight_prefetch_stream):
-            mlp_gate_up_prefetch_size = envs_ascend.VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE
-            torch_npu.npu_prefetch(
-                model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight,
-                x_dependency, mlp_gate_up_prefetch_size)
-    return
-
-
 def _maybe_all_gather_and_maybe_unpad_fake(
         x: torch.Tensor,
         label: bool,
@@ -161,63 +135,6 @@ def _maybe_pad_and_reduce_fake(x: torch.Tensor,
             dtype=x.dtype)
 
     return x
-
-
-def _maybe_prefetch_mlp_gate_up_proj_impl_fake(x_dependency: torch.Tensor,
-                                               prefix: str) -> None:
-    return
-
-
-def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
-    try:
-        forward_context = get_forward_context()
-    except AssertionError:
-        return
-
-    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
-        return
-    forward_context.prefetch_mlp_down_proj = True
-    model_instance = forward_context.model_instance
-    weight_prefetch_stream = prefetch_stream()
-    layer_idx = forward_context.layer_idx
-
-    # start point of down_proj weight prefetch
-    weight_prefetch_stream.wait_stream(torch.npu.current_stream())
-
-    with torch.npu.stream(weight_prefetch_stream):
-        mlp_down_prefetch_size = envs_ascend.VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE
-        torch_npu.npu_prefetch(
-            model_instance.model.layers[layer_idx].mlp.down_proj.weight,
-            x_dependency, mlp_down_prefetch_size)
-    forward_context.layer_idx += 1
-    return
-
-
-def _maybe_prefetch_mlp_down_proj_impl_fake(
-        x_dependency: torch.Tensor) -> None:
-    return
-
-
-def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
-    try:
-        forward_context = get_forward_context()
-    except AssertionError:
-        return
-
-    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
-        return
-    if forward_context.prefetch_mlp_gate_up_proj or \
-        forward_context.prefetch_mlp_down_proj:
-        weight_prefetch_stream = prefetch_stream()
-        # wait until prefetch done
-        torch.npu.current_stream().wait_stream(weight_prefetch_stream)
-        forward_context.prefetch_mlp_gate_up_proj = False
-        forward_context.prefetch_mlp_down_proj = False
-    return
-
-
-def _maybe_wait_prefetch_done_impl_fake(x: torch.Tensor) -> None:
-    return
 
 
 def _prefetch_preprocess_impl(weight: torch.Tensor, start_flag: torch.Tensor,
@@ -302,7 +219,15 @@ def _quantize_impl_fake(in_tensor: torch.Tensor, input_scale: torch.Tensor,
                         input_offset: torch.Tensor) -> torch.Tensor:
     return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal,
                                   input_offset, torch.qint8, -1, False)
-
+def _rope_forward_triton_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    rope_dim: int = -1,
+    is_neox_style: bool = True
+) -> Tuple[torch.Tensor, torch.Tensor]:  
+    return torch.empty_like(q), torch.empty_like(k)
 
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
@@ -319,24 +244,6 @@ direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
 direct_register_custom_op(op_name="maybe_pad_and_reduce",
                           op_func=_maybe_pad_and_reduce_impl,
                           fake_impl=_maybe_pad_and_reduce_fake,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
-
-direct_register_custom_op(op_name="maybe_prefetch_mlp_gate_up_proj",
-                          op_func=_maybe_prefetch_mlp_gate_up_proj_impl,
-                          fake_impl=_maybe_prefetch_mlp_gate_up_proj_impl_fake,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
-
-direct_register_custom_op(op_name="maybe_prefetch_mlp_down_proj",
-                          op_func=_maybe_prefetch_mlp_down_proj_impl,
-                          fake_impl=_maybe_prefetch_mlp_down_proj_impl_fake,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
-
-direct_register_custom_op(op_name="maybe_wait_prefetch_done",
-                          op_func=_maybe_wait_prefetch_done_impl,
-                          fake_impl=_maybe_wait_prefetch_done_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
@@ -367,5 +274,10 @@ direct_register_custom_op(op_name="matmul_and_reduce",
 direct_register_custom_op(op_name="quantize",
                           op_func=_quantize_impl,
                           fake_impl=_quantize_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+direct_register_custom_op(op_name="rope_forward_triton",
+                          op_func=rope_forward_triton,
+                          fake_impl=_rope_forward_triton_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
