@@ -22,6 +22,7 @@ from typing import Annotated, Any
 import model_hosting_container_standards.sagemaker as sagemaker_standards
 import pydantic
 import uvloop
+import vllm.envs as envs
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,8 +30,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import URL, Headers, MutableHeaders, State
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-
-import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
@@ -113,7 +112,7 @@ ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
 _running_tasks: set[asyncio.Task] = set()
 
 ## To monkey patch required elastic IMM functions
-from vllm_ascend.elastic_scaling import inference
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -322,9 +321,7 @@ async def _convert_stream_to_sse_events(
     async for event in generator:
         event_type = getattr(event, "type", "unknown")
         # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
-        event_data = (
-            f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
-        )
+        event_data = f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
         yield event_data
 
 
@@ -342,26 +339,18 @@ async def _convert_stream_to_sse_events(
 async def create_responses(request: ResponsesRequest, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Responses API"
-        )
+        return base(raw_request).create_error_response(message="The model does not support Responses API")
     try:
         generator = await handler.create_responses(request, raw_request)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
+        return JSONResponse(content=generator.model_dump(), status_code=generator.error.code)
     elif isinstance(generator, ResponsesResponse):
         return JSONResponse(content=generator.model_dump())
 
-    return StreamingResponse(
-        content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
-    )
+    return StreamingResponse(content=_convert_stream_to_sse_events(generator), media_type="text/event-stream")
 
 
 @router.get("/v1/responses/{response_id}")
@@ -373,9 +362,7 @@ async def retrieve_responses(
 ):
     handler = responses(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Responses API"
-        )
+        return base(raw_request).create_error_response(message="The model does not support Responses API")
 
     try:
         response = await handler.retrieve_responses(
@@ -384,40 +371,28 @@ async def retrieve_responses(
             stream=stream,
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
 
     if isinstance(response, ErrorResponse):
-        return JSONResponse(
-            content=response.model_dump(), status_code=response.error.code
-        )
+        return JSONResponse(content=response.model_dump(), status_code=response.error.code)
     elif isinstance(response, ResponsesResponse):
         return JSONResponse(content=response.model_dump())
-    return StreamingResponse(
-        content=_convert_stream_to_sse_events(response), media_type="text/event-stream"
-    )
+    return StreamingResponse(content=_convert_stream_to_sse_events(response), media_type="text/event-stream")
 
 
 @router.post("/v1/responses/{response_id}/cancel")
 async def cancel_responses(response_id: str, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Responses API"
-        )
+        return base(raw_request).create_error_response(message="The model does not support Responses API")
 
     try:
         response = await handler.cancel_responses(response_id)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
 
     if isinstance(response, ErrorResponse):
-        return JSONResponse(
-            content=response.model_dump(), status_code=response.error.code
-        )
+        return JSONResponse(content=response.model_dump(), status_code=response.error.code)
     return JSONResponse(content=response.model_dump())
 
 
@@ -441,15 +416,11 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
                 message=response.error.message,
             )
         )
-        return JSONResponse(
-            status_code=response.error.code, content=anthropic_error.model_dump()
-        )
+        return JSONResponse(status_code=response.error.code, content=anthropic_error.model_dump())
 
     handler = messages(raw_request)
     if handler is None:
-        error = base(raw_request).create_error_response(
-            message="The model does not support Messages API"
-        )
+        error = base(raw_request).create_error_response(message="The model does not support Messages API")
         return translate_error_response(error)
 
     try:
@@ -490,24 +461,16 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
-    metrics_header_format = raw_request.headers.get(
-        ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
-    )
+    metrics_header_format = raw_request.headers.get(ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, "")
     handler = chat(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Chat Completions API"
-        )
+        return base(raw_request).create_error_response(message="The model does not support Chat Completions API")
     try:
         generator = await handler.create_chat_completion(request, raw_request)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
+        return JSONResponse(content=generator.model_dump(), status_code=generator.error.code)
 
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(
@@ -531,14 +494,10 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
-    metrics_header_format = raw_request.headers.get(
-        ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
-    )
+    metrics_header_format = raw_request.headers.get(ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, "")
     handler = completion(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Completions API"
-        )
+        return base(raw_request).create_error_response(message="The model does not support Completions API")
 
     try:
         generator = await handler.create_completion(request, raw_request)
@@ -546,9 +505,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
+        return JSONResponse(content=generator.model_dump(), status_code=generator.error.code)
     elif isinstance(generator, CompletionResponse):
         return JSONResponse(
             content=generator.model_dump(),
@@ -569,27 +526,19 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 )
 @with_cancellation
 @load_aware_call
-async def create_transcriptions(
-    raw_request: Request, request: Annotated[TranscriptionRequest, Form()]
-):
+async def create_transcriptions(raw_request: Request, request: Annotated[TranscriptionRequest, Form()]):
     handler = transcription(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Transcriptions API"
-        )
+        return base(raw_request).create_error_response(message="The model does not support Transcriptions API")
 
     audio_data = await request.file.read()
     try:
         generator = await handler.create_transcription(audio_data, request, raw_request)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
+        return JSONResponse(content=generator.model_dump(), status_code=generator.error.code)
 
     elif isinstance(generator, TranscriptionResponseVariant):
         return JSONResponse(content=generator.model_dump())
@@ -608,27 +557,19 @@ async def create_transcriptions(
 )
 @with_cancellation
 @load_aware_call
-async def create_translations(
-    request: Annotated[TranslationRequest, Form()], raw_request: Request
-):
+async def create_translations(request: Annotated[TranslationRequest, Form()], raw_request: Request):
     handler = translation(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Translations API"
-        )
+        return base(raw_request).create_error_response(message="The model does not support Translations API")
 
     audio_data = await request.file.read()
     try:
         generator = await handler.create_translation(audio_data, request, raw_request)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
+        return JSONResponse(content=generator.model_dump(), status_code=generator.error.code)
 
     elif isinstance(generator, TranslationResponseVariant):
         return JSONResponse(content=generator.model_dump())
@@ -643,9 +584,7 @@ def load_log_config(log_config_file: str | None) -> dict | None:
         with open(log_config_file) as f:
             return json.load(f)
     except Exception as e:
-        logger.warning(
-            "Failed to load log config from file %s: error %s", log_config_file, e
-        )
+        logger.warning("Failed to load log config from file %s: error %s", log_config_file, e)
         return None
 
 
@@ -865,9 +804,7 @@ def _log_non_streaming_response(response_body: list) -> None:
 
 def build_app(args: Namespace) -> FastAPI:
     if args.disable_fastapi_docs:
-        app = FastAPI(
-            openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
-        )
+        app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan)
     elif args.enable_offline_docs:
         app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
     else:
@@ -978,9 +915,7 @@ def build_app(args: Namespace) -> FastAPI:
         elif inspect.iscoroutinefunction(imported):
             app.middleware("http")(imported)
         else:
-            raise ValueError(
-                f"Invalid middleware {middleware}. Must be a function or a class."
-            )
+            raise ValueError(f"Invalid middleware {middleware}. Must be a function or a class.")
 
     app = sagemaker_standards.bootstrap(app)
 
@@ -1004,9 +939,7 @@ async def init_app_state(
     else:
         request_logger = None
 
-    base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
-    ]
+    base_model_paths = [BaseModelPath(name=name, model_path=args.model) for name in served_model_names]
 
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
@@ -1015,9 +948,7 @@ async def init_app_state(
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
 
-    resolved_chat_template = await process_chat_template(
-        args.chat_template, engine_client, vllm_config.model_config
-    )
+    resolved_chat_template = await process_chat_template(args.chat_template, engine_client, vllm_config.model_config)
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
@@ -1030,17 +961,9 @@ async def init_app_state(
         tool_server = None
 
     # Merge default_mm_loras into the static lora_modules
-    default_mm_loras = (
-        vllm_config.lora_config.default_mm_loras
-        if vllm_config.lora_config is not None
-        else {}
-    )
+    default_mm_loras = vllm_config.lora_config.default_mm_loras if vllm_config.lora_config is not None else {}
 
-    default_mm_loras = (
-        vllm_config.lora_config.default_mm_loras
-        if vllm_config.lora_config is not None
-        else {}
-    )
+    default_mm_loras = vllm_config.lora_config.default_mm_loras if vllm_config.lora_config is not None else {}
     lora_modules = process_lora_modules(args.lora_modules, default_mm_loras)
 
     state.openai_serving_models = OpenAIServingModels(
@@ -1253,8 +1176,7 @@ def validate_api_server_args(args):
     valid_tool_parses = ToolParserManager.list_registered()
     if args.enable_auto_tool_choice and args.tool_call_parser not in valid_tool_parses:
         raise KeyError(
-            f"invalid tool call parser: {args.tool_call_parser} "
-            f"(chose from {{ {','.join(valid_tool_parses)} }})"
+            f"invalid tool call parser: {args.tool_call_parser} (chose from {{ {','.join(valid_tool_parses)} }})"
         )
 
     valid_reasoning_parsers = ReasoningParserManager.list_registered()
@@ -1262,8 +1184,7 @@ def validate_api_server_args(args):
         reasoning_parser := args.structured_outputs_config.reasoning_parser
     ) and reasoning_parser not in valid_reasoning_parsers:
         raise KeyError(
-            f"invalid reasoning parser: {reasoning_parser} "
-            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
+            f"invalid reasoning parser: {reasoning_parser} (chose from {{ {','.join(valid_reasoning_parsers)} }})"
         )
 
 
@@ -1321,9 +1242,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 
-async def run_server_worker(
-    listen_address, sock, args, client_config=None, **uvicorn_kwargs
-) -> None:
+async def run_server_worker(listen_address, sock, args, client_config=None, **uvicorn_kwargs) -> None:
     """Run a single API server worker."""
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
@@ -1398,9 +1317,7 @@ if __name__ == "__main__":
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
     # entrypoints.
     cli_env_setup()
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server."
-    )
+    parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()
     validate_parsed_serve_args(args)

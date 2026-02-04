@@ -34,12 +34,9 @@ class NPUIPCCore:
         self.whitelisted_clients = []
         self.tgid = torch.ops.tensor_ipc_utils.rt_get_tgid()
         print(
-            f"[NPUIPCCore] DP {self.dp_rank}/{self.dp_size}, TP {self.tp_rank}/{self.tp_size}, NPU {self.current_device}, Global NPU {self.global_rank}/{self.world_size}, TGID {self.tgid}"
+            f"""[NPUIPCCore] DP {self.dp_rank}/{self.dp_size}, TP {self.tp_rank}/{self.tp_size}, 
+            NPU {self.current_device}, Global NPU {self.global_rank}/{self.world_size}, TGID {self.tgid}"""
         )
-
-    @property
-    def current_device(self):
-        return torch_npu.npu.current_device()
 
     def current_device(self, device_id, force=False):
         if (self.current_device != device_id) or force:
@@ -62,14 +59,16 @@ class NPUIPCCore:
             ret_code = torch.ops.tensor_ipc_utils.rt_set_ipc_mem_pid(ipc_handle, self.whitelisted_clients)
             if ret_code != 0:
                 print(
-                    f"[NPUIPCCore] Whitelisting FAILED for tensor {param_name} with self.whitelisted_clients {self.whitelisted_clients}. Code: {ret_code}"
+                    f"""[NPUIPCCore] Whitelisting FAILED for tensor {param_name} 
+                    with self.whitelisted_clients {self.whitelisted_clients}. Code: {ret_code}"""
                 )
                 return False
             else:
                 return True
         else:
             print(
-                f"[NPUIPCCore] Skipping whitelisting for tensor {param_name} as the self.whitelisted_clients is empty {self.whitelisted_clients}"
+                f"""[NPUIPCCore] Skipping whitelisting for tensor 
+                {param_name} as the self.whitelisted_clients is empty {self.whitelisted_clients}"""
             )
             return False
 
@@ -80,12 +79,12 @@ class NPUIPCCore:
         whitelist_success = [
             param_name
             for param_name, (handle_data, _) in self.cached_handles.items()
-            if handle_data["whitelist_status"] == True
+            if handle_data["whitelist_status"]
         ]
         whitelist_failed = [
             param_name
             for param_name, (handle_data, _) in self.cached_handles.items()
-            if handle_data["whitelist_status"] == False
+            if not handle_data["whitelist_status"]
         ]
         return whitelist_success, whitelist_failed
 
@@ -97,7 +96,8 @@ class NPUIPCCore:
         )
         if ret_code != 0:
             print(
-                f"[NPUIPCCore] Export IPC handle failed: param_name: {param_name} | Shape: {list(tensor.shape)} | Dtype: {dtype_str} | Ptr: {data_ptr}"
+                f"""[NPUIPCCore] Export IPC handle failed: param_name: {param_name} | 
+                Shape: {list(tensor.shape)} | Dtype: {dtype_str} | Ptr: {data_ptr}"""
             )
             handle_b64 = None
         else:

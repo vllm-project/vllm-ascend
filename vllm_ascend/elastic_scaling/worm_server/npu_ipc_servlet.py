@@ -46,7 +46,9 @@ class NPUIPCServlet(WORMBase):
             if handle_info is None:
                 new_allocations.append(param_name)
         print(
-            f"[NPUIPCServlet] Model Parameters Handle Info Cached Successfully. New allocations - {len(new_allocations)}/{len(self.named_parameters)}={round(len(new_allocations) / len(self.named_parameters) * 100, 2)}%"
+            f"""[NPUIPCServlet] Model Parameters Handle Info Cached Successfully. New allocations - 
+            {len(new_allocations)}/{len(self.named_parameters)}
+            ={round(len(new_allocations) / len(self.named_parameters) * 100, 2)}%"""
         )
 
     def set_kv_caches(self, kv_caches):
@@ -64,7 +66,9 @@ class NPUIPCServlet(WORMBase):
         self.ipc_core.current_device(self.ipc_core.device_id, force=True)
         whitelist_success, whitelist_failed = self.ipc_core.whitelist_cached_handles()
         print(
-            f"\nWhitelist completed. TGIDs {self.ipc_core.whitelisted_clients} Failed percentage {len(whitelist_failed)}/{len(whitelist_success) + len(whitelist_failed)} = {round(len(whitelist_failed) / (len(whitelist_success) + len(whitelist_failed)) * 100, 2)}%"
+            f"""\nWhitelist completed. TGIDs {self.ipc_core.whitelisted_clients} 
+            Failed percentage {len(whitelist_failed)}/{len(whitelist_success) + len(whitelist_failed)} 
+            = {round(len(whitelist_failed) / (len(whitelist_success) + len(whitelist_failed)) * 100, 2)}%"""
         )
         return server_tgid
 

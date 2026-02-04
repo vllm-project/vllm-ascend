@@ -27,7 +27,7 @@
 
 int64_t initialize_acl() {
     CHECK_ACLRT(aclInit(""));
-    printf("ACL intializing in WORM C++ code: [[success]]");
+    printf("ACL initializing in WORM C++ code: [[success]]");
     return 0;
 }
 

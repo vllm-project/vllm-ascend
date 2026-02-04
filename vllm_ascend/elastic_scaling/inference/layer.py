@@ -21,6 +21,13 @@ from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE,
+    FusedMoERouterImpl,
+    determine_expert_placement_strategy,
+    get_compressed_expert_map,
+    maybe_roundup_hidden_size,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -33,14 +40,6 @@ from vllm.utils.torch_utils import (
 )
 
 logger = init_logger(__name__)
-
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
-    FusedMoERouterImpl,
-    determine_expert_placement_strategy,
-    get_compressed_expert_map,
-    maybe_roundup_hidden_size,
-)
 
 
 def determine_expert_map(

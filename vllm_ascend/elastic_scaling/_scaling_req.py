@@ -1,7 +1,6 @@
 import argparse
 import socket
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
 
 import psutil
 import requests
@@ -121,7 +120,6 @@ def wait_until_port_free(port, timeout=30, interval=0.5):
     return True
 
 
-# python /mnt/t00926703/deepseek-inferencing/example/scripts/_scaling_req.py --num_scale_units 1 --tp 2 --inference_port 7102 --kill_port 7101
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scale up NPUs and initialize inference engine")
     parser.add_argument("--num_scale_units", type=int, default=0, help="Number of scale units (default: 1)")

@@ -37,9 +37,8 @@ class WORMServlet:
         self.data_parallel_size = 1  # needs to be 1 for init_distributed_environment to be working for global_world
         self.pipeline_parallel_size = 1
         self.expert_tensor_parallel_size = 1
-        assert (
-            self.global_world_size % self.tensor_parallel_size == 0,
-            f"TP SIZE {self.tensor_parallel_size} should be a divisor of WORLD SIZE {self.global_world_size}",
+        assert self.global_world_size % self.tensor_parallel_size == 0, (
+            f"TP SIZE {self.tensor_parallel_size} should be a divisor of WORLD SIZE {self.global_world_size}"
         )  # Scaling can only happen by TP
 
         import torch
@@ -84,7 +83,8 @@ class WORMServlet:
         )
 
         print(
-            f"WORMServlet Initialized -> Rank:{self.rank}, Node -> {node_id}, Physical NPU #{os.environ['ASCEND_RT_VISIBLE_DEVICES']}, Total visible devices:{torch.npu.device_count()}"
+            f"""WORMServlet Initialized -> Rank:{self.rank}, Node -> {node_id}, 
+            Physical NPU #{os.environ["ASCEND_RT_VISIBLE_DEVICES"]}, Total visible devices:{torch.npu.device_count()}"""
         )
 
     def _npu_ipc_init(self):
@@ -165,7 +165,9 @@ class WORMServlet:
         self.ipc_engine.check_all_weights_on_npu(self.named_parameters)
         return "ok"
 
-    def _init_kv_cache(self, num_gpu_blocks=None, kv_cache_configs=[None]):
+    def _init_kv_cache(self, num_gpu_blocks=None, kv_cache_configs=None):
+        if kv_cache_configs is None:
+            kv_cache_configs = [None]
         from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 
         from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -188,7 +190,6 @@ class WORMServlet:
             kv_cache_specs = self.model_runner.get_kv_cache_spec()
 
             kv_cache_specs = [kv_cache_specs]
-            has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
 
             # Attention free models don't need memory for kv cache
             available_gpu_memory = [26414821376] * len(kv_cache_specs)
@@ -375,9 +376,6 @@ class WORMServlet:
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
 
-        free_ranks = list(range(self.model_world_size, self.global_world_size))
-        destination_ranks = free_ranks[:num_npus]  # (kept; not used later but harmless)
-        source_ranks = list(range(self.model_world_size))
         source_rank_map = {
             tp_rank: list(range(tp_rank, self.model_world_size, self.tensor_parallel_size))
             for tp_rank in range(self.tensor_parallel_size)
@@ -454,7 +452,8 @@ class WORMServlet:
         scaled_down_model_size = self.model_world_size - num_npus
         if scaled_down_model_size < self.tensor_parallel_size:
             self.print(
-                f"Can't scale down below the TP Size limit. Target size:{scaled_down_model_size} < TP Size:{self.tensor_parallel_size}"
+                f"""Can't scale down below the TP Size limit. Target size:
+                {scaled_down_model_size} < TP Size:{self.tensor_parallel_size}"""
             )
             return "cant_scale"
         else:

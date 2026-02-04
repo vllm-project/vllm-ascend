@@ -1,10 +1,8 @@
 import os
-from collections.abc import Callable
 
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
-from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map
 
@@ -13,9 +11,7 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import (
     expert_file_to_tensor,
     generate_log2phy_map,
-    init_eplb_config,
 )
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 
@@ -57,7 +53,8 @@ def init_eplb_config(eplb_config, layer_id, moe_config):
             EXPERT_PARTITION_SPLIT = ep_size
         else:
             logger.info(
-                f"Overwriting expert map to replicated experts because EXPERT_PARTITION_SPLIT is set.\nReplicated every {EXPERT_PARTITION_SPLIT} accelerators."
+                f"""Overwriting expert map to replicated experts because EXPERT_PARTITION_SPLIT is set.
+                \nReplicated every {EXPERT_PARTITION_SPLIT} accelerators."""
             )
             EXPERT_PARTITION_SPLIT = int(EXPERT_PARTITION_SPLIT)
 

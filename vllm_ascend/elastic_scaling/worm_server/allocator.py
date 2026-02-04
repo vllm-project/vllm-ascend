@@ -99,18 +99,15 @@ class IPCSafeAllocator:
         return tensor.fill_(0)
 
     def _log_only_full(self, *args, **kwargs):
-        # print(f"[LogOnly] torch.full called -> args={args}, kwargs={kwargs}")
         return self._original_full(*args, **kwargs)
 
     def __enter__(self):
-        # print(f"[Override] Patching torch.ones, torch.zeros, and torch.empty. Default device -> {self.device}, dtype -> {self.dtype_str} ")
         torch.ones = self._custom_ones
         torch.empty = self._custom_empty
         torch.zeros = self._custom_zeros
         torch.full = self._log_only_full
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # print("[Override] Restoring original torch.ones, torch.zeros, and torch.empty")
         torch.ones = self._original_ones
         torch.empty = self._original_empty
         torch.zeros = self._original_zeros

@@ -32,18 +32,21 @@ class WormNPUClient(WORMBase):
         server_device = response["server_device"]
         if server_device != self.ipc_core.device_id:
             print(
-                f"\nWARNING: Cross Device Zero Copy Happening. Server npu:{server_device} -> Client npu:{self.ipc_core.device_id}"
+                f"""\nWARNING: Cross Device Zero Copy Happening. 
+                Server npu:{server_device} -> Client npu:{self.ipc_core.device_id}"""
             )
             # self.ipc_core.initialize_context(server_device)
         self.ipc_core.set_tgid([server_tgid])
 
-    def send_request(self, end_point_name, end_point_args={}):
+    def send_request(self, end_point_name, end_point_args=None):
+        if end_point_args is None:
+            end_point_args = {}
         self.socket.send(pickle.dumps({"cmd": end_point_name, **end_point_args}))
         return pickle.loads(self.socket.recv())
 
     def zero_copy(self, name):
         response = self.send_request(end_point_name="zero_copy", end_point_args={"param_name": name})
-        if response is not None and response["whitelist_status"] == True:
+        if response is not None and response["whitelist_status"]:
             tensor = self.ipc_core.open_tensor(response)
         else:
             tensor = None
@@ -73,7 +76,8 @@ class WormNPUClient(WORMBase):
 
         num_tensors = sum(1 for _ in model.named_parameters())
         print(
-            f"[WormNPUClient] | DP {self.ipc_core.dp_rank} TP {self.ipc_core.tp_rank} | Done loading model. NCCL fallback: {len(zero_copy_failed)}/{num_tensors} ({100 * len(zero_copy_failed) / num_tensors:.2f}%)"
+            f"""[WormNPUClient] | DP {self.ipc_core.dp_rank} TP {self.ipc_core.tp_rank} | Done loading model. 
+            NCCL fallback: {len(zero_copy_failed)}/{num_tensors} ({100 * len(zero_copy_failed) / num_tensors:.2f}%)"""
         )
 
     def zero_copy_kv_caches(self):

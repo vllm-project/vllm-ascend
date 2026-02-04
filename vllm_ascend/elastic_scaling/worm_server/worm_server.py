@@ -4,12 +4,16 @@ import time
 os.environ["RAY_DEDUP_LOGS"] = "0"
 import asyncio
 import threading
+from contextlib import suppress
+from typing import Any
 
 import ray
 import uvicorn
 from fastapi import Body, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from worm_server.worm_servlet import WORMServlet
+
+BODY = Body(...)
 
 # NEWFORMWARE SERVER SPECS
 os.environ["MASTER_ADDR"] = os.environ["HEAD_IP"]
@@ -41,8 +45,8 @@ class WormServer:
 
         try:
             self.MODEL_PATH = os.environ["MODEL_PATH"]
-        except:
-            raise Exception("MODEL_PATH env var not set")
+        except KeyError as exc:
+            raise RuntimeError("MODEL_PATH env var not set") from exc
 
         self.MASTER_ADDR = os.environ["MASTER_ADDR"]
         self.MASTER_PORT = os.environ["MASTER_PORT"]
@@ -71,18 +75,32 @@ class WormServer:
         # print(f'ring_probe -> {ray.get([a.ring_probe.remote() for a in self.actors])}')
         # print(f'_init_model_world() {ray.get([a._init_model_world.remote() for a in self.actors])}')
         print(f"_init_model() {ray.get([a._init_model.remote() for a in self.actors[: self.tensor_parallel_size]])}")
-        print(
-            f"_init_kv_cache() {ray.get([a._init_kv_cache.remote(num_gpu_blocks=(int(os.getenv('KV_GPU_BLOCKS')))) for a in self.actors[: self.tensor_parallel_size]])}"
+        gpu_blocks = int(os.getenv("KV_GPU_BLOCKS"))
+        results = ray.get(
+            [
+                actor._init_kv_cache.remote(num_gpu_blocks=gpu_blocks)
+                for actor in self.actors[: self.tensor_parallel_size]
+            ]
         )
-        print(
-            f"set_attribute(peers) -> {ray.get([a.set_attribute.remote(name='peers', value_or_oid=self.actors) for a in self.actors])}"
+        print(f"_init_kv_cache() {results}")
+
+        results = ray.get(
+            [
+                actor.set_attribute.remote(
+                    name="peers",
+                    value_or_oid=self.actors,
+                )
+                for actor in self.actors
+            ]
         )
+        print(f"set_attribute(peers) -> {results}")
+
         print(f"broadcast_metadata_dict(peers) -> {ray.get(ray.get(self.actors[0].broadcast_metadata_dict.remote()))}")
 
         # Scale up to get to the initial config
-        print(
-            f"scaleup() -> {ray.get([a.scaleup.remote(num_npus=self.model_size - self.tensor_parallel_size) for a in self.actors])}"
-        )
+        num_npus = self.model_size - self.tensor_parallel_size
+        results = ray.get([actor.scaleup.remote(num_npus=num_npus) for actor in self.actors])
+        print(f"scaleup() -> {results}")
         print(f"model_health() -> {ray.get([a.model_health.remote() for a in self.actors])}")
 
         # API app
@@ -121,7 +139,8 @@ class WormServer:
                 break
         if len(plan) < self.world_size:
             raise RuntimeError(
-                f"Insufficient NPUs for WORLD_SIZE={self.world_size}. Available {len(plan)} across nodes: {nic_for_node}"
+                f"""Insufficient NPUs for WORLD_SIZE={self.world_size}. 
+                Available {len(plan)} across nodes: {nic_for_node}"""
             )
         assert nic_for_node[head_node_id]["ip"] == self.MASTER_ADDR, (
             f"Placement bug: rank-0 isn't on MASTER_ADDR={self.MASTER_ADDR}"
@@ -323,7 +342,12 @@ class WormServer:
             return {"result": result}
 
         @app.post("/invoke_method")
-        async def invoke_method(method_name: str, payload: dict = Body(default={})):
+        async def invoke_method(
+            method_name: str,
+            payload: dict[str, Any] = BODY,
+        ):
+            if payload is None:
+                payload = {}
             args = payload.get("args", []) or []
             kwargs = payload.get("kwargs", {}) or {}
             futs = [getattr(a, method_name).remote(*args, **kwargs) for a in self.actors]
@@ -360,10 +384,8 @@ class WormServer:
         print(f"HTTP API listening on :{self.api_port}")
 
     def stop(self):
-        try:
+        with suppress(Exception):
             ray.get([a.free.remote() for a in self.actors])
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":
