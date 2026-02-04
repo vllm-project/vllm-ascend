@@ -280,9 +280,7 @@ class NpugraphExConfig:
 
         # npugraph only support FULL_DECODE_ONLY or FULL graph mode now
         compilation_config = vllm_config.compilation_config
-        if compilation_config.cudagraph_mode in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL):
-            self.enable = self.enable and True
-        else:
+        if compilation_config.cudagraph_mode not in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL):
             self.enable = False
 
 
