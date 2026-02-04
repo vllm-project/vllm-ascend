@@ -60,7 +60,7 @@ The details of each configuration option are as follows:
 | Name             | Type | Default                                                     | Description                        |
 |------------------|------|-------------------------------------------------------------|------------------------------------|
 | `enabled`        | bool | `False`                                                     | Whether to enable weight prefetch. |
-| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}}` | Prefetch ratio of each weight.     |
+| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}, "mlp": { "gate_up": 1.0,  "down": 1.0}}` | Prefetch ratio of each weight.     |
 
 **finegrained_tp_config**
 
@@ -115,6 +115,10 @@ An example of additional configuration is as follows:
             },
             "moe": {
                 "gate_up": 0.8
+            },
+            "mlp": {
+                "gate_up": 1.0,
+                "down": 1.0
             }
         },
     },

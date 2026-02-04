@@ -72,7 +72,6 @@ async def test_models(model: str, tp_size: int) -> None:
         "OMP_PROC_BIND": "false",
         "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1",
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
-        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"
     }
     server_args = [
         "--quantization", "ascend", "--tensor-parallel-size",
@@ -82,7 +81,8 @@ async def test_models(model: str, tp_size: int) -> None:
         "0.9", "--block-size", "128", "--max-num-seqs", "256",
         "--enforce-eager", "--max-model-len", "35840",
         "--max-num-batched-tokens", "35840", "--additional-config",
-        '{"enable_weight_nz_layout":true}', "--compilation-config",
+        '{"enable_weight_nz_layout":true, "weight_prefetch_config":{"enabled": true}}',
+        "--compilation-config",
         '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60]}'
     ]
     with RemoteOpenAIServer(model,

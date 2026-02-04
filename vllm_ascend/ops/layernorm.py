@@ -24,7 +24,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormG
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 
 from vllm_ascend.utils import enable_custom_op
-
+from vllm_ascend.utils import get_weight_prefetch_method
 
 class AscendRMSNorm(RMSNorm):
 
@@ -67,6 +67,10 @@ class AscendRMSNorm(RMSNorm):
                                              self.variance_epsilon)
         if self.bias is not None:
             x.add_(self.bias)
+
+        weight_prefetch_method = get_weight_prefetch_method()
+        if weight_prefetch_method:
+            weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(x)
         return x
 
 
