@@ -438,6 +438,8 @@ async def _handle_completions(api: str, request: Request):
         elif chat_flag:
             messages = req_data["messages"]
             origin_prompt = messages[0].get("content", "")
+            if isinstance(origin_prompt, list):
+                origin_prompt = origin_prompt[0].get("text", "")
         else:
             origin_prompt = ""
         # refer to vLLM sampling_params: max_token default value
