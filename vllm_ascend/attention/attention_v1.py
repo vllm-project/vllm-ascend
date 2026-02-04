@@ -472,8 +472,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         block_tables,
                         attn_mask,
                         block_size,
-                        seq_lens,
-                        query_start_loc,
+                        seq_lens_kv,
+                        actual_seq_lengths_q,
                         num_kv_heads,
                         num_heads,
                         scale,
@@ -483,12 +483,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                     if forward_context.is_draft_model:
                         draft_step = attn_count // num_layers
-                        seq_lens = attn_metadata[draft_step][key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
+                        seq_lens_kv = attn_metadata[draft_step][key].seq_lens_list
                         attn_count = attn_count + 1
                     else:
-                        seq_lens = attn_metadata[key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        seq_lens_kv = attn_metadata[key].seq_lens_list
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
@@ -500,7 +498,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         input_layout="TND",
                         block_size=block_size,
                         actual_seq_lengths=actual_seq_lengths_q,
-                        actual_seq_lengths_kv=seq_lens,
+                        actual_seq_lengths_kv=seq_lens_kv,
                         num_key_value_heads=num_kv_heads,
                         num_heads=num_heads,
                         scale=scale,
@@ -540,6 +538,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # Get workspace from cache or calculate it if not present.
         workspace = graph_params.workspaces.get(num_tokens)
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
+        # For MLA models, key/value are expanded from latent, so their head count
+        # equals num_heads rather than num_kv_heads. Use actual tensor shape.
+        actual_num_kv_heads = key.shape[1]
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
@@ -551,7 +552,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_size=block_size,
                 actual_seq_lengths=actual_seq_lengths_q,
                 actual_seq_lengths_kv=actual_seq_lengths_kv,
-                num_key_value_heads=self.num_kv_heads,
+                num_key_value_heads=actual_num_kv_heads,
                 num_heads=self.num_heads,
                 sparse_mode=3,
                 scale=self.scale,
@@ -578,7 +579,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_size,
                 actual_seq_lengths_kv,
                 actual_seq_lengths_q,
-                self.num_kv_heads,
+                actual_num_kv_heads,
                 self.num_heads,
                 self.scale,
                 weak_ref_tensors(output),
@@ -597,7 +598,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_size=block_size,
             actual_seq_lengths=actual_seq_lengths_q,
             actual_seq_lengths_kv=actual_seq_lengths_kv,
-            num_key_value_heads=self.num_kv_heads,
+            num_key_value_heads=actual_num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
             sparse_mode=3,
