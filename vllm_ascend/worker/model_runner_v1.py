@@ -2308,7 +2308,7 @@ class NPUModelRunner(GPUModelRunner):
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
-                model_register(self.model, self.model_config)
+                model_register(self.model)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 with get_tp_context(self.drafter):
