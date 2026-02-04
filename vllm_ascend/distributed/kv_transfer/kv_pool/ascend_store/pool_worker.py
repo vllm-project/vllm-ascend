@@ -97,7 +97,7 @@ class KVPoolWorker:
 
         soc_version = get_ascend_device_type()
         # be removed later
-        if self.backend == "mooncake" or soc_version in {AscendDeviceType.A2}:
+        if self.backend == "mooncake" and soc_version in {AscendDeviceType.A3}:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
 
