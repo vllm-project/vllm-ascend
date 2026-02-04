@@ -37,7 +37,7 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         super().__init__(moe=moe)
 
     def process_weights_after_loading(self, layer):
-        super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
+        super().process_weights_after_loading(layer)
 
         # Fused gate_up_proj (column parallel)
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
@@ -67,6 +67,7 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
+        assert routed_scaling_factor == 1.0
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -78,7 +79,6 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
         )

@@ -625,11 +625,11 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
+        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
         from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
         from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
-        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
 
         REGISTERED_ASCEND_OPS.update(
             {
