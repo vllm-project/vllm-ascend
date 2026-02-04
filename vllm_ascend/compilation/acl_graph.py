@@ -196,7 +196,7 @@ class ACLGraphWrapper:
             else False
         )
         if self.runtime_mode != CUDAGraphMode.FULL or not forward_context.is_draft_model or not use_eagle:
-            torch.npu.synchronize()
+            torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output
 
