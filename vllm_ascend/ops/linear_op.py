@@ -234,7 +234,6 @@ class OProjRowParallelOp(CustomRowParallelOp):
                 input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
-        # Prepare tensors for all-to-all communication
         local_batch_size = input_parallel.size(0)
         chunk_size = self.input_size_per_partition
         total_batch_size = local_batch_size * self.tp_size
