@@ -110,11 +110,6 @@ class MtpProposer(EagleProposer):
         positions = self._get_positions(num_tokens)
         previous_hidden_states = self.hidden_states[:num_tokens]
         for i in range(self.num_speculative_tokens):
-            if not vllm_version_is("v0.15.0"):
-                # Reset MOE layer index for each MTP step iteration
-                forward_context = get_forward_context()
-                if forward_context is not None:
-                    forward_context.moe_layer_index = 0
             if i > 0 and not in_graph_capturing and aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 aclgraph_runtime_mode = CUDAGraphMode.NONE
             with set_ascend_forward_context(
@@ -127,6 +122,11 @@ class MtpProposer(EagleProposer):
                     batch_descriptor=batch_descriptor,
                     is_draft_model=True,
                     in_profile_run=is_profile):
+                if not vllm_version_is("v0.15.0"):
+                    # Reset MOE layer index for each MTP step iteration
+                    forward_context = get_forward_context()
+                    if forward_context is not None:
+                        forward_context.moe_layer_index = 0
                 previous_hidden_states, positions = self.maybe_pad_and_reduce(
                     previous_hidden_states, positions)
                 self.model(input_ids=input_ids,
