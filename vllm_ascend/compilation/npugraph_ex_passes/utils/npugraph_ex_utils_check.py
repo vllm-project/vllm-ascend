@@ -51,3 +51,25 @@ def extra_stream_scope_check(match: Match) -> bool:
         return False
 
     return True
+
+
+_register_patterns = set()
+
+
+def check_and_register_fusion_pass(pattern_class: type, **kwargs):
+    global _register_patterns
+    eps = kwargs.get("eps", 1e-6)
+    pattern_key = str(pattern_class.__name__) + str(eps)
+    if pattern_key in _register_patterns:
+        return
+
+    pattern = pattern_class(**kwargs)
+    try:
+        pattern.register()
+        _register_patterns.add(pattern_key)
+    except RuntimeError as e:
+        if "Duplicate pattern" in str(e):
+            logger.warning(f"Pattern {pattern_class.__name__} eps {eps} has been registered")
+            _register_patterns.add(pattern_key)
+        else:
+            raise e
