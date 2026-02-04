@@ -72,7 +72,7 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         "HCCL_BUFFSIZE": "1024",
         "VLLM_ASCEND_ENABLE_MLAPO": "1",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "0",
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
     }
 
     server_args = [
@@ -80,9 +80,9 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         str(tp_size), "--data-parallel-size",
         str(dp_size), "--port",
         str(port), "--max-model-len", "8192", "--max-num-batched-tokens",
-        "8192", "--max-num-seqs", "8", "--trust-remote-code", "--quantization",
-        "ascend", "--gpu-memory-utilization", "0.98", "--compilation-config",
-        '{"cudagraph_capture_sizes":[8, 16, 24, 32], "cudagraph_mode":"FULL_DECODE_ONLY"}',
+        "8192", "--max-num-seqs", "4", "--trust-remote-code", "--quantization",
+        "ascend", "--gpu-memory-utilization", "0.92", "--compilation-config",
+        '{"cudagraph_capture_sizes":[4, 8, 12, 16], "cudagraph_mode":"FULL_DECODE_ONLY"}',
         "--speculative-config",
         '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}',
         "--additional-config", '{"layer_sharding": ["q_b_proj", "o_proj"]}',
