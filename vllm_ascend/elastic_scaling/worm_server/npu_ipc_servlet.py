@@ -4,7 +4,7 @@ import threading
 
 import torch
 import zmq
-from worm_ipc.npu_ipc_core import NPUIPCCore, WORMBase
+from worm_server.npu_ipc_core import NPUIPCCore, WORMBase
 
 
 class NPUIPCServlet(WORMBase):

@@ -6,7 +6,7 @@ default_stages:
   - manual # Run in CI
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.14.0
+  rev: v0.15.0
   hooks:
   - id: ruff-check
     args: [--output-format, github, --fix]
@@ -23,7 +23,7 @@ repos:
       additional_dependencies:
         - tomli
 - repo: https://github.com/crate-ci/typos
-  rev: v1.32.0
+  rev: v1
   hooks:
   - id: typos
     args: [
@@ -38,13 +38,13 @@ repos:
 #     types_or: [c++]
 #     args: [--style=google, --verbose]
 - repo: https://github.com/igorshubovych/markdownlint-cli
-  rev: v0.45.0
+  rev: v0.47.0
   hooks:
   - id: markdownlint
     exclude: '.*\.inc\.md$|.*report_template\.md$|.*contributors\.md$|.*PULL_REQUEST_TEMPLATE\.md$'
     stages: [manual] # Only run in CI
 - repo: https://github.com/rhysd/actionlint
-  rev: v1.7.7
+  rev: v1.7.10
   hooks:
   - id: actionlint
     exclude: '.*\.github/workflows/scripts/.*\.ya?ml$'

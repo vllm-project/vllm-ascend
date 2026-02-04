@@ -85,12 +85,10 @@ def determine_expert_map(
     ### Replicating experts
     import os
 
-    EXPERT_PARTITION_SPLIT = os.getenv("EXPERT_PARTITION_SPLIT", "")
-    if EXPERT_PARTITION_SPLIT:
-        EXPERT_PARTITION_SPLIT = int(EXPERT_PARTITION_SPLIT)
-
-        LOCAL_NUM_EXPERTS = os.getenv("LOCAL_NUM_EXPERTS", "0")
-        if LOCAL_NUM_EXPERTS:
+    EXPERT_PARTITION_SPLIT = int(os.getenv("EXPERT_PARTITION_SPLIT", "0"))
+    if EXPERT_PARTITION_SPLIT > 0:
+        LOCAL_NUM_EXPERTS = int(os.getenv("LOCAL_NUM_EXPERTS", "0"))
+        if LOCAL_NUM_EXPERTS > 0:
             local_num_experts = int(LOCAL_NUM_EXPERTS)
         else:
             local_num_experts = global_num_experts // EXPERT_PARTITION_SPLIT
@@ -249,7 +247,7 @@ def __init__(
     self.is_sequence_parallel = is_sequence_parallel
     self.sp_size = tp_size_ if is_sequence_parallel else 1
 
-    self.moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
+    self.moe_parallel_config = FusedMoEParallelConfig.make(
         tp_size_=tp_size_,
         pcp_size_=pcp_size_,
         dp_size_=dp_size_,
@@ -279,10 +277,10 @@ def __init__(
     self.layer_name = prefix
 
     self.enable_eplb = enable_eplb
-    self.expert_load_view: torch.Tensor | None = None
-    self.logical_to_physical_map: torch.Tensor | None = None
-    self.logical_replica_count: torch.Tensor | None = None
-    self.expert_placement_strategy: ExpertPlacementStrategy = vllm_config.parallel_config.expert_placement_strategy
+    self.expert_load_view = None
+    self.logical_to_physical_map = None
+    self.logical_replica_count = None
+    self.expert_placement_strategy = vllm_config.parallel_config.expert_placement_strategy
 
     # ROCm aiter shared experts fusion
     self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
@@ -313,7 +311,7 @@ def __init__(
             enable_eplb=self.enable_eplb,
         )
 
-        self._expert_map: torch.Tensor | None
+        self._expert_map | None
         local_num_experts, expert_map, expert_mask = determine_expert_map(
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
@@ -370,7 +368,7 @@ def __init__(
     self.apply_router_weight_on_input = apply_router_weight_on_input
     self.activation = activation
 
-    self._grouped_topk_impl: GroupedTopk | None = None
+    self._grouped_topk_impl = None
     if self.use_grouped_topk:
         assert self.num_expert_group is not None
         assert self.topk_group is not None
@@ -389,7 +387,7 @@ def __init__(
 
     # ToDo: Better logic to determine the routing method type
     if routing_method_type is not None:
-        self.routing_method_type: RoutingMethodType = routing_method_type
+        self.routing_method_type = routing_method_type
     else:
         if scoring_func == "sigmoid":
             if self.use_grouped_topk:
@@ -403,7 +401,7 @@ def __init__(
         else:
             self.routing_method_type = RoutingMethodType.TopK
 
-    self.moe_config: FusedMoEConfig = FusedMoEConfig(
+    self.moe_config = FusedMoEConfig(
         num_experts=self.global_num_experts,
         experts_per_token=top_k,
         hidden_dim=hidden_size,
@@ -435,7 +433,7 @@ def __init__(
 
     # Note: get_quant_method will look at the layer's local_num_experts
     # for heuristic purposes, so it must be initialized first.
-    self.quant_method: FusedMoEMethodBase = _get_quant_method()
+    self.quant_method = _get_quant_method()
 
     if not self.moe_config.is_act_and_mul:
         # Avoid circular import
@@ -490,7 +488,7 @@ def __init__(
     self.quant_method.create_weights(layer=self, **moe_quant_params)
 
     # Chunked all2all staging tensor
-    self.batched_hidden_states: torch.Tensor | None = None
-    self.batched_router_logits: torch.Tensor | None = None
+    self.batched_hidden_states = None
+    self.batched_router_logits = None
 
     self.router = FusedMoERouterImpl(self)
