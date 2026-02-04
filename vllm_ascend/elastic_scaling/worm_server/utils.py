@@ -110,7 +110,7 @@ def initialize_fake_model_parallel(
 
     import vllm_ascend.distributed.parallel_state as ascend_ps
 
-    # Intentially forced DP=1 as model is always loaded with DP=1
+    # Intentionally forced DP=1 as model is always loaded with DP=1
     data_parallel_size = 1
     model_world_size: int = tensor_model_parallel_size * data_parallel_size
     all_ranks = torch.arange(model_world_size).reshape(

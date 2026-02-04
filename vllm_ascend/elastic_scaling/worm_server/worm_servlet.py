@@ -202,7 +202,7 @@ class WORMServlet:
             for kv_cache_config in kv_cache_configs:
                 kv_cache_config.num_blocks = num_gpu_blocks
 
-                # Manually enforing num_gpu_blocks on kv_cache_config
+                # Manually enforcing num_gpu_blocks on kv_cache_config
                 for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                     kv_cache_tensor.size = int(kv_cache_tensor.size / kv_cache_config.num_blocks * num_gpu_blocks)
 
@@ -217,7 +217,7 @@ class WORMServlet:
         self.kv_cache_config = kv_cache_configs
         self.ipc_engine.set_kv_caches(self.kv_caches)
 
-    """ utlity and meta data dict broadcasting functions """
+    """ utility and meta data dict broadcasting functions """
 
     def breakpoint(self, rank=None, type="debugpy"):
         if (not rank) or (rank and self.rank == rank):

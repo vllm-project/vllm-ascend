@@ -21,7 +21,7 @@ class NPUIPCCore:
         self.tp_size = ipc_config["tp_size"]
         self.device_id = ipc_config["device_id"]
 
-        # Global parameters (acorss machine)
+        # Global parameters (across machine)
         self.dp_rank = ipc_config["dp_rank"]
         self.dp_size = ipc_config["dp_size"]
         self.world_size = self.dp_size * self.tp_size
@@ -62,7 +62,7 @@ class NPUIPCCore:
             ret_code = torch.ops.tensor_ipc_utils.rt_set_ipc_mem_pid(ipc_handle, self.whitelisted_clients)
             if ret_code != 0:
                 print(
-                    f"[NPUIPCCore] Whiltelisting FAIELD for tensor {param_name} with self.whitelisted_clients {self.whitelisted_clients}. Code: {ret_code}"
+                    f"[NPUIPCCore] Whitelisting FAILED for tensor {param_name} with self.whitelisted_clients {self.whitelisted_clients}. Code: {ret_code}"
                 )
                 return False
             else:
