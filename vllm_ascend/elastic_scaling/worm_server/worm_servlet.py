@@ -38,8 +38,8 @@ class WORMServlet:
         self.pipeline_parallel_size = 1
         self.expert_tensor_parallel_size = 1
         assert (
-            self.tensor_parallel_size % self.global_world_size == 0,
-            f"TP SIZE {self.tensor_parallel_size} should be divisble by WORLD SIZE {self.global_world_size}",
+            self.global_world_size % self.tensor_parallel_size == 0,
+            f"TP SIZE {self.tensor_parallel_size} should be a divisor of WORLD SIZE {self.global_world_size}",
         )  # Scaling can only happen by TP
 
         import torch
