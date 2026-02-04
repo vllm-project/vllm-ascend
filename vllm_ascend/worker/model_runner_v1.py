@@ -80,7 +80,10 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         AscendSkipLiMetadata,
+                                         AscendLIMetadata,
+                                         get_sfa_skip_indices,
+                                         hidden_states_reorder,
+                                         maybe_pad_and_reorder_inputs,
                                          using_paged_attention)
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -106,9 +109,9 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
-                               enable_sp, get_ascend_device_type,
-                               is_drafter_moe_model, is_moe_model,
-                               lmhead_tp_enable, maybe_trans_nz,
+                               enable_li_skip, enable_sp,
+                               get_ascend_device_type, is_drafter_moe_model,
+                               is_moe_model, lmhead_tp_enable, maybe_trans_nz,
                                set_weight_prefetch_method, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -361,7 +364,7 @@ class NPUModelRunner(GPUModelRunner):
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
 
-        self.skip_li_metadata: AscendSkipLiMetadata | None = None
+        self.skip_li_metadata: AscendLIMetadata | None = None
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
@@ -513,65 +516,6 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
-    def get_sfa_skip_indices(self, num_comptuted_tokens, query_lens):
-            
-        # calculate num of tokens need skip for each request
-        num_comptuted_tokens = num_comptuted_tokens[:len(query_lens)]
-        num_skip_tokens = np.maximum(2048-num_comptuted_tokens, 0)
-        skip_query_lens = np.minimum(num_skip_tokens, query_lens)
-
-        # calcualte query lens for non-skip part
-        no_skip_query_lens = np.maximum(query_lens-skip_query_lens, 0)
-
-        # # get masks for original request: [True * len()]
-        # req_org_mask = np.array([True]*len(query_lens) + [False]*len(query_lens))
-
-        # mask the block table need copy
-        li_skipped_mask = query_lens - no_skip_query_lens > 0
-
-        # (1) combine no-skip and skip part query lens
-        # (2) put skip part at the end
-        # (3) only select request with len > 0
-        # (4) cumsum of query len
-        li_cum_query_lens = np.cumsum(np.concatenate([no_skip_query_lens, 
-                                                    skip_query_lens[skip_query_lens!=0]]))
-
-        # (1) for no-skip part of a request:
-        #  seq_len  = skip_query_len + no_skip_query_len + num_computed_tokens
-        #           = query_len + num_computed_tokens
-        # (2) for skip part of a request:
-        #  seq_len = skip_query_len + num_computed_tokens
-        # (3) only select request with len > 0
-        # (4) combine skip and no-skip parts as seq_lens
-
-        li_seq_lens = np.concatenate([query_lens + num_comptuted_tokens, 
-                                    skip_query_lens[skip_query_lens!=0] + num_comptuted_tokens[skip_query_lens!=0]])
-
-        # # calculate masks for requests feeding into lighting indexer
-        # li_requset_mask = np.array([False] * len(li_seq_lens))
-        # li_requset_mask[:np.sum(no_skip_query_lens!=0)] = True
-
-
-        # calculate li skip reorder indices
-        q_cal_part_indices = np.array([], dtype=np.int32)
-        q_skip_indices = np.array([], dtype=np.int32)
-
-        seq_offset = np.cumsum(np.insert(query_lens[:-1], 0, 0))
-
-        for req_idx in range(len(query_lens)):
-            full_indices = np.arange(query_lens[req_idx])
-
-            keep_indices = full_indices[full_indices>=num_skip_tokens[req_idx]] + seq_offset[req_idx]
-            skip_indices = full_indices[full_indices<num_skip_tokens[req_idx]] + seq_offset[req_idx]
-
-            q_cal_part_indices = np.concatenate([q_cal_part_indices, keep_indices])
-            q_skip_indices = np.concatenate([q_skip_indices, skip_indices])
-
-
-        indices = np.concatenate([q_cal_part_indices, q_skip_indices]).astype(np.int32)
-
-        return indices, li_cum_query_lens, li_seq_lens, li_skipped_mask
-
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -593,18 +537,26 @@ class NPUModelRunner(GPUModelRunner):
         req_ids = self.input_batch.req_ids
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
-      
 
         li_reorder_indices, li_cum_query_lens, li_seq_lens, li_skiped_query_mask \
-            = self.get_sfa_skip_indices(self.input_batch.num_computed_tokens_cpu, num_scheduled_tokens)
+            = get_sfa_skip_indices(self.input_batch.num_computed_tokens_cpu, num_scheduled_tokens)
 
         # make lighting skip metadata
-        skip_li_metadata = AscendSkipLiMetadata(
-            li_reorder_indices = torch.from_numpy(li_reorder_indices).pin_memory().to(dtype = torch.int32, device=self.device, non_blocking=True),
-            li_cum_query_lens = torch.from_numpy(li_cum_query_lens).pin_memory().to(dtype = torch.int32, device=self.device, non_blocking=True),
-            li_seq_lens = torch.from_numpy(li_seq_lens).pin_memory().to(dtype = torch.int32, device=self.device, non_blocking=True),
-            li_skip_request_mask = torch.from_numpy(li_skiped_query_mask).pin_memory().to(dtype = torch.bool, device=self.device, non_blocking=True)
-        )
+        skip_li_metadata = AscendLIMetadata(
+            li_reorder_indices=torch.from_numpy(
+                li_reorder_indices).pin_memory().to(dtype=torch.int32,
+                                                    device=self.device,
+                                                    non_blocking=True),
+            li_cum_query_lens=torch.from_numpy(
+                li_cum_query_lens).pin_memory().to(dtype=torch.int32,
+                                                   device=self.device,
+                                                   non_blocking=True),
+            li_seq_lens=torch.from_numpy(li_seq_lens).pin_memory().to(
+                dtype=torch.int32, device=self.device, non_blocking=True),
+            li_skip_request_mask=torch.from_numpy(
+                li_skiped_query_mask).pin_memory().to(dtype=torch.bool,
+                                                      device=self.device,
+                                                      non_blocking=True))
 
         self.skip_li_metadata = skip_li_metadata
 
@@ -1109,7 +1061,7 @@ class NPUModelRunner(GPUModelRunner):
                 max_seq_len=0,
                 encoder_seq_lens=encoder_seq_lens,
                 encoder_seq_lens_cpu=encoder_seq_lens_cpu,
-                li_skip_metadata = self.skip_li_metadata)
+                li_skip_metadata=self.skip_li_metadata)
 
             if self.speculative_config and self.pcp_size * self.dcp_size > 1:
                 # For pcp + spec decode, we flatten block_table
@@ -1623,17 +1575,10 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
-
-            input_ids_reorder = torch.index_select(input_ids, 0, self.skip_li_metadata.li_reorder_indices)
-            positions_reorder = torch.index_select(positions, 0, self.skip_li_metadata.li_reorder_indices)
-
-            input_actual_length = input_ids_reorder.size(0)
-            input_ids_reorder_pad = torch.zeros_like(input_ids)
-            input_ids_reorder_pad[:input_actual_length] = input_ids_reorder
-
-            positions_reorder_pad = torch.zeros_like(input_ids)
-            positions_reorder_pad[:input_actual_length] = positions_reorder
-
+            if enable_li_skip():
+                input_ids, positions = maybe_pad_and_reorder_inputs(
+                    input_ids, positions,
+                    self.skip_li_metadata.li_reorder_indices)
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -1650,7 +1595,9 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = self._generate_process_reqs_hidden_states(
                     maybe_padded_num_tokens, input_ids, positions,
                     intermediate_tensors, inputs_embeds, model_kwargs)
-            hidden_states = torch.index_select(hidden_states, 0, self.skip_li_metadata.li_reorder_indices.argsort())
+            if enable_li_skip():
+                hidden_states = hidden_states_reorder(
+                    hidden_states, self.skip_li_metadata.li_reorder_indices)
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfer(

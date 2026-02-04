@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, List, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -34,12 +35,14 @@ def enable_cp():
     return prefill_config.prefill_context_parallel_size > 1 \
                 or prefill_config.decode_context_parallel_size > 1
 
+
 @dataclass
-class AscendSkipLiMetadata:
+class AscendLIMetadata:
     li_reorder_indices: torch.Tensor = None
     li_cum_query_lens: torch.Tensor = None
     li_seq_lens: torch.Tensor = None
     li_skip_request_mask: torch.Tensor = None
+
 
 @dataclass
 # class AscendCommonLongSequenceMetadata:
@@ -105,8 +108,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     prefill_context_parallel_metadata: Optional[
         AscendPrefillContextParallelMetadata] = None
-    
-    li_skip_metadata:AscendSkipLiMetadata|None = None
+
+    li_skip_metadata: AscendLIMetadata | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int,
@@ -277,3 +280,84 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
         nz_mat,
         (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3]))
     return nz_mat
+
+
+def get_sfa_skip_indices(num_comptuted_tokens, query_lens):
+
+    # calculate num of tokens need skip for each request
+    num_comptuted_tokens = num_comptuted_tokens[:len(query_lens)]
+    num_skip_tokens = np.maximum(2048 - num_comptuted_tokens, 0)
+    skip_query_lens = np.minimum(num_skip_tokens, query_lens)
+
+    # calcualte query lens for non-skip part
+    no_skip_query_lens = np.maximum(query_lens - skip_query_lens, 0)
+
+    # mask the block table need copy
+    li_skipped_mask = query_lens - no_skip_query_lens > 0
+
+    # (1) combine no-skip and skip part query lens
+    # (2) put skip part at the end
+    # (3) for skip-part, only select request with len > 0
+    # (4) cumsum of query len
+    li_cum_query_lens = np.cumsum(
+        np.concatenate(
+            [no_skip_query_lens, skip_query_lens[skip_query_lens != 0]]))
+
+    # (1) for no-skip part of a request:
+    #  seq_len  = skip_query_len + no_skip_query_len + num_computed_tokens
+    #           = query_len + num_computed_tokens
+    # (2) for skip part of a request:
+    #  seq_len = skip_query_len + num_computed_tokens
+    # (3) for skip-part, only select request with len > 0
+    # (4) combine skip and no-skip parts as seq_lens
+
+    li_seq_lens = np.concatenate([
+        query_lens + num_comptuted_tokens,
+        skip_query_lens[skip_query_lens != 0] +
+        num_comptuted_tokens[skip_query_lens != 0]
+    ])
+
+    # calculate li skip reorder indices
+    q_cal_part_indices = np.array([], dtype=np.int32)
+    q_skip_indices = np.array([], dtype=np.int32)
+
+    seq_offset = np.cumsum(np.insert(query_lens[:-1], 0, 0))
+
+    for req_idx in range(len(query_lens)):
+        full_indices = np.arange(query_lens[req_idx])
+
+        keep_indices = full_indices[
+            full_indices >= num_skip_tokens[req_idx]] + seq_offset[req_idx]
+        skip_indices = full_indices[
+            full_indices < num_skip_tokens[req_idx]] + seq_offset[req_idx]
+
+        q_cal_part_indices = np.concatenate([q_cal_part_indices, keep_indices])
+        q_skip_indices = np.concatenate([q_skip_indices, skip_indices])
+
+    indices = np.concatenate([q_cal_part_indices,
+                              q_skip_indices]).astype(np.int32)
+
+    return indices, li_cum_query_lens, li_seq_lens, li_skipped_mask
+
+
+def maybe_pad_and_reorder_inputs(input_ids, positions, reorder_indices):
+    input_ids_reorder = torch.index_select(input_ids, 0, reorder_indices)
+    positions_reorder = torch.index_select(positions, 0, reorder_indices)
+
+    input_actual_length = input_ids_reorder.size(0)
+    input_ids_reorder_pad = torch.zeros_like(input_ids)
+    input_ids_reorder_pad[:input_actual_length] = input_ids_reorder
+
+    positions_reorder_pad = torch.zeros_like(input_ids)
+    positions_reorder_pad[:input_actual_length] = positions_reorder
+
+    input_ids = input_ids_reorder_pad
+    positions = positions_reorder_pad
+
+    return input_ids_reorder_pad, positions_reorder_pad
+
+
+def hidden_states_reorder(hidden_states, reorder_indices):
+    return torch.index_select(
+        hidden_states, 0,
+        reorder_indices.to(torch.float32).argsort().to(torch.int32))

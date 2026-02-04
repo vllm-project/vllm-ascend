@@ -1202,6 +1202,20 @@ def enable_dsa_cp() -> bool:
     return False
 
 
+#TODO: Temporarily use enable_skip_li to enable skipping lightling indexer for first 2048 token of ds32.
+@lru_cache(maxsize=1)
+def enable_li_skip() -> bool:
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    is_ds_v32 = hasattr(
+        vllm_config.model_config, "hf_text_config") and hasattr(
+            vllm_config.model_config.hf_text_config, "index_topk")
+    if is_ds_v32 and vllm_config.additional_config.get("enable_li_skip",
+                                                       False):
+        return True
+    return False
+
+
 @lru_cache(maxsize=1)
 def enable_dsa_cp_with_layer_shard() -> bool:
     if not enable_dsa_cp():
