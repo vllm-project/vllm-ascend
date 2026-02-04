@@ -725,7 +725,6 @@ vllm serve xxxxxxx/Qwen3-32B \
                                "kv_connector": "AscendStoreConnector",
                                "kv_role": "kv_consumer",
                                "kv_connector_extra_config":{
-                                    "use_layerwise": false,
                                     "backend": "memcache",
                                     "lookup_rpc_port":"1"
                                }
@@ -876,7 +875,6 @@ python -m vllm.entrypoints.openai.api_server \
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_consumer",
     "kv_connector_extra_config":{
-                "use_layerwise": false,
                 "backend": "memcache",
                 "lookup_rpc_port":"1"
     }
