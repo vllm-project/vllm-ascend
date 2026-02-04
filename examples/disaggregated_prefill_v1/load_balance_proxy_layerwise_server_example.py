@@ -444,7 +444,7 @@ async def _handle_completions(api: str, request: Request):
             origin_prompt = ""
         # refer to vLLM sampling_params: max_token default value
         origin_max_tokens = req_data.get("max_tokens", 16)
-        
+
         async def generate_stream():
             nonlocal released_kv
             generated_token = ""
@@ -457,29 +457,28 @@ async def _handle_completions(api: str, request: Request):
                 while retry:
                     retry = False
                     async for chunk in stream_service_response_with_retry(
-                            decoder.client,
-                            api,
-                            req_data,
-                            request_id=request_id,
-                            max_retries=global_args.max_retries,
-                            base_delay=global_args.retry_delay):
+                        decoder.client,
+                        api,
+                        req_data,
+                        request_id=request_id,
+                        max_retries=global_args.max_retries,
+                        base_delay=global_args.retry_delay,
+                    ):
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
                         except UnicodeDecodeError:
-                            logger.debug(
-                                f"Skipping chunk: {chunk}")
+                            logger.debug(f"Skipping chunk: {chunk}")
                             yield chunk
                             continue
                         if not chunk_str:
                             continue
                         if chunk_str.startswith("data: "):
-                            chunk_str = chunk_str[len("data: "):]
+                            chunk_str = chunk_str[len("data: ") :]
                         try:
                             chunk_json = json.loads(chunk_str)
                         except json.JSONDecodeError:
                             # if chunk is [done], skip it.
-                            logger.debug(
-                                f"Skipping chunk: {chunk_str}")
+                            logger.debug(f"Skipping chunk: {chunk_str}")
                             yield chunk
                             continue
                         choices = chunk_json.get("choices", [])
@@ -490,35 +489,28 @@ async def _handle_completions(api: str, request: Request):
                         choice = choices[0]
                         delta = choice.get("delta") or {}
                         message = choice.get("message") or {}
-                        content = (
-                                delta.get("content")
-                                or message.get("content")
-                                or choice.get("text")
-                                or ""
-                                )
+                        content = delta.get("content") or message.get("content") or choice.get("text") or ""
                         generated_token += content
 
-                        stop_reason = choice.get(
-                            "stop_reason")
+                        stop_reason = choice.get("stop_reason")
                         usage = chunk_json.get("usage", {})
-                        completion_tokens = (completion_tokens + 1) if stream_flag else \
-                            (completion_tokens + usage.get("completion_tokens"))
+                        completion_tokens = (
+                            (completion_tokens + 1)
+                            if stream_flag
+                            else (completion_tokens + usage.get("completion_tokens"))
+                        )
                         if stop_reason == "recomputed":
                             retry = True
                             retry_count += 1
                             if chat_flag:
-                                messages[0][
-                                    "content"] = origin_prompt + generated_token
+                                messages[0]["content"] = origin_prompt + generated_token
                             else:
-                                req_data[
-                                    "prompt"] = origin_prompt + generated_token
-                            req_data[
-                                "max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                                req_data["prompt"] = origin_prompt + generated_token
+                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
-                                choice["message"][
-                                    "content"] = generated_token
+                                choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
                             chunk = json.dumps(chunk_json).encode("utf-8")
