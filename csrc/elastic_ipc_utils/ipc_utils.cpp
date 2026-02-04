@@ -38,7 +38,7 @@ int64_t hello_world() {
 
 
 typedef struct {
-    char reserved[100];  // Fixed 64-byte reserved buffer
+    char reserved[100];  // Fixed 100-byte reserved buffer
 } rtIpcMemHandle_t;
 
 
