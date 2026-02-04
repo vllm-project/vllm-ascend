@@ -119,18 +119,8 @@ def set_ascend_forward_context(
         if has_layer_idx(model_instance):
             forward_context.layer_idx = model_instance.model.start_layer
 
-        # TODO(rjg-lyh): refactor mlp weight prefetch method
-        # set for mlp weight prefetch
-        prefetch_mlp_enabled = (
-            envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP
-            and forward_context.layer_idx is not None
-            and num_tokens is not None
-            and num_tokens < 500
-        )
-        if prefetch_mlp_enabled:
-            forward_context.prefetch_mlp_gate_up_proj = False
-            forward_context.prefetch_mlp_down_proj = False
-        forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
+        forward_context.prefetch_mlp_gate_up_proj = False
+        forward_context.prefetch_mlp_down_proj = False
         forward_context.model_instance = model_instance
         forward_context.is_draft_model = is_draft_model
 

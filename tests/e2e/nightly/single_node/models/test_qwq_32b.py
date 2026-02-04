@@ -75,8 +75,7 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
         "OMP_PROC_BIND": "false",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
-        "VLLM_ASCEND_ENABLE_DEBSE_OPTIMIZE": "1",
-        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"
+        "VLLM_ASCEND_ENABLE_DEBSE_OPTIMIZE": "1"
     }
     server_args = [
         "--tensor-parallel-size",
@@ -86,7 +85,7 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
         "--gpu-memory-utilization", "0.9", "--compilation_config",
         '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 8, 24, 48, 60]}',
         "--reasoning-parser", "deepseek_r1", "--distributed_executor_backend",
-        "mp"
+        "mp", "--additional-config", '{"weight_prefetch_config":{"enabled":true}}'
     ]
     if mode == "single":
         server_args.remove("--compilation_config")
