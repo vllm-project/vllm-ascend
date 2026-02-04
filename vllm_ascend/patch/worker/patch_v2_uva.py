@@ -39,10 +39,10 @@ def get_row_indices_from_key(key: Union[int, slice, Tuple],
     elif isinstance(key, tuple):
         # pasre row slice such as np[1,:100]
         if len(key) == 0:
-            return set(range(dim_size))  # 空元组默认所有行
+            return set(range(dim_size))
         return get_row_indices_from_key(key[0], dim_size)
     else:
-        # 其他类型（如布尔数组）保守返回所有行
+        # for other types such as list/ndarray, we return all rows.
         return set(range(dim_size))
 
 
@@ -55,7 +55,7 @@ class MonitoredNumPyArray:
 
     def __setitem__(self, key, value):
         self._array[key] = value
-        dim_size = self._array.shape[0]  # 第一维大小
+        dim_size = self._array.shape[0] 
         row_indices = get_row_indices_from_key(key, dim_size)
         for row in row_indices:
             self._callback(row)
@@ -80,6 +80,9 @@ class MonitoredTorchTensor:
         row_indices = get_row_indices_from_key(key, dim_size)
         for row in row_indices:
             self._callback(row)
+
+    def __getitem__(self, key):
+        return self._tensor[key]
 
     def __getattr__(self, name):
         return getattr(self._tensor, name)
