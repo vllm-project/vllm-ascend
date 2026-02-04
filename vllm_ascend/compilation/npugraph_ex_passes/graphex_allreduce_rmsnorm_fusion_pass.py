@@ -23,7 +23,10 @@ from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
 
-from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
+from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import (
+    check_and_register_fusion_pass,
+    extra_stream_scope_check,
+)
 
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THREHOLD = 512
@@ -143,8 +146,8 @@ class GraphEXLastLayerMatmulAllReduceAddRMSNormPattern:
 
 class GraphEXMatmulAllReduceAddRMSNormPass:
     def __init__(self, vllm_config: VllmConfig):
-        GraphEXMiddleLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register()
-        GraphEXLastLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register()
+        check_and_register_fusion_pass(GraphEXMiddleLayerMatmulAllReduceAddRMSNormPattern, vllm_config=vllm_config)
+        check_and_register_fusion_pass(GraphEXLastLayerMatmulAllReduceAddRMSNormPattern, vllm_config=vllm_config)
 
     def __call__(self, graph: torch.fx.Graph):
         pass
