@@ -576,7 +576,7 @@ class KVPoolWorker:
             # all tokens where found, return the maximal end
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
-            return start
+            return 0
         return end
 
     def lookup_scheduler(
@@ -633,7 +633,7 @@ class KVPoolWorker:
         # all tokens where found, return the maximal end
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
-            return start
+            return 0
         return end
 
     def check_all_layers_exists(self, res: list[int], num_layers: int) -> list[int]:
