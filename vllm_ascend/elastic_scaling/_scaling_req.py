@@ -77,10 +77,8 @@ def init_inference_engine(inference_port=7102):
     """Wait until resources are available and initialize inference engine"""
     start_t = time.time()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        copy_model_res = executor.submit(requests.post, f"http://localhost:{inference_port}/reload_models")
-        copy_kv_res = executor.submit(requests.post, f"http://localhost:{inference_port}/reload_kvcache")
-        wait([copy_model_res, copy_kv_res])
+    requests.post(f"http://localhost:{inference_port}/reload_models")
+    requests.post(f"http://localhost:{inference_port}/reload_kvcache")
 
     reload_t = time.time()
     print(f"!!! zero-copy model & kv cache took {reload_t - start_t:.2f} seconds")
