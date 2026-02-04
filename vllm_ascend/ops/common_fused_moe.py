@@ -42,6 +42,7 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, npu_stream_switch
 from vllm.distributed.parallel_state import (
     get_dp_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
+import vllm_ascend.envs as envs_ascend
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -579,10 +580,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             topk_weights: Optional[torch.Tensor] = None,
             topk_ids: Optional[torch.Tensor] = None,
             row_idx: Optional[torch.Tensor] = None,
+            x_active_mask: Optional[torch.Tensor] = None,
         ):
         import torch.nn as nn
         forward_context = get_forward_context()
         moe_comm_method = forward_context.moe_comm_method
+        forward_context.mc2_mask = x_active_mask
 
         # Load balancing for token distribution among experts in dummy_run
         # TODO: The community only considers load balancing when DP > 1.
@@ -591,48 +594,11 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-        # print(f'topk_ids shape before split is {topk_ids.shape}')
-        
-        shared_out = self._shared_experts(hidden_states)
-
-        # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
-        if tp_size > 1:
-            moe_comm_type = forward_context.moe_comm_type
-            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
-                shared_out = tensor_model_parallel_all_reduce(shared_out)
-            
-        num_tokens, _ = hidden_states.shape
-        target_pad_length = forward_context.padded_num_tokens
-        pad_size = target_pad_length - num_tokens
-        # print(f'pad_size is {pad_size}')
-        # Pad if necessary (unless shared expert DP is enabled)
-        if pad_size > 0:
-            topk_weights = nn.functional.pad(topk_weights,
-                                                (0, 0, 0, pad_size))
-            topk_ids = nn.functional.pad(topk_ids,
-                                                (0, 0, 0, pad_size))
-            row_idx = nn.functional.pad(row_idx,
-                                                (0, 0, 0, pad_size))
-                                                
-        if tp_size > 1:
-            split_topk_weights = torch.tensor_split(topk_weights,
-                                                    tp_size,
-                                                    dim=0)
-            split_topk_ids = torch.tensor_split(topk_ids,
-                                                tp_size,
-                                                dim=0)
-            split_row_idx = torch.tensor_split(row_idx,
-                                                tp_size,
-                                                dim=0)
-            topk_weights = split_topk_weights[tp_rank]
-            topk_ids = split_topk_ids[tp_rank]
-            row_idx = split_row_idx[tp_rank]
-
-        # print(f'topk_ids shape after split is {topk_ids.shape}')    
+  
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            replace_allreduce=forward_context.sp_enabled,
+            replace_allreduce=True,
             enable_shared_expert_dp=self.enable_shared_expert_dp)
 
         use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias = \
@@ -668,7 +634,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             hidden_states=final_hidden_states,
             reduce_results=self.reduce_results)
 
-        return shared_out,final_hidden_states
+        return final_hidden_states
 
     def afd_m2n_ffn_compute(
             self, 
@@ -691,29 +657,36 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # hidden_states是dispatch之后的，shape第一维是group_list[-1],self.max_num_token*8*2
         shared_out = self._shared_experts(hidden_states)
 
-        if connector_name == "camp2pconnector" :
-            w1 = layer.w13_weight.to(torch.int8)
-            w2 = layer.w2_weight.to(torch.int8)
-            gmm1_weight = torch_npu.npu_format_cast(w1, torch_npu.Format.FRACTAL_NZ)
-            gmm2_weight = torch_npu.npu_format_cast(w2, torch_npu.Format.FRACTAL_NZ)
-            w1_scale = w1_scale.float()
-            w2_scale = w2_scale.float()
-            from vllm_ascend.ops.moe.moe_mlp import fused_experts
-            mlp_output = fused_experts(
-                hidden_states=hidden_states,
-                w1=gmm1_weight,
-                w1_scale=w1_scale,
-                w2=gmm2_weight,
-                w2_scale=w2_scale,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                x_active_mask=x_active_mask,
-                group_ep=cam_p2p_ep_name,
-                ep_rank_size=self.ep_size,
-                ep_rank_id=self.ep_rank,
-                moe_expert_num=self.global_num_experts
-            )
-            return shared_out,mlp_output
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2
+        if connector_name == "camp2pconnector":
+            if fused_mc2_enable == 1:
+                w1 = layer.w13_weight.to(torch.int8)
+                w2 = layer.w2_weight.to(torch.int8)
+                gmm1_weight = torch_npu.npu_format_cast(w1, torch_npu.Format.FRACTAL_NZ)
+                gmm2_weight = torch_npu.npu_format_cast(w2, torch_npu.Format.FRACTAL_NZ)
+                w1_scale = w1_scale.float()
+                w2_scale = w2_scale.float()
+                from vllm_ascend.ops.moe.moe_mlp import fused_experts
+                mlp_output = fused_experts(
+                    hidden_states=hidden_states,
+                    w1=gmm1_weight,
+                    w1_scale=w1_scale,
+                    w2=gmm2_weight,
+                    w2_scale=w2_scale,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    x_active_mask=x_active_mask,
+                    group_ep=cam_p2p_ep_name,
+                    ep_rank_size=self.ep_size,
+                    ep_rank_id=self.ep_rank,
+                    moe_expert_num=self.global_num_experts
+                )
+                return shared_out,mlp_output
+            else:
+                final_hidden_states = self.afd_ffn_compute(layer, hidden_states, router_logits, \
+                    group_list, topk_weights, topk_ids, row_idx, x_active_mask)
+                return shared_out,final_hidden_states
+
         from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
         
         permuted_hidden_states, expert_tokens = hidden_states, group_list

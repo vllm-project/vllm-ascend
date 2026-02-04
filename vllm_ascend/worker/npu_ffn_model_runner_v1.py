@@ -21,7 +21,7 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.utils import DeviceMemoryProfiler, GiB_bytes
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner,graph_capture
-from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context, MoECommType
 from vllm_ascend.distributed.metadata import (M2NAFDConnectorMetadata, CAMM2NAFDConnectorMetadata, CAMP2PAFDConnectorMetadata)
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
@@ -141,6 +141,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 if self.connector_name == "camm2nconnector":
                     #TODO(yxj):self.decode_max_num_token * self.attn_size * (self.topk // self.ffn_size)
                     max_num_tokens = self.decode_max_num_token * self.attn_size * (self.n_routed_experts // self.ffn_size)
+                elif self.connector_name == "camp2pconnector":
+                    max_num_tokens = self.decode_max_num_token
                 else:
                     max_num_tokens = self.decode_max_num_token * self.topk * self.attn_size
                 acl_graph_info = self._acl_graphs_ubatch_full.get(max_num_tokens)
@@ -415,7 +417,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                             aclgraph_runtime_mode=aclgraph_runtime_mode,
                             prefetch_stream=self.prefetch_stream,
                             model_instance=self.model,
-                            afd_metadata=afd_metadata):
+                            afd_metadata=afd_metadata,
+                            moe_comm_type=MoECommType.MC2):
                         rank_ffn_output = self._run_ffn_computation(
                             hidden_states=hidden_states,
                             layer_idx=layer_idx,

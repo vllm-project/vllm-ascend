@@ -8,6 +8,7 @@ __all__ = ["AFDConnectorBase", "AFDConnectorMetadata", "AFDConnectorFactory"]
 
 import torch_npu
 import torch
+import pickle
 
 from torch.distributed.distributed_c10d import _get_default_group
 import re
@@ -22,7 +23,20 @@ from vllm_ascend.distributed.metadata import (CAMP2PAFDConnectorMetadata)
 from vllm.config import VllmConfig, CUDAGraphMode, CompilationLevel
 from vllm.distributed.afd_transfer.afd_connector.p2p_connector import DefaultProcessGroupSwitcher
 
+from vllm.utils import direct_register_custom_op
+from vllm.forward_context import ForwardContext, get_forward_context
+from vllm_ascend.utils import npu_stream_switch_within_graph
+
 logger = init_logger(__name__)
+
+def _get_group_ep(ubatch_idx: int, hccl_comm_name: str, hccl_comm_name2: str, hccl_comm_name3: Optional[str]) -> str:
+    groupEp = hccl_comm_name
+    if ubatch_idx == 1:
+        groupEp = hccl_comm_name2
+    elif ubatch_idx == 2:
+        assert hccl_comm_name3 is not None
+        groupEp = hccl_comm_name3
+    return groupEp
 
 
 class CAMP2PAFDConnector(AFDConnectorBase):
@@ -35,10 +49,17 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         self.local_rank = local_rank
         self._initialized = False
         self.config = config
+        self.hf_config = config.model_config.hf_config
+        self.scheduler_config = config.scheduler_config
+        decode_max_num_seqs = getattr(self.scheduler_config,
+                                      'decode_max_num_seqs', 0)
+        self.max_num_reqs = max(self.scheduler_config.max_num_seqs,
+                                decode_max_num_seqs)
         self.attn_size = 0
         self.ffn_size = 0
         self.use_aclgraph = self._use_aclgraph()
         self.hccl_comm_name1 = ""
+        self.dst_list = []
         print(f'self.use_aclgraph in CAMP2PAFDConnector is {self.use_aclgraph}')
 
     def _use_aclgraph(self) -> bool:
@@ -56,49 +77,83 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         self.attn_size, self.ffn_size = map(
             int,
             re.match(r"(\d+)\D+(\d+)", afd_size).groups())
-        # ffn_ranks = [i for i in range(ffn_size, ffn_size + attn_size)]
-        # attn_ranks = [i for i in range(attn_size)]
-        # self rank atten:0 ffn:0
-        self.rank = self.rank + self.ffn_size if role == "attention" else self.rank
 
-        logger.info(
+        self.min_size = min(self.ffn_size, self.attn_size)
+        world_rank = self.rank + self.ffn_size if role == "attention" else self.rank
+        # p2p_rank: 所有FFN [0, ffn_size), 前min_size个Attention [ffn_size, ffn_size+min_size)
+        self.p2p_rank = self.rank + self.min_size if role == "attention" else self.rank
+        self.rank = world_rank
+
+
+        print(f"world_size = {self.ffn_size + self.attn_size}, world_rank = {self.rank}")
+        logger.debug(
             f"world_size = {self.ffn_size + self.attn_size}, world_rank = {self.rank}")
-        # 多机需要改成master_ip
-        self.afd_pg = init_afd_process_group(
-            backend="hccl",
-            init_method=f"tcp://127.0.0.1:29509",
-            world_size=self.ffn_size + self.attn_size,
-            rank=self.rank,
-            group_name="afd"
-        )
-        self.hccl_comm_name = self.afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank)
+        # TODO(jcz) : 这里要根据实际的num_of_stages创建，需要改成list
+        self.afd_pg_list = []
+        self.hccl_comm_name_list = []
+        num_ubatches = self.config.parallel_config.num_ubatches if self.config.parallel_config.num_ubatches else 1
+        for i in range(num_ubatches):
+            group_name = "afd" + str(i) if i > 0 else "afd"
+            afd_pg = init_afd_process_group(
+                backend="hccl",
+                init_method=(
+                    f"tcp://{self.config.afd_config.afd_host}"
+                    f":{self.config.afd_config.afd_port}"
+                ),
+                world_size=self.ffn_size + self.attn_size,
+                rank=self.rank,
+                group_name=group_name
+            )
+            self.afd_pg_list.append(afd_pg)
+            self.hccl_comm_name_list.append(afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank))
+        self.hccl_comm_name = self.hccl_comm_name_list[0]
+        self.hccl_comm_name2 = self.hccl_comm_name_list[1] if num_ubatches > 1 else self.hccl_comm_name
+        self.hccl_comm_name3 = self.hccl_comm_name_list[2] if num_ubatches > 2 else None
+        
 
         if self.rank < self.ffn_size:
-            # 多机需要改成master_ip
             self.afd_pg1 = init_afd_process_group(
                 backend="hccl",
-                init_method=f"tcp://127.0.0.1:29999",
+                init_method=(
+                    f"tcp://{self.config.afd_config.afd_host}"
+                    f":{self.config.afd_config.afd_port}"
+                ),
                 world_size=self.ffn_size,
                 rank=self.rank,
-                group_name="afd1"
+                group_name="afd_moe"
             )
             self.hccl_comm_name1 = self.afd_pg1._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank)
-        ffn_ranks = [i for i in range(0, self.ffn_size)]
-        attn_ranks = [i for i in range(self.ffn_size, self.ffn_size + self.attn_size)]
 
-        default_pg_switcher = DefaultProcessGroupSwitcher(
-            _get_default_group(), self.afd_pg)
-        # TODO(yxj):m2n ae_group is different
-        with default_pg_switcher:
-            sub_group_ranks = []
-            for i in range(len(ffn_ranks)):
-                ranks = list([attn_ranks[i], ffn_ranks[i]])
-                sub_group_ranks.append(ranks)
-            self.process_group = init_model_parallel_group(sub_group_ranks,
-                                                           self.rank,
-                                                           backend="hccl",
-                                                           group_name="ae")
+        # 所有FFN和前min_size的Attention参与p2p通信
+        # 所有FFN: world_rank in [0, ffn_size), 前min_size个Attention: world_rank in [ffn_size, ffn_size+min_size)
+        import datetime
+        timeout = datetime.timedelta(seconds=30000)
+        if self.is_vaild_rank_for_inequal_AF(self.rank):
+            self.p2p_pg = init_afd_process_group(
+                backend="hccl",
+                init_method=(
+                    f"tcp://{self.config.afd_config.afd_host}"
+                    f":{self.config.afd_config.afd_port}"
+                ),
+                world_size=self.ffn_size + self.min_size,
+                rank=self.p2p_rank,
+                group_name="p2p",
+                timeout=timeout # TODO(yxj):use timeout set
+            )
 
+        # 前min_size的Attention向多个FFN发送metadata（1对多映射）
+        # attn_i 向所有 ffn_j (其中 j % min_size == i) 发送
+        if self.is_attn_top_min_size_rank(self.rank):
+            local_attn_rank = self.rank - self.ffn_size
+            dst = local_attn_rank
+            while dst < self.ffn_size:
+                self.dst_list.append(dst)
+                dst += self.min_size
+        
+        self.aiv_num = int(self.config.afd_config.multistream_info["core_num"]) if self.config.afd_config.is_multistream else 48
+
+        logger.debug(f"[CAM] world_rank={self.rank}, p2p_rank={self.p2p_rank}, min_size={self.min_size}, "
+                    f"dst_list={self.dst_list}, cam connector initialized")
         logger.info("m2n connector initialized")
 
         self._initialized = True
@@ -121,40 +176,24 @@ class CAMP2PAFDConnector(AFDConnectorBase):
             metadata.connector_data.moe_expert_num = config.n_routed_experts
             # TODO: quant_mode and aiv_num read from config
             metadata.connector_data.quant_mode = 0
-            metadata.connector_data.aiv_num = 48
+            metadata.connector_data.aiv_num = self.aiv_num
             metadata.connector_data.scale = None
             metadata.connector_data.batch_size = batch_size
             metadata.connector_data.h = config.hidden_size
             metadata.connector_data.k = config.num_experts_per_tok
 
-    def compute_moe(self, experts, hidden_states, **kwargs):
-        topk_ids = kwargs.get('topk_ids')
-        topk_weights = kwargs.get('topk_weights')
-        x_active_mask = kwargs.get('x_active_mask')
-        cam_p2p_ep_name = kwargs.get('cam_p2p_ep_name')
-
-        return experts.afd_m2n_ffn_compute(
-            layer=experts,
-            hidden_states=hidden_states,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-            connector_name="camp2pconnector",
-            x_active_mask=x_active_mask,
-            cam_p2p_ep_name=cam_p2p_ep_name
-        )
-
     def select_experts(
-            self,
-            hidden_states: torch.Tensor,
-            router_logits: torch.Tensor,
-            top_k: int,
-            use_grouped_topk: bool,
-            renormalize: bool,
-            topk_group: Optional[int] = None,
-            num_expert_group: Optional[int] = None,
-            custom_routing_function: Optional[Any] = None,
-            e_score_correction_bias: Optional[torch.Tensor] = None,
-            **kwargs
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        use_grouped_topk: bool,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Any] = None,
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        **kwargs
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         from vllm_ascend.ops.moe.experts_selector import select_experts
         return select_experts(
@@ -169,6 +208,26 @@ class CAMP2PAFDConnector(AFDConnectorBase):
             e_score_correction_bias=e_score_correction_bias
         )
 
+    def compute_moe(self, experts, hidden_states, **kwargs):
+        group_list = kwargs.get('group_list')
+        dynamic_scales = kwargs.get('dynamic_scales')
+        topk_weights = kwargs.get('topk_weights')
+        topk_ids = kwargs.get('topk_ids')
+        x_active_mask = kwargs.get('x_active_mask')
+        cam_p2p_ep_name = kwargs.get('cam_p2p_ep_name')
+
+        return experts.afd_m2n_ffn_compute(
+                layer=experts,
+                hidden_states=hidden_states,
+                group_list=group_list,
+                dynamic_scale=dynamic_scales,
+                connector_name="camp2pconnector",
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                x_active_mask=x_active_mask,
+                cam_p2p_ep_name=cam_p2p_ep_name,
+                )
+
     # ATTN发给MOE（ATTN发送）
     # TODO:metadata的获取，最好从框架侧去拿
     def send_attn_output(self,
@@ -179,85 +238,76 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         topk_weights = kwargs.get('topk_weights')
         topk_idx = kwargs.get('topk_ids')
 
-        if not self.use_aclgraph:
-            print(f'send_attn_output start rank:{self.rank}')
-            dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
-            print(f'send_attn_output dst is {dst}')
-            self.process_group.send_object(metadata, dst)
+        if metadata.connector_data:
+            get_forward_context().cam_afdconnector_data = metadata.connector_data
 
-        # Access p2p data
-        batch_size = metadata.connector_data.batch_size
-        h = metadata.connector_data.h
-        k = metadata.connector_data.k
-        aiv_num = metadata.connector_data.aiv_num
-
-        output_list = torch_npu.cam_a2e(expandX=hidden_states, expertIds=topk_idx,
-                                        scales=topk_weights,
-                                        batchSize=batch_size, hiddenSize=h, topk=k,
-                                        expertRankSize=self.ffn_size, attentionRankSize=self.attn_size,
-                                        ank=self.rank, groupEp=self.hccl_comm_name,
-                                        aivNum=aiv_num)
-
-        hidden_states1, simulateExpertIds, simulateExpertScales, attenBatchSize, xActiveMaskOut = output_list[0:5]
-        handle_out = [hidden_states1, simulateExpertIds, simulateExpertScales, attenBatchSize]
-
-        return None, handle_out
+        multistream_enable = False if metadata.layer_idx == self.hf_config.first_k_dense_replace else self.config.afd_config.is_multistream # dense层的后一层不分流
+        return torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
+                                                self.hccl_comm_name,
+                                                self.hccl_comm_name2,
+                                                self.hccl_comm_name3,
+                                                self.rank,
+                                                self.ffn_size,
+                                                self.attn_size,
+                                                self.hf_config.n_routed_experts,
+                                                self.max_num_reqs,
+                                                self.hf_config.hidden_size,
+                                                self.hf_config.num_experts_per_tok,
+                                                multistream_enable,
+                                                self.aiv_num), None
 
     # MOE发给ATTN（ATTN接收）
     def recv_ffn_output(self,
                         hidden_states: Optional[torch.Tensor] = None,
-                        metadata: Optional["AFDConnectorMetadata"] = None,
-                        ) -> Optional[torch.Tensor]:
-        batch_size = metadata.connector_data.batch_size
-        h = metadata.connector_data.h
-        k = metadata.connector_data.k
-        aiv_num = metadata.connector_data.aiv_num
-        handle = metadata.connector_data.handle
+                        metadata: Optional["AFDConnectorMetadata"] = None) -> torch.Tensor:
+        return torch.ops.vllm.cam_recv_ffn_output(hidden_states,
+                                                self.hccl_comm_name,
+                                                self.hccl_comm_name2,
+                                                self.hccl_comm_name3,
+                                                self.rank,
+                                                self.ffn_size,
+                                                self.attn_size,
+                                                self.config.afd_config.is_multistream)
+    
+    # MOE发给ATTN(MOE发送) 
+    def send_ffn_output(self, ffn_output: torch.Tensor, metadata: CAMP2PAFDConnectorMetadata, **kwargs):
+        ubatch_idx = kwargs.get('ubatch_idx', 0)
+        batch_size = metadata.batch_size
+        h = metadata.h
+        k = metadata.k
+        moe_expert_num = metadata.moe_expert_num
+        shared_expert_num = metadata.shared_expert_num
+        aiv_num = metadata.aiv_num
+        handle = metadata.handle
 
-        output2 = torch_npu.cam_e2a(expandXOut=hidden_states, attenBatchSize=handle[3],
-                                    commId=0,
-                                    batchSize=batch_size, hiddenSize=h, topk=k,
-                                    expertRankSize=self.ffn_size, attentionRankSize=self.attn_size,
-                                    rank=self.rank, groupEp=self.hccl_comm_name,
-                                    aivNum=aiv_num)
-
-        return output2
-
-    # MOE发给ATTN(MOE发送)
-    def send_ffn_output(self, ffn_output: torch.Tensor, metadata: AFDConnectorMetadata, **kwargs):
-        batch_size = metadata.connector_data.batch_size
-        h = metadata.connector_data.h
-        k = metadata.connector_data.k
-        aiv_num = metadata.connector_data.aiv_num
-        handle = metadata.connector_data.handle
-
-        torch_npu.cam_e2a(expandXOut=ffn_output, attenBatchSize=handle[0],
-                          batchSize=batch_size, hiddenSize=h, topk=k,
-                          expertRankSize=self.ffn_size, attentionRankSize=self.attn_size,
-                          rank=self.rank, groupEp=self.hccl_comm_name,
-                          aivNum=aiv_num)
+        groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
+        
+        torch_npu.cam_e2a(expandXOut = ffn_output, attenBatchSize = handle[0],
+                            batchSize = batch_size, hiddenSize = h, topk = k,
+                            expertRankSize = self.ffn_size, attentionRankSize = self.attn_size,
+                            rank = self.rank, groupEp = groupEp,
+                            aivNum = aiv_num)
 
         return
 
     # ATTN发给MOE(MOE接收)
     def recv_attn_output(self, metadata: Optional[Any] = None, **kwargs) -> Any:
+        ubatch_idx = kwargs.get('ubatch_idx', 0)
         afdmetadata = None
-        if not self.use_aclgraph:
-            src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
-            afdmetadata = self.process_group.recv_object(src)
-            print(f'recv_attn_output start rank:{self.rank}')
 
         batch_size = metadata.batch_size
         h = metadata.h
         k = metadata.k
         aiv_num = metadata.aiv_num
 
+        groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
+
         outputs = torch_npu.cam_a2e(expandX=torch.tensor([], dtype=torch.bfloat16, device='npu'),
                                     expertIds=torch.tensor([], dtype=torch.int32, device='npu'),
                                     scales=torch.tensor([], dtype=torch.float, device='npu'),
                                     batchSize=batch_size, hiddenSize=h, topk=k,
                                     expertRankSize=self.ffn_size, attentionRankSize=self.attn_size,
-                                    rank=self.rank, groupEp=self.hccl_comm_name,
+                                    rank=self.rank, groupEp=groupEp,
                                     aivNum=aiv_num)
 
         # outputs: [hidden_states1, simulateExpertIds, simulateExpertScales, attenBatchSize, xActiveMaskOut]
@@ -272,21 +322,193 @@ class CAMP2PAFDConnector(AFDConnectorBase):
             cam_p2p_ep_name=self.hccl_comm_name1
         )
 
+    def is_vaild_rank_for_inequal_AF(self,rank):
+        # Only support ffn rank < attn rank
+        return ((rank >= self.ffn_size and rank < self.ffn_size + self.min_size) or rank < self.ffn_size)
+    
+    def is_attn_top_min_size_rank(self,rank):
+        # Only support ffn rank < attn rank
+        return (rank >= self.ffn_size and rank < self.ffn_size + self.min_size)
+
+    def send_is_ubatch(self, data):
+        for dst in self.dst_list:
+            object_bytes = pickle.dumps(data)
+            object_tensor_cpu = torch.frombuffer(bytearray(object_bytes), dtype=torch.uint8)
+
+            object_tensor_npu = torch.empty(object_tensor_cpu.shape,
+                                            dtype=torch.uint8,
+                                            device="npu")
+            object_tensor_npu.copy_(object_tensor_cpu)
+
+            size_tensor = torch.tensor([object_tensor_cpu.numel()],
+                                        dtype=torch.long,
+                                        device="npu")
+
+            torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
+            torch.distributed.send(object_tensor_npu, dst=dst, group=self.p2p_pg)
+
+    def recv_is_ubatch(self):
+        src = self.p2p_rank % self.min_size + self.ffn_size
+
+        size_tensor = torch.empty(1, dtype=torch.long, device="npu")
+        rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)
+        object_tensor_npu = torch.empty(size_tensor.item(), dtype=torch.uint8, device="npu")
+        rank_object = torch.distributed.recv(object_tensor_npu, src=src, group=self.p2p_pg)
+
+        assert rank_object == rank_size, "Received object sender rank does not match the size sender rank."
+
+        object_tensor_cpu = object_tensor_npu.cpu()
+        data = pickle.loads(object_tensor_cpu.numpy().tobytes())
+        return data
+
     def create_recv_metadata(self, **kwargs):
         max_num_tokens = kwargs.get('max_num_tokens', 0)
         hf_config = self.config.model_config.hf_config
 
         return CAMP2PAFDConnectorMetadata(
-            moe_expert_num=hf_config.n_routed_experts,
-            shared_expert_num=0,
-            scale=None,
-            handle=None,
-            quant_mode=0,
-            aiv_num=48,
-            batch_size=max_num_tokens,
-            h=hf_config.hidden_size,
-            k=hf_config.num_experts_per_tok
+            moe_expert_num = hf_config.n_routed_experts,
+            shared_expert_num = 0,
+            scale = None,
+            handle = None,
+            quant_mode = 0,
+            aiv_num = self.aiv_num,
+            batch_size = max_num_tokens,
+            h = hf_config.hidden_size,
+            k = hf_config.num_experts_per_tok
         )
 
     def update_metadata(self, metadata, recv_output):
-        metadata.handle = [recv_output.atten_batch_size]
+        metadata.handle = [
+            recv_output.topk_ids,
+            recv_output.topk_weights,
+            recv_output.expand_idx,
+            recv_output.ep_recv_counts,
+            recv_output.atten_batch_size
+        ]
+
+def cam_send_attn_output_impl(hidden_states: torch.Tensor,
+                              topk_weights: torch.Tensor,
+                              topk_idx: torch.Tensor,
+                              hccl_comm_name: str,
+                              hccl_comm_name2: str,
+                              hccl_comm_name3: Optional[str],
+                              rank: int,
+                              ffn_size: int,
+                              attn_size: int,
+                              moe_expert_num:int,
+                              batch_size:int,
+                              h:int,
+                              k:int,
+                              multistream_enable: bool,
+                              aiv_num: int) -> torch.Tensor:
+    ubatch_idx = get_forward_context().ubatch_idx
+    comm_stream = get_forward_context().afd_comm_stream
+    comm_event = get_forward_context().afd_comm_event
+    if get_forward_context().cam_afdconnector_data is None:
+        cam_afdconnector_data = CAMP2PAFDConnectorMetadata(
+            moe_expert_num = moe_expert_num,
+            shared_expert_num = 0,
+            scale = None,
+            handle = None,
+            quant_mode = 0,
+            aiv_num = aiv_num,
+            batch_size = batch_size,
+            h = h,
+            k = k
+        )
+        get_forward_context().cam_afdconnector_data = cam_afdconnector_data
+
+    cam_metadata = get_forward_context().cam_afdconnector_data
+    batch_size = cam_metadata.batch_size
+    h = cam_metadata.h
+    k = cam_metadata.k
+    aiv_num = cam_metadata.aiv_num
+
+    groupEp = _get_group_ep(ubatch_idx, hccl_comm_name, hccl_comm_name2, hccl_comm_name3)
+
+    curr_stream = torch.npu.current_stream()
+    with npu_stream_switch_within_graph(curr_stream, comm_stream, multistream_enable):
+        handle_out = torch_npu.cam_a2e(expandX = hidden_states, expertIds = topk_idx,
+                            scales = topk_weights,
+                            batchSize = batch_size, hiddenSize = h, topk = k,
+                            expertRankSize = ffn_size, attentionRankSize = attn_size,
+                            rank = rank, groupEp = groupEp,
+                            aivNum = aiv_num)
+
+        hidden_states1, simulateExpertIds, simulateExpertScales, attenBatchSize, xActiveMaskOut = handle_out[0:5]
+        handle = [hidden_states1, simulateExpertIds, simulateExpertScales, attenBatchSize]
+        cam_metadata.handle = handle
+        get_forward_context().cam_afdconnector_data = cam_metadata
+        if multistream_enable:
+            comm_event.record(comm_stream)
+    return hidden_states
+
+def cam_send_attn_output_fake_impl(hidden_states: torch.Tensor,
+                                    topk_weights: torch.Tensor,
+                                    topk_idx: torch.Tensor,
+                                    hccl_comm_name: str,
+                                    hccl_comm_name2: str,
+                                    hccl_comm_name3: Optional[str],
+                                    rank: int,
+                                    ffn_size: int,
+                                    attn_size: int,
+                                    moe_expert_num:int,
+                                    batch_size:int,
+                                    h:int,
+                                    k:int,
+                                    multistream_enable: bool,
+                                    aiv_num: int) -> torch.Tensor:
+    return hidden_states
+
+def cam_recv_ffn_output_impl(hidden_states: torch.Tensor,
+                              hccl_comm_name: str,
+                              hccl_comm_name2: str,
+                              hccl_comm_name3: Optional[str],
+                              rank: int,
+                              ffn_size: int,
+                              attn_size: int,
+                              multistream_enable: bool) -> torch.Tensor:
+
+    cam_metadata = get_forward_context().cam_afdconnector_data
+    assert cam_metadata is not None, "cam_metadata is None"
+    ubatch_idx = get_forward_context().ubatch_idx
+    comm_event = get_forward_context().afd_comm_event
+    batch_size = cam_metadata.batch_size
+    h = cam_metadata.h
+    k = cam_metadata.k
+    aiv_num = cam_metadata.aiv_num
+    handle = cam_metadata.handle
+
+    groupEp = _get_group_ep(ubatch_idx, hccl_comm_name, hccl_comm_name2, hccl_comm_name3)
+    
+    if multistream_enable:
+        curr_stream = torch.npu.current_stream()
+        comm_event.wait(curr_stream)
+    output2 = torch_npu.cam_e2a(expandXOut = hidden_states, attenBatchSize = handle[3],
+                        batchSize = batch_size, hiddenSize = h, topk = k,
+                        expertRankSize = ffn_size, attentionRankSize = attn_size,
+                        rank = rank, groupEp = groupEp,
+                        aivNum = aiv_num)
+    return output2
+
+def cam_recv_ffn_output_fake_impl(hidden_states: torch.Tensor,
+                                  hccl_comm_name: str,
+                                  hccl_comm_name2: str,
+                                  hccl_comm_name3: Optional[str],
+                                  rank: int,
+                                  ffn_size: int,
+                                  attn_size: int,
+                                  multistream_enable: bool) -> torch.Tensor:
+    return hidden_states
+
+direct_register_custom_op(op_name="cam_send_attn_output",
+                          op_func=cam_send_attn_output_impl,
+                          fake_impl=cam_send_attn_output_fake_impl,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="cam_recv_ffn_output",
+                          op_func=cam_recv_ffn_output_impl,
+                          fake_impl=cam_recv_ffn_output_fake_impl,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
