@@ -406,7 +406,7 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          pytest -sv --durations=0 tests/e2e/310p/singlecard/test_qwen3_dense.py
+          pytest -sv --durations=0 tests/e2e/310p/singlecard/test_dense_model_singlecard.py
 
   e2e_310p-4cards:
     name: 310p multicards 4cards
@@ -465,5 +465,5 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
           pytest -sv --durations=0 \
-          tests/e2e/310p/multicard/test_qwen3_dense.py \
-          tests/e2e/310p/multicard/test_qwen3_moe.py
+          tests/e2e/310p/multicard/test_dense_model_multicard.py \
+          tests/e2e/310p/multicard/test_moe_model_multicard.py
