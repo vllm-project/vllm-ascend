@@ -38,6 +38,7 @@ jobs:
         repository: vllm-project/vllm
         path: ./vllm-empty
         ref: ${{ inputs.vllm }}
+
     - uses: dorny/paths-filter@v3
       id: filter
       with:
@@ -62,10 +63,12 @@ jobs:
       run: |
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+
     - name: Run mypy
       run: |
         PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
         export PYTHONPATH
+        env
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         # Run mypy for Python 3.10, 3.11, 3.12 manually
         # Note: We are now separating mypy from pre-commit hooks for performance reasons.

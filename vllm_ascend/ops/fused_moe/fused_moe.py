@@ -46,7 +46,8 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
 from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                get_ascend_device_type, maybe_trans_nz,
                                npu_stream_switch, shared_expert_dp_enabled,
-                               shared_experts_calculation_stream)
+                               shared_experts_calculation_stream,
+                               vllm_version_is)
 
 @dataclass
 class FusedMoEResult:
@@ -407,10 +408,13 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         shared_experts: torch.nn.Module,
         gate: Optional[torch.nn.Module] = None,
         use_overlapped: bool = True,
+        routed_input_transform: Optional[torch.nn.Module] = None,
         **kwargs,
     ):
         AscendFusedMoE.__init__(self, **kwargs)
 
+        if not vllm_version_is("0.15.0"):
+            self._routed_input_transform = routed_input_transform
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
