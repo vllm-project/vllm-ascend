@@ -37,6 +37,7 @@ class AttentionMaskBuilder310:
         self.attn_mask_cache = None
         self.device = device
         self.swa_mask = None
+        self._seq_len_cached = 0
 
     @staticmethod
     def gen_causal_additive_mask(max_seq_len: int, device: torch.device):
