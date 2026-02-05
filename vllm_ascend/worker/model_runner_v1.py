@@ -1321,9 +1321,7 @@ class NPUModelRunner(GPUModelRunner):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         if self.need_accepted_tokens:
-            self._update_states_after_model_execute(
-                sampler_output.sampled_token_ids, scheduler_output
-            )
+            self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
