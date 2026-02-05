@@ -118,10 +118,10 @@ if __name__ == "__main__":
     shape = [32000, 4096, 50]
     dtype_str = "float16"
 
-    IPCSafeAllocator = IPCSafeAllocator(dtype_str=dtype_str, device_id=0)
-    with IPCSafeAllocator:
+    _IPCSafeAllocator = IPCSafeAllocator(dtype_str=dtype_str, device_id=0)
+    with _IPCSafeAllocator:
         tensor = torch.zeros(shape)
         print(tensor.shape, tensor.dtype, tensor.device)
     input("IPCSafeAllocator.deallocate_all()")
-    IPCSafeAllocator.deallocate_all()
+    _IPCSafeAllocator.deallocate_all()
     input("Press any key to exit")
