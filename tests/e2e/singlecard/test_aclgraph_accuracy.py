@@ -153,10 +153,7 @@ def test_full_decode_only_res_consistency(cur_case: LLMTestCase, monkeypatch):
                   sampling_params=cur_case.sampling_params,
                   golden_answers=cur_case.golden_answers)
 
-@pytest.mark.parametrize("cur_case", [
-    pytest.param(CASE_QWEN_EX, marks=pytest.mark.skip(reason="Failed after vllm upgrade, fix me when npugraph_ex accuaracy is stable")),
-    CASE_DS_EX
-])
+@pytest.mark.parametrize("cur_case", [CASE_QWEN_EX, CASE_DS_EX])
 def test_npugraph_ex_res_consistency(cur_case: LLMTestCase, monkeypatch):
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
     runner_kwargs = {
@@ -181,7 +178,6 @@ def test_npugraph_ex_res_consistency(cur_case: LLMTestCase, monkeypatch):
 # The accuracy has already been verified in the previous test case.
 # This test case is used to check whether the functionality works properly
 # after enabling the static kernel and whether it is uninstalled as expected.
-@pytest.mark.skip(reason="Failed after vllm upgrade, fix me when npugraph_ex accuaracy is stable")
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_EX])
 def test_npugraph_ex_with_static_kernel(cur_case: LLMTestCase, monkeypatch):
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
