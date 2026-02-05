@@ -53,6 +53,7 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
+_COMPILE_CUSTOM_KERNELS = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
 _WEIGHT_PREFETCH_METHOD = None
@@ -146,6 +147,14 @@ def maybe_trans_nz(weight: torch.Tensor):
     else:
         # quant weight will trans nz by default
         return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+
+
+def custom_kernels_compiled():
+    global _COMPILE_CUSTOM_KERNELS
+    if _COMPILE_CUSTOM_KERNELS is None:
+        from vllm_ascend import _build_info  # type: ignore
+        _COMPILE_CUSTOM_KERNELS = _build_info.__compile_custom_kernels__
+    return _COMPILE_CUSTOM_KERNELS
 
 
 def _round_up(x: int, align: int):

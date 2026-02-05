@@ -57,7 +57,8 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
-                               enable_sp, get_ascend_device_type,
+                               custom_kernels_compiled, enable_sp,
+                               get_ascend_device_type,
                                register_ascend_customop, vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -152,6 +153,10 @@ class NPUWorker(WorkerBase):
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
 
     def sleep(self, level: int = 1) -> None:
+        if not custom_kernels_compiled():
+            raise ValueError(
+                "Sleep mode needs custom kernels. "
+                "Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1.")
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -172,6 +177,10 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        if not custom_kernels_compiled():
+            raise ValueError(
+                "Sleep mode needs custom kernels. "
+                "Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1.")
         if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "

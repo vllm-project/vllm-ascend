@@ -33,6 +33,8 @@ def mock_maybe_chunk_residual_impl(x, residual):
     return residual
 
 
+@pytest.mark.skip(
+    "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
 @pytest.mark.parametrize("is_310p", [True, False])
 @pytest.mark.parametrize("residual",
                          [None, torch.randn(4, 8, dtype=torch.float32)])
