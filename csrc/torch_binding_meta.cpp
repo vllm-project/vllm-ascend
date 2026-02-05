@@ -457,7 +457,6 @@ void transpose_kv_cache_by_block_meta(
 {
     return;
 }
-}
 } // namespace meta
 } // namespace vllm_ascend
 
