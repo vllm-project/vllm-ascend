@@ -169,8 +169,6 @@ def gen_build_info():
     with open(package_dir, "w+") as f:
         f.write('# Auto-generated file\n')
         f.write(f"__device_type__ = '{device_type}'\n")
-        f.write(
-            f"__compile_custom_kernels__ = {envs.COMPILE_CUSTOM_KERNELS}\n")
     logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
 
 
