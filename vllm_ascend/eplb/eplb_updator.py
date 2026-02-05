@@ -28,7 +28,7 @@ from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 class EplbUpdator:
     def __init__(self, eplb_config, loader, eplb_process: EplbProcess, process):
         self.eplb_config = eplb_config
-        self.multi_stage = (eplb_config.policy_type == 3)
+        self.multi_stage = eplb_config.policy_type == 3
         self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
         self.eplb_process = eplb_process
@@ -137,12 +137,9 @@ class EplbUpdator:
         dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
         if self.multi_stage:
-            moe_load_cum = self._gather_buffer.cpu().permute(2,1,0,3)
-            moe_load_dff = moe_load_cum[...,1:] - moe_load_cum.roll(shift=1, dim=3)[..., 1:]
-            moe_load = torch.cat([
-                moe_load_cum[...,:1],
-                moe_load_dff
-            ], dim=3)
+            moe_load_cum = self._gather_buffer.cpu().permute(2, 1, 0, 3)
+            moe_load_dff = moe_load_cum[..., 1:] - moe_load_cum.roll(shift=1, dim=3)[..., 1:]
+            moe_load = torch.cat([moe_load_cum[..., :1], moe_load_dff], dim=3)
         else:
             moe_load = self._gather_buffer.cpu().permute(1, 0, 2)
         self.shared_dict["moe_load"] = moe_load
