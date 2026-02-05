@@ -85,9 +85,6 @@ class NPUModelRunner(GPUModelRunner):
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
-            inputs_embeds_size=self.inputs_embeds_size,
-            vocab_size=self.vocab_size,
-            dtype=self.dtype,
             device=self.device,
         )
         # we need to adjust triton operators in sampler,

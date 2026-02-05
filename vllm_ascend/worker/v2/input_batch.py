@@ -29,17 +29,11 @@ class AscendInputBuffers(InputBuffers):
         self,
         max_num_reqs: int,
         max_num_tokens: int,
-        inputs_embeds_size: int,
-        vocab_size: int,
-        dtype: torch.dtype,
         device: torch.device,
     ):
         super().__init__(
             max_num_reqs,
             max_num_tokens,
-            inputs_embeds_size,
-            vocab_size,
-            dtype,
             device,
         )
         # Create seq_lens_cpu and seq_lens_np.
