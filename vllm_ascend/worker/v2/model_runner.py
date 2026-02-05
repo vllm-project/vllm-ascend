@@ -90,7 +90,11 @@ class NPUModelRunner(GPUModelRunner):
         # we need to adjust triton operators in sampler,
         # so reinitialize sampler here.
         self.sampler: AscendSampler = AscendSampler(
-            logprobs_mode=self.model_config.logprobs_mode, )
+            max_num_reqs=self.max_num_reqs,
+            vocab_size=self.vocab_size,
+            device=self.device,
+            logprobs_mode=self.model_config.logprobs_mode,
+        )
 
         # we need to copy num_computed_tokens back to cpu to help
         # update actual seq_lens_cpu. gpu attention backend doesn't need these
