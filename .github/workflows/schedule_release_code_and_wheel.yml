@@ -124,7 +124,11 @@ jobs:
           --exclude "libopapi.so" \
           --exclude "liberror_manager.so" \
           --exclude "libruntime.so" \
-          --exclude "libmmpa.so"
+          --exclude "libmmpa.so" \
+          --exclude "libops_base.so" \
+          --exclude "libopapi_math.so" \
+          --exclude "libunified_dlog.so" \
+          --exclude "liboptiling.so"
         done
         rm -f dist/*.whl
         mv dist/repaired/*.whl dist/
