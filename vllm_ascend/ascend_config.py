@@ -138,7 +138,7 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
         self.fault_tolerance_level = additional_config.get(
-            "fault_tolerance_lecel", 0)
+            "fault_tolerance_level", 0)
 
 class FinegrainedTPConfig:
     """
