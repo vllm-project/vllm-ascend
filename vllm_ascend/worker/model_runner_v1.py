@@ -571,14 +571,14 @@ class NPUModelRunner(GPUModelRunner):
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
-        if self.pcp_size * self.dcp_size > 1:
+        if self.use_cp:
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 self.input_batch.num_reqs,
             )
 
         # for pcp, prefill mtp should use origin scheduleroutput ,
-        if self.speculative_config and self.pcp_size * self.dcp_size > 1:
+        if self.speculative_config and self.use_cp:
             self.pcp_manager.generate_pcp_mtp_input(
                 total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens,
@@ -732,7 +732,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata = None
             num_draft_tokens = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
-            if self.pcp_size * self.dcp_size > 1:
+            if self.use_cp:
                 logits_indices = self.pcp_manager.get_logits_indices(cu_num_tokens)
                 logits_indices = logits_indices.pin_memory().to(self.device, non_blocking=True)
             else:
@@ -954,7 +954,7 @@ class NPUModelRunner(GPUModelRunner):
                     self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
                 req_scheduled_tokens = scheduler_output.num_scheduled_tokens
-                if self.pcp_size * self.dcp_size > 1:
+                if self.use_cp:
                     long_seq_metadata = self.long_seq_metadata  # type: ignore
                     input_ids_pcp_full = self.pcp_manager.input_ids_pcp_full.gpu
                     query_start_loc_pcp_full = self.pcp_manager.query_start_loc_pcp_full.gpu
@@ -1838,11 +1838,17 @@ class NPUModelRunner(GPUModelRunner):
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
-        def _get_pcp_metadata(num_tokens):
+        def _get_pcp_metadata(block_table_tensor):
             if not self.use_cp:
-                return None
+                return None, block_table_tensor
             return self.pcp_manager.generate_pcp_metadata(
-                num_tokens, self.query_lens, self.input_batch, num_scheduled_tokens_np
+                num_tokens,
+                self.query_lens,
+                self.input_batch,
+                num_scheduled_tokens_np,
+                block_table_tensor,
+                num_reqs_padded,
+                num_reqs,
             )
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
@@ -1883,8 +1889,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
             return blk_table_tensor, slot_mapping
 
-        self.long_seq_metadata = _get_pcp_metadata(num_tokens)
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
+        self.long_seq_metadata, block_table_gid_0 = _get_pcp_metadata(block_table_gid_0)
 
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
@@ -2080,11 +2086,14 @@ class NPUModelRunner(GPUModelRunner):
             # LoRA state when determining the batch descriptor for capture
             force_has_lora=activate_lora,
         )
-        if self.pcp_size * self.dcp_size > 1:
+        if self.use_cp:
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 num_reqs,
             )
+            if self.speculative_config:
+                self.pcp_manager.query_lens_pcp_full.cpu[:num_reqs] = torch.from_numpy(num_scheduled_tokens)
+                self.pcp_manager.query_lens_pcp_full.copy_to_gpu()
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode
         else:
