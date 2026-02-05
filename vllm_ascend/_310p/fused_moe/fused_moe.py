@@ -26,7 +26,7 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECommMethods
-from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
+from vllm_ascend.quantization.methods.base import QuantType
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
@@ -194,12 +194,10 @@ class AscendFusedMoE310(FusedMoE):
             return QuantType.NONE
 
         method = quant_method.quant_method
-        if hasattr(method, "quant_type"):
-            from vllm_ascend.quantization.methods.base import QuantType as SchemeQuantType
-
-            scheme_quant_type = method.quant_type
-            if scheme_quant_type == SchemeQuantType.W8A8:
-                raise RuntimeError("W8A8 is not supported currently.")
+        quant_type = getattr(method, "quant_type", QuantType.NONE)
+        if quant_type != QuantType.NONE:
+            # TODO: w8a8 quantization will be supported soon, and only reject w4a8 here.
+            raise RuntimeError("W8A8 is not supported currently.")
         return QuantType.NONE
 
     def forward_impl(  # type: ignore[override]
