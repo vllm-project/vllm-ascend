@@ -55,4 +55,3 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
 
         # Override the mask builder with the 310P-specific version
         self.attn_mask_builder: Any = AttentionMaskBuilder310(self.device)
-

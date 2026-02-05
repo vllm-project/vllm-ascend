@@ -23,14 +23,13 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d, nd_to_nz_spec
 
 
 class AttentionMaskBuilder310:
-
     chunked_prefill_attn_mask = None
     max_seqlen = 2048
 
     def __init__(self, device: torch.device):
         """
         Initializes the AttentionMaskBuilder for the 310P device.
-        
+
         Args:
             device (torch.device): The device on which tensors will be allocated.
         """
@@ -43,14 +42,14 @@ class AttentionMaskBuilder310:
     def gen_causal_additive_mask(max_seq_len: int, device: torch.device):
         """
         Generates a standard causal lower-triangular attention mask.
-        
-        The upper triangular part is filled with negative infinity (float("-inf")) 
+
+        The upper triangular part is filled with negative infinity (float("-inf"))
         to mask out future tokens, while the lower triangular part is kept as 0.
-        
+
         Args:
             max_seq_len (int): The maximum sequence length for the mask.
             device (torch.device): The target device for the tensor.
-            
+
         Returns:
             torch.Tensor: A float16 tensor representing the causal mask.
         """
@@ -59,14 +58,14 @@ class AttentionMaskBuilder310:
         mask = torch.zeros((max_seq_len, max_seq_len), dtype=torch.float16, device=device)
         mask.masked_fill_(upper, float("-inf"))
         return mask
-    
+
     @classmethod
     def get_splitfuse_mask(cls, attn_metadata: AscendMetadata, device: torch.device):
         """
         Generates and formats the attention mask for SplitFuse (chunked prefill) decoding.
-        
-        It calculates the specific indices required based on query start locations 
-        and context lengths, selects the relevant parts from the global chunked 
+
+        It calculates the specific indices required based on query start locations
+        and context lengths, selects the relevant parts from the global chunked
         mask, and converts the result to the NPU-specific fractal format.
 
         Args:
@@ -88,11 +87,11 @@ class AttentionMaskBuilder310:
         splitfuse_mask = cls.chunked_prefill_attn_mask.index_select(0, position)
         splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
         return splitfuse_mask_nz
-    
+
     def get_swa_mask(self, dtype: torch.dtype, sliding_window):
         """
         Generates or retrieves a cached Sliding Window Attention (SWA) mask.
-        
+
         This mask allows attention only within a specific local window (diagonal band),
         masking out tokens that are too far in the past or in the future.
 
@@ -117,8 +116,8 @@ class AttentionMaskBuilder310:
     def get_attention_mask(self, model_config) -> torch.Tensor:
         """
         Retrieves the appropriate attention mask based on the model configuration.
-        
-        It explicitly checks for 'pooling' runner types which are not supported 
+
+        It explicitly checks for 'pooling' runner types which are not supported
         on 310P hardware.
 
         Args:
@@ -134,11 +133,11 @@ class AttentionMaskBuilder310:
             # TODO: pooling model will be supported soon.
             raise NotImplementedError("310P does not support runner_type='pooling'")
         return self._get_causal_mask(self.max_seqlen)
-    
+
     def _get_causal_mask(self, max_seq_len: int) -> torch.Tensor:
         """
         Internal method to get or update the cached causal attention mask.
-        
+
         If the cache is empty or the requested length exceeds the cached length,
         a new mask is generated and converted to the NPU fractal format.
 
