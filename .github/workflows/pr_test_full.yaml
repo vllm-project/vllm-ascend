@@ -75,7 +75,7 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [13397841ab469cecf1ed425c3f52a9ffc38139b5, v0.15.0]
+        vllm_version: [18e7cbbb158a86bdc76585e64ada795bf1c0d435, v0.15.0]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.e2e_tracker == true }}
     uses: ./.github/workflows/_e2e_test.yaml
