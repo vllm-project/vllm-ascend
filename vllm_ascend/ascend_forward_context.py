@@ -19,7 +19,6 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
-    vllm_version_is,
 )
 
 
@@ -44,6 +43,7 @@ def set_ascend_forward_context(
     model_instance: torch.nn.Module = None,
     is_draft_model=False,
     skip_compiled: bool = False,
+    draft_attn_metadatas=None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -57,13 +57,12 @@ def set_ascend_forward_context(
         "num_tokens_across_dp": num_tokens_across_dp,
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
+        "skip_compiled": skip_compiled,
     }
-
-    if not vllm_version_is("0.14.1"):
-        forward_context_kwargs["skip_compiled"] = skip_compiled
 
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
+        forward_context.draft_attn_metadatas = draft_attn_metadatas
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
@@ -120,18 +119,8 @@ def set_ascend_forward_context(
         if has_layer_idx(model_instance):
             forward_context.layer_idx = model_instance.model.start_layer
 
-        # TODO(rjg-lyh): refactor mlp weight prefetch method
-        # set for mlp weight prefetch
-        prefetch_mlp_enabled = (
-            envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP
-            and forward_context.layer_idx is not None
-            and num_tokens is not None
-            and num_tokens < 500
-        )
-        if prefetch_mlp_enabled:
-            forward_context.prefetch_mlp_gate_up_proj = False
-            forward_context.prefetch_mlp_down_proj = False
-        forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
+        forward_context.prefetch_mlp_gate_up_proj = False
+        forward_context.prefetch_mlp_down_proj = False
         forward_context.model_instance = model_instance
         forward_context.is_draft_model = is_draft_model
 

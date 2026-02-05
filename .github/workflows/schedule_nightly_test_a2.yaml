@@ -133,8 +133,54 @@ jobs:
               - Qwen3-Omni-30B-A3B-Instruct
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: v0.14.1
+      vllm: v0.15.0
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11'
       upload: false
+
+  doc-test:
+    name: doc-test
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    strategy:
+      # Each version should be tested
+      fail-fast: false
+      matrix:
+        vllm_verison: [releases-v0.13.0, releases-v0.13.0-openeuler, main, main-openeuler]
+    runs-on: linux-aarch64-a2-1
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_verison }}
+    steps:
+      - name: Check NPU/CANN and git info
+        run: |
+          echo "====> Print NPU/CANN info"
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+          echo "====> Print vllm-ascend git info"
+          cd /vllm-workspace/vllm-ascend
+          git --no-pager log -1 || true
+          echo "====> Print vllm git info"
+          cd /vllm-workspace/vllm
+          git --no-pager log -1 || true
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Run vllm-ascend/tests/e2e/run_doctests.sh
+        run: |
+          # PWD: /__w/vllm-ascend/vllm-ascend
+          # Make sure e2e tests are latest
+          echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
+          rm -rf /vllm-workspace/vllm-ascend/tests/e2e
+          mkdir -p /vllm-workspace/vllm-ascend/tests
+          # Overwrite e2e and examples
+          cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
+          cp -r examples /vllm-workspace/vllm-ascend/
+
+          # Simulate container to enter directory
+          cd /workspace
+
+          # Run real test
+          echo "Test:"
+          /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh

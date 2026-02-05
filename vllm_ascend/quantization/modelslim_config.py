@@ -166,6 +166,12 @@ packed_modules_model_mapping: Dict[str, Dict[str, List[str]]] = {
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
     },
+    "glm4_moe_lite":  {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
+    },
     "longcat_flash": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
@@ -395,7 +401,13 @@ class AscendModelSlimConfig(QuantizationConfig):
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
         prefix = self.quant_prefix_mapper(model_type, prefix)
-        from vllm.attention.layer import Attention
+
+        from vllm_ascend.utils import vllm_version_is
+        if vllm_version_is("v0.15.0"):
+            from vllm.attention.layer import Attention # type: ignore
+        else:
+            from vllm.model_executor.layers.attention import Attention
+
         if prefix.startswith("language_model"):
             prefix = prefix.split('.', 1)[-1]
         if isinstance(layer, LinearBase):

@@ -37,7 +37,16 @@ class MtpProposer(EagleProposer):
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None,
                   is_profile=False) -> None:
-
+        if (
+            self.pcp_size * self.dcp_size == 1
+            and not self.speculative_config.disable_padded_drafter_batch
+        ):
+            super().dummy_run(
+                num_tokens, with_prefill, in_graph_capturing, num_reqs,
+                num_tokens_across_dp, aclgraph_runtime_mode, batch_descriptor,
+                dummy_compute_logits, is_profile
+            )
+            return
         (
             num_tokens,
             num_tokens_across_dp,
@@ -113,6 +122,11 @@ class MtpProposer(EagleProposer):
                     batch_descriptor=batch_descriptor,
                     is_draft_model=True,
                     in_profile_run=is_profile):
+                if not vllm_version_is("v0.15.0"):
+                    # Reset MOE layer index for each MTP step iteration
+                    forward_context = get_forward_context()
+                    if forward_context is not None:
+                        forward_context.moe_layer_index = 0
                 previous_hidden_states, positions = self.maybe_pad_and_reduce(
                     previous_hidden_states, positions)
                 self.model(input_ids=input_ids,
@@ -151,6 +165,19 @@ class MtpProposer(EagleProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
     ) -> torch.Tensor:
+        if (
+            self.pcp_size * self.dcp_size == 1
+            and not self.speculative_config.disable_padded_drafter_batch
+        ):
+            draft_token_ids = super()._propose(
+                target_token_ids, target_positions, target_hidden_states,
+                next_token_ids, last_token_indices, common_attn_metadata,
+                sampling_metadata, mm_embed_inputs, req_scheduled_tokens,
+                long_seq_metadata, num_prefill_reqs, num_decode_reqs,
+                scheduler_output, num_scheduled_tokens
+            )
+            return draft_token_ids
+
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
 
@@ -245,12 +272,8 @@ class MtpProposer(EagleProposer):
         # Note(qcs): We may need to refactor these check logics.
         if self.use_cuda_graph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
                 -1]:
-            if vllm_version_is('0.14.1'):
-                num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                    num_scheduled_tokens)
-            else:
-                num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[
-                    num_scheduled_tokens]
+            num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[
+                num_scheduled_tokens]
         else:
             # Eager mode, no padding needed
             num_input_tokens = num_tokens
@@ -312,6 +335,13 @@ class MtpProposer(EagleProposer):
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=num_tokens,
                     is_draft_model=True):
+                
+                if not vllm_version_is("v0.15.0"):
+                    # Reset MOE layer index for each MTP step to match all_moe_layers registration
+                    forward_context = get_forward_context()
+                    if forward_context is not None:
+                        forward_context.moe_layer_index = 0
+
                 with record_function_or_nullcontext('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata

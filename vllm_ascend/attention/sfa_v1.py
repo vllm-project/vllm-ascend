@@ -9,6 +9,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MLAAttentionImpl  # type: ignore
@@ -45,17 +46,11 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     maybe_trans_nz,
-    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-if vllm_version_is("0.14.1"):
-    from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder  # type: ignore
-else:
-    from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
-# isort: on
 
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
@@ -82,6 +77,10 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
         return AscendSFAImpl
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [128]
 
 
 @dataclass
@@ -1063,3 +1062,24 @@ class AscendSFAImpl(MLAAttentionImpl):
             torch.distributed.all_to_all_single(attn_output, send, group=get_tp_group().device_group)
 
             return attn_output, True
+
+    def forward_mha(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: M,
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        raise NotImplementedError("forward_mha is not supported for SFA attention. Use forward() instead.")
+
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: M,
+        layer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        raise NotImplementedError("forward_mqa is not supported for SFA attention. Use forward() instead.")
