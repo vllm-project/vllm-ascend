@@ -766,7 +766,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and self.sliding_window is not None
             and attn_metadata.seq_lens.shape[0] == query.size(0)
         ):
-            return self._forward_fia_slidingwindow(query, attn_metadata, output)
+            attn_output = self._forward_fia_slidingwindow(query, attn_metadata, output)
+            num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
