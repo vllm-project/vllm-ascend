@@ -916,10 +916,14 @@ PROMPT_CONFIGS = {
         "model": "Tencent-Hunyuan/HunyuanOCR",
         "prompt_fn": hunyuan_prompt,
         "mm_processor_kwargs": {},
+        "skip": "HunYuanVLProcessor has add_special_tokens conflict after vLLM commit f0a1c8453, pending upstream fix",
     },
 }
 
 
 @pytest.fixture(params=PROMPT_CONFIGS.keys())
 def vl_config(request):
-    return PROMPT_CONFIGS[request.param]
+    config = PROMPT_CONFIGS[request.param]
+    if "skip" in config:
+        pytest.skip(config["skip"])
+    return config
