@@ -1062,3 +1062,24 @@ class AscendSFAImpl(MLAAttentionImpl):
             torch.distributed.all_to_all_single(attn_output, send, group=get_tp_group().device_group)
 
             return attn_output, True
+
+    def forward_mha(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: M,
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        raise NotImplementedError("forward_mha is not supported for SFA attention. Use forward() instead.")
+
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: M,
+        layer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        raise NotImplementedError("forward_mqa is not supported for SFA attention. Use forward() instead.")
