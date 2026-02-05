@@ -83,6 +83,7 @@ PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 logger = logging.getLogger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
+_LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 
 DISAGG_EPD_PROXY_SCRIPT = Path(
     __file__
