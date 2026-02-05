@@ -33,7 +33,7 @@ jobs:
     name: refresh codecov
     strategy:
       matrix:
-        vllm_version: [v0.15.0]
+        vllm_version: [d7e17aaacd5ed1b4b4be6bcfef3a1b7cbc84fc9a]
     uses: ./.github/workflows/_unit_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
