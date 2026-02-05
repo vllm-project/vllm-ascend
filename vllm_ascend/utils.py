@@ -264,6 +264,11 @@ def enable_custom_op():
     return _CUSTOM_OP_ENABLED
 
 
+def use_split_rmsnorm_rope(vllm_config) -> bool:
+    return vllm_config.model_config.hf_config.model_type in ["qwen3", "qwen3_moe"] and \
+        not vllm_config.model_config.enforce_eager
+
+
 def find_hccl_library() -> str:
     """
     We either use the library file specified by the `HCCL_SO_PATH`

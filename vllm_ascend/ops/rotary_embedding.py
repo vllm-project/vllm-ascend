@@ -33,7 +33,8 @@ if HAS_TRITON:
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
-                               get_ascend_device_type, has_rope, is_vl_model)
+                               get_ascend_device_type, has_rope, is_vl_model,
+                               use_split_rmsnorm_rope)
 
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
 # However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
@@ -287,7 +288,8 @@ class AscendRotaryEmbedding(RotaryEmbedding):
     ) -> None:
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
-        _record_cos_sin_cache(self.cos_sin_cache)
+        if not use_split_rmsnorm_rope():
+            _record_cos_sin_cache(self.cos_sin_cache)
         _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
 
     def forward_oot(
@@ -338,7 +340,8 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         }
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, scaling_factor, dtype, **extra_kwargs)
-        _record_cos_sin_cache(self.cos_sin_cache)
+        if not use_split_rmsnorm_rope():
+            _record_cos_sin_cache(self.cos_sin_cache)
 
     def forward_oot(
         self,

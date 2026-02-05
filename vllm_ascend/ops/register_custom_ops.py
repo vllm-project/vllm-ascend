@@ -283,6 +283,6 @@ direct_register_custom_op(op_name="quantize",
 
 direct_register_custom_op(op_name="rope_forward",
                           op_func=rope_forward_oot,
-                          fake_impl=_rope_forward_oot_fake,
+                          fake_impl=rope_forward_oot_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
