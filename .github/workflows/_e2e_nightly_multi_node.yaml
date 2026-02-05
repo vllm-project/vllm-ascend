@@ -32,7 +32,7 @@ on:
         description: how many pods will be pulled up via lws.yaml, indicates number of nodes we need
       vllm_version:
         required: false
-        default: "v0.14.1"
+        default: "v0.15.0"
         type: string
         description: vllm version to use
       vllm_ascend_remote_url:
@@ -78,7 +78,7 @@ jobs:
         - name: Decode kubeconfig from secrets
           run: |
             # Decode and save kubeconfig
-            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
+            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
 
         - name: Checkout code
           uses: actions/checkout@v6
@@ -133,7 +133,7 @@ jobs:
             image="${{ inputs.image }}"
             config_file_path="${{ inputs.config_file_path }}"
             fail_tag=FAIL_TAG_"${{ inputs.config_file_path }}"
-            echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
+            echo "FAIL_TAG=${fail_tag}" >> "$GITHUB_ENV"
 
             required_params=("size" "replicas" "image" "config_file_path")
             for param in "${required_params[@]}"; do
@@ -264,5 +264,5 @@ jobs:
         - name: Post process
           if: always()
           run: |
-            kubectl get pods -n $NAMESPACE --ignore-not-found=true
+            kubectl get pods -n "$NAMESPACE" --ignore-not-found=true
             kubectl delete -f ./lws.yaml --ignore-not-found=true || true

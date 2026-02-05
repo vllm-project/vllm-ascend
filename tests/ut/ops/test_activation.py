@@ -54,11 +54,7 @@ def test_QuickGELU_forward(mock_gelu, dummy_tensor, default_vllm_config):
 
 @pytest.mark.skipif(is_310p_hw(), reason="non_310P device unittest case.")
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
-@patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
-@patch("torch.ops.vllm.maybe_prefetch_mlp_down_proj", side_effect=lambda x: None)
 def test_SiluAndMul_forward(
-    mock_maybe_prefetch_mlp_down_proj,
-    mock_maybe_wait_prefetch_done,
     mock_swiglu,
     dummy_tensor,
     default_vllm_config,
@@ -67,14 +63,8 @@ def test_SiluAndMul_forward(
     out = layer.forward(dummy_tensor)
     expected_arg = dummy_tensor
 
-    # assert mock_maybe_prefetch_mlp_down_proj.call_count == 1
-    mock_maybe_prefetch_mlp_down_proj.assert_called_once()
-
     # assert mock_swiglu.call_count == 1
     mock_swiglu.assert_called_once()
-
-    # assert mock_maybe_wait_prefetch_done.call_count == 1
-    mock_maybe_wait_prefetch_done.assert_called_once()
 
     actual_arg = mock_swiglu.call_args[0][0]
     assert torch.allclose(actual_arg, expected_arg), "npu_swiglu called with unexpected input"
@@ -85,11 +75,7 @@ def test_SiluAndMul_forward(
 
 @pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
 @patch("torch.nn.functional.silu", side_effect=lambda x: x + 1)
-@patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
-@patch("torch.ops.vllm.maybe_prefetch_mlp_down_proj", side_effect=lambda x: None)
 def test_SiluAndMul_forward_310p(
-    mock_maybe_prefetch_mlp_down_proj,
-    mock_maybe_wait_prefetch_done,
     mock_silu,
     dummy_tensor,
     default_vllm_config,
@@ -99,14 +85,8 @@ def test_SiluAndMul_forward_310p(
     h = dummy_tensor.shape[-1] // 2
     expected_arg = dummy_tensor[..., :h]
 
-    # assert mock_maybe_prefetch_mlp_down_proj.call_count == 1
-    mock_maybe_prefetch_mlp_down_proj.assert_called_once()
-
     # assert mock_silu.call_count == 1
     mock_silu.assert_called_once()
-
-    # assert mock_maybe_wait_prefetch_done.call_count == 1
-    mock_maybe_wait_prefetch_done.assert_called_once()
 
     actual_arg = mock_silu.call_args[0][0]
     assert torch.allclose(actual_arg, expected_arg), "swiglu called with unexpected input"
