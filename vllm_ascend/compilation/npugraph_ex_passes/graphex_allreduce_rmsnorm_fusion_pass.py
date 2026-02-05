@@ -16,15 +16,25 @@
 #
 import torch
 import torchair
+from torch._inductor.pattern_matcher import Match
+from vllm.compilation.inductor_pass import get_pass_context
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
 
-from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
+from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import (
+    check_and_register_fusion_pass,
+    extra_stream_scope_check,
+)
 
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THREHOLD = 512
+
+
+def extra_check_for_allreduce_rmsnorm_fusion_pass(match: Match) -> bool:
+    compile_range = get_pass_context().compile_range
+    return extra_stream_scope_check(match) and compile_range.start > ALLREDUCE_NORM_FUSE_THREHOLD
 
 
 class GraphEXMiddleLayerMatmulAllReduceAddRMSNormPattern:
@@ -80,7 +90,7 @@ class GraphEXMiddleLayerMatmulAllReduceAddRMSNormPattern:
             search_fn=pattern,
             replace_fn=replacement,
             example_inputs=self.get_inputs(),
-            extra_check=extra_stream_scope_check,
+            extra_check=extra_check_for_allreduce_rmsnorm_fusion_pass,
         )
 
 
@@ -130,14 +140,14 @@ class GraphEXLastLayerMatmulAllReduceAddRMSNormPattern:
             search_fn=pattern,
             replace_fn=replacement,
             example_inputs=self.get_inputs(),
-            extra_check=extra_stream_scope_check,
+            extra_check=extra_check_for_allreduce_rmsnorm_fusion_pass,
         )
 
 
 class GraphEXMatmulAllReduceAddRMSNormPass:
     def __init__(self, vllm_config: VllmConfig):
-        GraphEXMiddleLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register()
-        GraphEXLastLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register()
+        check_and_register_fusion_pass(GraphEXMiddleLayerMatmulAllReduceAddRMSNormPattern, vllm_config=vllm_config)
+        check_and_register_fusion_pass(GraphEXLastLayerMatmulAllReduceAddRMSNormPattern, vllm_config=vllm_config)
 
     def __call__(self, graph: torch.fx.Graph):
         pass

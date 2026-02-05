@@ -194,7 +194,7 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
     return;
 }
 
-at::Tensor& dispatch_ffn_combine_meta(
+std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& x,
     const at::TensorList& weight1,
     const at::TensorList& weight2,
@@ -204,9 +204,10 @@ at::Tensor& dispatch_ffn_combine_meta(
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
-    at::Tensor& out
+    at::Tensor& out,
+    at::Tensor& expert_token_nums
 ) {
-    return out;
+    return {out, expert_token_nums};
 }
 
 at::Tensor npu_lightning_indexer_meta(
@@ -434,6 +435,20 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     at::Tensor x = at::empty_symint(x1.sym_sizes(), x1.options());
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
+
+void transpose_kv_cache_by_block_meta(
+    const at::TensorList &k_cache,
+    const at::TensorList &v_cache,
+    const at::Tensor &block_ids,
+    int64_t block_size,
+    int64_t head_num,
+    int64_t head_dim,
+    int64_t split_num,
+    int64_t layer_num)
+{
+    return;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -474,5 +489,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
+    // transpose_kv_cache_by_block
+    ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
 }
 }
