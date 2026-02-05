@@ -18,7 +18,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
-from vllm_ascend.utils import lmhead_tp_enable
+from vllm_ascend.utils import lmhead_tp_enable, vllm_version_is
 
 
 class MtpProposer(EagleProposer):
@@ -122,6 +122,11 @@ class MtpProposer(EagleProposer):
                     batch_descriptor=batch_descriptor,
                     is_draft_model=True,
                     in_profile_run=is_profile):
+                if not vllm_version_is("v0.15.0"):
+                    # Reset MOE layer index for each MTP step iteration
+                    forward_context = get_forward_context()
+                    if forward_context is not None:
+                        forward_context.moe_layer_index = 0
                 previous_hidden_states, positions = self.maybe_pad_and_reduce(
                     previous_hidden_states, positions)
                 self.model(input_ids=input_ids,
@@ -330,6 +335,13 @@ class MtpProposer(EagleProposer):
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=num_tokens,
                     is_draft_model=True):
+                
+                if not vllm_version_is("v0.15.0"):
+                    # Reset MOE layer index for each MTP step to match all_moe_layers registration
+                    forward_context = get_forward_context()
+                    if forward_context is not None:
+                        forward_context.moe_layer_index = 0
+
                 with record_function_or_nullcontext('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata
