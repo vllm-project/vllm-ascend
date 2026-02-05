@@ -163,6 +163,8 @@ def gen_build_info():
     with open(package_dir, "w+") as f:
         f.write("# Auto-generated file\n")
         f.write(f"__device_type__ = '{device_type}'\n")
+        f.write(
+            f"__compile_custom_kernels__ = {envs.COMPILE_CUSTOM_KERNELS}\n")
     logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
 
 
@@ -334,6 +336,8 @@ class cmake_build_ext(build_ext):
         )
 
     def build_extensions(self) -> None:
+        if not envs.COMPILE_CUSTOM_KERNELS:
+            return
         # Ensure that CMake is present and working
         try:
             subprocess.check_output(["cmake", "--version"])
@@ -423,7 +427,9 @@ except LookupError:
     # only checks out the commit. In this case, we set a dummy version.
     VERSION = "0.0.0"
 
-ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
+ext_modules = []
+if envs.COMPILE_CUSTOM_KERNELS:
+    ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
 
 
 def get_path(*filepath) -> str:
