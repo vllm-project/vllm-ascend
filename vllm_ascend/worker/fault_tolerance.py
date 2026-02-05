@@ -351,6 +351,7 @@ class FaultTolerance:
             req_backup = {
                 'output_token_ids' : state.output_token_ids.copy() if state.output_token_ids else [],
                 'num_computed_tokens' : state.num_computed_tokens,
+                'block_ids':tuple(block_id.copy() for block_id in state.block_ids) if state.block_ids else [],
             }
             requests_backup[req_id] = req_backup
 
@@ -362,8 +363,19 @@ class FaultTolerance:
         backup['_req_ids'] = ib._req_ids.copy()
         backup['req_output_token_ids'] = ib.req_output_token_ids.copy()
         backup['req_id_to_index'] = dict(ib.req_id_to_index)
+        backup['num_blocks_per_row'] = ib.block_table.num_blocks_per_row.copy()
+        if ib.batch_update_builder._removed is not None:
+            backup['_removed'] = ib.batch_update_builder._removed.copy()
+        else:
+            backup['_removed'] = None
+        if ib.batch_update_builder.added is not None:
+            backup['added'] = ib.batch_update_builder.added.copy()
+        else:
+            backup['added'] = None
+        backup['spec_token_ids'] = [spec_list.copy() for spec_list in ib.spec_token_ids]
 
         essential_arrays = ['token_ids_cpu','num_tokens','num_tokens_no_spec','num_computed_tokens_cpu','num_accepted_tokens_cpu']
+
         for attr_name in essential_arrays:
             if hasattr(ib,attr_name):
                 attr_value = getattr(ib,attr_name)
@@ -408,6 +420,7 @@ class FaultTolerance:
                     state = self.model_runner.requests[req_id]
                     state.output_token_ids = req_backup['output_token_ids']
                     state.num_computed_tokens = req_backup['num_computed_tokens']
+                    state.block_ids = req_backup['block_ids']
 
         # Rollback inputbatch state
         if hasattr(self.model_runner,'input_batch'):
@@ -420,6 +433,14 @@ class FaultTolerance:
             if 'req_id_to_index' in backup:
                 ib.req_id_to_index.clear()
                 ib.req_id_to_index.update(backup['req_id_to_index'])
+            if 'num_blocks_per_row' in backup:
+                ib.block_table.num_blocks_per_row[:] = backup['num_blocks_per_row']
+            if '_removed' in backup:
+                ib.batch_update_builder._removed = backup['_removed']
+            if 'added' in backup:
+                ib.batch_update_builder.added = backup['added']
+            if 'spec_token_ids' in backup:
+                ib.spec_token_ids = backup['spec_token_ids']
 
             essential_arrays = ['token_ids_cpu','num_tokens','num_tokens_no_spec','num_computed_tokens_cpu','num_accepted_tokens_cpu']
             for attr_name in essential_arrays:
@@ -442,11 +463,3 @@ class FaultTolerance:
 
             if 'cur_iterations' in backup:
                 eplb.cur_iterations = backup['cur_iterations']
-    def _create_essential_state_for_common(self,*args,**kwargs):
-        pass
-    def _create_essential_state_for_requests(self):
-        pass
-    def _create_essential_state_for_input_batch(self):
-        pass
-    def _create_essential_state_for_sampling(self):
-        pass
