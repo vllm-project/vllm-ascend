@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+
 import torch
 import triton  # type: ignore
 import triton.language as tl  # type: ignore
@@ -30,7 +31,9 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 def split_qkv_rmsnorm_mrope_kernel(
     in_qkv_ptr: torch.Tensor,
     q_weight_ptr: torch.Tensor,
+    q_bias_ptr: torch.Tensor,
     k_weight_ptr: torch.Tensor,
+    k_bias_ptr: torch.Tensor,
     cos_sin_ptr: torch.Tensor,
     out_q_ptr: torch.Tensor,
     out_k_ptr: torch.Tensor,
@@ -49,6 +52,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     mrope_section_h: tl.constexpr,
     mrope_section_w: tl.constexpr,
     half_head_size: tl.constexpr,
+    has_bias: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
 
@@ -63,6 +67,10 @@ def split_qkv_rmsnorm_mrope_kernel(
 
     q_rmsnorm_weight = tl.load(q_weight_ptr + tl.arange(0, head_size))
     k_rmsnorm_weight = tl.load(k_weight_ptr + tl.arange(0, head_size))
+
+    if has_bias:
+        q_bias = tl.load(q_bias_ptr + tl.arange(0, head_size))
+        k_bias = tl.load(k_bias_ptr + tl.arange(0, head_size))
 
     for index in range(loop_num):
         ## load ##
@@ -133,7 +141,9 @@ def split_qkv_rmsnorm_mrope_kernel(
         variances = tl.sum(squares, axis=1) / head_size
         reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(num_q_heads, 1)
         q_normalized = in_q_tensor * reciprocal_std
-        q_normalized = (q_normalized * q_rmsnorm_weight)
+        q_normalized = q_normalized * q_rmsnorm_weight
+        if has_bias:
+            q_normalized = q_normalized + q_bias
 
         # k-rmsnorm
         squares = in_k_tensor * in_k_tensor
@@ -141,7 +151,9 @@ def split_qkv_rmsnorm_mrope_kernel(
         reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(num_kv_heads,
                                                                 1)
         k_normalized = in_k_tensor * reciprocal_std
-        k_normalized = (k_normalized * k_rmsnorm_weight)
+        k_normalized = k_normalized * k_rmsnorm_weight
+        if has_bias:
+            k_normalized = k_normalized + k_bias
 
         # q-mrope
         x1 = tl.extract_slice(
@@ -231,6 +243,8 @@ def triton_split_qkv_rmsnorm_mrope(
     head_size: int,
     eps: float,
     mrope_section: list[int],
+    q_bias: torch.Tensor | None = None,
+    k_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     core_num = get_vectorcore_num()
 
@@ -270,10 +284,14 @@ def triton_split_qkv_rmsnorm_mrope(
 
     half_head_size = head_size // 2
 
+    has_bias = q_bias is not None
+
     split_qkv_rmsnorm_mrope_kernel[(block_dim,)](
         qkv,
         q_weight,
+        q_bias,
         k_weight,
+        k_bias,
         cos_sin,
         q_output,
         k_output,
@@ -292,6 +310,7 @@ def triton_split_qkv_rmsnorm_mrope(
         mrope_section[1],
         mrope_section[2],
         half_head_size,
+        has_bias
     )
 
     return q_output, k_output, v_output
@@ -307,6 +326,8 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     head_size: int,
     eps: float,
     mrope_section: list[int],
+    q_bias: torch.Tensor | None = None,
+    k_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = qkv.shape[0]
     q_size = num_q_heads * head_size
