@@ -88,6 +88,12 @@ class NPUWorker(WorkerBase):
             # Additional parameters for compatibility with vllm
             **kwargs):
         """Initialize the worker for Ascend."""
+        if not envs_ascend.COMPILE_CUSTOM_KERNELS:
+            logger.warning(
+                "COMPILE_CUSTOM_KERNELS is set to False. "
+                "In most scenarios, without custom kernels, vllm-ascend will not function correctly."
+            )
+
         # register patch for vllm
         from vllm_ascend.utils import adapt_patch
         adapt_patch()
@@ -183,10 +189,6 @@ class NPUWorker(WorkerBase):
 
 
     def sleep(self, level: int = 1) -> None:
-        if not custom_kernels_compiled():
-            raise ValueError(
-                "Sleep mode needs custom kernels. "
-                "Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1.")
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -207,10 +209,6 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
-        if not custom_kernels_compiled():
-            raise ValueError(
-                "Sleep mode needs custom kernels. "
-                "Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1.")
         if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
