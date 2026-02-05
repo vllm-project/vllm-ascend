@@ -3,13 +3,11 @@
 
 import logging
 import math
-from typing import Dict, List, Tuple, Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
 from numba import njit  # type: ignore
-import scipy  # type: ignore
-import scipy.optimize  # type: ignore
 from scipy import stats
 from scipy.optimize import linear_sum_assignment
 
@@ -22,23 +20,19 @@ numba_logger.setLevel(logging.WARNING)
 
 @njit(fastmath=True, cache=True)
 def min_max_replica_org(
-    mu: np.ndarray,
-    var: np.ndarray,
-    num_available_replicas: int,
-    current_replicas: np.ndarray,
-    z_score: float
-) -> Tuple[np.ndarray, np.ndarray]:
+    mu: np.ndarray, var: np.ndarray, num_available_replicas: int, current_replicas: np.ndarray, z_score: float
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Original min-max replica allocation algorithm
     Allocates replicas iteratively to expert with maximum unit load value
-    
+
     Args:
         mu: Mean load of each expert (N,)
         var: Variance of each expert's load (N,)
         num_available_replicas: Total available replicas to allocate
         current_replicas: Initial replica count per expert (N,)
         z_score: Z-score for risk calculation (confidence level)
-    
+
     Returns:
         current_replicas: Updated replica count per expert (N,)
         replicas_history: Replica allocation history (num_available_replicas+1, N)
@@ -67,23 +61,19 @@ def min_max_replica_org(
 
 @njit
 def max_delta_replica(
-    mu: np.ndarray,
-    var: np.ndarray,
-    num_available_replicas: int,
-    current_replicas: np.ndarray,
-    z_score: float
-) -> Tuple[np.ndarray, np.ndarray]:
+    mu: np.ndarray, var: np.ndarray, num_available_replicas: int, current_replicas: np.ndarray, z_score: float
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Maximum delta replica allocation algorithm
     Allocates replicas by maximum unit value delta after increment
-    
+
     Args:
         mu: Mean load of each expert (N,)
         var: Variance of each expert's load (N,)
         num_available_replicas: Total available replicas to allocate
         current_replicas: Initial replica count per expert (N,)
         z_score: Z-score for risk calculation (confidence level)
-    
+
     Returns:
         current_replicas: Updated replica count per expert (N,)
         replicas_history: Replica allocation history (num_available_replicas+1, N)
@@ -112,23 +102,19 @@ def max_delta_replica(
 
 @njit
 def percentage_replica(
-    mu: np.ndarray,
-    var: np.ndarray,
-    num_available_replicas: int,
-    current_replicas: np.ndarray,
-    z_score: float
-) -> Tuple[np.ndarray, np.ndarray]:
+    mu: np.ndarray, var: np.ndarray, num_available_replicas: int, current_replicas: np.ndarray, z_score: float
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Proportional replica allocation algorithm
     Allocates replicas proportionally to expert total load
-    
+
     Args:
         mu: Mean load of each expert (N,)
         var: Variance of each expert's load (N,)
         num_available_replicas: Total available replicas to allocate
         current_replicas: Initial replica count per expert (N,)
         z_score: Z-score for risk calculation (confidence level)
-    
+
     Returns:
         current_replicas: Updated replica count per expert (N,)
         replicas_history: Replica allocation history (num_available_replicas+1, N)
@@ -174,12 +160,12 @@ def compute_updated_device_variance(
     current_device_var: float,
     expert_var: np.ndarray,
     expert_cov: np.ndarray,
-    expert_replicas: np.ndarray
+    expert_replicas: np.ndarray,
 ) -> float:
     """
     Compute updated device variance after adding a new expert
     Includes both individual variance and covariance with existing experts
-    
+
     Args:
         new_expert_id: ID of the new expert to add
         device_slots: Current expert slots on the device (-1 for empty)
@@ -187,7 +173,7 @@ def compute_updated_device_variance(
         expert_var: Variance of each expert's load (N,)
         expert_cov: Covariance matrix between experts (N,N)
         expert_replicas: Replica count per expert (N,)
-    
+
     Returns:
         new_device_var: Updated device variance after adding the expert
     """
@@ -211,12 +197,12 @@ def lpt_deployment(
     deployment: np.ndarray,
     deployed_replicas: np.ndarray,
     total_replicas: np.ndarray,
-    z_score: float
+    z_score: float,
 ) -> np.ndarray:
     """
     Largest Processing Time (LPT) deployment algorithm
     Greedily deploys experts to device with minimal risk (mean + z*std)
-    
+
     Args:
         mu: Mean load of each expert (N,)
         var: Variance of each expert's load (N,)
@@ -225,7 +211,7 @@ def lpt_deployment(
         deployed_replicas: Already deployed replica count per expert (N,)
         total_replicas: Total target replica count per expert (N,)
         z_score: Z-score for risk calculation (confidence level)
-    
+
     Returns:
         new_deployment: Updated expert deployment matrix
     """
@@ -286,20 +272,16 @@ def lpt_deployment(
 
 
 @njit(fastmath=True, cache=True)
-def compute_score(
-    val_data: np.ndarray,
-    simulated_replicas: np.ndarray,
-    simulated_deployment: np.ndarray
-) -> float:
+def compute_score(val_data: np.ndarray, simulated_replicas: np.ndarray, simulated_deployment: np.ndarray) -> float:
     """
     Calculate load balance score: (max_device_load * num_devices) / total_load
     Lower score means better load balance
-    
+
     Args:
         val_data: Validation load data (T, N) - T time steps, N experts
         simulated_replicas: Replica count per expert (N,)
         simulated_deployment: Expert deployment matrix (D, K) - D devices, K slots
-    
+
     Returns:
         mean_score: Average load balance score over time steps
     """
@@ -329,11 +311,11 @@ def get_score(
     current_idx: np.ndarray,
     current_replicas: np.ndarray,
     remaind_idx: np.ndarray,
-    remaind_replicas: np.ndarray
-) -> Tuple[float, np.ndarray]:
+    remaind_replicas: np.ndarray,
+) -> tuple[float, np.ndarray]:
     """
     Wrapper to compute load balance score for replica allocation simulation
-    
+
     Args:
         f: Deployment function (e.g., _lpt_deployment)
         val_data: Validation load data (T, N)
@@ -342,7 +324,7 @@ def get_score(
         current_replicas: Replica count for current expert group
         remaind_idx: Indices of remaining expert group
         remaind_replicas: Replica count for remaining expert group
-    
+
     Returns:
         score: Load balance score
         simulated_deployment: Simulated expert deployment matrix
@@ -359,17 +341,12 @@ def get_score(
 
 
 def neighbor_search(
-    low: int,
-    high: int,
-    initial: int,
-    max_range: int,
-    get_score: Any,
-    *args: Any
-) -> Tuple[int, float, np.ndarray]:
+    low: int, high: int, initial: int, max_range: int, get_score: Any, *args: Any
+) -> tuple[int, float, np.ndarray]:
     """
     Local neighbor search for optimal replica number
     Search [initial-max_range, initial+max_range] within [low, high]
-    
+
     Args:
         low: Lower bound of search range
         high: Upper bound of search range
@@ -377,7 +354,7 @@ def neighbor_search(
         max_range: Maximum search range from initial value
         get_score: Function to compute score for a given replica number
         *args: Additional arguments for get_score function
-    
+
     Returns:
         best_x: Optimal replica number
         best_score: Best load balance score
@@ -404,19 +381,15 @@ def neighbor_search(
     return best_x, best_score, best_sim
 
 
-def compute_expert_hotness(
-    num_of_expert: int,
-    deployment: np.ndarray,
-    rank_load: np.ndarray
-) -> np.ndarray:
+def compute_expert_hotness(num_of_expert: int, deployment: np.ndarray, rank_load: np.ndarray) -> np.ndarray:
     """
     Calculate expert hotness by summing rank load on each expert
-    
+
     Args:
         num_of_expert: Total number of experts
         deployment: Expert deployment matrix (num_devices, num_slots)
         rank_load: Load matrix for each rank/slot (num_devices, num_slots)
-    
+
     Returns:
         hotness: Hotness score for each expert (num_of_expert,)
     """
@@ -432,10 +405,11 @@ class FlashLB(EplbPolicy):
     Flash Load Balancing (FlashLB) policy for expert deployment optimization
     Implements layered tree search with load balance score optimization
     """
+
     def __init__(self, config: DynamicConfig):
         """
         Initialize FlashLB policy with dynamic configuration
-        
+
         Args:
             config: Dynamic configuration object containing policy parameters
         """
@@ -456,29 +430,24 @@ class FlashLB(EplbPolicy):
         self.width = config.width if hasattr(config, "width") else 8
 
         # Runtime state storage with type annotations
-        self.average_to_peak_history: Dict[int, float] = {}  # Layer-wise load balance history
-        self.hotness_window: Dict[int, Dict[str, Any]] = {}  # Layer-wise hotness stats and buffer
-        self.current_deployment: Dict[int, np.ndarray] = {}  # Current expert deployment per layer
-        self.current_deployed_replicas: Dict[int, np.ndarray] = {}  # Current replica count per expert per layer
+        self.average_to_peak_history: dict[int, float] = {}  # Layer-wise load balance history
+        self.hotness_window: dict[int, dict[str, Any]] = {}  # Layer-wise hotness stats and buffer
+        self.current_deployment: dict[int, np.ndarray] = {}  # Current expert deployment per layer
+        self.current_deployed_replicas: dict[int, np.ndarray] = {}  # Current replica count per expert per layer
 
     def min_max_replica(
-        self,
-        mu: np.ndarray,
-        var: np.ndarray,
-        num_available_replicas: int,
-        current_replicas: np.ndarray,
-        z_score: float
-    ) -> Tuple[np.ndarray, np.ndarray]:
+        self, mu: np.ndarray, var: np.ndarray, num_available_replicas: int, current_replicas: np.ndarray, z_score: float
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Wrapper for original min-max replica allocation
-        
+
         Args:
             mu: Mean load of each expert (N,)
             var: Variance of each expert's load (N,)
             num_available_replicas: Total available replicas to allocate
             current_replicas: Initial replica count per expert (N,)
             z_score: Z-score for risk calculation (confidence level)
-        
+
         Returns:
             current_replicas: Updated replica count per expert (N,)
             replicas_history: Replica allocation history (num_available_replicas+1, N)
@@ -486,13 +455,13 @@ class FlashLB(EplbPolicy):
         return min_max_replica_org(mu, var, num_available_replicas, current_replicas, z_score)
 
     @staticmethod
-    def compute_statistics(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def compute_statistics(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Compute mean, variance and covariance matrix from time series data
-        
+
         Args:
             X: Time series data (T, N) - T steps, N experts
-        
+
         Returns:
             mean: Mean load per expert (N,)
             variance: Variance of load per expert (N,)
@@ -512,22 +481,18 @@ class FlashLB(EplbPolicy):
 
     @staticmethod
     def sliding_update_stats(
-        mean: np.ndarray,
-        cov: np.ndarray,
-        x_old: np.ndarray,
-        x_new: np.ndarray,
-        T: int
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        mean: np.ndarray, cov: np.ndarray, x_old: np.ndarray, x_new: np.ndarray, T: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Update statistics with sliding window (replace old data with new data)
-        
+
         Args:
             mean: Current mean statistics (N,)
             cov: Current covariance matrix (N,N)
             x_old: Old data batch to remove (t, N)
             x_new: New data batch to add (t, N)
             T: Window size
-        
+
         Returns:
             new_mean: Updated mean (N,)
             new_var: Updated variance (N,)
@@ -561,20 +526,17 @@ class FlashLB(EplbPolicy):
 
     @staticmethod
     def incremental_update_stats(
-        mean: np.ndarray,
-        cov: np.ndarray,
-        x_new: np.ndarray,
-        T: int
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+        mean: np.ndarray, cov: np.ndarray, x_new: np.ndarray, T: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
         """
         Incrementally update statistics with new data (expand window)
-        
+
         Args:
             mean: Current mean statistics (N,)
             cov: Current covariance matrix (N,N)
             x_new: New data batch to add (t, N)
             T: Current window size
-        
+
         Returns:
             new_mean: Updated mean (N,)
             new_var: Updated variance (N,)
@@ -607,15 +569,11 @@ class FlashLB(EplbPolicy):
         return new_mean, new_var, new_cov, new_T
 
     def register_hotness(
-        self,
-        deployment: np.ndarray,
-        rank_load: np.ndarray,
-        num_layers: int,
-        num_experts: int
+        self, deployment: np.ndarray, rank_load: np.ndarray, num_layers: int, num_experts: int
     ) -> None:
         """
         Update expert hotness statistics with sliding window for all layers
-        
+
         Args:
             deployment: Expert deployment matrix (num_layers, num_devices, num_slots)
             rank_load: Load data (num_stages, num_layers, num_devices, num_slots)
@@ -695,22 +653,17 @@ class FlashLB(EplbPolicy):
 
     @staticmethod
     @njit
-    def compute_match(
-        src_counts: np.ndarray,
-        dst_counts: np.ndarray,
-        N: int,
-        M: int
-    ) -> np.ndarray:
+    def compute_match(src_counts: np.ndarray, dst_counts: np.ndarray, N: int, M: int) -> np.ndarray:
         """
         Compute match matrix between source and destination expert counts
         match[i,j] = total min(src_counts[i,k], dst_counts[j,k]) for all k
-        
+
         Args:
             src_counts: Source expert count histogram (N, max_val)
             dst_counts: Destination expert count histogram (N, max_val)
             N: Number of rows in deployment matrix
             M: Number of columns in deployment matrix
-        
+
         Returns:
             matches: Match matrix (N, N)
         """
@@ -724,18 +677,15 @@ class FlashLB(EplbPolicy):
         return matches
 
     @staticmethod
-    def minimize_redeploy_with_inner_permutation(
-        src: np.ndarray,
-        dst: np.ndarray
-    ) -> np.ndarray:
+    def minimize_redeploy_with_inner_permutation(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
         """
         Minimize expert redeployment by permuting destination rows/columns
         Aligns destination deployment with source to reduce expert movement
-        
+
         Args:
             src: Source deployment matrix (N, M)
             dst: Destination deployment matrix (N, M)
-        
+
         Returns:
             dst_reordered: Reordered destination deployment matrix
         """
@@ -762,7 +712,7 @@ class FlashLB(EplbPolicy):
             s_row = src[src_idx]
             d_row = dst[dst_idx]
             # Map expert values to their positions in dst row
-            val_to_positions: Dict[int, List[int]] = {}  # Add type annotation for mypy
+            val_to_positions: dict[int, list[int]] = {}  # Add type annotation for mypy
             for pos, v in enumerate(d_row):
                 val_to_positions.setdefault(v, []).append(pos)
 
@@ -793,10 +743,10 @@ class FlashLB(EplbPolicy):
         """
         Check if layer needs load balance update
         Trigger update if load balance ratio drops below threshold
-        
+
         Args:
             layer_id: Layer index to check
-        
+
         Returns:
             bool: True if update is needed, False otherwise
         """
@@ -827,12 +777,12 @@ class FlashLB(EplbPolicy):
         num_devices: int,
         z_score: float = 0.674,
         deep: int = 4,
-        width: int = 8
-    ) -> Tuple[np.ndarray, np.ndarray, float]:
+        width: int = 8,
+    ) -> tuple[np.ndarray, np.ndarray, float]:
         """
         Flash tree search algorithm for optimal replica allocation and deployment
         Layered search to balance exploration and exploitation
-        
+
         Args:
             X_row: Validation load data (T, N)
             mu: Mean load of each expert (N,)
@@ -843,7 +793,7 @@ class FlashLB(EplbPolicy):
             z_score: Z-score for risk calculation (default: 0.674)
             deep: Tree search depth (default: 4)
             width: Neighbor search width (default: 8)
-        
+
         Returns:
             optimal_deployment: Optimal expert deployment matrix
             replica_counts: Optimal replica count per expert
@@ -939,18 +889,16 @@ class FlashLB(EplbPolicy):
         return final_deployment, deployed_replicas, final_par
 
     def rebalance_experts(
-        self,
-        current_expert_table: Union[List[np.ndarray], np.ndarray],
-        expert_workload: Union[List[np.ndarray], np.ndarray]
-    ) -> Tuple[bool, np.ndarray, np.ndarray]:
+        self, current_expert_table: list[np.ndarray] | np.ndarray, expert_workload: list[np.ndarray] | np.ndarray
+    ) -> tuple[bool, np.ndarray, np.ndarray]:
         """
         Main expert rebalance entry point
         Optimizes expert deployment to improve load balance
-        
+
         Args:
             current_expert_table: Current expert deployment (layers, devices, slots)
             expert_workload: Expert load data (stages, layers, devices, slots)
-        
+
         Returns:
             change: True if any layers were updated
             priority_idx: Indices of updated layers (sorted by improvement)
@@ -1056,22 +1004,19 @@ class FlashLB(EplbPolicy):
 
 
 def generate_layered_experts(
-    num_layers: int = 58,
-    layer_shape: Tuple[int, int] = (32, 9),
-    expert_min: int = 0,
-    expert_max: int = 255
+    num_layers: int = 58, layer_shape: tuple[int, int] = (32, 9), expert_min: int = 0, expert_max: int = 255
 ) -> torch.Tensor:
     """
     Generate layered expert deployment matrix
     Each layer contains all experts [expert_min, expert_max] at least once
     Remaining slots filled with random experts
-    
+
     Args:
         num_layers: Number of layers to generate
         layer_shape: Shape of each layer's deployment matrix (rows, cols)
         expert_min: Minimum expert ID (inclusive)
         expert_max: Maximum expert ID (inclusive)
-    
+
     Returns:
         layers: Layered expert deployment tensor (num_layers, *layer_shape)
     """
@@ -1086,7 +1031,7 @@ def generate_layered_experts(
     )
 
     # Generate each layer
-    layers: List[torch.Tensor] = []
+    layers: list[torch.Tensor] = []
     for _ in range(num_layers):
         # Full expert sequence (cover all experts once)
         full_experts = torch.arange(expert_min, expert_max + 1, dtype=torch.int64)  # (expert_num,)
@@ -1122,19 +1067,3 @@ def warm_up() -> None:
     expert_tensor = generate_layered_experts(num_layers=58, layer_shape=(32, 9))
     # Run rebalance with dummy workload data
     algo.rebalance_experts(expert_tensor, torch.randint(1, 1000, (100, 58, 32, 9)))
-
-
-# Fix attribute name error: replace get_rank_expert_workload_list with get_rank_expert_workload
-# Add this helper function if needed (or update caller code to use correct attribute name)
-def fix_vllm_adaptor_attribute_error(adaptor: Any) -> List[np.ndarray]:
-    """
-    Fix attribute error for VllmEplbAdaptor
-    Uses correct attribute name: get_rank_expert_workload instead of get_rank_expert_workload_list
-    
-    Args:
-        adaptor: VllmEplbAdaptor instance
-    
-    Returns:
-        workload_list: Expert workload data from the adaptor
-    """
-    return adaptor.get_rank_expert_workload()  # Correct attribute name
