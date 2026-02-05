@@ -665,7 +665,7 @@ class EagleProposer(VllmEagleProposer):
         hidden_states = hidden_states[last_token_indices]
         last_token_indices = self.arange[:batch_size]
 
-        input_batch_size = num_input_tokens if self.use_cuda_graph else batch_size
+        input_batch_size = num_input_tokens
 
         forward_context = get_forward_context()
         forward_context.num_tokens = input_batch_size
