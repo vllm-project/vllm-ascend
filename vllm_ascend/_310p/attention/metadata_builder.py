@@ -28,13 +28,13 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder
 class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
     """
     Metadata builder specialized for the Huawei Ascend 310P NPU.
-    
-    This class extends the base Ascend attention metadata builder to use 
-    the 310P-specific attention mask builder, ensuring that masks are 
-    generated in the correct format (FRACTAL_NZ) and logic required by 
+
+    This class extends the base Ascend attention metadata builder to use
+    the 310P-specific attention mask builder, ensuring that masks are
+    generated in the correct format (FRACTAL_NZ) and logic required by
     the 310P hardware.
     """
-    
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,

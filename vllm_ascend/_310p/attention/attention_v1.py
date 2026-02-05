@@ -17,9 +17,7 @@
 
 from typing import Any
 
-import torch
 import torch_npu
-
 from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
@@ -32,12 +30,12 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
-    AscendMetadata
+    AscendMetadata,
 )
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
-class AscendAttentionBackend310(AscendAttentionBackend):  
+class AscendAttentionBackend310(AscendAttentionBackend):
     def __init__(self, *args, **kwargs):
         """
         Initializes the 310P backend and sets up the device-specific mask builder.
@@ -49,9 +47,9 @@ class AscendAttentionBackend310(AscendAttentionBackend):
     def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int, head_size: int):
         """
         Determines the shape of the Key-Value (KV) cache tensor.
-        
+
         The 310P hardware requires specific memory alignment for optimal performance.
-        This method defines a 5D tensor shape where the head size dimension is 
+        This method defines a 5D tensor shape where the head size dimension is
         split to ensure alignment to multiples of 16.
 
         Args:
@@ -61,7 +59,7 @@ class AscendAttentionBackend310(AscendAttentionBackend):
             head_size (int): Dimension size of each head.
 
         Returns:
-            tuple: The specific 5D shape required by the hardware 
+            tuple: The specific 5D shape required by the hardware
                    (2, num_blocks, hidden_dim_aligned, block_size, 16).
         """
         # Align to a multiple of 16, as required by the 310P device.
@@ -87,7 +85,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     Implementation of attention operations (Prefill, Decode, Chunked Prefill)
     optimized for the Ascend 310P architecture.
     """
-    
+
     def forward_paged_attention(
         self,
         query: Any,
@@ -96,8 +94,8 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     ) -> Any:
         """
         Executes Paged Attention (typically for the decode phase).
-        
-        Ensures that the sequence length metadata is on the correct device 
+
+        Ensures that the sequence length metadata is on the correct device
         before invoking the base implementation.
 
         Args:
@@ -118,10 +116,10 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     def forward_prefill_310(self, query, key, value, attn_metadata, output):
         """
         Executes Flash Attention for the prefill phase on 310P.
-        
+
         This method handles memory alignment padding. If the query shape implies
-        padding (aligned_tokens > real_tokens), it adjusts the sequence length 
-        of the last request to account for the delta, ensuring the NPU operator 
+        padding (aligned_tokens > real_tokens), it adjusts the sequence length
+        of the last request to account for the delta, ensuring the NPU operator
         processes the data correctly.
 
         Args:
@@ -136,12 +134,12 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         seq_len = attn_metadata.seq_lens
         aligned_tokens = int(query.shape[0])
         delta = aligned_tokens - real_tokens
-        
+
         # Adjust sequence length if padding (alignment) was applied to the inputs
         if delta:
             seq_len = seq_len.clone()
             seq_len[-1] += delta
-            
+
         mask = attn_metadata.attn_mask
         torch_npu._npu_flash_attention(
             query=query,
@@ -159,9 +157,9 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     def forward_chunked_prefill_310(self, query, attn_metadata, output):
         """
         Executes SplitFuse (Chunked Prefill) attention on 310P.
-        
+
         This handles scenarios where the prefill is split into chunks. It prepares
-        the necessary metadata (query lengths, block tables) and generates the 
+        the necessary metadata (query lengths, block tables) and generates the
         specific splitfuse mask before calling the NPU operator.
 
         Args:
@@ -176,16 +174,16 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         # Calculate query lengths from start locations
         qsl_cpu = attn_metadata.query_start_loc.cpu()
         qlens = qsl_cpu[1:] - qsl_cpu[:-1]
-        
+
         context_lens = attn_metadata.seq_lens
         block_table = attn_metadata.block_tables
-        
+
         # Generate the specific mask for splitfuse
         mask = AttentionMaskBuilder310.get_splitfuse_mask(attn_metadata, query.device)
-        
+
         if context_lens.device != query.device:
             context_lens = context_lens.to(query.device, non_blocking=True)
-            
+
         torch_npu._npu_paged_attention_splitfuse(
             query=query,
             key_cache=self.key_cache,
@@ -203,7 +201,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
         """
         Main dispatch method for attention operations.
-        
+
         Routes the execution to Decode, Prefill, or Chunked Prefill methods
         based on the current attention state found in metadata.
 
