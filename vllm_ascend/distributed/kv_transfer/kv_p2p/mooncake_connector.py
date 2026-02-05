@@ -528,11 +528,11 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
-        length = len(self.block_len)
+        block_length = len(self.block_len)
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
             zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
         ):
-            block_len = self.block_len[k % length]
+            block_len = self.block_len[k % block_length]
             inner_block_len = block_len // tp_num_need_pulls
             for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
                 src = src_layer_base_addr + local_block_id[0] * block_len + inner_offset * inner_block_len

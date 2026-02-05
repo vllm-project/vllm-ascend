@@ -233,11 +233,11 @@ class KVCacheSendingLayerThread(threading.Thread):
                 remote_block_ids, local_block_ids
             )
 
-            length = len(self.block_len)
+            block_length = len(self.block_len)
             for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
                 zip(layer_local_kv_base_addr, layer_remote_kv_base_addr)
             ):
-                block_len = self.block_len[k % length]
+                block_len = self.block_len[k % block_length]
                 for group_remote_block_id, group_local_block_id in zip(
                     grouped_remote_block_ids, grouped_local_block_ids
                 ):
