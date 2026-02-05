@@ -40,8 +40,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # This configuration option should only be set to False when running UT
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
-    "COMPILE_CUSTOM_KERNELS":
-    lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
