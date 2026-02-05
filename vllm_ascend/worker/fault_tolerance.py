@@ -442,3 +442,11 @@ class FaultTolerance:
 
             if 'cur_iterations' in backup:
                 eplb.cur_iterations = backup['cur_iterations']
+    def _create_essential_state_for_common(self,*args,**kwargs):
+        pass
+    def _create_essential_state_for_requests(self):
+        pass
+    def _create_essential_state_for_input_batch(self):
+        pass
+    def _create_essential_state_for_sampling(self):
+        pass
