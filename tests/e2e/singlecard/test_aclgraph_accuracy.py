@@ -69,7 +69,7 @@ CASE_QWEN_EX = LLMTestCase(
     golden_answers=[
         ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
         " \n\nTo solve this problem, we can use the following approach: Let $P$ be the perimeter of the square. Then, the expected value of the area",
-        ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
+        ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations $x^2 +'
     ])
 
 CASE_DS_EX = LLMTestCase(model="vllm-ascend/DeepSeek-V2-Lite-W8A8",

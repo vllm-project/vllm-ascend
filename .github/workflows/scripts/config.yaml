@@ -60,6 +60,8 @@ e2e-singlecard:
 e2e-singlecard-light:
   - name: tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
     estimated_time: 220
+  - name: tests/e2e/singlecard/test_aclgraph_accuracy.py::test_npugraph_ex_res_consistency
+    estimated_time: 220
   - name: tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
     estimated_time: 90
 
