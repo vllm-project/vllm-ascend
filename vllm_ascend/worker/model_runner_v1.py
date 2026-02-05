@@ -109,6 +109,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
+from vllm_ascend.spec_decode.draft_proposer import DraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import MedusaProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
@@ -381,7 +382,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
-        self.drafter: NgramProposer | EagleProposer | MtpProposer | SuffixDecodingProposer | MedusaProposer | None = (
+        self.drafter: NgramProposer | EagleProposer | DraftModelProposer | MtpProposer | SuffixDecodingProposer | MedusaProposer | None = (
             None
         )
         self.actual_seq_lengths_q: list[int] = []
@@ -919,7 +920,7 @@ class NPUModelRunner(GPUModelRunner):
                 draft_token_ids = self.drafter.generate_token_ids(
                     valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
                 )
-            elif self.speculative_config.use_eagle():
+            elif (self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()):
                 common_attn_metadata = spec_decode_common_attn_metadata
                 sampled_token_ids = valid_sampled_token_ids
 
@@ -1395,16 +1396,16 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
-                use_padded_batch_for_eagle = (
+                use_padded_batch = (
                     self.speculative_config
-                    and self.speculative_config.use_eagle()
+                    and (self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model())
                     and not self.speculative_config.disable_padded_drafter_batch
                 )
-                if use_padded_batch_for_eagle:
+                if use_padded_batch:
                     # EAGLE speculative decoding can use the GPU sampled tokens
                     # as inputs, and does not need to wait for bookkeeping to finish.
                     propose_draft_token_ids(sampler_output.sampled_token_ids)
-                if self.speculative_config and not use_padded_batch_for_eagle:
+                if self.speculative_config and not use_padded_batch:
                     # ngram and other speculative decoding methods use the sampled
                     # tokens on the CPU, so they are run after bookkeeping.
                     propose_draft_token_ids(valid_sampled_token_ids)
@@ -1974,7 +1975,7 @@ class NPUModelRunner(GPUModelRunner):
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(kv_cache_gid)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, EagleProposer):
+                if isinstance(self.drafter, EagleProposer | DraftModelProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
