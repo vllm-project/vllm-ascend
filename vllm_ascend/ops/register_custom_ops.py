@@ -13,9 +13,10 @@ from vllm.utils.torch_utils import direct_register_custom_op
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
+from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 from typing import Optional, Tuple
-from vllm_ascend.ops.triton.rope import rope_forward_triton
+
 
 def _maybe_chunk_residual_impl(x: torch.Tensor,
                                residual: torch.Tensor) -> torch.Tensor:
@@ -219,15 +220,18 @@ def _quantize_impl_fake(in_tensor: torch.Tensor, input_scale: torch.Tensor,
                         input_offset: torch.Tensor) -> torch.Tensor:
     return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal,
                                   input_offset, torch.qint8, -1, False)
-def _rope_forward_triton_fake(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    rope_dim: int = -1,
-    is_neox_style: bool = True
-) -> Tuple[torch.Tensor, torch.Tensor]:  
-    return torch.empty_like(q), torch.empty_like(k)
+
+def rope_forward_oot_fake(
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    is_neox_style: bool,
+    head_size: int,
+    rotary_dim: int,
+    offsets: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]: 
+    return torch.empty_like(query), torch.empty_like(key)
 
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
@@ -276,8 +280,9 @@ direct_register_custom_op(op_name="quantize",
                           fake_impl=_quantize_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
-direct_register_custom_op(op_name="rope_forward_triton",
-                          op_func=rope_forward_triton,
-                          fake_impl=_rope_forward_triton_fake,
+
+direct_register_custom_op(op_name="rope_forward",
+                          op_func=rope_forward_oot,
+                          fake_impl=_rope_forward_oot_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
