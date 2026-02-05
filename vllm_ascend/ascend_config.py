@@ -18,6 +18,7 @@ import warnings
 from typing import TYPE_CHECKING
 
 from vllm.logger import logger
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -296,6 +297,9 @@ class NpugraphExConfig:
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = fuse_qknorm_rope
         self.fuse_allreduce_rms = fuse_allreduce_rms
+
+        if vllm_is_batch_invariant():
+            self.enable = False
 
 
 class XliteGraphConfig:
