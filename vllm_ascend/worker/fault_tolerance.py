@@ -126,7 +126,6 @@ class FaultTolerance:
             for attempt in range(max_retries + 1):
                 try:
                     output = func(*args, **kwargs)
-                    # TODO:这里的跳过逻辑要细看一下，感觉可以根据是否调度了token来跳过（scheduler_output)
                     if output is not EMPTY_MODEL_RUNNER_OUTPUT:
                         self._all_gather_for_sync_group()
                     return output
