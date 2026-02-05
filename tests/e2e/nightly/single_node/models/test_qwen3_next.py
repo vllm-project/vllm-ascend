@@ -27,10 +27,10 @@ api_keyword_args = {
 }
 
 batch_size_dict = {
-    "linux-aarch64-a2-4": 64,
+    "linux-aarch64-a2b3-4": 64,
     "linux-aarch64-a3-4": 64,
 }
-VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
+VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2b3-4")
 performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
 
 aisbench_cases = [{
