@@ -126,6 +126,9 @@ jobs:
           - name: qwen2-5-vl-7b
             os: linux-aarch64-a3-4
             tests: tests/e2e/nightly/single_node/models/test_qwen2_5_vl_7b.py
+          - name: qwen2-5-vl-7b-epd
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen2_5_vl_7b_epd.py
           - name: qwen2-5-vl-32b
             os: linux-aarch64-a3-4
             tests: tests/e2e/nightly/single_node/models/test_qwen2_5_vl_32b.py
