@@ -56,7 +56,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
 |-------------|--------------|------------------|-------------|--------------------|
-|     main    | 80f921ba4bab2ea251d149305ea0f912c6fc218a, v0.15.0 tag | >= 3.10, < 3.12   | 8.5.0 | 2.9.0 / 2.9.0 |
+|     main    | 81a90e52776503c6cbdccd30fbe53f61c9179bdf, v0.15.0 tag | >= 3.10, < 3.12   | 8.5.0 | 2.9.0 / 2.9.0 |
 
 ## Release cadence
 
