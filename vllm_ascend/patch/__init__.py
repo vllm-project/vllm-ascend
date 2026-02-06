@@ -263,3 +263,19 @@
 #       make unquantized_gemm as a customop.
 #    Future Plan:
 #       Remove this patch when vLLM support the operator as customop.
+#
+# * Npugraph_ex Patch:
+# =================
+#
+# ** 1. File: npugraph_ex/patch_triton.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `torchair.core._concrete_graph.ValuePack.__getitem__`, `torchair.npu_fx_compiler._unpack_meta = _unpack_meta`,
+#      `torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu = _unpack_npu`
+#    Why:
+#       In the Triton scenario, npugraph_ex backend needs to process the value pack of the input parameters.
+#    How：
+#       Supplement the relevant processing logic through patches.
+#    Related PR (if no, explain why):
+#       https://gitcode.com/Ascend/torchair/pull/2575
+#    Future Plan:
+#       Remove this patch when the PTA version used by vllm-ascend has been upgraded.

@@ -305,6 +305,7 @@ class NpugraphExConfig:
         if is_batch_invariant:
             self.enable = False
 
+
 class XliteGraphConfig:
     """
     Configuration Object for xlite_graph_config from additional_config
