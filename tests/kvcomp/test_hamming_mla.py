@@ -31,7 +31,7 @@ class TestCustomHammingDistTopK(TestCase):
         print(f'test_hamming_dist_top_k_mla_eager begin')
         print('=======================data=======================')
         device = 'cpu'
-        batch_size = 4
+        batch_size = 15
         num_head = 16    # 16 ok
         num_kv_head = 1
         head_dim_nope = 512
@@ -45,7 +45,7 @@ class TestCustomHammingDistTopK(TestCase):
         sparse_ratio = 0.2
         chunk_size_value = 128
 
-        seqlen_list = [4096] * batch_size
+        seqlen_list = [8191] * batch_size
         seqlen = torch.tensor(seqlen_list, dtype=torch.int32, device=device)
 
         max_seq_len = max(seqlen_list)

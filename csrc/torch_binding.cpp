@@ -1391,6 +1391,7 @@ at::Tensor npu_reshape_and_cache_bnsd(const at::Tensor& hashq,
     // 调用aclnn接口计算
     EXEC_NPU_CMD(aclnnReshapeAndCacheBnsd, hashq, hashkCache, slotMapping, seqLen, hashkCacheOut);
     return hashkCacheOut;
+}
 
 void transpose_kv_cache_by_block(
     const at::TensorList &kCache,
