@@ -664,10 +664,9 @@ class EagleProposer(VllmEagleProposer):
             positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
         last_token_indices = self.arange[:batch_size]
-        if self.method == "mtp":
-            input_batch_size = num_input_tokens
-        else:
-            input_batch_size = num_input_tokens if self.use_cuda_graph else batch_size
+
+        input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
+
         forward_context = get_forward_context()
         forward_context.num_tokens = input_batch_size
         forward_context.num_accept_tokens = batch_size
