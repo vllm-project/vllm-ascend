@@ -1951,7 +1951,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
             # (ldeng) add kvcomp_metadata into common_attn_metadata
-            common_attn_metadata.kvcomp_metadata = self.kvcomp_meta_data
+            if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
+                common_attn_metadata.kvcomp_metadata = self.kvcomp_meta_data
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
