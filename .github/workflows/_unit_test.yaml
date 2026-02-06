@@ -27,6 +27,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         SOC_VERSION: ascend910b1
         MAX_JOBS: 4
+        COMPILE_CUSTOM_KERNELS: 0
     steps:
       - name: Install packages
         run: |
