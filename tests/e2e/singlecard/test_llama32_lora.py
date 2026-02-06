@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
+from unittest.mock import patch
 
 import vllm
 import vllm.config
 from vllm.lora.request import LoRARequest
-from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, vllm_version_is
 
 enable_custom_op()
 
@@ -25,19 +24,20 @@ The People_ID of candidate is the foreign key of People_ID of people.
 ###Response:<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 """  # noqa: E501
 
-EXPECTED_LORA_OUTPUT = [
-    "SELECT count(*) FROM candidate",
-    "SELECT count(*) FROM candidate",
-    "SELECT poll_source FROM candidate GROUP BY poll_source ORDER BY count(*) DESC LIMIT 1",  # noqa: E501
-    "SELECT poll_source FROM candidate GROUP BY poll_source ORDER BY count(*) DESC LIMIT 1",  # noqa: E501
-]
-
-EXPECTED_BASE_MODEL_OUTPUT = [
-    "SELECT COUNT(*) FROM candidate",
-    "`SELECT COUNT(*) FROM candidate;`",
-    "SELECT Poll_Source FROM candidate GROUP BY Poll_Source ORDER BY COUNT(*) DESC LIMIT 1;",
-    "SELECT * FROM candidate ORDER BY Candidate_ID DESC LIMIT 1",
-]
+if vllm_version_is("0.15.0"):
+    EXPECTED_LORA_OUTPUT = [
+        "SELECT count(*) FROM candidate",
+        "SELECT count(*) FROM candidate",
+        "SELECT poll_source FROM candidate GROUP BY poll_source ORDER BY count(*) DESC LIMIT 1",  # noqa: E501
+        "SELECT poll_source FROM candidate GROUP BY poll_source ORDER BY count(*) DESC LIMIT 1",  # noqa: E501
+    ]
+else:
+    EXPECTED_LORA_OUTPUT = [
+        "SELECT COUNT(*) FROM candidate",
+        "SELECT COUNT(*) FROM candidate",
+        "SELECT Poll_Source FROM candidate GROUP BY Poll_Source ORDER BY COUNT(*) DESC LIMIT 1;",
+        "SELECT t1.Poll_Source FROM candidate AS t1 JOIN people AS t2 ON t1.People_ID  =  t2.People_ID GROUP BY t1.Poll_Source ORDER BY COUNT(*) DESC LIMIT 1",  # noqa: E501
+    ]
 
 # For hk region, we need to use the model from hf to avoid the network issue
 MODEL_PATH = "meta-llama/Llama-3.2-3B-Instruct"

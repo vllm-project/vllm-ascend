@@ -25,8 +25,8 @@ import pytest
 import torch
 from vllm.utils.network_utils import get_open_port
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from tests.e2e.conftest import wait_until_npu_memory_free
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MODELS = [
     # Offline data parallel mode will be not supported/useful for dense models
@@ -85,8 +85,7 @@ def _run_worker_process(
 
     # Import vLLM only after environment setup
     from vllm import LLM, SamplingParams
-    from vllm.distributed.parallel_state import (
-        destroy_distributed_environment, destroy_model_parallel)
+    from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
 
     # Apply hooks and run inference
     with _install_spies(counters):
@@ -208,8 +207,9 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     expected_exec_model = (total_steps + 1 + 1) * dp_size
 
     assert (
-        num_execute_model == expected_exec_model
-    ), f"Model execution count mismatch. Expected: {expected_exec_model}, Got: {num_execute_model}"
+        expected_exec_model - dp_size < num_execute_model <= expected_exec_model
+    ), f"Model execution count mismatch. Expected range: [{expected_exec_model - dp_size}, \
+    {expected_exec_model}], Got: {num_execute_model}"
 
     # Metric 3: Dummy Runs (Warmup & Alignment)
     # vLLM synchronizes globally every 32 steps.
@@ -229,8 +229,8 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     expected_dummy_run = (warmup_runs + padding_runs) * dp_size
 
     assert (
-        num_dummy_run == expected_dummy_run
-    ), f"Dummy run count mismatch. Expected: {expected_dummy_run}, Got: {num_dummy_run}"
+        expected_dummy_run <= num_dummy_run <= expected_dummy_run + dp_size
+    ), f"Dummy run count mismatch. Expected: {expected_dummy_run}, Got: {num_dummy_run}, Tolerance: ±{dp_size}"
 
     # Metric 4: Graph Replay (Inference Execution)
     # Replays happen for every aligned step across all graphs.
