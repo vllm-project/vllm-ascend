@@ -5,12 +5,11 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig310
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
 
 class TestAscendModelSlimConfig310(TestBase):
-
     def setUp(self):
         self.sample_config = {
             "weight": "INT8",
@@ -30,20 +29,23 @@ class TestAscendModelSlimConfig310(TestBase):
         mock_config.model_config.hf_config.model_type = None
         linear_layer = MagicMock(spec=LinearBase)
         # Test skipped layer
-        with patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
-            patch.object(self.ascend_config, \
-                          'is_layer_skipped_ascend',
-                          return_value=True):
+        with (
+            patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True)
+        ):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIsInstance(method, AscendUnquantizedLinearMethod)
 
         # Test quantized layer
         mock_scheme = MagicMock()
-        with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
-            patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
-            patch("vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme), \
-            patch('vllm_ascend._310p.quantization.modelslim_config.AscendLinearMethod', return_value=MagicMock()) as mock_ascend_linear:
-
+        with (
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
+            patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
+            patch(
+                "vllm_ascend._310p.quantization.modelslim_config.AscendLinearMethod", return_value=MagicMock()
+            ) as mock_ascend_linear,
+        ):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIs(method, mock_ascend_linear.return_value)
             mock_ascend_linear.assert_called_once_with(mock_scheme)
@@ -55,10 +57,11 @@ class TestAscendModelSlimConfig310(TestBase):
         mock_config = MagicMock()
         mock_config.model_config.hf_config.model_type = None
         mock_scheme = MagicMock()
-        with self.assertRaises(NotImplementedError):
-            with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
-                patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
-                patch("vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme), \
-                patch('vllm_ascend._310p.quantization.modelslim_config.AscendLinearMethod', return_value=MagicMock()) as mock_ascend_moe:
-                method = self.ascend_config.get_quant_method(
-                    fused_moe_layer, "moe_layer")
+        with (
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
+            patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
+            patch("vllm_ascend._310p.quantization.modelslim_config.AscendLinearMethod", return_value=MagicMock()),
+            self.assertRaises(NotImplementedError),
+        ):
+            self.ascend_config.get_quant_method(fused_moe_layer, "moe_layer")
