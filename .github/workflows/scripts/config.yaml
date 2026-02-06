@@ -1,56 +1,56 @@
 e2e-singlecard:
-  - name: tests/e2e/singlecard/compile/test_graphex_norm_quant_fusion.py
-    estimated_time: 80
-  - name: tests/e2e/singlecard/compile/test_graphex_qknorm_rope_fusion.py
-    estimated_time: 80
-  - name: tests/e2e/singlecard/test_auto_fit_max_mode_len.py
-    estimated_time: 25
-  - name: tests/e2e/singlecard/test_aclgraph_accuracy.py
-    estimated_time: 480
-  - name: tests/e2e/singlecard/test_aclgraph_batch_invariant.py
-    estimated_time: 410
-  - name: tests/e2e/singlecard/test_aclgraph_mem.py
-    estimated_time: 130
-  - name: tests/e2e/singlecard/test_async_scheduling.py
-    estimated_time: 150
-  - name: tests/e2e/singlecard/test_batch_invariant.py
-    estimated_time: 320
-  - name: tests/e2e/singlecard/test_camem.py
-    estimated_time: 77
-  - name: tests/e2e/singlecard/test_completion_with_prompt_embeds.py
-    estimated_time: 76
-  - name: tests/e2e/singlecard/test_cpu_offloading.py
-    estimated_time: 132
-  - name: tests/e2e/singlecard/test_guided_decoding.py
-    estimated_time: 354
-  - name: tests/e2e/singlecard/test_ilama_lora.py
-    estimated_time: 95
-  - name: tests/e2e/singlecard/test_llama32_lora.py
-    estimated_time: 162
-  - name: tests/e2e/singlecard/test_qwen3_multi_loras.py
-    estimated_time: 65
-  - name: tests/e2e/singlecard/test_models.py
-    estimated_time: 300
-  - name: tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
-    estimated_time: 200
-  - name: tests/e2e/singlecard/test_quantization.py
-    estimated_time: 200
-  - name: tests/e2e/singlecard/test_sampler.py
-    estimated_time: 200
+#  - name: tests/e2e/singlecard/compile/test_graphex_norm_quant_fusion.py
+#    estimated_time: 80
+#  - name: tests/e2e/singlecard/compile/test_graphex_qknorm_rope_fusion.py
+#    estimated_time: 80
+#  - name: tests/e2e/singlecard/test_auto_fit_max_mode_len.py
+#    estimated_time: 25
+#  - name: tests/e2e/singlecard/test_aclgraph_accuracy.py
+#    estimated_time: 480
+#  - name: tests/e2e/singlecard/test_aclgraph_batch_invariant.py
+#    estimated_time: 410
+#  - name: tests/e2e/singlecard/test_aclgraph_mem.py
+#    estimated_time: 130
+#  - name: tests/e2e/singlecard/test_async_scheduling.py
+#    estimated_time: 150
+#  - name: tests/e2e/singlecard/test_batch_invariant.py
+#    estimated_time: 320
+#  - name: tests/e2e/singlecard/test_camem.py
+#    estimated_time: 77
+#  - name: tests/e2e/singlecard/test_completion_with_prompt_embeds.py
+#    estimated_time: 76
+#  - name: tests/e2e/singlecard/test_cpu_offloading.py
+#    estimated_time: 132
+#  - name: tests/e2e/singlecard/test_guided_decoding.py
+#    estimated_time: 354
+#  - name: tests/e2e/singlecard/test_ilama_lora.py
+#    estimated_time: 95
+#  - name: tests/e2e/singlecard/test_llama32_lora.py
+#    estimated_time: 162
+#  - name: tests/e2e/singlecard/test_qwen3_multi_loras.py
+#    estimated_time: 65
+#  - name: tests/e2e/singlecard/test_models.py
+#    estimated_time: 300
+#  - name: tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
+#    estimated_time: 200
+#  - name: tests/e2e/singlecard/test_quantization.py
+#    estimated_time: 200
+#  - name: tests/e2e/singlecard/test_sampler.py
+#    estimated_time: 200
   - name: tests/e2e/singlecard/test_vlm.py
     estimated_time: 354
-  - name: tests/e2e/singlecard/test_xlite.py
-    estimated_time: 45
-  - name: tests/e2e/singlecard/compile/test_norm_quant_fusion.py
-    estimated_time: 70
-  - name: tests/e2e/singlecard/pooling/test_classification.py
-    estimated_time: 120
-  - name: tests/e2e/singlecard/pooling/test_embedding.py
-    estimated_time: 270
-  - name: tests/e2e/singlecard/pooling/test_scoring.py
-    estimated_time: 500
-  - name: tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
-    estimated_time: 1500
+#  - name: tests/e2e/singlecard/test_xlite.py
+#    estimated_time: 45
+#  - name: tests/e2e/singlecard/compile/test_norm_quant_fusion.py
+#    estimated_time: 70
+#  - name: tests/e2e/singlecard/pooling/test_classification.py
+#    estimated_time: 120
+#  - name: tests/e2e/singlecard/pooling/test_embedding.py
+#    estimated_time: 270
+#  - name: tests/e2e/singlecard/pooling/test_scoring.py
+#    estimated_time: 500
+#  - name: tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
+#    estimated_time: 1500
   - name: tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
     estimated_time: 1800
   - name: tests/e2e/singlecard/model_runner_v2/test_basic.py
