@@ -62,9 +62,6 @@ exclude = [
     "vllm_ascend/worker/v2/**",
     "vllm_ascend/worker/npu_input_batch.py",
     "vllm_ascend/ops/rotary_embedding.py",
-    
-    # (11)
-    "vllm_ascend/ops/fused_moe/**",
 ]
 
 [tool.ruff.lint]
