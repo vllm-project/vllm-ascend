@@ -51,10 +51,6 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
-    # (7)
-    "vllm_ascend/quantization/**",
-    "vllm_ascend/sample/*.py",
-    "vllm_ascend/worker/block_table.py",
 
     # (8)
     "vllm_ascend/ops/__init__.py",
@@ -67,7 +63,7 @@ exclude = [
     "vllm_ascend/ops/vocab_parallel_embedding.py",
     "vllm_ascend/ops/weight_prefetch.py",
     "vllm_ascend/spec_decode/**",
-    
+
     # (10)
     "vllm_ascend/ops/*linear*.py",
     "vllm_ascend/worker/worker.py",
