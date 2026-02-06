@@ -82,9 +82,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             1, 2).contiguous()
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        if get_ascend_device_type() != AscendDeviceType._310P:
-            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
     def apply(self,
               layer: torch.nn.Module,
