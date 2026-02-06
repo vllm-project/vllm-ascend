@@ -471,6 +471,9 @@ class EagleProposer(VllmEagleProposer):
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
 
+        if num_input_tokens != num_tokens and attn_metadata.actual_seq_lengths_q:
+            attn_metadata.actual_seq_lengths_q[-1] = num_input_tokens
+
         # update global cos, sin
         update_cos_sin(self._get_positions(num_input_tokens))
 
