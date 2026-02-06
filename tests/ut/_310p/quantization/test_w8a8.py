@@ -34,44 +34,57 @@ class TestAscendW8A8LinearMethod310(TestBase):
         self.assertEqual(params["weight_scale"].shape, (10, 1))
         self.assertEqual(params["weight_offset"].shape, (10, 1))
 
-    @patch("vllm_ascend.quantization.methods.w8a8_static.get_weight_prefetch_method")
     @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_quant_matmul")
-    def test_apply_with_x_not_int8_310(self, mock_npu_quant_matmul, mock_quantize, mock_get_weight_prefetch_method):
+    def test_apply_with_x_not_int8_310(self, mock_npu_quant_matmul, mock_quantize):
         layer = MagicMock()
-        layer.aclnn_input_scale = 0.1
-        layer.aclnn_input_offset = 0.2
+        layer.aclnn_input_scale = torch.randn(256)
+        layer.aclnn_input_scale_reciprocal = 1.0 / layer.aclnn_input_scale
+        layer.aclnn_input_offset = torch.randint(-128, 127, (256,), dtype=torch.int8)
         layer.weight = torch.randn(128, 256)
-        layer.deq_scale = 0.3
-
-        mock_get_weight_prefetch_method.return_value = MagicMock()
+        layer.deq_scale = torch.randn(128)
+        layer.quant_bias = torch.randint(-128, 127, (256,))
+        layer.params_dtype = torch.float16
 
         x = torch.randn(32, 128)
-        bias = torch.randn(256)
-        mock_quantize.return_value = torch.randint(-128, 127, x.shape, dtype=torch.int8)
+        expect_x_output = torch.randint(-128, 127, x.shape, dtype=torch.int8)
+        mock_quantize.return_value = expect_x_output
 
         expected_y_output = torch.randn(32, 256)
         mock_npu_quant_matmul.return_value = expected_y_output
 
-        output = self.method.apply(layer, x, bias)
+        output = self.method.apply(layer, x, tp_rank=0)
 
+        mock_quantize.assert_called_with(
+            x, layer.aclnn_input_scale, layer.aclnn_input_scale_reciprocal, layer.aclnn_input_offset
+        )
+        mock_npu_quant_matmul.assert_called_with(
+            expect_x_output, layer.weight, layer.deq_scale, bias=layer.quant_bias, output_dtype=layer.params_dtype
+        )
         # The bias is added by the linear layer's forward pass, not the quant method.
         self.assertTrue(torch.equal(output, expected_y_output))
 
+    @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_quant_matmul")
-    def test_apply_with_x_is_int8_310(self, mock_npu_quant_matmul):
+    def test_apply_with_x_is_int8_310(self, mock_npu_quant_matmul, mock_quantize):
         layer = MagicMock()
-        layer.aclnn_input_scale = 0.1
-        layer.aclnn_input_offset = 0.2
+        layer.aclnn_input_scale = torch.randn(256)
+        layer.aclnn_input_offset = torch.randint(-128, 127, (256,))
         layer.weight = torch.randn(128, 256)
-        layer.deq_scale = 0.3
+        layer.deq_scale = torch.randn(128)
+        layer.quant_bias = torch.randint(-128, 127, (256,))
+        layer.params_dtype = torch.float16
 
         x = torch.randint(-128, 127, (32, 128), dtype=torch.int8)
-        bias = torch.randn(256)
 
         expected_y_output = torch.randn(32, 256)
         mock_npu_quant_matmul.return_value = expected_y_output
 
-        output = self.method.apply(layer, x, bias)
+        output = self.method.apply(layer, x, tp_rank=0)
+
+        mock_quantize.assert_not_called()
+        mock_npu_quant_matmul.assert_called_with(
+            x, layer.weight, layer.deq_scale, bias=layer.quant_bias, output_dtype=layer.params_dtype
+        )
         # The bias is added by the linear layer's forward pass, not the quant method.
         self.assertTrue(torch.equal(output, expected_y_output))
