@@ -96,6 +96,12 @@ class DSACPContext:
 
 
 @dataclass
+class SFACPMetadata:
+    block_table_cp: torch.Tensor
+    valid_block_ids: torch.Tensor
+
+
+@dataclass
 class AscendSFAMetadata:
     """Metadata for MLACommon.
 
@@ -114,7 +120,7 @@ class AscendSFAMetadata:
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
     cum_query_lens: torch.Tensor
-    block_tables: torch.Tensor
+    block_table: torch.Tensor
     sin: torch.Tensor
     cos: torch.Tensor
 
@@ -127,6 +133,7 @@ class AscendSFAMetadata:
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     dsa_cp_context: DSACPContext | None = None
     reshape_cache_event: torch.npu.Event = None
+    sfa_cp_metadata: SFACPMetadata | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -177,6 +184,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
         self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
+
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        self.pcp_group = get_pcp_group().device_group if self.pcp_size > 1 else None
+
+        self.dcp_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
+        self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -294,6 +309,22 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
 
+        sfa_cp_metadata = None
+        if self.pcp_size * self.dcp_size > 1:
+            valid_block_ids, new_block_table = block_table.flatten().unique(return_inverse=True)
+            num_blocks = valid_block_ids.shape[0]
+            # Note(qcs): `block_table_cp` will have dirty values in the part beyond kv_lens.
+            # We assume that we can always get the correct kv_lens or kv index,
+            # so we omit the dirty value processing here.
+            block_table_cp = (
+                new_block_table.unsqueeze(-1).to(block_table)
+                + (torch.arange(self.pcp_size * self.dcp_size) * num_blocks).view(1, 1, -1).to(block_table)
+            ).reshape(block_table.shape[0], -1)
+            sfa_cp_metadata = SFACPMetadata(
+                block_table_cp=block_table_cp,
+                valid_block_ids=valid_block_ids,
+            )
+
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -303,10 +334,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(self.model_config),
             attn_state=common_attn_metadata.attn_state,
-            block_tables=block_table,
+            block_table=block_table,
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
+            sfa_cp_metadata=sfa_cp_metadata,
         )
 
     def build_for_graph_capture(
@@ -857,13 +889,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             need_gather_q_kv=need_gather_q_kv,
         )
 
-        block_tables = attn_metadata.block_tables
+        block_table = attn_metadata.block_table
         kv = kv_cache[0]
         key_rope = kv_cache[1]
         if self.pcp_size * self.dcp_size > 1:
-            kv, block_tables = self.gather_kv_cross_cp(kv, block_tables)
-            key_rope, _ = self.gather_kv_cross_cp(key_rope)
-            assert block_tables is not None
+            assert attn_metadata.sfa_cp_metadata is not None
+            valid_block_ids = attn_metadata.sfa_cp_metadata.valid_block_ids
+            kv = self.gather_kv_cross_cp(kv, valid_block_ids)
+            key_rope = self.gather_kv_cross_cp(key_rope, valid_block_ids)
+            block_table = attn_metadata.sfa_cp_metadata.block_table_cp
 
         attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
@@ -872,7 +906,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             sparse_indices=topk_indices,
             scale_value=self.scale,
             sparse_block_size=1,
-            block_table=block_tables,
+            block_table=block_table,
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_kv=actual_seq_lengths_key,
             query_rope=q_pe,
@@ -910,21 +944,14 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         return output_padded
 
-    def gather_kv_cross_cp(
-        self, kv_cache: torch.Tensor, block_tables: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    def gather_kv_cross_cp(self, kv_cache: torch.Tensor, valid_block_ids: torch.Tensor) -> torch.Tensor:
         # Note(qcs): we need set kv_cache_interleave_size = block_size for sfa!!!
-        block_num = kv_cache.shape[0]
+        kv_cache = torch.index_select(kv_cache, 0, valid_block_ids)
         if self.dcp_size > 1:
             kv_cache = get_dcp_group().all_gather(kv_cache, 0)
         if self.pcp_size > 1:
             kv_cache = get_pcp_group().all_gather(kv_cache, 0)
-        if block_tables is not None:
-            block_tables = (
-                block_tables.unsqueeze(-1)
-                + (torch.arange(self.pcp_size * self.dcp_size) * block_num).view(1, 1, -1).to(block_tables)
-            ).reshape(block_tables.shape[0], -1)
-        return kv_cache, block_tables
+        return kv_cache
 
     def indexer_select_pre_process(
         self,
@@ -1002,9 +1029,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         weights = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(weights, need_gather_q_kv)
 
         key = kv_cache[2]
-        block_table = attn_metadata.block_tables
+        block_table = attn_metadata.block_table
         if self.pcp_size * self.dcp_size > 1:
-            key, block_table = self.gather_kv_cross_cp(key, block_table)
+            assert attn_metadata.sfa_cp_metadata is not None
+            key = self.gather_kv_cross_cp(key, attn_metadata.sfa_cp_metadata.valid_block_ids)
+            block_table = attn_metadata.sfa_cp_metadata.block_table_cp
 
         topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
             query=q,
