@@ -10,6 +10,11 @@ NC="\033[0m" # No Color
 
 # Configuration
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+# cann and atb environment setup
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/cann-8.5.0/share/info/ascendnpu-ir/bin/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
 # Home path for aisbench
 export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
 
