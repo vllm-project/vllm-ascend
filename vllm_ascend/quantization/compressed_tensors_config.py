@@ -17,23 +17,20 @@
 #
 """LLM-Compressor (compressed_tensors) quantization configuration for Ascend."""
 
-from typing import Any, Optional, Union, cast
+from typing import Any, Optional, cast
 
 import torch
-from compressed_tensors.quantization import (QuantizationArgs,
-                                             QuantizationStrategy,
-                                             QuantizationType)
+from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy, QuantizationType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.linear import (LinearBase,
-                                               UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization import (
-    QUANTIZATION_METHODS, register_quantization_config)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    find_matched_target, is_activation_quantization_format,
-    should_ignore_layer)
+    find_matched_target,
+    is_activation_quantization_format,
+    should_ignore_layer,
+)
 from vllm.model_executor.models.utils import WeightsMapper
 
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
@@ -51,14 +48,13 @@ def _remove_quantization_method():
 
 _remove_quantization_method()
 
-QUANTIZATION_SCHEME_MAP_TYPE = dict[str, Optional[dict[str,
-                                                       "QuantizationArgs"]]]
+QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, "QuantizationArgs"] | None]
 
 
 @register_quantization_config(COMPRESSED_TENSORS_METHOD)
 class AscendCompressedTensorsConfig(QuantizationConfig):
     """Config class for LLM-Compressor (compressed_tensors) quantization on Ascend.
-    
+
     This class adapts the compressed_tensors format to work with Ascend's
     quantization implementations.
     """
@@ -68,7 +64,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         target_scheme_map: dict[str, Any],
         ignore: list[str],
         quant_format: str,
-        config: Optional[dict[str, Any]] = None,
+        config: dict[str, Any] | None = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -86,8 +82,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        raise NotImplementedError(
-            "Ascend hardware dose not support \"get_min_capability\" feature.")
+        raise NotImplementedError('Ascend hardware dose not support "get_min_capability" feature.')
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
@@ -100,18 +95,15 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         targeting 'Linear' needs to also match
         FusedMoE modules.
         """
-        if ("Linear" not in self.target_scheme_map
-                or "FusedMoE" in self.target_scheme_map):
+        if "Linear" not in self.target_scheme_map or "FusedMoE" in self.target_scheme_map:
             return
         self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
 
     @classmethod
-    def from_config(cls, config: dict[str,
-                                      Any]) -> "AscendCompressedTensorsConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AscendCompressedTensorsConfig":
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
-        target_scheme_map = cls._quantization_scheme_map_from_config(
-            config=config)
+        target_scheme_map = cls._quantization_scheme_map_from_config(config=config)
 
         return cls(
             target_scheme_map=target_scheme_map,
@@ -121,10 +113,9 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         )
 
     @classmethod
-    def _quantization_scheme_map_from_config(
-            cls, config: dict[str, Any]) -> QUANTIZATION_SCHEME_MAP_TYPE:
+    def _quantization_scheme_map_from_config(cls, config: dict[str, Any]) -> QUANTIZATION_SCHEME_MAP_TYPE:
         """Build target scheme map from config.
-        
+
         :param config: The `quantization_config` dictionary from config.json
         :return: A dictionary mapping target layer names to their corresponding
             quantization_args for weights and input activations
@@ -138,24 +129,22 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             targets = quant_config.get("targets")
             for target in targets:
                 target_scheme_map[target] = {}
-                target_scheme_map[target][
-                    "weights"] = QuantizationArgs.model_validate(
-                        quant_config.get("weights"))
+                target_scheme_map[target]["weights"] = QuantizationArgs.model_validate(quant_config.get("weights"))
 
                 target_scheme_map[target]["input_activations"] = None
-                target_scheme_map[target]["format"] = quant_config.get(
-                    "format")
+                target_scheme_map[target]["format"] = quant_config.get("format")
                 format = target_scheme_map[target].get("format")
                 # If no per-config format defined, use global format in config
                 act_quant_format = (
                     is_activation_quantization_format(format)
-                    if format is not None else
-                    is_activation_quantization_format(quant_format))
+                    if format is not None
+                    else is_activation_quantization_format(quant_format)
+                )
                 input_activations = quant_config.get("input_activations")
                 if act_quant_format and input_activations is not None:
-                    target_scheme_map[target]["input_activations"] = (
-                        QuantizationArgs.model_validate(
-                            quant_config.get("input_activations")))
+                    target_scheme_map[target]["input_activations"] = QuantizationArgs.model_validate(
+                        quant_config.get("input_activations")
+                    )
         return target_scheme_map
 
     def get_quant_method(
@@ -168,8 +157,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
             # Get the scheme for this layer
-            linear_scheme = self._get_linear_scheme(layer=layer,
-                                                    layer_name=prefix)
+            linear_scheme = self._get_linear_scheme(layer=layer, layer_name=prefix)
 
             # Return unquantized method if no scheme found
             if linear_scheme is None:
@@ -177,14 +165,12 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
             # Store scheme on layer for reference (optional, for debugging)
             layer.scheme = linear_scheme
-            logger.info_once(
-                "Using the vLLM Ascend llmcompressor Quantization now!")
+            logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
             return AscendLinearMethod(linear_scheme)
 
         if isinstance(layer, FusedMoE):
             # Delayed import to avoid circular import
-            from vllm_ascend.ops.fused_moe.fused_moe import \
-                AscendUnquantizedFusedMoEMethod
+            from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
             layer_name = prefix + ".0.gate_proj"
@@ -197,24 +183,19 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
             # Store scheme on layer for reference (optional, for debugging)
             layer.scheme = moe_scheme
-            logger.info_once(
-                "Using the vLLM Ascend llmcompressor Quantization now!")
+            logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
             return AscendFusedMoEMethod(moe_scheme, layer.moe_config)
 
         return None
 
-    def _get_linear_scheme(
-            self,
-            layer: torch.nn.Module,
-            layer_name: Optional[str] = None) -> Optional[AscendLinearScheme]:
+    def _get_linear_scheme(self, layer: torch.nn.Module, layer_name: str | None = None) -> AscendLinearScheme | None:
         """Get the linear quantization scheme for a layer.
-        
+
         Returns:
             An AscendLinearScheme instance, or None if the layer
             should use unquantized method.
         """
-        weight_quant, input_quant, format = self._get_quant_args(
-            layer, layer_name)
+        weight_quant, input_quant, format = self._get_quant_args(layer, layer_name)
         if weight_quant is None:
             return None
 
@@ -226,12 +207,9 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         )
         return cast(AscendLinearScheme, scheme)
 
-    def _get_moe_scheme(
-            self,
-            layer: torch.nn.Module,
-            layer_name: Optional[str] = None) -> Optional[AscendMoEScheme]:
+    def _get_moe_scheme(self, layer: torch.nn.Module, layer_name: str | None = None) -> AscendMoEScheme | None:
         """Get the MoE quantization scheme for a layer.
-        
+
         Returns:
             An AscendMoEScheme instance, or None if the layer
             should use unquantized method.
@@ -239,8 +217,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         # Add FusedMoE to target scheme map if needed
         self._add_fused_moe_to_target_scheme_map()
 
-        weight_quant, input_quant, format = self._get_quant_args(
-            layer, layer_name)
+        weight_quant, input_quant, format = self._get_quant_args(layer, layer_name)
         if weight_quant is None:
             return None
 
@@ -253,13 +230,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         return cast(AscendMoEScheme, scheme)
 
     def _get_quant_args(
-        self,
-        layer: torch.nn.Module,
-        layer_name: Optional[str] = None
-    ) -> tuple[Optional["QuantizationArgs"], Optional["QuantizationArgs"],
-               Optional[str]]:
+        self, layer: torch.nn.Module, layer_name: str | None = None
+    ) -> tuple[Optional["QuantizationArgs"], Optional["QuantizationArgs"], str | None]:
         """Extract quantization arguments for a layer.
-        
+
         compressed-tensors supports non uniform in the following way:
 
         targets of config_groups: There can be N config_groups which each
@@ -269,7 +243,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
         Detect whether a layer_name is found in any target and
         use the quantization scheme corresponding to the matched target.
-        
+
         Returns:
             A tuple of (weight_quant, input_quant, format). weight_quant is
             None if the layer should use unquantized method.
@@ -284,16 +258,16 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             format = scheme_dict.get("format")
 
         if weight_quant is None:
-            logger.warning_once("Acceleration for non-quantized schemes is "
-                                "not supported by Compressed Tensors. "
-                                "Falling back to UnquantizedLinearMethod")
+            logger.warning_once(
+                "Acceleration for non-quantized schemes is "
+                "not supported by Compressed Tensors. "
+                "Falling back to UnquantizedLinearMethod"
+            )
 
         return weight_quant, input_quant, format
 
     def get_scheme_dict(
-        self,
-        layer: torch.nn.Module,
-        layer_name: str | None = None
+        self, layer: torch.nn.Module, layer_name: str | None = None
     ) -> dict[str, QuantizationArgs | str | None] | None:
         """
         Extract the QuantizationArgs for a given layer.
@@ -305,9 +279,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 "format": str | None
             } | None
         """
-        if should_ignore_layer(layer_name,
-                               ignore=self.ignore,
-                               fused_mapping=self.packed_modules_mapping):
+        if should_ignore_layer(layer_name, ignore=self.ignore, fused_mapping=self.packed_modules_mapping):
             return None
 
         if self.target_scheme_map:
@@ -328,17 +300,17 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         self,
         weight_quant: "QuantizationArgs",
         input_quant: Optional["QuantizationArgs"],
-        format: Optional[str],
+        format: str | None,
         layer_type: str,
-    ) -> Union[AscendLinearScheme, AscendMoEScheme]:
+    ) -> AscendLinearScheme | AscendMoEScheme:
         """Create the appropriate Ascend scheme based on quantization args and layer type.
-        
+
         Args:
             weight_quant: Weight quantization arguments.
             input_quant: Input activation quantization arguments.
             format: Per-layer format, if defined.
             layer_type: Type of layer ("linear" or "moe").
-            
+
         Returns:
             An instance of the appropriate Ascend quantization scheme.
         """
@@ -352,7 +324,8 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         if scheme_cls is None:
             raise NotImplementedError(
                 f"No compressed-tensors compatible scheme was found for "
-                f"quant_type={quant_type}, layer_type={layer_type}.")
+                f"quant_type={quant_type}, layer_type={layer_type}."
+            )
 
         return scheme_cls()
 
@@ -360,15 +333,15 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         self,
         weight_quant: "QuantizationArgs",
         input_quant: Optional["QuantizationArgs"],
-        format: Optional[str],
+        format: str | None,
     ) -> str:
         """Detect the quantization type from quantization arguments.
-        
+
         Args:
             weight_quant: Weight quantization arguments.
             input_quant: Input activation quantization arguments.
             format: Per-layer format, if defined.
-            
+
         Returns:
             A string representing the quantization type (e.g., "W8A8", "W8A8_DYNAMIC").
         """
@@ -389,16 +362,12 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         if self._is_w4a16(weight_quant, input_quant):
             return "W4A16"
 
-        raise NotImplementedError(
-            "No compressed-tensors compatible quantization type was found.")
+        raise NotImplementedError("No compressed-tensors compatible quantization type was found.")
 
-    def _is_static_tensor_w8a8(self, weight_quant: "QuantizationArgs",
-                               input_quant: "QuantizationArgs") -> bool:
+    def _is_static_tensor_w8a8(self, weight_quant: "QuantizationArgs", input_quant: "QuantizationArgs") -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
-        weight_strategy = (
-            weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
-        is_tensor = (weight_strategy and input_quant.strategy
-                     == QuantizationStrategy.TENSOR.value)
+        weight_strategy = weight_quant.strategy == QuantizationStrategy.CHANNEL.value
+        is_tensor = weight_strategy and input_quant.strategy == QuantizationStrategy.TENSOR.value
         is_static = not weight_quant.dynamic and not input_quant.dynamic
         is_symmetric = weight_quant.symmetric and input_quant.symmetric
 
@@ -406,28 +375,24 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         # Only symmetric weight quantization supported.
         return is_8_bits and is_tensor and is_symmetric and is_static
 
-    def _is_dynamic_token_w8a8(self, weight_quant: "QuantizationArgs",
-                               input_quant: "QuantizationArgs") -> bool:
+    def _is_dynamic_token_w8a8(self, weight_quant: "QuantizationArgs", input_quant: "QuantizationArgs") -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
-        weight_strategy = (
-            weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
-        is_token = (weight_strategy and input_quant.strategy
-                    == QuantizationStrategy.TOKEN.value)
+        weight_strategy = weight_quant.strategy == QuantizationStrategy.CHANNEL.value
+        is_token = weight_strategy and input_quant.strategy == QuantizationStrategy.TOKEN.value
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
         is_symmetric = weight_quant.symmetric and input_quant.symmetric
 
         # Only symmetric input quantization supported.
         # Only symmetric weight quantization supported.
         return is_8_bits and is_token and is_symmetric and is_dynamic
-    
-    def _is_dynamic_token_w4a8(self, weight_quant: QuantizationArgs,
-                               input_quant: QuantizationArgs) -> bool:
+
+    def _is_dynamic_token_w4a8(self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs) -> bool:
         is_4_bits = weight_quant.num_bits == 4
         is_8_bits = input_quant.num_bits == 8
-        weight_strategy = (
-            weight_quant.strategy == QuantizationStrategy.CHANNEL.value) or (weight_quant.strategy == QuantizationStrategy.GROUP.value)
-        is_token = (weight_strategy and input_quant.strategy
-                    == QuantizationStrategy.TOKEN.value)
+        weight_strategy = (weight_quant.strategy == QuantizationStrategy.CHANNEL.value) or (
+            weight_quant.strategy == QuantizationStrategy.GROUP.value
+        )
+        is_token = weight_strategy and input_quant.strategy == QuantizationStrategy.TOKEN.value
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
         is_symmetric = weight_quant.symmetric and input_quant.symmetric
 
@@ -435,7 +400,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         assert self.quant_description is not None, "quant_description should not be None"
         if weight_strategy:
             self.quant_description["group_size"] = weight_quant.group_size if weight_quant.group_size else 0
-        
+
         self.quant_description["version"] = "0"
         self.quant_description["ascend_quant_method"] = COMPRESSED_TENSORS_METHOD
         self.quant_description["weight_strategy"] = str(weight_quant.strategy)
@@ -444,8 +409,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         # Only symmetric weight quantization supported.
         return is_4_bits and is_8_bits and is_token and is_symmetric and is_dynamic
 
-    def _is_w4a16(self, weight_quant: "QuantizationArgs",
-                  input_quant: Optional["QuantizationArgs"]) -> bool:
+    def _is_w4a16(self, weight_quant: "QuantizationArgs", input_quant: Optional["QuantizationArgs"]) -> bool:
         # Confirm weights quantized.
         if weight_quant is None:
             return False
@@ -456,12 +420,11 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
         input_quant_none = input_quant is None
         is_4_bits = weight_quant.num_bits == 4
-        is_group = (weight_quant.strategy == QuantizationStrategy.GROUP.value)
+        is_group = weight_quant.strategy == QuantizationStrategy.GROUP.value
         is_static = not weight_quant.dynamic
 
         return input_quant_none and is_4_bits and is_group and is_static
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        self.target_scheme_map = hf_to_vllm_mapper.apply_dict(
-            self.target_scheme_map)
+        self.target_scheme_map = hf_to_vllm_mapper.apply_dict(self.target_scheme_map)
         self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
