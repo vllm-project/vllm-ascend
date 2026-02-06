@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,18 +13,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
+#from collections.abc import Iterable
 
-import torch
-import torch.nn.functional as F
+from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
 
-from vllm_ascend.ops.activation import AscendSiluAndMul
-from vllm_ascend.utils import get_weight_prefetch_method
+_original_call = HunYuanVLProcessor.__call__
 
+def _patched_call(self, images=None, text=None, videos=None, **kwargs):
+    """Remove add_special_tokens requirement."""
+    kwargs.pop("add_special_tokens", None)
+    return _original_call(self, images=images, text=text, videos=videos, **kwargs)
 
-class AscendSiluAndMul310(AscendSiluAndMul):
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = x.shape[-1] // 2
-        out = F.silu(x[..., :h]) * x[..., h:]
-        return out
+HunYuanVLProcessor.__call__ = _patched_call

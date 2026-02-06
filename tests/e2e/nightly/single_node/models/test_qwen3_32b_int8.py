@@ -45,10 +45,10 @@ api_keyword_args = {
 }
 
 batch_size_dict = {
-    "linux-aarch64-a2-4": 72,
+    "linux-aarch64-a2b3-4": 72,
     "linux-aarch64-a3-4": 76,
 }
-VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
+VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2b3-4")
 performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
 
 aisbench_cases = [{
@@ -83,7 +83,6 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
         "TASK_QUEUE_ENABLE": "1",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
-        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"
     }
     compilation_config = {
         "cudagraph_mode":
@@ -98,7 +97,8 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
         str(port), "--max-model-len", "40960", "--max-num-batched-tokens",
         "40960", "--block-size", "128", "--trust-remote-code",
         "--reasoning-parser", "qwen3", "--gpu-memory-utilization", "0.9",
-        "--async-scheduling"
+        "--async-scheduling", "--additional-config",
+        '{"weight_prefetch_config":{"enabled":true}}',
     ]
     if mode == "single":
         server_args.append("--enforce-eager")
