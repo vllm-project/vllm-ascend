@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from collections.abc import Callable, Optional
+from typing import Callable, Optional
 
 import torch
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
