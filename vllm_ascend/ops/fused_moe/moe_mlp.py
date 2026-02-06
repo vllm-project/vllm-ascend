@@ -291,11 +291,7 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
         group_type=0,
         group_list=group_list,
     )[0]
-    if get_ascend_device_type() == AscendDeviceType._310P:
-        gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
-            torch.float16)
-    else:
-        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+    gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
