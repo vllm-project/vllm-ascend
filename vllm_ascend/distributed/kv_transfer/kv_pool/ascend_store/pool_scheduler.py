@@ -37,6 +37,7 @@ class KVPoolScheduler:
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
+        self.original_block_size = vllm_config.cache_config.block_size
         self._block_size = vllm_config.cache_config.block_size
         if self.pcp_size > 1:
             self._block_size *= self.pcp_size
@@ -174,6 +175,8 @@ class KVPoolScheduler:
             num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
             request_tuple = self._unfinished_requests.get(request.req_id)
             request_real = request_tuple[0]  # type: ignore[index]
+            print("request_real in KVPoolScheduler.build_connector_meta: ", request_real)
+            print("type(request_real): ", type(request_real))
             if not isinstance(request.block_ids[0], list):
                 unfolded_block_ids = request.block_ids.copy()
             else:
@@ -183,6 +186,7 @@ class KVPoolScheduler:
                 token_len=num_tokens_to_compute,
                 allocated_block_ids=unfolded_block_ids,
                 num_saved_tokens=0,
+                token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
             )
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
@@ -199,6 +203,7 @@ class KVPoolScheduler:
                 block_hashes=request_real.block_hashes,
                 is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
                 discard_partial_chunks=self._discard_partial_chunks,
+                original_block_size=self.original_block_size,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -299,7 +304,7 @@ class KVPoolScheduler:
                 )
 
                 self._request_trackers[request_id] = request_tracker
-
+                # TODO add lora_request here
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,

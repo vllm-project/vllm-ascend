@@ -12,6 +12,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 
@@ -74,6 +75,7 @@ class KVPoolWorker:
             "consumer_is_to_put", False
         )
         self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
+        self.original_block_size = vllm_config.cache_config.block_size
         self.block_size = vllm_config.cache_config.block_size
 
         if self.pcp_size > 1:
@@ -146,6 +148,13 @@ class KVPoolWorker:
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config
         )
+        kv_event_config = vllm_config.kv_events_config
+        self.enable_kv_events = False
+        self.kv_events: list[BlockStored] = None
+        print(f"------------kv_event_config: {kv_event_config}")
+        if kv_event_config and kv_event_config.enable_kv_cache_events:
+            self.kv_events = []
+            self.enable_kv_events = True
 
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
@@ -209,6 +218,7 @@ class KVPoolWorker:
                     self.put_step,
                     ready_event_sending,
                     self.num_layers,
+                    self.enable_kv_events,
                 )
                 self.kv_send_thread.start()
             ready_event = threading.Event()
@@ -235,6 +245,7 @@ class KVPoolWorker:
                     self.put_step,
                     self.kv_role,
                     ready_event_sending,
+                    self.enable_kv_events,
                 )
                 self.kv_send_thread.start()
             if self.load_async:
@@ -449,6 +460,10 @@ class KVPoolWorker:
             ends.append(end)
             keys.append(keys_multi_layer)  # [block_num,layer_num]
 
+        if self.enable_kv_events:
+            # TODO 适配layerwise场景
+            pass
+
         if keys:
             keys = [list(row) for row in zip(*keys)]  # [layer_num,block_num]
             for layer_id, keys_multi_chunk in enumerate(keys):
@@ -641,3 +656,10 @@ class KVPoolWorker:
             return min(idx for row in arr for idx, val in enumerate(row) if val != 1)
         except ValueError:
             return -1
+
+    def get_kv_events(self) -> list[BlockStored]:
+        if self.enable_kv_events:
+            # collect store kv events form sending thread
+            events = self.kv_send_thread.get_kv_events()
+            return events
+        return []
