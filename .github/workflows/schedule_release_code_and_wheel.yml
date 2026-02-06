@@ -35,7 +35,7 @@ on:
           - main
           - v0.15.0rc1
           - v0.14.0rc1
-          - v0.13.0rc2
+          - v0.13.0rc3
 
 jobs:
   build_and_release_code:
@@ -114,7 +114,7 @@ jobs:
       - name: Build wheel
         run: |
           ls
-          docker build -f ./.github/Dockerfile.buildwheel \
+          docker build -f ./.github/workflows/dockerfiles/Dockerfile.buildwheel \
           --build-arg PY_VERSION=${{ matrix.python-version }} \
           -t wheel:v1 .
           docker run --rm \
