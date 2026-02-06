@@ -1,0 +1,130 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'e2e nightly single node (YAML-driven)'
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: true
+        type: string
+      image:
+        required: false
+        type: string
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
+      config_file_path:
+        required: true
+        type: string
+        description: "Path to the YAML configuration file relative to tests/e2e/nightly/single_node/config/"
+      name:
+        required: false
+        type: string
+        description: "Test name for logging"
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+concurrency:
+  group: ascend-nightly-single-yaml-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-nightly-single-yaml:
+    name: ${{ inputs.name || inputs.config_file_path }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 600
+    container:
+      image: ${{ inputs.image }}
+    env:
+      HF_HUB_OFFLINE: 1
+      VLLM_USE_MODELSCOPE: True
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Show vLLM and vLLM-Ascend version
+        working-directory: /vllm-workspace
+        run: |
+          echo "Installed vLLM-related Python packages:"
+          pip list | grep vllm || echo "No vllm packages found."
+
+          echo ""
+          echo "============================"
+          echo "vLLM Git information"
+          echo "============================"
+          cd vllm
+          if [ -d .git ]; then
+            echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+            echo "Commit hash: $(git rev-parse HEAD)"
+            echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+            echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+            echo "Message:     $(git log -1 --pretty=format:'%s')"
+            echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+            echo "Remote:      $(git remote -v | head -n1)"
+            echo ""
+          else
+            echo "No .git directory found in vllm"
+          fi
+          cd ..
+
+          echo ""
+          echo "============================"
+          echo "vLLM-Ascend Git information"
+          echo "============================"
+          cd vllm-ascend
+          if [ -d .git ]; then
+            echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+            echo "Commit hash: $(git rev-parse HEAD)"
+            echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+            echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+            echo "Message:     $(git log -1 --pretty=format:'%s')"
+            echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+            echo "Remote:      $(git remote -v | head -n1)"
+            echo ""
+          else
+            echo "No .git directory found in vllm-ascend"
+          fi
+          cd ..
+
+      - name: Install clang
+        shell: bash -l {0}
+        run: |
+          apt-get update && apt-get -y install clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+      - name: Run YAML-driven single node test
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+          VLLM_CI_RUNNER: ${{ inputs.runner }}
+          BENCHMARK_HOME: /vllm-workspace/vllm-ascend/benchmark
+          CONFIG_YAML_PATH: ${{ inputs.config_file_path }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          echo "Running YAML-driven test with config: $CONFIG_YAML_PATH"
+          
+          # Run the YAML-driven test
+          pytest -sv tests/e2e/nightly/single_node/scripts/test_single_node.py
