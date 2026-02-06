@@ -105,32 +105,6 @@ check_and_config() {
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 }
 
-install_extra_components() {
-    echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
-    
-    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
-        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
-        return 1
-    fi
-    chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-    ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-    
-    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
-        echo "Failed to download custom_ops wheel"
-        return 1
-    fi
-    pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-    
-    export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
-    export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    
-    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
-          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-    echo "====> Extra components installation completed"
-}
-
-
 show_triton_ascend_info() {
     echo "====> Check triton ascend info"
     clang -v
@@ -160,15 +134,51 @@ If this is insufficient to pinpoint the error, please download and review the lo
         fi
     fi
 }
+upgrade_vllm_ascend_scr() {
+    # Fix me(Potabk): Remove this once our image build use 
+    # The separate architecture build process currently suffers from errors during cross-compilation
+    # causing the image to fail to build correctly. 
+    # This results in the nightly test code not being the latest version.
+    cd "$WORKSPACE/vllm-ascend"
+    # git pull origin main
+    git fetch origin pull/6378/head:pr-6378
+    git checkout pr-6378
+    
+}
+install_aisbench() {
+    print_section "Install AISBench benchmark"
+
+    export AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
+    : "${AIS_BENCH_TAG:=v3.0-20250930-master}"  
+
+    BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
+
+    if [ -d "$BENCH_DIR" ]; then
+        echo "Removing existing benchmark directory..."
+        rm -rf "$BENCH_DIR"
+    fi
+
+    git clone -b "${AIS_BENCH_TAG}" --depth 1 \
+        "${AIS_BENCH_URL}" "${BENCH_DIR}"
+
+    cd "$BENCH_DIR"
+    pip install -e . \
+        -r requirements/api.txt \
+        -r requirements/extra.txt
+
+    python3 -m pip cache purge || echo "WARNING: pip cache purge failed, but proceeding..."
+    pip install pytest-asyncio pytest
+
+    print_success "AISBench installed successfully"
+}
 
 main() {
     check_npu_info
     check_and_config
     show_vllm_info
+    upgrade_vllm_ascend_scr
+    install_aisbench
     show_triton_ascend_info
-    if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
-        install_extra_components
-    fi
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }
