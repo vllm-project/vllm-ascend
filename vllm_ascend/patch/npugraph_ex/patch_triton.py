@@ -16,7 +16,7 @@
 #
 
 import torch
-import torchair
+import torch_npu
 from torch._subclasses.fake_tensor import FakeTensor
 from torchair.core._concrete_graph import _is_symlist
 from torchair.npu_fx_compiler import _unpack_meta_list
@@ -105,6 +105,6 @@ def _unpack_npu(self, args, kwargs):
     return unpacked, unpacked_kwargs
 
 
-torchair.core._concrete_graph.ValuePack = ValuePack
-torchair.npu_fx_compiler._unpack_meta = _unpack_meta
-torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu = _unpack_npu
+torch_npu.dynamo.torchair.core._concrete_graph.ValuePack = ValuePack
+torch_npu.dynamo.torchair.npu_fx_compiler._unpack_meta = _unpack_meta
+torch_npu.dynamo.torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu = _unpack_npu
