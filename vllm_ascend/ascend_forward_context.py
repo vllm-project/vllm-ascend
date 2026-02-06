@@ -166,8 +166,6 @@ def set_ascend_forward_context(
 
 _mc2_tokens_capacity: Optional[int] = None
 _reserved_mc2_mask: Optional[torch.Tensor] = None
-_sin: Optional[torch.Tensor] = None
-_cos: Optional[torch.Tensor] = None
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs,

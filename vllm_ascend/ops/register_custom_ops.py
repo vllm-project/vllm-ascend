@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.triton.rope import rope_forward_triton_with_positions
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
@@ -312,6 +313,14 @@ def _quantize_impl_fake(in_tensor: torch.Tensor, input_scale: torch.Tensor,
                                   input_offset, torch.qint8, -1, False)
 
 
+def _rope_forward_triton_with_positions_impl_fake(
+    positions: torch.Tensor, query: torch.Tensor,
+    key: torch.Tensor, cos_sin_cache: torch.Tensor, 
+    head_dim: int, rotary_dim: int, is_neox_style: bool = True
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return query, key
+
+
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
                           fake_impl=lambda x, residual: torch.empty_like(x),
@@ -375,5 +384,12 @@ direct_register_custom_op(op_name="matmul_and_reduce",
 direct_register_custom_op(op_name="quantize",
                           op_func=_quantize_impl,
                           fake_impl=_quantize_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+
+direct_register_custom_op(op_name="rope_forward_triton_with_positions",
+                          op_func=rope_forward_triton_with_positions,
+                          fake_impl=_rope_forward_triton_with_positions_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
