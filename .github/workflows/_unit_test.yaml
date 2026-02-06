@@ -55,7 +55,7 @@ jobs:
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install --system . --extra-index-url https://download.pytorch.org/whl/cpu/
-          uv pip uninstall --system -y triton
+          uv pip uninstall --system triton
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
