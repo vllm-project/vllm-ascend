@@ -42,6 +42,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+          #uv
           pip install uv
 
       - name: Checkout vllm-project/vllm repo
