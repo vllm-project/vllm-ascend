@@ -19,7 +19,6 @@ import torch
 import torch.nn.functional as F
 
 from vllm_ascend.ops.activation import AscendSiluAndMul
-from vllm_ascend.utils import get_weight_prefetch_method
 
 
 class AscendSiluAndMul310(AscendSiluAndMul):
