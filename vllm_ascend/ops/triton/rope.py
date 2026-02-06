@@ -91,19 +91,27 @@ def _triton_rope(
             pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
             cos_start_ptr = cos_sin_ptr + pos_idx * cos_sin_row_stride
 
-        cos_offsets = tl.arange(0, pad_rope_dim // 2)
+            cos_offsets = tl.arange(0, pad_rope_dim // 2)
             sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
             cos_mask = cos_offsets < (rope_dim // 2)
-            cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
-            sin_row = tl.load(cos_start_ptr + sin_offsets, mask=cos_mask, other=0).to(tl.float32)
+            cos_row = tl.load(cos_start_ptr + cos_offsets,
+                              mask=cos_mask,
+                              other=0).to(tl.float32)
+            sin_row = tl.load(cos_start_ptr + sin_offsets,
+                              mask=cos_mask,
+                              other=0).to(tl.float32)
         else:
             cos_start_ptr = cos_ptr + row_idx * cos_row_stride
             sin_start_ptr = sin_ptr + row_idx * sin_row_stride
             cos_offsets = tl.arange(0, pad_rope_dim // 2)
             sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
             cos_mask = cos_offsets < (rope_dim // 2)
-            cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
-            sin_row = tl.load(sin_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+            cos_row = tl.load(cos_start_ptr + cos_offsets,
+                              mask=cos_mask,
+                              other=0).to(tl.float32)
+            sin_row = tl.load(sin_start_ptr + cos_offsets,
+                              mask=cos_mask,
+                              other=0).to(tl.float32)
 
         # ####################################################################
         # Load the left and right half of q and k for the current
@@ -252,7 +260,7 @@ def rope_forward_triton_with_positions(
     num_vectorcore = get_vectorcore_num()
     n_row = min(num_tokens, num_vectorcore)
 
-    _triton_rope[(n_row,)](
+    _triton_rope[(n_row, )](
         q,
         q.stride(0),
         k,

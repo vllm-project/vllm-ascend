@@ -314,10 +314,13 @@ def _quantize_impl_fake(in_tensor: torch.Tensor, input_scale: torch.Tensor,
 
 
 def _rope_forward_triton_with_positions_impl_fake(
-    positions: torch.Tensor, query: torch.Tensor,
-    key: torch.Tensor, cos_sin_cache: torch.Tensor, 
-    head_dim: int, rotary_dim: int, is_neox_style: bool = True
-) -> tuple[torch.Tensor, torch.Tensor]:
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        head_dim: int,
+        rotary_dim: int,
+        is_neox_style: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
     return query, key
 
 
@@ -387,9 +390,9 @@ direct_register_custom_op(op_name="quantize",
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
-
-direct_register_custom_op(op_name="rope_forward_triton_with_positions",
-                          op_func=rope_forward_triton_with_positions,
-                          fake_impl=_rope_forward_triton_with_positions_impl_fake,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
+direct_register_custom_op(
+    op_name="rope_forward_triton_with_positions",
+    op_func=rope_forward_triton_with_positions,
+    fake_impl=_rope_forward_triton_with_positions_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1")

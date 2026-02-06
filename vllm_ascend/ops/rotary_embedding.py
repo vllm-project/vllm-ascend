@@ -175,7 +175,6 @@ def _custom_rotary_embedding_enabled(query, neox_style, head_size):
 
 
 def rope_forward_oot(
-    self,
     positions: torch.Tensor,
     query: torch.Tensor,
     key: torch.Tensor,
@@ -188,8 +187,8 @@ def rope_forward_oot(
     query_shape, key_shape = query.shape, key.shape
     # adopt custom kernel path for rotary_embedding
     if _custom_rotary_embedding_enabled(
-            query, is_neox_style, head_size) and get_ascend_device_type(
-            ) != AscendDeviceType._310P:
+            query, is_neox_style,
+            head_size) and get_ascend_device_type() != AscendDeviceType._310P:
         query, key = torch.ops._C_ascend.rotary_embedding(
             positions,
             query,
@@ -202,17 +201,11 @@ def rope_forward_oot(
     if offsets is not None:
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
-     else:
+    else:
         if HAS_TRITON:
             return torch.ops.vllm.rope_forward_triton_with_positions(
-                positions,
-                query,
-                key,
-                cos_sin_cache,
-                head_size,
-                rotary_dim,
-                is_neox_style
-            )
+                positions, query, key, cos_sin_cache, head_size, rotary_dim,
+                is_neox_style)
         else:
             if rotary_dim < head_size:
                 num_tokens = query.shape[0]
@@ -281,15 +274,8 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        return rope_forward_oot(
-            positions,
-            query,
-            key,
-            self.cos_sin_cache,
-            self.head_size,
-            self.rotary_dim,
-            is_neox_style
-        )
+        return rope_forward_oot(positions, query, key, self.cos_sin_cache,
+                                self.head_size, self.rotary_dim, is_neox_style)
 
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
@@ -531,15 +517,9 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
             b, h_k, d = key.shape
             key = key.view(b, h_k, d // 2, 2).transpose(3,
                                                         2).reshape(b, h_k, d)
-        q_pe, k_pe = rope_forward_oot(
-            positions,
-            query,
-            key,
-            self.cos_sin_cache,
-            self.head_size,
-            self.rotary_dim,
-            is_neox_style
-        )
+        q_pe, k_pe = rope_forward_oot(positions, query, key,
+                                      self.cos_sin_cache, self.head_size,
+                                      self.rotary_dim, is_neox_style)
         return q_pe, k_pe
 
 

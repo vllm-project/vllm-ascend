@@ -46,10 +46,20 @@ class QKNormRopeFusionPattern:
     def get_inputs(self):
         T = 5
         max_position_embeddings = 16384
-        qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
-        q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        k_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        cos_sin_cache = torch.empty(max_position_embeddings, self.head_dim, dtype=torch.bfloat16, device="npu")
+        qkv = torch.empty(T,
+                          self.q_size + 2 * self.kv_size,
+                          dtype=torch.bfloat16,
+                          device="npu")
+        q_weight = torch.empty(self.head_dim,
+                               dtype=torch.bfloat16,
+                               device="npu")
+        k_weight = torch.empty(self.head_dim,
+                               dtype=torch.bfloat16,
+                               device="npu")
+        cos_sin_cache = torch.empty(max_position_embeddings,
+                                    self.head_dim,
+                                    dtype=torch.bfloat16,
+                                    device="npu")
         positions = torch.ones(T, dtype=torch.int64, device="npu")
         return [qkv, q_weight, k_weight, cos_sin_cache, positions]
 
@@ -63,20 +73,25 @@ class QKNormRopeFusionPattern:
             positions: torch.Tensor,
         ):
 
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
+                                dim=-1)
 
-            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-            q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight, self.eps)
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                               self.head_dim)
+            q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight,
+                                                       self.eps)
 
-            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-            k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight, self.eps)
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                               self.head_dim)
+            k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight,
+                                                       self.eps)
 
             q_flat = q_norm_out.view(q.shape)
 
             k_flat = k_norm_out.view(k.shape)
             q_rope, k_rope = torch.ops.vllm.rope_forward_triton_with_positions(
-                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
-            )
+                positions, q_flat, k_flat, cos_sin_cache, self.head_dim,
+                self.head_dim, True)
 
             return q_rope, k_rope, v
 
@@ -99,7 +114,7 @@ class QKNormRopeFusionPattern:
                 k_bias=None,
                 cos_sin_cache=cos_sin_cache,
                 positions=positions,
-
+            )
             return results
 
         pm.register_replacement(pattern, replacement, self.get_inputs(),
@@ -126,19 +141,31 @@ class QKNormRopeFusionPatternWithBias:
     def get_inputs(self):
         T = 5
         max_position_embeddings = 16384
-        qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
-        q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        k_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
+        qkv = torch.empty(T,
+                          self.q_size + 2 * self.kv_size,
+                          dtype=torch.bfloat16,
+                          device="npu")
+        q_weight = torch.empty(self.head_dim,
+                               dtype=torch.bfloat16,
+                               device="npu")
+        k_weight = torch.empty(self.head_dim,
+                               dtype=torch.bfloat16,
+                               device="npu")
         q_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        cos_sin_cache = torch.empty(max_position_embeddings, self.head_dim, dtype=torch.bfloat16, device="npu")
+        cos_sin_cache = torch.empty(max_position_embeddings,
+                                    self.head_dim,
+                                    dtype=torch.bfloat16,
+                                    device="npu")
         positions = torch.ones(T, dtype=torch.int64, device="npu")
 
-        return [qkv, q_weight, k_weight, q_bias, k_bias, cos_sin_cache, positions]
+        return [
+            qkv, q_weight, k_weight, q_bias, k_bias, cos_sin_cache, positions
+        ]
 
     def register(self, pm_pass: PatternMatcherPass):
 
-        def def pattern(
+        def pattern(
             qkv: torch.Tensor,
             q_weight: torch.Tensor,
             k_weight: torch.Tensor,
@@ -147,22 +174,27 @@ class QKNormRopeFusionPatternWithBias:
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
+                                dim=-1)
 
-            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-            q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight, self.eps)
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                               self.head_dim)
+            q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight,
+                                                       self.eps)
             q_normed = q_norm_out + q_bias
 
-            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-            k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight, self.eps)
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                               self.head_dim)
+            k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight,
+                                                       self.eps)
             k_normed = k_norm_out + k_bias
 
             q_flat = q_normed.view(q.shape)
 
             k_flat = k_normed.view(k.shape)
             q_rope, k_rope = torch.ops.vllm.rope_forward_triton_with_positions(
-                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
-            )
+                positions, q_flat, k_flat, cos_sin_cache, self.head_dim,
+                self.head_dim, True)
 
             return q_rope, k_rope, v
 

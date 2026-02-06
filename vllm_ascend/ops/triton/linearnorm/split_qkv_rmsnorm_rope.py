@@ -99,7 +99,7 @@ def split_qkv_rmsnorm_rope_kernel(
         roped_q2 = x2 * cos + x1 * sin
 
         roped_q = tl.zeros((Q_BLOCK_SIZE // HEAD_DIM, HEAD_DIM),
-                         dtype=tl.bfloat16)
+                           dtype=tl.bfloat16)
         roped_q = tl.insert_slice(
             roped_q,
             roped_q1,
@@ -169,7 +169,7 @@ def split_qkv_rmsnorm_rope_kernel(
         roped_k2 = x2 * cos + x1 * sin
 
         roped_k = tl.zeros((KV_BLOCK_SIZE // HEAD_DIM, HEAD_DIM),
-                         dtype=tl.bfloat16)
+                           dtype=tl.bfloat16)
         roped_k = tl.insert_slice(
             roped_k,
             roped_k1,
