@@ -29,6 +29,7 @@ Public API:
 
 # LLM-Compressor (compressed_tensors) quantization config
 from .compressed_tensors_config import AscendCompressedTensorsConfig
+
 # ModelSlim quantization config
 from .modelslim_config import AscendModelSlimConfig
 
