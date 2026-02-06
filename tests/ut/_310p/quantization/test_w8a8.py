@@ -69,7 +69,7 @@ class TestAscendW8A8LinearMethod310(TestBase):
     def test_apply_with_x_is_int8_310(self, mock_npu_quant_matmul, mock_quantize):
         layer = MagicMock()
         layer.aclnn_input_scale = torch.randn(256)
-        layer.aclnn_input_offset = torch.randint(-128, 127, (256,))
+        layer.aclnn_input_offset = torch.randint(-128, 127, (256,), dtype=torch.int8)
         layer.weight = torch.randn(128, 256)
         layer.deq_scale = torch.randn(128)
         layer.quant_bias = torch.randint(-128, 127, (256,))
