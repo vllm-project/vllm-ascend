@@ -235,9 +235,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_scale = layer.w2_weight_scale_list
         else:
             w1 = [layer.w13_weight]
-            w1_scale = [layer.w13_weight_scale_fp32]
+            w1_scale = [layer.fused_w1_scale] if fused_scale_flag else [layer.w13_weight_scale_fp32]
             w2 = [layer.w2_weight]
-            w2_scale = [layer.w2_weight_scale]
+            w2_scale = [layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale]
 
         fused_scale_flag = (
             get_forward_context().moe_comm_type == MoECommType.FUSED_MC2
@@ -247,9 +247,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             hidden_states=x,
             pertoken_scale=pertoken_scale,
             w1=w1,
-            w1_scale=[layer.fused_w1_scale] if fused_scale_flag else w1_scale,
+            w1_scale=w1_scale,
             w2=w2,
-            w2_scale=[layer.fused_w2_scale] if fused_scale_flag else w2_scale,
+            w2_scale=w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             use_int8_w8a8=True,

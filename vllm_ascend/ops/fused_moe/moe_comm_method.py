@@ -271,6 +271,9 @@ class FusedMC2CommImpl(MoECommMethod):
     This implementation uses the MC2 communication method, which is optimized for
     Communication and Computation parallelism on Ascend devices.
     """
+    def __init__(self, moe_config):
+        super().__init__(moe_config)
+        self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
 
     def _get_token_dispatcher(self):
         return TokenDispatcherWithMC2()
@@ -317,8 +320,9 @@ class FusedMC2CommImpl(MoECommMethod):
         group_list_type = None
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            group_list_type = 1
             out = torch.empty_like(hidden_states)
-            expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32)
+            
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=hidden_states,
                 weight1=w1,
@@ -330,9 +334,9 @@ class FusedMC2CommImpl(MoECommMethod):
                 group=self.token_dispatcher.moe_all_to_all_group_name,
                 max_output_size=65536,
                 out=out,
-                expert_token_nums=expert_token_nums,
+                expert_token_nums=self.expert_token_nums,
             )
-            expert_tokens = expert_token_nums
+            expert_tokens = self.expert_token_nums
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert expert_map is not None, "expert_map cannot be None."
             group_list_type = 1
