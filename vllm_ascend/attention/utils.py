@@ -317,6 +317,10 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
     return nz_mat
 
 
-def enabling_malpo(vllm_config: VllmConfig) -> bool:
-    is_decode_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+def enabling_mlapo(vllm_config: VllmConfig) -> bool:
+    is_decode_instance = (
+        vllm_config.kv_transfer_config is not None
+        and vllm_config.kv_transfer_config.is_kv_consumer
+        and not vllm_config.kv_transfer_config.is_kv_producer
+    )
     return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)

@@ -98,10 +98,6 @@ SERVICE_PROFILING_SYMBOLS_YAML = """
   name: _prepare_inputs
   domain: ModelExecute
 
-- symbol: vllm_ascend.utils:ProfileExecuteDuration.capture_async
-  min_version: "0.9.1"
-  handler: msserviceprofiler.vllm_profiler.vllm_v1.model_hookers:capture_async
-
 # ===== Request Lifecycle =====
 - symbol: vllm.v1.engine.async_llm:AsyncLLM.add_request
   min_version: "0.9.1"

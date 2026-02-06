@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/vllm-ascend:releases-v0.13.0-a3
+FROM quay.io/ascend/vllm-ascend:main-a3
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG AIS_BENCH_TAG="v3.0-20250930-master"

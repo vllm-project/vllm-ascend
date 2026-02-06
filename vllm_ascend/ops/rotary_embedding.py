@@ -16,6 +16,7 @@
 #
 
 import math
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -189,8 +190,7 @@ def _rope_forward_oot(
     cos, sin = get_cos_and_sin_slice()
     # adopt custom kernel path for rotary_embedding
     if _custom_rotary_embedding_enabled(
-            query, is_neox_style, self.head_size) and get_ascend_device_type(
-            ) != AscendDeviceType._310P:
+            query, is_neox_style, self.head_size):
         query, key = torch.ops._C_ascend.rotary_embedding(
             positions,
             query,
@@ -240,11 +240,13 @@ def _rope_forward_oot(
                 k_pass = key[..., self.rotary_dim:]
                 q_rot = q_rot.contiguous().view(num_tokens, -1)
                 k_rot = k_rot.contiguous().view(num_tokens, -1)
+                # only the rotary part is processed here,
+                # the dimension should be rotary_dim
                 torch_npu._npu_rotary_embedding(
                     positions,
                     q_rot,
                     k_rot,
-                    self.head_size,
+                    self.rotary_dim,
                     self.cos_sin_cache,
                     is_neox_style,
                 )
@@ -545,6 +547,9 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
 
 class AscendMRotaryEmbedding(MRotaryEmbedding):
 
+    # Empirical safety threshold for large Triton grids on Ascend NPU
+    _ASCEND_TRITON_GRID_LIMIT = 65535
+
     def forward_triton(self,
                        positions: torch.Tensor,
                        query: torch.Tensor,
@@ -565,6 +570,12 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         key_shape = key.shape
 
         assert self.mrope_section
+
+        # When the grid becomes large, enable TRITON_ALL_BLOCKS_PARALLEL 
+        # to avoid scheduler/runtime failures.
+        if (query_shape[0] > self._ASCEND_TRITON_GRID_LIMIT and 
+                os.environ.get("TRITON_ALL_BLOCKS_PARALLEL") != "1"):
+            os.environ["TRITON_ALL_BLOCKS_PARALLEL"] = "1"
 
         q, k = triton_mrope(
             query,

@@ -222,7 +222,7 @@ def test_qwen3_dense_fc1_tp2(model):
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
     example_prompts = [
         "Hello, my name is",
@@ -236,6 +236,7 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
             tensor_parallel_size=2,
             cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
+            additional_config={"weight_prefetch_config": {"enabled": True}},
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -245,14 +246,19 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
 @patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
-    example_prompts = [
-        "Hello, my name is",
+    short_example_prompts = [
+        "Hello ",
     ]
-    max_tokens = 5
+    # "max_position_embeddings": 163840,
+    long_example_prompts = [
+        "Hello " * (163839 - 500) + "Hello"
+    ]
+    max_tokens = 500 
     with VllmRunner("vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
                     tensor_parallel_size=2,
                     quantization="ascend",
                     enable_expert_parallel=True,
+                    max_model_len=163840,
                     compilation_config={
                         "cudagraph_capture_sizes": [3, 6, 9, 12],
                         "cudagraph_mode": "FULL_DECODE_ONLY"
@@ -266,7 +272,8 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
                     },
                     reasoning_parser="deepseek_v3",
                     tokenizer_mode="deepseek_v32") as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+        vllm_model.generate_greedy(short_example_prompts, max_tokens)
+        vllm_model.generate_greedy(long_example_prompts, max_tokens)
 
 
 @pytest.mark.parametrize("model", QWEN_W4A4_MODELS)

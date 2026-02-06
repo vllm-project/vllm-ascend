@@ -725,7 +725,7 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
     return;
 }
 
-at::Tensor& dispatch_ffn_combine(
+std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     const at::Tensor& x,
     const at::TensorList& weight1,
     const at::TensorList& weight2,
@@ -735,7 +735,8 @@ at::Tensor& dispatch_ffn_combine(
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
-    at::Tensor& out
+    at::Tensor& out,
+    at::Tensor& expert_token_nums
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
     bool is_int8 = weight1[0].dtype() == at::kChar;
@@ -750,7 +751,8 @@ at::Tensor& dispatch_ffn_combine(
                  probs,
                  group_ep_ptr,
                  max_output_size,
-                 out);
+                 out,
+                 expert_token_nums);
     } else {
         EXEC_NPU_CMD(aclnnDispatchFFNCombineBF16,
                  x,
@@ -762,9 +764,10 @@ at::Tensor& dispatch_ffn_combine(
                  probs,
                  group_ep_ptr,
                  max_output_size,
-                 out);
+                 out,
+                 expert_token_nums);
     }    
-    return out;
+    return {out, expert_token_nums};
 }
 
 at::Tensor npu_lightning_indexer(
@@ -1340,6 +1343,22 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
+void transpose_kv_cache_by_block(
+    const at::TensorList &kCache,
+    const at::TensorList &vCache,
+    const at::Tensor &blockIDs,
+    int64_t blockSize,
+    int64_t headNum,
+    int64_t headDim,
+    int64_t splitNum,
+    int64_t layerNum)
+{
+
+    EXEC_NPU_CMD(aclnnTransposeKvCacheByBlock, kCache, vCache, blockIDs,
+                 blockSize, headNum, headDim, splitNum, layerNum);
+
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -1452,7 +1471,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
         "                     Tensor[] scale1, Tensor[] scale2, Tensor probs, str group,"
-        "                     int max_output_size, Tensor! out) -> Tensor"
+        "                     int max_output_size, Tensor! out, Tensor! expert_token_nums) -> (Tensor out, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 
@@ -1518,4 +1537,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("npu_apply_top_k_top_p(Tensor logits, Tensor? p=None, Tensor? k=None) -> Tensor");
     ops.impl("npu_apply_top_k_top_p", torch::kPrivateUse1, &vllm_ascend::npu_apply_top_k_top_p);
+    ops.def(
+        "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
+    );
+    ops.impl("transpose_kv_cache_by_block", torch::kPrivateUse1, &vllm_ascend::transpose_kv_cache_by_block);
 }

@@ -30,9 +30,6 @@ on:
       - 'tests/e2e/doctests/**'
       - 'tests/e2e/common.sh'
       - 'tests/e2e/run_doctests.sh'
-  schedule:
-    # Runs every 12 hours
-    - cron:  '0 */12 * * *'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -47,9 +44,9 @@ jobs:
       # Each version should be tested
       fail-fast: false
       matrix:
-        vllm_verison: [v0.9.1-dev, v0.9.1-dev-openeuler, main, main-openeuler]
+        vllm_verison: [releases-v0.13.0, releases-v0.13.0-openeuler, main, main-openeuler]
     name: vLLM Ascend test
-    runs-on: linux-aarch64-a2-1
+    runs-on: linux-aarch64-a2b3-1
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_verison }}
     steps:

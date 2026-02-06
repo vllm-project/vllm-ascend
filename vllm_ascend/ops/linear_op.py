@@ -65,8 +65,8 @@ from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import (enable_dsa_cp, enable_dsa_cp_with_layer_shard, enable_sp, flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
-                               oproj_tp_enable, shared_expert_dp_enabled)
-
+                               oproj_tp_enable, shared_expert_dp_enabled,
+                               get_weight_prefetch_method)
 
 class CustomLinearOp:
 
@@ -138,8 +138,10 @@ class CustomRowParallelOp(CustomLinearOp):
 
     def apply(self, input_):
         output, output_bias = self.apply_impl(input_)
-        if envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP:
-            torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
+        weight_prefetch_method = get_weight_prefetch_method()
+        if weight_prefetch_method:
+            weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_GATE_UP, output, self.prefix)
+
         if not self.return_bias:
             return output
         return output, output_bias
