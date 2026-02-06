@@ -30,9 +30,10 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return EagleProposer(vllm_config, device, runner)
     elif method == "mtp":
         return MtpProposer(vllm_config, device, runner)
-    elif method == "suffix":
+    elif method == 'suffix':
         return SuffixDecodingProposer(vllm_config, device, runner)
     elif method == "medusa":
         return MedusaProposer(vllm_config, device, runner)
     else:
-        raise ValueError(f"Unknown speculative decoding method: {method}")
+        raise ValueError("Unknown speculative decoding method: "
+                         f"{method}")

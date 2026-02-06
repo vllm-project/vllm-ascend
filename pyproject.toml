@@ -51,6 +51,19 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
+
+    # (8)
+    "vllm_ascend/ops/__init__.py",
+    "vllm_ascend/ops/activation.py",
+    "vllm_ascend/ops/flashcomm2_oshard_manager.py",
+    "vllm_ascend/ops/layernorm.py",
+    "vllm_ascend/ops/mla.py",
+    "vllm_ascend/ops/mm_encoder_attention.py",
+    "vllm_ascend/ops/register_custom_ops.py",
+    "vllm_ascend/ops/vocab_parallel_embedding.py",
+    "vllm_ascend/ops/weight_prefetch.py",
+    "vllm_ascend/spec_decode/**",
+
 ]
 
 [tool.ruff.lint]
