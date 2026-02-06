@@ -126,6 +126,8 @@ e2e-multicard-2-cards:
     estimated_time: 1050
   - name: tests/e2e/multicard/2-cards/test_single_request_aclgraph.py
     estimated_time: 215
+  - name: tests/e2e/multicard/2-cards/test_disaggregated_encoder.py
+    estimated_time: 90
 
 e2e-multicard-4-cards:
   # TODO: recover skipped tests
