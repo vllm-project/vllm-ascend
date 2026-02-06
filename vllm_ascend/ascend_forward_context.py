@@ -152,6 +152,9 @@ def set_ascend_forward_context(
                 mc2_mask[num_actual_tokens:] = False
                 forward_context.mc2_mask = mc2_mask
 
+        if is_draft_model:
+            forward_context.remaining_moe_layers = None
+
         try:
             yield
         finally:
