@@ -101,7 +101,7 @@ ge::graphStatus HammingDistTopKTiling::GetWorkspaceSize() {
     /* usrWorkspaceSize = workspace for Select + workspace for Topk */
     uint64_t usrWorkspaceSize = ops::CeilDiv(static_cast<uint64_t>(tilingData_.params.get_reducedBatch()) *
                                 tilingData_.params.get_maxSeqLen() * tilingData_.params.get_dimension() *
-                                sizeof(int8_t), static_cast<uint64_t>(2)) + /* 2: 1/2, size of int4 */
+                                sizeof(int8_t), static_cast<uint64_t>(2))*2 + /* 2: 1/2, size of int4 */
                                 ops::CeilDiv(static_cast<uint64_t>(tilingData_.params.get_reducedBatch()) *
                                 tilingData_.params.get_dimension() * sizeof(int8_t), static_cast<uint64_t>(2)) +
                                 static_cast<uint64_t>(tilingData_.params.get_reducedBatch()) *
