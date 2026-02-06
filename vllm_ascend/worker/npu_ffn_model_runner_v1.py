@@ -430,6 +430,10 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     num_of_stages=1
                 )
 
+                print(f"ttg recv_attn_output success: {layer_idx}, "
+                      f"hidden_states: {hidden_states}, hidden_states.shape : {hidden_states.shape}, "
+                      f"group_list: {group_list}", flush=True)
+
                 with set_ascend_forward_context(
                             attn_metadata=None,
                             vllm_config=self.vllm_config,
@@ -442,7 +446,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                             layer_idx=layer_idx,
                             capture_mode=True,
                             group_list=group_list,
-                            dynamic_scales=None if afd_connector_data.quant_mode else dynamic_scales,
+                            dynamic_scales=dynamic_scales if self.connector.quant_mode == 1 else None,
                             topk_weights=topk_weights,
                             topk_ids=topk_ids,
                             router_logits=router_logits,
