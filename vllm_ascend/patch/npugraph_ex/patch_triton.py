@@ -28,10 +28,7 @@ def _unpack_meta(args, kwargs):
         if isinstance(arg, (list, tuple)) and any(isinstance(v, ValuePack) for v in arg):
             return _unpack_meta_list(arg)
         elif isinstance(arg, dict):
-            return {
-                k: v.meta if isinstance(v, ValuePack) else v
-                for k, v in arg.items()
-            }
+            return {k: v.meta if isinstance(v, ValuePack) else v for k, v in arg.items()}
         elif isinstance(arg, ValuePack):
             return arg.meta
         else:
@@ -55,14 +52,10 @@ def _unpack_npu(self, args, kwargs):
             if _is_symlist(arg):
                 arg = self._graph.parse_symlist(arg)
             else:
-                arg = [(v.npu if isinstance(v, ValuePack) else v)
-                       for v in arg]
+                arg = [(v.npu if isinstance(v, ValuePack) else v) for v in arg]
             return arg
         elif isinstance(arg, dict):
-            return {
-                k: v.npu if isinstance(v, ValuePack) else v
-                for k, v in arg.items()
-            }
+            return {k: v.npu if isinstance(v, ValuePack) else v for k, v in arg.items()}
         elif isinstance(arg, ValuePack):
             return arg.npu
         else:
