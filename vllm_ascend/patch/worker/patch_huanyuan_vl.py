@@ -13,15 +13,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#from collections.abc import Iterable
+# from collections.abc import Iterable
 
 from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
 
 _original_call = HunYuanVLProcessor.__call__
 
+
 def _patched_call(self, images=None, text=None, videos=None, **kwargs):
     """Remove add_special_tokens requirement."""
     kwargs.pop("add_special_tokens", None)
     return _original_call(self, images=images, text=text, videos=videos, **kwargs)
+
 
 HunYuanVLProcessor.__call__ = _patched_call
