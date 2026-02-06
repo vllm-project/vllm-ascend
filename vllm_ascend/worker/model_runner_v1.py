@@ -2410,6 +2410,14 @@ class NPUModelRunner(GPUModelRunner):
                         hashk_cache_rope = torch.zeros((num_blocks_rope, num_kv_heads_rope, block_size_rope, head_size_rope // 8),
                                             dtype=torch.uint8,
                                             device=self.device)
+                        hashk_caches_nope[layer_name] = hashk_cache_nope
+                        hashk_caches_rope[layer_name] = hashk_cache_rope
+                    else:
+                        num_blocks, block_size, num_kv_heads, head_size = kv_cache.shape
+                        hashk_cache = torch.zeros((num_blocks, num_kv_heads, block_size, head_size // 8),
+                                            dtype=torch.uint8,
+                                            device=self.device)
+                        hashk_caches[layer_name] = hashk_cache
 
             # bind hashk cache to forward context and model runner
             if self.vllm_config.model_config.use_mla:
