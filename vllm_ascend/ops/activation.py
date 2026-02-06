@@ -17,11 +17,10 @@
 
 import torch
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
-
 from vllm_ascend.utils import get_weight_prefetch_method
 
-
 class AscendQuickGELU(QuickGELU):
+
     def forward_oot(self, x: torch.tensor) -> torch.Tensor:
         import torch_npu
 
@@ -30,6 +29,7 @@ class AscendQuickGELU(QuickGELU):
 
 
 class AscendSiluAndMul(SiluAndMul):
+
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         import torch_npu
 
