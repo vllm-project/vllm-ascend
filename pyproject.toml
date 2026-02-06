@@ -51,10 +51,6 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
-    # (7)
-    "vllm_ascend/quantization/**",
-    "vllm_ascend/sample/*.py",
-    "vllm_ascend/worker/block_table.py",
 
     # (10)
     "vllm_ascend/ops/*linear*.py",
