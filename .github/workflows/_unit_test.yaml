@@ -27,6 +27,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         SOC_VERSION: ascend910b1
         MAX_JOBS: 4
+        COMPILE_CUSTOM_KERNELS: 0
         # uv
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
         UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
