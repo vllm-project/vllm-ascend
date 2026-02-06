@@ -16,10 +16,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import os
 import importlib
+import os
 
 import torch
+import torch_npu
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.triton_utils import HAS_TRITON
@@ -39,8 +40,6 @@ HAS_ASCENDC_BATCH_INVARIANT = importlib.util.find_spec("custom_ops") is not None
 
 
 def override_envs_for_invariance():
-    # TODO(Ronald) set attntion backend to deterministic mode
-
     # enabling NZ mode introduces NZ format input to the triton operator,
     # resulting in accuracy anomalies.
     os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
@@ -50,39 +49,37 @@ def override_envs_for_invariance():
     os.environ["LCCL_DETERMINISTIC"] = "1"
 
 
-_aten_batch_invariant_LIB = None
-_npu_batch_invariant_LIB = None
+_batch_invariant_LIB = None
 
 
 def enable_batch_invariant_mode():
-    global _aten_batch_invariant_LIB
-    global _npu_batch_invariant_LIB
-    _aten_batch_invariant_LIB = torch.library.Library("aten", "IMPL")
-    _npu_batch_invariant_LIB = torch.library.Library("npu", "IMPL")
+    global _batch_invariant_LIB
+    _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
     # Register operators only implemented in triton.
     if HAS_TRITON:
-        _aten_batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "NPU")
-        _aten_batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "NPU")
 
     # Register operators implemented in Ascend batch-invariant ops in priority.
     if HAS_ASCENDC_BATCH_INVARIANT:
-        _aten_batch_invariant_LIB.impl("aten::mm", torch.ops.my_ops.npu_mm_batch_invariant, "NPU")
-        _aten_batch_invariant_LIB.impl("aten::matmul", torch.ops.my_ops.npu_matmul_batch_invariant, "NPU")
-        _npu_batch_invariant_LIB.impl(
-            "npu::npu_fused_infer_attention_score",
-            torch.ops.my_ops.npu_fused_infer_attention_score_batch_invariant,
-            "NPU",
-        )
+        import custom_ops  # noqa
+
+        _batch_invariant_LIB.impl("aten::mm", torch.ops.myops.npu_mm_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::matmul", torch.ops.myops.npu_matmul_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::sum", torch.ops.myops.npu_reduce_sum_batch_invariant, "NPU")
+        # torch_npu.npu_fused_infer_attention_score is a function of torch_npu, not a torch.ops.Operator,
+        # so we need to patch it directly.
+        torch_npu.npu_fused_infer_attention_score = torch.ops.myops.npu_fused_infer_attention_score_batch_invariant
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
-        _aten_batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "NPU")
-        _aten_batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "NPU")
 
         # linear call matmul internally, so register linear only when ascendc
         # is not available. it will get better performance with ascendc.
-        _aten_batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "NPU")
 
 
 def init_batch_invariance():
