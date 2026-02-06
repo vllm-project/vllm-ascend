@@ -129,11 +129,13 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         original_process_weights = self.mla_attn.process_weights_after_loading
 
         def wrapped_process_weights(act_dtype: torch.dtype):
-            from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-
-            if not isinstance(self.mla_attn.impl, AscendSFAImpl):
+            if vllm_version_is("v0.15.0"):
                 original_process_weights(act_dtype)
-            self.mla_attn.impl.process_weights_after_loading(act_dtype)
+            else:
+                from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+                if not isinstance(self.mla_attn.impl, AscendSFAImpl):
+                    original_process_weights(act_dtype)
+                self.mla_attn.impl.process_weights_after_loading(act_dtype)
 
         self.mla_attn.process_weights_after_loading = wrapped_process_weights
 
