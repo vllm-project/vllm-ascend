@@ -442,7 +442,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                             layer_idx=layer_idx,
                             capture_mode=True,
                             group_list=group_list,
-                            dynamic_scales=dynamic_scales,
+                            dynamic_scales=None if afd_connector_data.quant_mode else dynamic_scales,
                             topk_weights=topk_weights,
                             topk_ids=topk_ids,
                             router_logits=router_logits,
