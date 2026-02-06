@@ -113,21 +113,21 @@ jobs:
           apt-get update && apt-get -y install clang-15
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-      - name: Install aisbench
-        shell: bash -l {0} 
-        run: |
-          git clone -b v3.0-20250930-master --depth 1 https://gitee.com/aisbench/benchmark.git /vllm-workspace/vllm-ascend/benchmark
-          cd /vllm-workspace/vllm-ascend/benchmark
-          pip install pytest asyncio pytest-asyncio
-          pip install -e . -r requirements/api.txt -r requirements/extra.txt
-          python3 -m pip cache purge
-      - name: Checkout pr
-        shell: bash -l {0} 
-        run: |
-          cd /vllm-workspace/vllm-ascend
-          # git pull origin main
-          git fetch origin pull/6378/head:pr-6378
-          git checkout pr-6378
+      # - name: Install aisbench
+      #   shell: bash -l {0} 
+      #   run: |
+      #     git clone -b v3.0-20250930-master --depth 1 https://gitee.com/aisbench/benchmark.git /vllm-workspace/vllm-ascend/benchmark
+      #     cd /vllm-workspace/vllm-ascend/benchmark
+      #     pip install pytest asyncio pytest-asyncio
+      #     pip install -e . -r requirements/api.txt -r requirements/extra.txt
+      #     python3 -m pip cache purge
+      # - name: Checkout pr
+      #   shell: bash -l {0} 
+      #   run: |
+      #     cd /vllm-workspace/vllm-ascend
+      #     # git pull origin main
+      #     git fetch origin pull/6378/head:pr-6378
+      #     git checkout pr-6378
       - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
