@@ -55,7 +55,7 @@ class TestAscendW8A8LinearMethod310(TestBase):
 
         output = self.method.apply(layer, x, bias)
 
-        expected_y_output += bias
+        # The bias is added by the linear layer's forward pass, not the quant method.
         self.assertTrue(torch.equal(output, expected_y_output))
 
     @patch("torch_npu.npu_quant_matmul")
@@ -73,5 +73,5 @@ class TestAscendW8A8LinearMethod310(TestBase):
         mock_npu_quant_matmul.return_value = expected_y_output
 
         output = self.method.apply(layer, x, bias)
-        expected_y_output += bias
+        # The bias is added by the linear layer's forward pass, not the quant method.
         self.assertTrue(torch.equal(output, expected_y_output))

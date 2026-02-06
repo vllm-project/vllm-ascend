@@ -41,9 +41,9 @@ class AscendMMEncoderAttention310(AscendMMEncoderAttention):
         value = value.view(bsz * kv_len, self.num_kv_heads, self.head_size)
 
         if cu_seqlens is None:
-            seq_len = torch.tensor([q_len for _ in range(bsz)])
-
-        seq_len = torch.diff(cu_seqlens.to("cpu", dtype=torch.int32))
+            seq_len = torch.tensor([q_len] * bsz, device="cpu", dtype=torch.int32)
+        else:
+            seq_len = torch.diff(cu_seqlens.to("cpu", dtype=torch.int32))
 
         output = torch.empty_like(query)
         torch_npu._npu_flash_attention_unpad(
