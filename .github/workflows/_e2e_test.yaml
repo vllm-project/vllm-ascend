@@ -6,9 +6,6 @@ on:
       vllm:
         required: true
         type: string
-      runner:
-        required: true
-        type: string
       image:
         required: true
         type: string

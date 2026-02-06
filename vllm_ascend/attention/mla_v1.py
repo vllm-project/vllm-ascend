@@ -1450,6 +1450,28 @@ class AscendMLAImpl(MLAAttentionImpl):
     def get_num_actual_tokens(self, attn_metadata: M):
         return attn_metadata.num_actual_tokens
 
+    def forward_mha(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: M,
+        need_gather_q_kv: bool = False,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("forward_mha is not supported for MLA attention. Use forward() instead.")
+
+    def forward_mqa(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: M,
+        need_gather_q_kv: bool = False,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("forward_mqa is not supported for MLA attention. Use forward() instead.")
+
     def forward(
         self,
         layer_name,

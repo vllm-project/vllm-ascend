@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
@@ -27,6 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.metadata import (
     MetadataServerProc,
     MLAConfig,
 )
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -34,6 +34,11 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+
+if vllm_version_is("v0.15.0"):
+    from vllm.attention.layer import Attention, MLAAttention  # type: ignore
+else:
+    from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 
 @dataclass
