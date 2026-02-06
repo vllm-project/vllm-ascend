@@ -27,8 +27,7 @@ if HAS_TRITON:
 
 import vllm_ascend.ops.vocab_parallel_embedding  # noqa
 from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-from vllm_ascend.ops.rotary_embedding import (
-    AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+from vllm_ascend.ops.rotary_embedding import AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding
 
 
 class dummyFusionOp:
@@ -40,23 +39,13 @@ class dummyFusionOp:
 
 def register_dummy_fusion_op() -> None:
     torch.ops._C_ascend.rms_norm = dummyFusionOp(name="rms_norm")
-    torch.ops._C_ascend.fused_add_rms_norm = dummyFusionOp(
-        name="fused_add_rms_norm")
-    torch.ops._C_ascend.static_scaled_fp8_quant = dummyFusionOp(
-        name="static_scaled_fp8_quant")
-    torch.ops._C_ascend.dynamic_scaled_fp8_quant = dummyFusionOp(
-        name="dynamic_scaled_fp8_quant")
-    torch.ops._C_ascend.dynamic_per_token_scaled_fp8_quant = dummyFusionOp(
-        name="dynamic_per_token_scaled_fp8_quant")
-    torch.ops._C_ascend.rms_norm_static_fp8_quant = dummyFusionOp(
-        name="rms_norm_static_fp8_quant")
-    torch.ops._C_ascend.fused_add_rms_norm_static_fp8_quant = dummyFusionOp(
-        name="fused_add_rms_norm_static_fp8_quant")
-    torch.ops._C_ascend.rms_norm_dynamic_per_token_quant = dummyFusionOp(
-        name="rms_norm_dynamic_per_token_quant")
+    torch.ops._C_ascend.fused_add_rms_norm = dummyFusionOp(name="fused_add_rms_norm")
+    torch.ops._C_ascend.static_scaled_fp8_quant = dummyFusionOp(name="static_scaled_fp8_quant")
+    torch.ops._C_ascend.dynamic_scaled_fp8_quant = dummyFusionOp(name="dynamic_scaled_fp8_quant")
+    torch.ops._C_ascend.dynamic_per_token_scaled_fp8_quant = dummyFusionOp(name="dynamic_per_token_scaled_fp8_quant")
+    torch.ops._C_ascend.rms_norm_static_fp8_quant = dummyFusionOp(name="rms_norm_static_fp8_quant")
+    torch.ops._C_ascend.fused_add_rms_norm_static_fp8_quant = dummyFusionOp(name="fused_add_rms_norm_static_fp8_quant")
+    torch.ops._C_ascend.rms_norm_dynamic_per_token_quant = dummyFusionOp(name="rms_norm_dynamic_per_token_quant")
 
 
-__all__ = [
-    "AscendQuickGELU", "AscendSiluAndMul", "AscendRotaryEmbedding",
-    "AscendDeepseekScalingRotaryEmbedding"
-]
+__all__ = ["AscendQuickGELU", "AscendSiluAndMul", "AscendRotaryEmbedding", "AscendDeepseekScalingRotaryEmbedding"]
