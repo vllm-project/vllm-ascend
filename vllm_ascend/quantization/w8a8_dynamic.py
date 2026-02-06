@@ -80,14 +80,23 @@ class AscendW8A8DynamicLinearMethod:
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+        if x.dtype == torch.int8:
+            pertoken_scale = getattr(get_forward_context(), 'afd_dynamic_scale',
+                                     None)
+            quantized_x = x
+            # output_dtype = get_current_vllm_config().model_config.dtype
+            output_dtype = layer.weight_scale.dtype
+        else:
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+            output_dtype = x.dtype
+
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
             layer.weight_scale,
             pertoken_scale=pertoken_scale,
             bias=bias,
-            output_dtype=x.dtype,
+            output_dtype=output_dtype,
         )
         return output
 

@@ -582,7 +582,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type)
 
-        use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias = \
+        use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias, w1_offset, w2_offset = \
             _detect_quantization_and_get_params(layer)
 
         final_hidden_states = moe_comm_method.fused_experts(
@@ -633,11 +633,21 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             connector_name: Optional[str] = "",
             cam_p2p_ep_name: Optional[str] = "",
     ):
-        use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias = \
+        use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias, w1_offset, w2_offset = \
             _detect_quantization_and_get_params(layer)
         # TODO(yxj):move to p2p
         # hidden_states是dispatch之后的，shape第一维是group_list[-1],self.max_num_token*8*2
+        print(f"ttg afd_m2n_ffn_compute hidden_states.dtype: {hidden_states.dtype}", flush=True)
+        print(f"ttg afd_m2n_ffn_compute hidden_states: {hidden_states}", flush=True)
+        if hidden_states.dtype == torch.int8 and dynamic_scale is not None:
+            # 适配camm2n quant_mode:1时，A侧输出结果为量化后的结果
+            print(f"ttg afd_m2n_ffn_compute hidden_states.dtype: {hidden_states.dtype}, "
+                  f"dynamic_scale.dtype: {dynamic_scale.dtype}", flush=True)
+            forward_context = get_forward_context()
+            forward_context.afd_dynamic_scale = dynamic_scale
+
         shared_out = self._shared_experts(hidden_states)
+        print(f"ttg afd_m2n_ffn_compute shared_out: {shared_out}", flush=True)
 
         if connector_name == "camp2pconnector":
             w1 = layer.w13_weight.to(torch.int8)
@@ -646,7 +656,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             gmm2_weight = torch_npu.npu_format_cast(w2, torch_npu.Format.FRACTAL_NZ)
             w1_scale = w1_scale.float()
             w2_scale = w2_scale.float()
-            from vllm_ascend.ops.moe.moe_mlp import fused_experts
+            from vllm_ascend.ops.fused_moe.moe_mlp import fused_experts
             mlp_output = fused_experts(
                 hidden_states=hidden_states,
                 w1=gmm1_weight,
@@ -665,7 +675,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 
         permuted_hidden_states, expert_tokens = hidden_states, group_list
-
+        print(f"ttg afd_m2n_ffn_compute use_int4_w4a8: {use_int4_w4a8}, use_int8_w8a8:{use_int8_w8a8}", flush=True)
+        print(f"ttg type(layer.w13_weight): {type(layer.w13_weight)}")
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
                                        w1=layer.w13_weight,
                                        w1_scale=w1_scale,
@@ -676,6 +687,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                                        group_list_type=group_list_type,
                                        w1_scale_bias=w1_scale_bias,
                                        w2_scale_bias=w2_scale_bias,
+                                       w1_offset=w1_offset,
+                                       w2_offset=w2_offset,
                                        with_quant=use_int4_w4a8 or use_int8_w8a8,
                                        fusion=False,
                                        need_trans=False)
@@ -707,8 +720,16 @@ def _detect_quantization_and_get_params(layer: torch.nn.Module):
     w2_scale = getattr(layer, 'w2_weight_scale', None) if has_w2_scale else None
 
     # get scale_bias param（INT4)
-    w1_scale_bias = getattr(layer, 'w13_weight_offset', None) if \
-        hasattr(layer, 'w13_weight_offset') else None
-    w2_scale_bias = getattr(layer, 'w2_weight_offset', None) if \
-        hasattr(layer, 'w2_weight_offset') else None
-    return use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias
+    if use_int4_w4a8:
+        w1_scale_bias = getattr(layer, 'w13_weight_offset', None) if \
+            hasattr(layer, 'w13_weight_offset') else None
+        w2_scale_bias = getattr(layer, 'w2_weight_offset', None) if \
+            hasattr(layer, 'w2_weight_offset') else None
+    else:
+        w1_scale_bias = None
+        w2_scale_bias = None
+
+    w1_offset = None
+    w2_offset = None
+
+    return use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias, w1_offset, w2_offset

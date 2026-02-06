@@ -112,7 +112,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         self.hccl_comm_name = self.hccl_comm_name_list[0]
         self.hccl_comm_name2 = self.hccl_comm_name_list[1] if num_ubatches > 1 else self.hccl_comm_name
         self.hccl_comm_name3 = self.hccl_comm_name_list[2] if num_ubatches > 2 else None
-        self.quant_mode = self.config.afd_config.quant_mode
+        self.quant_mode = int(self.config.afd_config.quant_mode)
 
         # 所有FFN和前min_size的Attention参与p2p通信
         # 所有FFN: world_rank in [0, ffn_size), 前min_size个Attention: world_rank in [ffn_size, ffn_size+min_size)
@@ -162,7 +162,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         if config:
             metadata.connector_data.moe_expert_num = config.n_routed_experts
             # TODO: quant_mode and aiv_num read from config
-            metadata.connector_data.quant_mode = 0
+            metadata.connector_data.quant_mode = self.quant_mode
             metadata.connector_data.aiv_num = 48
             metadata.connector_data.scale = None
             metadata.connector_data.batch_size = batch_size
@@ -220,6 +220,10 @@ class CAMM2NAFDConnector(AFDConnectorBase):
 
         if metadata.connector_data:
             get_forward_context().cam_afdconnector_data = metadata.connector_data
+
+        print(f"ttg send_attn_output layer_idx: {metadata.layer_idx}, "
+              f"hidden_states: {hidden_states}, "
+              f"hidden_states.shape : {hidden_states.shape}", flush=True)
 
         return torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
                                                    self.hccl_comm_name,
