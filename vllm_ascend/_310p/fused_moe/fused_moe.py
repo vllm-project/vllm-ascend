@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
@@ -251,7 +251,7 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         shared_experts: torch.nn.Module,
         gate: torch.nn.Module | None = None,
         use_overlapped: bool = True,
-        routed_input_transform: Optional[torch.nn.Module] = None,
+        routed_input_transform: torch.nn.Module | None = None,
         **kwargs,
     ):
         AscendFusedMoE310.__init__(self, **kwargs)
