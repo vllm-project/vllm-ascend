@@ -34,6 +34,11 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        # uv
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -49,6 +54,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
 
       - name: Install system dependencies
         run: |
@@ -69,14 +75,25 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install --system -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          start_time=$(date +%s)
+          pip install uc-manager
+          end_time=$(date +%s)
+          duration=$((end_time - start_time))
+          echo "==========install uc-manager总耗时：$duration 秒（$((duration/60)) 分 $((duration%60)) 秒）"
+          uv pip install --system -r requirements-dev.txt
+          end_time1=$(date +%s)
+          duration=$((end_time1 - end_time))
+          echo "==========install requirements总耗时：$duration 秒（$((duration/60)) 分 $((duration%60)) 秒）"
+          uv pip install --system -v -e .
+          end_time2=$(date +%s)
+          duration=$((end_time2 - end_time1))
+          echo "==========build总耗时：$duration 秒（$((duration/60)) 分 $((duration%60)) 秒）"
 
 #      - name: Run vllm-project/vllm-ascend test
 #        env:
