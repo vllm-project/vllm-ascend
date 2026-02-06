@@ -51,9 +51,6 @@ line-length = 120
 # Folder to be modified
 exclude = [
     "tests/**",
-
-    # (11)
-    "vllm_ascend/ops/fused_moe/**",
 ]
 
 [tool.ruff.lint]
