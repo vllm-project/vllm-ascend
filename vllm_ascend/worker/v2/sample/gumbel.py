@@ -76,8 +76,7 @@ def _gumbel_sample_kernel(
     idx = tl.argmax(logits, axis=0)
     token_id = block_idx * BLOCK_SIZE + idx
     value = tl.max(logits, axis=0)
-    tl.store(local_argmax_ptr + req_idx * local_argmax_stride + block_idx,
-             token_id)
+    tl.store(local_argmax_ptr + req_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + req_idx * local_max_stride + block_idx, value)
 
 

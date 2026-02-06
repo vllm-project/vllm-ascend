@@ -17,12 +17,10 @@
 
 import torch
 import torch.nn as nn
-from vllm.model_executor.layers.rotary_embedding.base import \
-    RotaryEmbeddingBase
+from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbeddingBase
 
 
 class AscendRotaryEmbeddingBase(nn.Module):
-
     def get_cos_sin(self, seqlen: int) -> tuple[torch.Tensor, torch.Tensor]:
         cos_sin = self.cos_sin_cache[:seqlen]
         cos, sin = cos_sin.chunk(2, dim=-1)
