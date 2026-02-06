@@ -35,6 +35,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The build type of the package. It can be one of the following values:
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE": lambda: os.getenv("CMAKE_BUILD_TYPE"),
+    # Whether to compile custom kernels. If not set, the default value is True.
+    # If set to False, the custom kernels will not be compiled.
+    # This configuration option should only be set to False when running UT
+    # scenarios in an environment without an NPU. Do not set it to False in
+    # other scenarios.
+    "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
