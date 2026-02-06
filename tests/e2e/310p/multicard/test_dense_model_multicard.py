@@ -37,7 +37,7 @@ def test_qwen3_dense_tp4_w8a8():
     ]
     max_tokens = 5
     with VllmRunner(
-            "Qwen/Qwen3-32B-W8A8",
+            "vllm-ascend/Qwen3-32B-W8A8",
             tensor_parallel_size=4,
             enforce_eager=True,
             dtype="float16",
