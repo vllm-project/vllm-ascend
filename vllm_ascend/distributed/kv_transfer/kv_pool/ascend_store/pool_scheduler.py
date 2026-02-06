@@ -175,8 +175,6 @@ class KVPoolScheduler:
             num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
             request_tuple = self._unfinished_requests.get(request.req_id)
             request_real = request_tuple[0]  # type: ignore[index]
-            print("request_real in KVPoolScheduler.build_connector_meta: ", request_real)
-            print("type(request_real): ", type(request_real))
             if not isinstance(request.block_ids[0], list):
                 unfolded_block_ids = request.block_ids.copy()
             else:
@@ -304,7 +302,6 @@ class KVPoolScheduler:
                 )
 
                 self._request_trackers[request_id] = request_tracker
-                # TODO add lora_request here
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,

@@ -171,8 +171,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # Create KV event
         stored_event = None
         if self.enable_kv_event:
-            # TODO 当前不考虑 chunked prefill
-            logger.info(f"req_meta in ascend_connector kv_transfer: {req_meta}")
             new_block_hashes = [maybe_convert_block_hash(bh) for bh in req_meta.block_hashes]
             stored_event = BlockStored(
                 block_hashes=new_block_hashes,
@@ -233,7 +231,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 current_event.synchronize()
             self.m_store.put(keys, addrs, sizes)
 
-            # TODO 查询具体的replica信息，更新stored_event
+            # TODO Query specific replica info to update the event
             if self.enable_kv_event and stored_event is not None:
                 self.update_kv_event(stored_event)
 
@@ -368,7 +366,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.m_store.put(key_list, addr_list, size_list)
 
         if self.enable_kv_event and stored_event is not None:
-            # self.kv_events.append(stored_event)
             self.update_kv_event(stored_event)
 
         if layer_id == self.final_layer_id and is_last_chunk:

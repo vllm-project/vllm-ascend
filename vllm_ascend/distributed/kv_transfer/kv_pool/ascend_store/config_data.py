@@ -233,7 +233,7 @@ class RequestTracker:
     num_saved_tokens: int = 0
 
     # The token ids that has been scheduled so far
-    # NOTE: 只有当你开启kv-event的时候，这个字段才会被使用到
+    # NOTE: This field will only be used when you enable kv-event
     token_ids: list[int] | None = None
 
     @staticmethod
@@ -250,7 +250,6 @@ class RequestTracker:
                 local cache hit) and new tokens that will be scheduled.
 
         """
-        print("new_request in RequestTracker.from_new_request: ", new_request)
         unfolded_block_ids = []
 
         if not isinstance(new_request.block_ids[0], list):
@@ -273,8 +272,7 @@ class RequestTracker:
         """Update the request tracker when a running request is
         scheduled again
         """
-        # TODO 检查这里是否需要更新new_token_ids
-
+        # TODO Check here to see if new_token_ids need to be updated
         if len(new_block_ids) == 0:
             new_block_ids = []
         elif isinstance(new_block_ids, tuple):
@@ -339,9 +337,6 @@ class ReqMeta:
             block_hashes = []
         input_token_len = tracker.token_len
         if tracker.token_ids:
-            # assert parent_block_hash is not None, (
-            #     "'parent_block_hash' must be provided when 'tracker.token_ids' is not None"
-            # )
             input_token_len = len(tracker.token_ids)
 
         # For save operation: do not save if the following condition is met

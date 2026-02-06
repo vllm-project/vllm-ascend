@@ -151,7 +151,6 @@ class KVPoolWorker:
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
         self.kv_events: list[BlockStored] = None
-        print(f"------------kv_event_config: {kv_event_config}")
         if kv_event_config and kv_event_config.enable_kv_cache_events:
             self.kv_events = []
             self.enable_kv_events = True
@@ -459,10 +458,6 @@ class KVPoolWorker:
             starts.append(start)
             ends.append(end)
             keys.append(keys_multi_layer)  # [block_num,layer_num]
-
-        if self.enable_kv_events:
-            # TODO 适配layerwise场景
-            pass
 
         if keys:
             keys = [list(row) for row in zip(*keys)]  # [layer_num,block_num]
