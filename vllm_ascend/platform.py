@@ -37,6 +37,7 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
+    GPTQ_METHOD,
     AscendDeviceType,
     check_kv_extra_config,
     enable_sp,
@@ -100,7 +101,7 @@ class NPUPlatform(Platform):
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
 
-    supported_quantization: list[str] = [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD]
+    supported_quantization: list[str] = [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, GPTQ_METHOD]
 
     def is_sleep_mode_available(self) -> bool:
         return True

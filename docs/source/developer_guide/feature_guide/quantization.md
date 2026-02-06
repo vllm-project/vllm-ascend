@@ -99,6 +99,8 @@ packed_modules_model_mapping = {
 
 vLLM Ascend supports multiple quantization algorithms. The following table provides an overview of each quantization algorithm based on the implementation in the `vllm_ascend.quantization` module:
 
+### ModelSlim and LLM-Compressor Algorithms
+
 | Algorithm                | Weight | Activation | Weight Granularity | Activation Granularity | Type    | Description                                                                                                                                                        |
 | ------------------------ | ------ | ---------- | ------------------ | ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `W4A16`                  | INT4   | FP16/BF16  | Per-Group          | Per-Tensor             | Static  | 4-bit weight quantization with 16-bit activation precision, specifically designed for MoE model expert layers, supporting int32 format weight packing              |
@@ -112,3 +114,39 @@ vLLM Ascend supports multiple quantization algorithms. The following table provi
 **Static vs Dynamic:** Static quantization uses pre-computed scaling factors with better performance, while dynamic quantization computes scaling factors on-the-fly for each token/activation tensor with higher precision.
 
 **Granularity:** Refers to the scope of scaling factor computation (e.g., per-tensor, per-channel, per-group).
+
+### GPTQ Algorithm
+
+GPTQ (Generalized Post-Training Quantization) is a post-training quantization method that uses layer-wise quantization to compress large language models. vLLM Ascend provides GPTQ support through the `AscendGPTQConfig` class, which inherits from vLLM's `GPTQConfig` and adds Ascend NPU-specific constraints.
+
+**Key Features:**
+
+- Supports 4-bit and 8-bit weight quantization (2-bit and 3-bit are not supported on Ascend NPU)
+- Uses per-group weight quantization with configurable group size
+- Does not support `desc_act=True` (activation reordering) on Ascend NPU
+- Compatible with models quantized by [GPTQModel](https://github.com/ModelCloud/GPTQModel)
+
+**Implementation Details:**
+
+- **Config Class**: `AscendGPTQConfig` in `vllm_ascend/quantization/gptq_config.py`
+- **Linear Method**: `AscendGPTQLinearMethod` in `vllm_ascend/quantization/gptq_linear.py`
+- **NPU Operators**: Uses `npu_convert_weight_to_int4pack` and `npu_weight_quant_batchmatmul` for efficient quantized inference
+- **Registration**: Registered with `@register_quantization_config("gptq")` decorator
+
+**Supported Models:**
+
+- Pre-quantized GPTQ models from ModelScope (e.g., [Qwen/Qwen3-0.6B-GPTQ-Int8](https://www.modelscope.cn/models/Qwen/Qwen3-0.6B-GPTQ-Int8))
+- Custom models quantized using GPTQModel tool
+
+**Usage Example:**
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    model="/path/to/gptq/model",
+    quantization="gptq",  # Enable GPTQ quantization
+    max_model_len=512,
+    gpu_memory_utilization=0.7,
+)
+```
