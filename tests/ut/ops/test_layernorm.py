@@ -39,7 +39,8 @@ def default_vllm_config():
     with set_current_vllm_config(mock_config):
         yield mock_config
 
-
+@pytest.mark.skip(
+    "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
 @pytest.mark.skipif(is_310p_hw(), reason="non_310P device unittest case.")
 @pytest.mark.parametrize("residual", [None, torch.randn(4, 8, dtype=torch.float32)])
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)

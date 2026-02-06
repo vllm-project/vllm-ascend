@@ -88,6 +88,12 @@ class NPUWorker(WorkerBase):
             # Additional parameters for compatibility with vllm
             **kwargs):
         """Initialize the worker for Ascend."""
+        if not envs_ascend.COMPILE_CUSTOM_KERNELS:
+            logger.warning(
+                "COMPILE_CUSTOM_KERNELS is set to False. "
+                "In most scenarios, without custom kernels, vllm-ascend will not function correctly."
+            )
+
         # register patch for vllm
         from vllm_ascend.utils import adapt_patch
         adapt_patch()
