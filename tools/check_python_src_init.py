@@ -67,7 +67,7 @@ def main():
             print(f" - {pkg}")
         sys.exit(1)
     else:
-        print("✅ All Python packages have __init__.py files.")
+        print("All Python packages have __init__.py files.")
 
 
 if __name__ == "__main__":
