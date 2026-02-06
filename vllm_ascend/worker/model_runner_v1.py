@@ -2414,7 +2414,7 @@ class NPUModelRunner(GPUModelRunner):
                         hashk_caches_nope[layer_name] = hashk_cache_nope
                         hashk_caches_rope[layer_name] = hashk_cache_rope
                     else:
-                        num_blocks, block_size, num_kv_heads, head_size = kv_cache.shape
+                        num_blocks, block_size, num_kv_heads, head_size = kv_cache[0].shape
                         hashk_cache = torch.zeros((num_blocks, num_kv_heads, block_size, head_size // 8),
                                             dtype=torch.uint8,
                                             device=self.device)
