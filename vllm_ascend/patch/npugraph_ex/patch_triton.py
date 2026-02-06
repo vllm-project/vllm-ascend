@@ -16,8 +16,8 @@
 #
 
 import torch
-from torch._subclasses.fake_tensor import FakeTensor
 import torchair
+from torch._subclasses.fake_tensor import FakeTensor
 from torchair.core._concrete_graph import _is_symlist
 from torchair.npu_fx_compiler import _unpack_meta_list
 
@@ -52,7 +52,7 @@ class ValuePack:
                 meta_str = f"{type(self._meta)}({self._meta})"
             except Exception:
                 meta_str = f"{type(self._meta)}"
-        return f'Pack(meta:{meta_str} npu:{self._npu_meta})'
+        return f"Pack(meta:{meta_str} npu:{self._npu_meta})"
 
 
 def _unpack_meta(args, kwargs):
