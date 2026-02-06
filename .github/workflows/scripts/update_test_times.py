@@ -10,32 +10,25 @@ This script implements a Data-Driven Adaptive Scheduler that:
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
 from ruamel.yaml import YAML
 
-
-class Colors:
-    HEADER = "\033[95m"
-    OKBLUE = "\033[94m"
-    OKCYAN = "\033[96m"
-    OKGREEN = "\033[92m"
-    WARNING = "\033[93m"
-    FAIL = "\033[91m"
-    ENDC = "\033[0m"
-    BOLD = "\033[1m"
-
-
-# Anomaly detection thresholds
-MAX_DURATION_THRESHOLD = 3600  # 1 hour - anything longer is suspicious
-MIN_DURATION_THRESHOLD = 1  # Less than 1 second is suspicious for a test file
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 def load_test_stats(stats_path: Path) -> dict[str, dict]:
     """Load test stats from JSON file and return as dict keyed by test name."""
     if not stats_path.exists():
-        print(f"{Colors.FAIL}Error: Stats file not found: {stats_path}{Colors.ENDC}")
+        logger.error(f"Stats file not found: {stats_path}")
         sys.exit(1)
 
     with open(stats_path) as f:
@@ -52,7 +45,7 @@ def load_config(config_path: Path) -> tuple[dict, YAML]:
     yaml.indent(mapping=2, sequence=2, offset=2)
 
     if not config_path.exists():
-        print(f"{Colors.FAIL}Error: Config file not found: {config_path}{Colors.ENDC}")
+        logger.error(f"Config file not found: {config_path}")
         sys.exit(1)
 
     with open(config_path) as f:
@@ -65,42 +58,6 @@ def save_config(config: dict, config_path: Path, yaml: YAML) -> None:
     """Save config back to YAML file preserving structure."""
     with open(config_path, "w") as f:
         yaml.dump(config, f)
-
-
-def is_anomaly(actual: float, old: float, test_name: str) -> bool:
-    """
-    Check if the new duration is anomalous.
-
-    Returns True if anomaly detected (should skip update).
-    """
-    # Check absolute thresholds
-    if actual > MAX_DURATION_THRESHOLD or actual < MIN_DURATION_THRESHOLD:
-        print(
-            f"⚠️ Anomaly detected for [{test_name}]: Old=[{old}]s, New=[{actual}]s. "
-            "Skipping update (Manual check required)."
-        )
-        return True
-
-    return False
-
-
-def calculate_alpha(actual: float, old: float) -> float:
-    """
-    Calculate adaptive weight based on deviation magnitude.
-
-    Returns alpha value for EMA calculation.
-    """
-    if old == 0:
-        return 1.0  # New test, use actual value directly
-
-    diff_ratio = abs(actual - old) / old
-
-    if diff_ratio > 0.5:
-        # Significant change (>50%): Trust new data more
-        return 0.8
-    else:
-        # Minor fluctuation: Trust history more
-        return 0.2
 
 
 def update_test_times(config_path: Path, stats_path: Path, dry_run: bool = False) -> None:
@@ -116,13 +73,12 @@ def update_test_times(config_path: Path, stats_path: Path, dry_run: bool = False
     config, yaml = load_config(config_path)
 
     updates_made = 0
-    anomalies_found = 0
     new_tests_found = []
     tests_in_config = set()
 
-    print(f"\n{Colors.HEADER}{'=' * 60}")
-    print("Updating Test Estimated Times")
-    print(f"{'=' * 60}{Colors.ENDC}\n")
+    logger.info("=" * 60)
+    logger.info("Updating Test Estimated Times")
+    logger.info("=" * 60)
 
     # Process each suite in config
     for suite_name, test_list in config.items():
@@ -145,42 +101,29 @@ def update_test_times(config_path: Path, stats_path: Path, dry_run: bool = False
 
             # Only update for passed tests
             if stat["status"] != "passed":
-                print(
-                    f"{Colors.OKCYAN}ℹ️ Skipping [{test_name}]: "
-                    f"Test failed, keeping old estimate ({old_time}s){Colors.ENDC}"
-                )
+                logger.info(f"Skipping [{test_name}]: Test failed, keeping old estimate ({old_time}s)")
                 continue
 
             actual_time = stat["duration"]
-
-            # Rule A: Anomaly Detection
-            if is_anomaly(actual_time, old_time, test_name):
-                anomalies_found += 1
-                continue
+            new_time = old_time
 
             # Handle new tests (estimated_time is 0 or missing)
             if old_time == 0:
                 new_time = round(actual_time)
-                print(
-                    f"{Colors.OKGREEN}✨ New test [{test_name}]: "
-                    f"Setting initial estimate to {new_time}s{Colors.ENDC}"
+                logger.info(f"New test [{test_name}]: Setting initial estimate to {new_time}s")
+            elif abs(actual_time - old_time) > 30:
+                new_time = round(actual_time)
+                logger.info(
+                    f"Updating [{test_name}]: "
+                    f"Old={old_time}s -> New={new_time}s "
+                    f"(Actual={actual_time:.2f}s, Diff > 30s)"
                 )
             else:
-                # Rule B & C: Adaptive Weighting + EMA
-                alpha = calculate_alpha(actual_time, old_time)
-                new_time_float = (actual_time * alpha) + (old_time * (1 - alpha))
-                new_time = round(new_time_float)
-
-                if new_time != old_time:
-                    diff_ratio = abs(actual_time - old_time) / old_time * 100
-                    print(
-                        f"{Colors.OKBLUE}📊 [{test_name}]: "
-                        f"Old={old_time}s → New={new_time}s "
-                        f"(actual={actual_time:.1f}s, α={alpha}, diff={diff_ratio:.1f}%){Colors.ENDC}"
-                    )
+                # Diff <= 30s, do not update
+                pass
 
             if new_time != old_time:
-                test_entry["estimated_time"] = new_time
+                test_entry["estimated_time"] = int(new_time)
                 updates_made += 1
 
     # Check for new tests in stats that aren't in config
@@ -190,32 +133,29 @@ def update_test_times(config_path: Path, stats_path: Path, dry_run: bool = False
             new_tests_found.append((test_name, stat["duration"], stat["status"]))
 
     # Print summary
-    print(f"\n{Colors.HEADER}{'=' * 60}")
-    print("Summary")
-    print(f"{'=' * 60}{Colors.ENDC}")
-    print(f"  Updates made: {updates_made}")
-    print(f"  Anomalies skipped: {anomalies_found}")
+    logger.info("=" * 60)
+    logger.info("Summary")
+    logger.info("=" * 60)
+    logger.info(f"  Updates made: {updates_made}")
 
     if new_tests_found:
-        print(f"\n{Colors.WARNING}📋 New tests found in stats but not in config:{Colors.ENDC}")
+        logger.warning("New tests found in stats but not in config:")
         for name, duration, status in new_tests_found:
-            print(f"  - {name} (duration={duration:.1f}s, status={status})")
-        print(f"{Colors.WARNING}  Please add these to the appropriate suite in config.yaml{Colors.ENDC}")
+            logger.warning(f"  - {name} (duration={duration:.1f}s, status={status})")
+        logger.warning("  Please add these to the appropriate suite in config.yaml")
 
     # Save updated config
     if not dry_run and updates_made > 0:
         save_config(config, config_path, yaml)
-        print(f"\n{Colors.OKGREEN}✅ Config saved to {config_path}{Colors.ENDC}")
+        logger.info(f"Config saved to {config_path}")
     elif dry_run:
-        print(f"\n{Colors.WARNING}🔍 Dry run - no changes saved{Colors.ENDC}")
+        logger.info("Dry run - no changes saved")
     else:
-        print(f"\n{Colors.OKCYAN}ℹ️ No updates needed{Colors.ENDC}")
+        logger.info("No updates needed")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Update test estimated times based on actual execution data"
-    )
+    parser = argparse.ArgumentParser(description="Update test estimated times based on actual execution data")
     parser.add_argument(
         "--config",
         type=Path,
