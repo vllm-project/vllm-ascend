@@ -62,6 +62,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         run: |
+          pip install uc-manager
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           uv pip install --system -v . --extra-index-url https://download.pytorch.org/whl/cpu/
           uv pip install --system -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/
