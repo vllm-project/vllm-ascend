@@ -149,7 +149,7 @@ class PCPManager:
         self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type == "qwen3_next"
 
         self.num_pcp_pads = torch.zeros(self.max_num_reqs, dtype=torch.int32)
-        self.pcp_pads_logits_hybrid_attn = torch.zeros(self.max_num_reqs, dtype=torch.int32)
+        self.pcp_pads_logits_hybrid_attn = torch.ones(self.max_num_reqs, dtype=torch.int32) * (self.pcp_world_size - 1)
         self.pcp_padded_slot_mapping = torch.zeros(
             self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs,
             dtype=torch.int32,
@@ -257,7 +257,6 @@ class PCPManager:
         # Record how many pads were added per request (padded - original).
         self.num_pcp_pads_cpu[:num_reqs] = (num_padded_scheduled_tokens -
                                             num_scheduled_tokens)
-        self.pcp_pads_logits_hybrid_attn[:num_decode_reqs] = self.pcp_world_size - 1
         # cu_padded_tokens: cumulative sum of padded token counts,
         # pcp_padded_arange: per-request arange flattened for padded tokens.
         cu_padded_tokens, pcp_padded_arange = self._get_cumsum_and_arange(
@@ -338,6 +337,7 @@ class PCPManager:
             self.pcp_padded_tokens_fla = 0
             if num_decode_reqs > 0:
                 num_padded_scheduled_tokens[:num_decode_reqs] = num_padded_scheduled_tokens[:num_decode_reqs] // self.pcp_world_size
+            self.total_pcp_padding_tokens_fla = 0
             # have prefills
             if num_reqs - num_decode_reqs > 0:
                 prefill_tokens_tensor = torch.Tensor(num_scheduled_tokens[num_decode_tokens:])

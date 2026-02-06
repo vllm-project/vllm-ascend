@@ -758,10 +758,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
             if has_decode:
-                if not attn_metadata.use_hybrid_attn:
-                    slot_mapping = attn_metadata.slot_mapping[: num_decode_tokens * self.pcp_size : self.pcp_size]
-                else:
-                    slot_mapping = attn_metadata.slot_mapping[:num_decode_tokens]
+                slot_mapping = attn_metadata.slot_mapping[: num_decode_tokens * self.pcp_size : self.pcp_size]
                 torch_npu._npu_reshape_and_cache(
                     key=key[:num_decode_tokens],
                     value=value[:num_decode_tokens],
