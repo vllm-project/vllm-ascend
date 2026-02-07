@@ -78,14 +78,14 @@ class FaultTolerance:
 
         return recovery_handler_manager
 
-    def execute_model_decorator(self,func:Callable,max_retries: int,dummy_flag: bool) -> Callable:
+    def execute_model_decorator(self,func:Callable,max_retries: int,dummy_run: bool) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             self.state_backup = self._create_essential_state_backup(*args, **kwargs)
             for attempt in range(max_retries + 1):
                 try:
                     output = func(*args, **kwargs)
-                    if dummy_flag:
+                    if dummy_run:
                         self._all_gather_for_sync_group()
                     return output
                 except Exception as e:
