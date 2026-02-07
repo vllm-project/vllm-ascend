@@ -6,7 +6,7 @@ import torch_npu
 import torch.distributed as dist
 
 from datetime import timedelta
-from typing import Callable,List
+from typing import Any, Callable,List
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -78,14 +78,15 @@ class FaultTolerance:
 
         return recovery_handler_manager
 
-    def execute_dummy_decorator(self,func:Callable,max_retries: int) -> Callable:
+    def execute_model_decorator(self,func:Callable,max_retries: int,dummy_flag: bool) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            self.state_backup = self._create_essential_state_backup(*args, **kwargs)
             for attempt in range(max_retries + 1):
-                dummy_backup = self._create_essential_state_backup(*args, **kwargs)
                 try:
                     output = func(*args, **kwargs)
-                    self._all_gather_for_sync_group()
+                    if dummy_flag:
+                        self._all_gather_for_sync_group()
                     return output
                 except Exception as e:
                     if attempt >= max_retries:
@@ -95,7 +96,7 @@ class FaultTolerance:
                     recovery_context = RecoveryContext(
                         exception=e,
                         fault_queue=self.fault_queue,
-                        back_up=dummy_backup
+                        back_up=self.state_backup
                     )
                     ft_action = self._handle_exception(recovery_context)
                     if torch.equal(ft_action, FaultAction.RECOMPUTE):
@@ -111,22 +112,13 @@ class FaultTolerance:
             return EMPTY_MODEL_RUNNER_OUTPUT
         return wrapper
 
-    def execute_model_decorator(self, func: Callable) -> Callable:
-        """fault tolerance decorator is used to modify the execute_model for exception handling."""
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            self.state_backup = self._create_essential_state_backup(*args,**kwargs)
-            output = func(*args, **kwargs)
-            return output
-        return wrapper
-
     def sample_token_decorator(self,func:Callable,max_retries: int) -> Callable:
         def wrapper(*args, **kwargs):
             # Enable fault tolerance
             for attempt in range(max_retries + 1):
                 try:
                     output = func(*args, **kwargs)
-                    if output is not EMPTY_MODEL_RUNNER_OUTPUT:
+                    if output is not None:
                         self._all_gather_for_sync_group()
                     return output
                 except Exception as e:
@@ -363,7 +355,9 @@ class FaultTolerance:
         backup['_req_ids'] = ib._req_ids.copy()
         backup['req_output_token_ids'] = ib.req_output_token_ids.copy()
         backup['req_id_to_index'] = dict(ib.req_id_to_index)
-        backup['num_blocks_per_row'] = ib.block_table.num_blocks_per_row.copy()
+        backup['num_blocks_per_row'] = [
+            bt.num_blocks_per_row.copy() for bt in ib.block_table.block_tables
+        ]
         if ib.batch_update_builder._removed is not None:
             backup['_removed'] = ib.batch_update_builder._removed.copy()
         else:
@@ -434,7 +428,8 @@ class FaultTolerance:
                 ib.req_id_to_index.clear()
                 ib.req_id_to_index.update(backup['req_id_to_index'])
             if 'num_blocks_per_row' in backup:
-                ib.block_table.num_blocks_per_row[:] = backup['num_blocks_per_row']
+                for i, bt in enumerate[Any](ib.block_table.block_tables):
+                    bt.num_blocks_per_row[:] = backup['num_blocks_per_row'][i]            
             if '_removed' in backup:
                 ib.batch_update_builder._removed = backup['_removed']
             if 'added' in backup:
