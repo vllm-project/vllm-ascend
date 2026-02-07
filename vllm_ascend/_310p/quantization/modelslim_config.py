@@ -46,7 +46,7 @@ from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 logger = init_logger(__name__)
 
 
-def create_scheme_for_layer_310p(
+def create_scheme_for_layer(
     cfg: AscendModelSlimConfig,
     quant_description: dict[str, Any],
     prefix: str,
@@ -140,7 +140,7 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
 
                 return AscendUnquantizedLinearMethod()
 
-            scheme = create_scheme_for_layer_310p(
+            scheme = create_scheme_for_layer(
                 cfg=self,
                 quant_description=self.quant_description,
                 prefix=prefix,
