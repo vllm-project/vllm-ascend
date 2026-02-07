@@ -150,7 +150,7 @@
 #    Future Plan:
 #       Revert this when CANN support shift aclnn operation
 #
-# ** 5. File: worker/patch_triton.py**
+# ** 5. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
@@ -264,14 +264,11 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the operator as customop.
 #
-# * Npugraph_ex Patch:
-# =================
-#
-# ** 1. File: npugraph_ex/patch_triton.py **
+# ** 13. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `torch_npu.dynamo.torchair.core._concrete_graph.ValuePack`,
-#      `torch_npu.dynamo.torchair.npu_fx_compiler._unpack_meta`,
-#      `torch_npu.dynamo.torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu`
+#   1. `torchair.core._concrete_graph.ValuePack`,
+#      `torchair.npu_fx_compiler._unpack_meta`,
+#      `torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu`
 #    Why:
 #       In the Triton scenario, npugraph_ex backend needs to process the value pack of the input parameters.
 #    How：

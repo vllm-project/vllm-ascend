@@ -15,8 +15,11 @@
 # limitations under the License.
 #
 
+import importlib
+import sys
+
 import torch
-import torch_npu
+import torchair
 from torch._subclasses.fake_tensor import FakeTensor
 from torchair.core._concrete_graph import _is_symlist
 from torchair.npu_fx_compiler import _unpack_meta_list
@@ -105,6 +108,9 @@ def _unpack_npu(self, args, kwargs):
     return unpacked, unpacked_kwargs
 
 
-torch_npu.dynamo.torchair.core._concrete_graph.ValuePack = ValuePack
-torch_npu.dynamo.torchair.npu_fx_compiler._unpack_meta = _unpack_meta
-torch_npu.dynamo.torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu = _unpack_npu
+torchair.core._concrete_graph.ValuePack = ValuePack
+# The ValuePack class is referenced in these two modules, and after the patch, these two modules need to be reloaded.
+importlib.reload(sys.modules["torchair.fx_summary"])
+importlib.reload(sys.modules["torchair.npu_fx_compiler"])
+torchair.npu_fx_compiler._unpack_meta = _unpack_meta
+torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu = _unpack_npu
