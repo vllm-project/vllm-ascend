@@ -25,9 +25,7 @@ from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 class NPUWorker310(NPUWorker):
     def init_device(self):
         self.device = self._init_device()
-
-        # TODO: There is accuracy issue when jit_compile is disabled currently.
-        torch_npu.npu.set_compile_mode(jit_compile=True)
+        torch_npu.npu.set_compile_mode(jit_compile=False)
 
         init_workspace_manager(self.device, num_ubatches=1)
 

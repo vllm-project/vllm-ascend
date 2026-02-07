@@ -251,9 +251,11 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         shared_experts: torch.nn.Module,
         gate: torch.nn.Module | None = None,
         use_overlapped: bool = True,
+        routed_input_transform: torch.nn.Module | None = None,
         **kwargs,
     ):
         AscendFusedMoE310.__init__(self, **kwargs)
+        self._routed_input_transform = routed_input_transform
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
