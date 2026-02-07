@@ -267,7 +267,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
     def test_native_rope_deepseek_forward_base(self, mock_npuplatform):
         mock_npuplatform.device_type = torch.device("cpu")
         self.layer = self._create_layer()
-        with patch("vllm_ascend.ops.rotary_embedding._rope_forward_oot",
+        with patch("vllm_ascend.ops.rotary_embedding.rope_forward_oot",
                    return_value=(self.query,
                                  self.key)) as mock_rope_forward_oot:
             q_pe, k_pe = self.layer.forward(self.positions, self.query,
@@ -276,7 +276,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
         assert q_pe.shape == self.query.shape
         assert k_pe.shape == self.key.shape
 
-    @patch('vllm_ascend.ops.rotary_embedding._rope_forward_oot')
+    @patch('vllm_ascend.ops.rotary_embedding.rope_forward_oot')
     @patch("vllm.platforms.current_platform.device_type",
            new=torch.device("cpu"))
     @patch("vllm_ascend.ops.rotary_embedding.NPUPlatform",
@@ -295,7 +295,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
         assert q_pe.shape == self.query.shape
         assert k_pe.shape == key.shape
 
-    @patch('vllm_ascend.ops.rotary_embedding._rope_forward_oot')
+    @patch('vllm_ascend.ops.rotary_embedding.rope_forward_oot')
     @patch("vllm.platforms.current_platform.device_type",
            new=torch.device("cpu"))
     @patch("vllm_ascend.ops.rotary_embedding.NPUPlatform",
