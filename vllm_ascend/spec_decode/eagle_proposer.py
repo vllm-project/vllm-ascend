@@ -39,7 +39,6 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
-from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
@@ -299,9 +298,6 @@ class EagleProposer(VllmEagleProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
 
-        # update global cos, sin
-        update_cos_sin(self._get_positions(num_tokens))
-
         multi_steps_attn_metadata = []
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
@@ -470,9 +466,6 @@ class EagleProposer(VllmEagleProposer):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
-
-        # update global cos, sin
-        update_cos_sin(self._get_positions(num_input_tokens))
 
         if self.uses_mrope:
             used_update_positions = target_positions[:, last_token_indices]
@@ -661,9 +654,6 @@ class EagleProposer(VllmEagleProposer):
             else:
                 input_ids = self.input_ids[:input_batch_size]
                 inputs_embeds = None
-
-            # update global cos, sin
-            update_cos_sin(self._get_positions(input_batch_size))
 
             # Run the model.
 
