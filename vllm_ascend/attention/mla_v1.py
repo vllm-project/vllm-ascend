@@ -63,6 +63,9 @@ BUILD_METADATA_STEP_DECODE = 1
 # token count limits within the mlapo operator
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
+# kvcomp
+from vllm_ascend.worker.kvcomp_utils import KVCompMetaData, KVCompConfig, HashEncoder
+import os
 
 class AscendMLABackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -148,6 +151,11 @@ class AscendMLADecodeMetadata:
     cos: torch.Tensor = None
     cp_seq_len: torch.Tensor = None
 
+    # kvcomp
+    seq_lens_device: torch.Tensor = None
+    kvcomp_top_k_device: torch.Tensor = None
+    kvcomp_top_k_cpu: torch.Tensor = None
+
 
 @dataclass
 class AscendMLAMetadata:
@@ -190,6 +198,13 @@ class AscendMLAMetadata:
     decode: AscendMLADecodeMetadata | None = None
     prefill: AscendMLAPrefillMetadata | None = None
     reshape_cache_event: torch.npu.Event = None
+
+    # kvcomp
+    num_decode_tokens_device: torch.Tensor = None
+    num_prefill_tokens_device: torch.Tensor = None
+    slot_mapping_cpu: torch.Tensor = None
+    hamming_output_records: list[dict] = None
+    kvcomp_metadata = None
 
     def __post_init__(self):
         pass
@@ -433,7 +448,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             kvcomp_metadata = common_attn_metadata.kvcomp_metadata
         else:
             kvcomp_metadata = None
-        print(f"mla_v1 kvcomp_metadata: {kvcomp_metadata}")
+        # print(f"mla_v1 kvcomp_metadata: {kvcomp_metadata}")
 
         prefill_metadata = None
         if self.num_prefills > 0:
@@ -442,7 +457,22 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         decode_metadata = None
         if self.num_decodes > 0:
             decode_metadata = self.build_decode_metadata(common_prefix_len, common_attn_metadata)
-        return self.metadata_cls(  # type: ignore
+        num_decode_tokens_device = None
+        num_prefill_tokens_device = None
+        slot_mapping_cpu = None
+        hamming_output_records = None
+
+        if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
+            # kvcomp
+            device = self.device
+            num_decode_tokens_device = torch.tensor([self.num_decode_tokens], dtype=torch.int32) \
+                                            .to(device=device, non_blocking=True)  
+            num_prefill_tokens_device = torch.tensor([self.num_actual_tokens-self.num_decode_tokens], dtype=torch.int32) \
+                                            .to(device=device, non_blocking=True) 
+            slot_mapping_cpu = self.slot_mapping.cpu()
+            hamming_output_records = [None] * common_attn_metadata.kvcomp_metadata.kvcomp_config.num_hidden_layers
+
+        output_metadata = self.metadata_cls(  # type: ignore
             num_actual_tokens_pcp_padded=self.num_actual_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=self.num_actual_tokens,
@@ -459,7 +489,14 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             query_start_loc=query_start_loc,
             block_tables=self.block_table,
             seq_lens=self.seq_lens,
+            num_decode_tokens_device = num_decode_tokens_device,  # kvcomp
+            num_prefill_tokens_device = num_prefill_tokens_device, # kvcomp
+            slot_mapping_cpu=slot_mapping_cpu, # kvcomp
+            hamming_output_records=hamming_output_records #kvcomp
         )
+        if hasattr(common_attn_metadata, "kvcomp_metadata"):
+            output_metadata.kvcomp_metadata = common_attn_metadata.kvcomp_metadata
+        return output_metadata
 
     def build_chunked_metadata(
         self,
@@ -615,6 +652,24 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 )
 
         cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
+        seq_lens_device = None
+        top_k = None
+        top_k_device = None
+        if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
+            # kvcomp
+            kvcomp_metadata = common_attn_metadata.kvcomp_metadata
+            kvcomp_config = kvcomp_metadata.kvcomp_config
+            device = self.device
+            seq_lens_device = self.seq_lens.to(device=device, non_blocking=True)
+            top_k_device = ((seq_lens_device + (kvcomp_config.chunk_size-1)) // kvcomp_config.chunk_size).to(dtype=torch.int32)
+            top_k_device = torch.clamp(top_k_device, min=1, max=kvcomp_config.vllm_hash_attention_topk // kvcomp_config.chunk_size)
+            top_k = ((self.seq_lens + (kvcomp_config.chunk_size-1)) // kvcomp_config.chunk_size).to(dtype=torch.int32)
+            top_k = torch.clamp(top_k, min=1, max=kvcomp_config.vllm_hash_attention_topk // kvcomp_config.chunk_size)
+            if torch.distributed.get_rank() == 0:
+                print(f'seq_lens={self.seq_lens}')
+                print(f'top_k={top_k}')
+                print(f'top_k_device={top_k_device}')
+
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
             block_table=self.block_table,
@@ -626,6 +681,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             sin=sin[: self.num_decode_tokens, ...],
             cos=cos[: self.num_decode_tokens, ...],
             cp_seq_len=cp_seq_len,
+            seq_lens_device=seq_lens_device, # kvcomp
+            kvcomp_top_k_cpu=top_k, # kvcomp
+            kvcomp_top_k_device=top_k_device # kvcomp
         )
         return decode_metadata
 
@@ -731,6 +789,17 @@ class AscendMLAImpl(MLAAttentionImpl):
                     f"Layer '{layer_name}' not found in kwargs for layer sharding, skipping sharding configuration"
                 )
         register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
+
+        # kvcomp
+        self.enable_kvcomp = os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1"
+        self.kvcomp_initialized = False
+        self.hashk_cache_nope = None
+        self.hashk_cache_rope = None
+        self.hash_encoder_nope = None
+        self.hash_encoder_rope = None
+        self.layer_id = 0
+        self.k_idx = 0
+        self.q_idx = [0] * 16
 
     @staticmethod
     def update_graph_params(
@@ -1190,6 +1259,72 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
             k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
+        
+        # kvcomp
+        if self.enable_kvcomp:
+            kvcomp_metadata = attn_metadata.kvcomp_metadata
+            kvcomp_config = kvcomp_metadata.kvcomp_config
+        if self.enable_kvcomp and self.layer_id not in kvcomp_config.vllm_hash_attention_rollback_layers:
+            block_table = decode_meta.block_table
+            device = block_table.device
+            seq_lens = decode_meta.seq_lens                 # cpu
+            seq_lens_device = decode_meta.seq_lens_device   # npu
+            seq_lens_list = decode_meta.seq_lens_list
+            if not kvcomp_config.vllm_hash_attention_skip_layers[self.layer_id]:
+                batch_size = num_tokens
+                max_seq_len = decode_meta.max_seq_lens
+                chunk_size = kvcomp_metadata.chunk_sizes_for_hamming_full[:batch_size]
+                top_k_device = decode_meta.kvcomp_top_k_device
+                top_k = decode_meta.kvcomp_top_k_cpu
+                tail_chunk_size = (seq_lens - 1) % kvcomp_config.chunk_size + 1
+                new_seq_lens = (top_k - 1) * kvcomp_config.chunk_size + tail_chunk_size
+                new_seq_lens_list = new_seq_lens.tolist()
+                sink = 1 # TODO 应该加到kvcomp_config里，待添加
+                recent = 4
+                indices = kvcomp_metadata.hamming_output[:batch_size] 
+
+                qhash_nope = self.hash_encoder_nope.compute_hash(q_nope)
+                qhash_rope = self.hash_encoder_rope.compute_hash(q_pe)
+                qhash = torch.cat((qhash_nope, qhash_rope), dim=-1).contiguous()
+                qhash_zeros = torch.zeros(qhash_rope.shape, dtype=qhash_rope.dtype, device=device)
+                qhash_pad = torch.cat((qhash, qhash_zeros), dim=2).unsqueeze(2).contiguous()
+
+                new_block_table = torch.ops._C_ascend.npu_hamming_dist_top_k(
+                    qhash_pad, 
+                    self.hashk_cache_nope,
+                    self.hashk_cache_rope,
+                    top_k_device,
+                    seq_lens_device,
+                    chunk_size,
+                    max_seq_len,
+                    sink,
+                    recent,
+                    0, # not support offload
+                    block_table,
+                    None, # mask, set none to calculate allx
+                    indices
+                )
+                new_block_table = new_block_table.squeeze(1)
+                # TODO：讨论是否要和GQA一样改成只支持保存最近的记录
+                attn_metadata.hamming_output_records[self.layer_id] = {
+                    'new_block_table': new_block_table, 
+                    'new_seq_lens': new_seq_lens, 
+                    'new_seq_lens_list': new_seq_lens_list}
+            else: # 复用历史稀疏化结果
+                reuse_layer_id = kvcomp_config.top_k_index_reuse[self.layer_id]
+                hamming_output = attn_metadata.hamming_output_records[reuse_layer_id]
+                new_block_table = hamming_output['new_block_table']
+                new_seq_lens = hamming_output['new_seq_lens']
+                new_seq_lens_list = hamming_output['new_seq_lens_list']
+            # 稀疏化结果写入推理的metadata
+            decode_meta.block_table = new_block_table
+            decode_meta.seq_lens = new_seq_lens
+            decode_meta.seq_lens_list = new_seq_lens_list
+            if torch.distributed.get_rank() == 0:
+                # print(f'new_block_table={new_block_table}')
+                print(f'new_seq_lens={new_seq_lens}')
+                # print(f'new_seq_lens_list={new_seq_lens_list}')
+
 
         attn_output_shape: tuple | None = None
         if (
@@ -1304,6 +1439,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score(q_nope, k_nope, k_nope, **common_kwargs)
 
+        # kvcomp 还原稀疏化前的metadata
+        if self.enable_kvcomp and self.layer_id not in kvcomp_config.vllm_hash_attention_rollback_layers: 
+            decode_meta.block_table = block_table
+            decode_meta.seq_lens = seq_lens
+            decode_meta.seq_lens_list = seq_lens_list
+
         return self._v_up_proj(attn_output)
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
@@ -1393,6 +1534,38 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         prefill_k_pe = prefill_k_pe.view(prefill_q_c.shape[0], self.num_kv_heads, -1)
         prefill_k_pe = prefill_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
+
+        # kvcomp
+        if self.enable_kvcomp:
+            kvcomp_metadata = attn_metadata.kvcomp_metadata
+            kvcomp_config = kvcomp_metadata.kvcomp_config
+        if self.enable_kvcomp and self.layer_id not in kvcomp_config.vllm_hash_attention_rollback_layers: 
+            if not kvcomp_config.vllm_hash_attention_skip_layers[self.layer_id]:
+                device = attn_metadata.slot_mapping.device
+                
+                khash_nope = self.hash_encoder_nope.compute_hash(prefill_k_c_normed)
+                khash_rope = self.hash_encoder_rope.compute_hash(prefill_k_pe)
+                khash_nope_new = khash_nope.transpose(0, 1).reshape(-1, khash_nope.shape[-1]).contiguous()  # 融合num_kv_head维
+                khash_rope_new = khash_rope.transpose(0, 1).reshape(-1, khash_rope.shape[-1]).contiguous()
+                khash_zeros = torch.zeros(khash_rope_new.shape, dtype=khash_rope_new.dtype, device=device)
+                khash_rope_new_pad = torch.cat((khash_rope_new, khash_zeros), dim=-1).contiguous()
+
+                torch.ops._C_ascend.npu_reshape_and_cache_bnsd(
+                    khash_nope_new,
+                    self.hashk_cache_nope,
+                    prefill_slots,
+                    attn_metadata.num_prefill_tokens_device,
+                    self.hashk_cache_nope
+                )
+
+                torch.ops._C_ascend.npu_reshape_and_cache_bnsd(
+                    khash_rope_new_pad,
+                    self.hashk_cache_rope,
+                    prefill_slots,
+                    attn_metadata.num_prefill_tokens_device,
+                    self.hashk_cache_rope
+                )
+
         return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
 
     def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
@@ -1405,6 +1578,41 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens:1]
         decode_kv_no_split = kv_no_split[:num_decode_tokens]
         decode_k_pe, decode_k_nope = self.exec_kv_decode(decode_kv_no_split, cos, sin, kv_cache, decode_slots)
+
+        # kvcomp
+        if self.enable_kvcomp:
+            kvcomp_metadata = attn_metadata.kvcomp_metadata
+            kvcomp_config = kvcomp_metadata.kvcomp_config
+        if self.enable_kvcomp and self.layer_id not in kvcomp_config.vllm_hash_attention_rollback_layers: 
+            num_decode_tokens_device = attn_metadata.num_decode_tokens_device
+            k_nope = decode_k_nope.view(-1, decode_k_nope.shape[2], decode_k_nope.shape[3])[decode_slots]
+            k_rope = decode_k_pe.view(-1, decode_k_pe.shape[2], decode_k_pe.shape[3])[decode_slots]
+            if not kvcomp_config.vllm_hash_attention_skip_layers[self.layer_id]:
+                device = attn_metadata.slot_mapping.device
+
+                khash_nope = self.hash_encoder_nope.compute_hash(k_nope)
+                khash_rope = self.hash_encoder_rope.compute_hash(k_rope)
+                khash_nope_new = khash_nope.transpose(0, 1).reshape(-1, khash_nope.shape[-1]).contiguous() 
+                khash_rope_new = khash_rope.transpose(0, 1).reshape(-1, khash_rope.shape[-1]).contiguous()
+                khash_zeros = torch.zeros(khash_rope_new.shape, dtype=khash_rope_new.dtype, device=device)
+                khash_rope_new_pad = torch.cat((khash_rope_new, khash_zeros), dim=-1).contiguous()
+
+                torch.ops._C_ascend.npu_reshape_and_cache_bnsd(
+                    khash_nope_new,
+                    self.hashk_cache_nope,
+                    decode_slots,
+                    num_decode_tokens_device,
+                    self.hashk_cache_nope
+                )
+
+                torch.ops._C_ascend.npu_reshape_and_cache_bnsd(
+                    khash_rope_new_pad,
+                    self.hashk_cache_rope,
+                    decode_slots,
+                    num_decode_tokens_device,
+                    self.hashk_cache_rope
+                )
+
         return DecodeMLAPreprocessResult(decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe)
 
     def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv):
@@ -1463,7 +1671,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor],
-        attn_metadata: M,
+        attn_metadata: M, # AscendMLAMetadata
         need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -1474,6 +1682,17 @@ class AscendMLAImpl(MLAAttentionImpl):
                 if is_hidden_layer(layer):
                     reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
+
+        # kcomp
+        self.layer_id = int(layer_name.split(".")[2]) 
+        if self.enable_kvcomp:
+            kvcomp_metadata = attn_metadata.kvcomp_metadata
+            kvcomp_config = kvcomp_metadata.kvcomp_config
+            if not kvcomp_config.vllm_hash_attention_skip_layers[self.layer_id]:
+                self.hashk_cache_nope = kvcomp_metadata.hashk_cache_nope[self.layer_id]
+                self.hashk_cache_rope = kvcomp_metadata.hashk_cache_rope[self.layer_id]
+                self.hash_encoder_nope = kvcomp_metadata.hash_encoder_nope
+                self.hash_encoder_rope = kvcomp_metadata.hash_encoder_rope
 
         forward_context = get_forward_context()
         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
