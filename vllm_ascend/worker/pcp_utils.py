@@ -155,6 +155,7 @@ class PCPManager:
             device=self.device)
         self.num_actual_tokens_pcp_padded = 0
         self.pcp_padded_tokens_fla = 0
+        self.pcp_padded_tokens_length = 0
 
     def _get_cumsum_and_arange(
         self,
@@ -264,9 +265,10 @@ class PCPManager:
         # cu_padded_tokens: cumulative sum of padded token counts,
         # pcp_padded_arange: per-request arange flattened for padded tokens.
         cu_padded_tokens, pcp_padded_arange = self._get_cumsum_and_arange(num_padded_scheduled_tokens, arange_np)
+        self.pcp_padded_tokens_length = pcp_padded_arange.shape[0]
         # Build the mask that marks which positions in the padded allgather buffer
         # correspond to real (unpadded) tokens.
-        self.pcp_unpad_mask_cpu[: pcp_padded_arange.shape[0]] = pcp_padded_arange < np.repeat(
+        self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length] = self.pcp_padded_tokens_length < np.repeat(
             num_scheduled_tokens, num_padded_scheduled_tokens
         )
         unpad_mask_decode = self.pcp_unpad_mask_cpu[: self.num_decode_tokens * self.pcp_world_size]
@@ -411,7 +413,7 @@ class PCPManager:
                 ]
                 all_positions_prefill_tensor = torch.from_numpy(np.concatenate(all_positions_prefill))
                 all_enter_fla_restore_idx = all_positions_prefill_tensor.float().argsort()
-                unpad_mask_prefill = self.pcp_unpad_mask_cpu[:pcp_padded_arange.shape[0]][self.num_decode_reqs * self.pcp_world_size:]
+                unpad_mask_prefill = self.pcp_unpad_mask_cpu[:self.pcp_padded_tokens_length][self.num_decode_reqs * self.pcp_world_size:]
                 # [0] | [0,7]
                 ori_tokens_start_loc = np.roll(np.cumsum(num_scheduled_tokens[self.num_decode_tokens:]), 1)
                 ori_tokens_start_loc[0] = 0
@@ -430,7 +432,7 @@ class PCPManager:
                     pcp_fa_query_idx_tensor.long(), non_blocking=True)
                 self.pcp_tokens[:self.num_reqs] = pcp_tokens[:self.num_reqs]
                 self.total_num_sampled_tokens_pcp = pcp_tokens[:self.num_reqs].sum()
-            return num_padded_scheduled_tokens, pcp_tokens, max_scheduled_tokens, positions_linear, self.pcp_unpad_mask_cpu[:pcp_padded_arange.shape[0]]
+            return num_padded_scheduled_tokens, pcp_tokens, max_scheduled_tokens, positions_linear
         else:
             # Build the restore index used after allgather.
             padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
@@ -444,7 +446,7 @@ class PCPManager:
 
         self.pcp_tokens[:self.num_reqs] = pcp_tokens[:self.num_reqs]
         self.total_num_sampled_tokens_pcp = pcp_tokens[:self.num_reqs].sum()
-        return pcp_tokens[:self.num_reqs], None, sum(pcp_tokens), positions, self.pcp_unpad_mask_cpu[:pcp_padded_arange.shape[0]]
+        return pcp_tokens[:self.num_reqs], None, sum(pcp_tokens), positions
 
     def get_logits_indices(self, cu_num_tokens: np.ndarray):
         return torch.from_numpy(cu_num_tokens) * self.pcp_world_size - self.num_pcp_pads_cpu_tensor[: self.num_reqs] - 1
@@ -681,7 +683,6 @@ class PCPManager:
         block_table_tensor: torch.Tensor,
         num_reqs_padded: int,
         num_reqs: int,
-        pcp_unpad_mask,
     ):
         from vllm_ascend.attention.utils import AscendPrefillContextParallelMetadata
         query_lens_new = self.query_lens_pcp_full.cpu[:num_reqs] \
@@ -759,7 +760,7 @@ class PCPManager:
                 if num_reqs_padded > num_reqs:
                     pad_size = num_reqs_padded - num_reqs
                     ori_query_lens_cpu[-pad_size:] = torch.full([pad_size], ori_query_lens_cpu[-pad_size - 1].item())
-
+            pcp_unpad_mask = self.pcp_unpad_mask_cpu[:self.pcp_padded_tokens_length]
             long_seq_metadata = AscendPrefillContextParallelMetadata(
                 pcp_use_hybrid_attn=self.pcp_use_hybrid_attn,
                 num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,

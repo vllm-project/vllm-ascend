@@ -103,8 +103,6 @@ class AscendPrefillContextParallelMetadata:
     # original max_query_len before pcp split
     max_query_len_pcp_full: int = 0
 
-    pcp_prefill_mask: torch.Tensor = None
-
     pcp_unpad_mask: torch.Tensor = None
 
     pcp_fa_query_idx: torch.Tensor = None

@@ -214,7 +214,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 tail_attn_nomask_seqlens=tail_attn_nomask_seqlens,
                 q_full_idx=common_long_seq_metadata.q_full_idx,
                 pcp_allgather_restore_idx=common_long_seq_metadata.pcp_allgather_restore_idx,
-                pcp_prefill_mask=common_long_seq_metadata.pcp_prefill_mask,
                 pcp_fa_query_idx=common_long_seq_metadata.pcp_fa_query_idx,
                 pcp_padded_tokens_fla=common_long_seq_metadata.pcp_padded_tokens_fla,
                 pcp_enter_fa_restore_idx=common_long_seq_metadata.pcp_enter_fa_restore_idx,
@@ -452,6 +451,21 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         output, _ = torch_npu.npu_attention_update(attn_lse, attn_output, update_type)
         output = output.view(T, N, D)
         return output
+
+    def _forward_prefill_cp(
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata
+    ) -> torch.Tensor:
+        data_head, data_tail = self._forward_prefill_cp_pre(query, key, value, attn_metadata)
+
+        output_head, lse_head = self._forward_prefill_cp_attn(data_head, True, attn_metadata)
+        output_tail, lse_tail = self._forward_prefill_cp_attn(data_tail, False, attn_metadata)
+
+        output, attn_lse = self._forward_prefill_cp_post(
+            [output_head, output_tail],
+            [lse_head, lse_tail],
+            attn_metadata,
+        )
+        return output, attn_lse
 
     def _forward_prefill_cp_pre(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata
