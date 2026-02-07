@@ -26,7 +26,7 @@ from .registry import register_scheme
 
 
 @register_scheme("W8A8", "linear")
-class AscendW8A8LinearMethod310P(AscendLinearScheme):
+class AscendW8A8LinearMethod310(AscendLinearScheme):
     """310P-only W8A8 static linear scheme.
 
     Notes:
