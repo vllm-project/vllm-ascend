@@ -4,9 +4,15 @@ on:
     # Runs at 00:00 UTC+8 every day
     - cron: '0 20 * * *' 
   workflow_dispatch:
+    inputs:
+      vllm_hash:
+        description: 'vLLM base hash'
+        default: main
+        required: true
+        type: string
   push:
     paths:
-      - 'Dockerfile.lint'
+      - '.github/workflows/dockerfiles/Dockerfile.lint'
       - 'requirements-lint.txt'
       - 'requirements-dev.txt'
       - 'requirements.txt'
@@ -55,6 +61,7 @@ jobs:
         password: ${{ secrets.QUAY_CI_PASSWORD }}
 
     - name: Build and push
+      if: ${{ github.event_name != 'workflow_dispatch' }}
       uses: docker/build-push-action@v6
       with:
         # For now, we only build amd64 lint image
@@ -65,3 +72,18 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
         provenance: false
+
+    - name: Build and push
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      uses: docker/build-push-action@v6
+      with:
+        # For now, we only build amd64 lint image
+        platforms: 'linux/amd64'
+        context: .
+        file: .github/workflows/dockerfiles/Dockerfile.lint
+        push: true
+        labels: ${{ steps.meta.outputs.labels }}
+        tags: ${{ steps.meta.outputs.tags }}
+        provenance: false
+        build-args: |
+          VLLM_HASH=${{ inputs.vllm_hash }}
