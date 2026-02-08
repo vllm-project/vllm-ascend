@@ -224,6 +224,7 @@ jobs:
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
+          pip install uc-manager
           uv pip install --system -r requirements-dev.txt
           uv pip install --system -v -e .
 
@@ -368,7 +369,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-           VLLM_TARGET_DEVICE=empty uv pip install --system -e .
+          VLLM_TARGET_DEVICE=empty uv pip install --system -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
