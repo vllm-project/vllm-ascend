@@ -14,9 +14,6 @@
  */
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
-// #include "../../common/ophost/op_util.h"
-// #include "../../common/ophost/hcom_topo_info.h"
-// #include "log/ops_log.h"
 
 using namespace ge;
 namespace ops {
@@ -29,8 +26,6 @@ static ge::graphStatus InferShapeDispatchFFNCombine(gert::InferShapeContext* con
 }
 
 static ge::graphStatus InferDataTypeDispatchFFNCombine(gert::InferDataTypeContext* context) {
-  // auto d_type = context->GetInputDataType(0);
-  // context->SetOutputDataType(0, d_type);
   return ge::GRAPH_SUCCESS;
 }
 

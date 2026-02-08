@@ -102,6 +102,7 @@ private:
     int32_t maxOutputSize;
     int32_t EP;
     int32_t listLen;
+    int32_t epilogueGranularity;
 
     optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData;
     uint64_t initRoutingQuantTilingKey;
@@ -153,6 +154,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     commNpuSplit = tilingData.cocTiling.commNpuSplit;
     commDataSplit = tilingData.cocTiling.commDataSplit;
     lenPerLoop = tilingData.cocTiling.lenPerLoop;
+    epilogueGranularity = tilingData.cocTiling.epilogueGranularity;
     moeInitRoutingQuantV2TilingData = tilingData.cocTiling.moeInitRoutingQuantV2TilingData;
     initRoutingQuantTilingKey = tilingData.cocTiling.initRoutingQuantTilingKey;
 
@@ -255,13 +257,12 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
     GemmCoord problemShape{static_cast<uint32_t>(m), static_cast<uint32_t>(n), static_cast<uint32_t>(k)};
 
     uint32_t epilogueCoreNum = aivNum / 2;
-    uint32_t epilogueGranularity = expertPerRank - 1;
 
     typename MatmulKernel::Params params{
         problemShape, static_cast<uint32_t>(EP), static_cast<uint32_t>(listLen), static_cast<uint32_t>(expertPerRank), static_cast<uint32_t>(maxOutputSize),
         static_cast<uint32_t>(rank), static_cast<uint32_t>(rankSize),
         static_cast<uint32_t>(topK), initRoutingQuantTilingKey,
-        epilogueCoreNum, epilogueGranularity,
+        epilogueCoreNum, static_cast<uint32_t>(epilogueGranularity),
         xGM_, layoutA1, layoutA2,
         weight1GM_, layoutB1,
         weight2GM_, layoutB2,

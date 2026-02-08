@@ -32,9 +32,8 @@ namespace {
     // 1. Constant definitions
     const char *K_INNER_DEBUG = "DispatchFFNCombine Tiling Debug";
     constexpr uint32_t ATTR_GROUP_INDEX = 0;
-    constexpr uint32_t ATTR_MAX_OUTPUT_SIZE_INDEX = 1;
-    constexpr uint32_t ATTR_IS_TRANS_B = 2;
-    constexpr uint32_t ATTR_WEIGHT_NZ = 3;
+    constexpr uint32_t ATTR_IS_TRANS_B = 1;
+    constexpr uint32_t ATTR_WEIGHT_NZ = 2;
     constexpr uint64_t INIT_TILINGKEY = 1000000;
     constexpr uint64_t TILINGKEY_TRANS_B = 1U;
     constexpr uint64_t TILINGKEY_WEIGHT_NZ = 10;
@@ -89,7 +88,6 @@ static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingConte
 
     // TODO: set, validate, and print tiling data related to attributes
     auto groupPtr = attrs->GetAttrPointer<char>(static_cast<int>(ATTR_GROUP_INDEX));
-    auto maxOutputSizePtr = attrs->GetAttrPointer<int>(ATTR_MAX_OUTPUT_SIZE_INDEX);
     auto is_trans_b = attrs->GetAttrPointer<bool>(ATTR_IS_TRANS_B);
     auto weight_nz = attrs->GetAttrPointer<bool>(ATTR_WEIGHT_NZ);
     OP_TILING_CHECK(groupPtr == nullptr || strlen(groupPtr) == 0,
@@ -100,7 +98,6 @@ static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingConte
     OP_TILING_CHECK(weight_nz == nullptr,
         OP_LOGE(K_INNER_DEBUG, "weight_nz is invalid."), return GRAPH_FAILED);
 
-    info.maxOutputSize = *maxOutputSizePtr;
     info.isTransposeB = *is_trans_b;
     info.isWeightNz = *weight_nz;
 
@@ -108,7 +105,6 @@ static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingConte
     (void)ge::HcomTopoInfo::Instance().GetGroupRankSize(groupPtr, rankSize);
     info.worldSize = rankSize;
 
-    OP_LOGD(K_INNER_DEBUG, "maxOutputSize=%d ", info.maxOutputSize);
     OP_LOGD(K_INNER_DEBUG, "rankSize=%d ", info.worldSize);
 
     return ge::GRAPH_SUCCESS;
@@ -186,6 +182,7 @@ void SetTilingData(CoCTiling &cocTilingData, DispatchFFNCombineInfo &info)
     cocTilingData.commNpuSplit = info.worldSize;
     cocTilingData.commDataSplit = 1;
     cocTilingData.lenPerLoop = cocTilingData.m0 * cocTilingData.n0 / 2;
+    cocTilingData.epilogueGranularity = info.expertPerRank + 1;
 }
 
 // Main scheduling function:
@@ -275,15 +272,28 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     uint32_t n2 = info.K;
     uint32_t k2 = info.N / 2;
 
-    uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) +
-                            info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
-                            info.maxOutputSize * sizeof(float) * 2 +
-                            info.maxOutputSize * info.N * sizeof(int16_t) +
-                            info.maxOutputSize * n2 * sizeof(int16_t) +
-                            info.maxOutputSize * info.K * sizeof(int8_t) +
-                            info.maxOutputSize * k2 * sizeof(int8_t) +
-                            info.worldSize  * sizeof(int32_t) * 16 +
-                            (info.expertPerRank + info.worldSize) * sizeof(int32_t) * 16;
+    info.maxOutputSize = info.M * info.topK * 4;
+
+    uint64_t expandedRowIdxSize = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t);
+    uint64_t tokenPerExpertSize = info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t);
+    uint64_t sumBeforeRankSize = info.worldSize  * sizeof(int32_t) * 16; 
+    uint64_t SoftFlagBaseSize = (info.expertPerRank + info.worldSize) * sizeof(int32_t) * 16; 
+    uint64_t relatedMaxOutputSize = sizeof(float) * 2 + 
+                                    info.N * sizeof(int16_t) +
+                                    n2 * sizeof(int16_t) +
+                                    info.K * sizeof(int8_t) +
+                                    k2 * sizeof(int8_t);
+
+    uint64_t cocWorkspace = expandedRowIdxSize + tokenPerExpertSize + sumBeforeRankSize + SoftFlagBaseSize +
+                            relatedMaxOutputSize * info.maxOutputSize;
+
+    if (cocWorkspace > 1024 * MB_SIZE) {
+        cocWorkspace = 1024 * MB_SIZE;
+
+        info.maxOutputSize = (cocWorkspace - (expandedRowIdxSize + tokenPerExpertSize +
+                                            sumBeforeRankSize + SoftFlagBaseSize)) / relatedMaxOutputSize;
+    }
+
 
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
 
