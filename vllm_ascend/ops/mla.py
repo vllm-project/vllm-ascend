@@ -133,6 +133,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
                 original_process_weights(act_dtype)
             else:
                 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+
                 if not isinstance(self.mla_attn.impl, AscendSFAImpl):
                     original_process_weights(act_dtype)
                 self.mla_attn.impl.process_weights_after_loading(act_dtype)

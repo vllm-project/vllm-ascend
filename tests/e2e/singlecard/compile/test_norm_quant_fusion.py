@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 import torch_npu
 import vllm.config
-from vllm.compilation.fx_utils import OpOverload
+from torch._ops import OpOverload
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)

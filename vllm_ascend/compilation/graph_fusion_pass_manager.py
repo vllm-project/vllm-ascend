@@ -17,9 +17,16 @@
 #
 
 from torch import fx as fx
-from vllm.compilation.inductor_pass import get_pass_context
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("v0.15.0"):
+    from vllm.compilation.inductor_pass import get_pass_context
+    from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+else:
+    from vllm.compilation.passes.inductor_pass import get_pass_context
+    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 
 
 class GraphFusionPassManager:
