@@ -31,6 +31,11 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        # uv
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -46,6 +51,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
 
       - name: Install system dependencies
         run: |
@@ -66,14 +72,15 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install --system -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install --system -r requirements-dev.txt
+          uv pip install --system -v -e .
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -96,6 +103,11 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        # uv
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -112,6 +124,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
 
       - name: Install system dependencies
         run: |
@@ -132,14 +145,16 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install --system -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install --system -r requirements-dev.txt
+          uv pip install --system -v -e .
+
       - name: Run e2e test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -162,6 +177,11 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
         HF_HUB_OFFLINE: 1
+        # uv
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -177,6 +197,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
 
       - name: Install system dependencies
         run: |
@@ -197,14 +218,16 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install --system -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install --system -r requirements-dev.txt
+          uv pip install --system -v -e .
+
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -226,6 +249,11 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
         HF_HUB_OFFLINE: 1
+        # uv
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -241,6 +269,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
 
       - name: Install system dependencies
         run: |
@@ -261,14 +290,16 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install --system -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install --system -r requirements-dev.txt
+          uv pip install --system -v -e .
+
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -297,6 +328,11 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        # uv
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -312,6 +348,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
 
       - name: Install system dependencies
         run: |
@@ -332,14 +369,15 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install --system -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install --system -r requirements-dev.txt
+          uv pip install --system -v -e .
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
@@ -357,6 +395,12 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        # uv
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
+
     steps:
       - name: Check npu and CANN info
         run: |
@@ -369,6 +413,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -389,14 +434,15 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install --system -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install --system -r requirements-dev.txt
+          uv pip install --system -v -e .
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -415,6 +461,11 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        # uv
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -427,6 +478,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -447,14 +499,15 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install --system -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install --system -r requirements-dev.txt
+          uv pip install --system -v -e .
 
       - name: Run vllm-project/vllm-ascend test
         env:
