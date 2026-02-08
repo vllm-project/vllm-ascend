@@ -29,6 +29,8 @@ from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import initialize_model, process_weights_after_loading
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from vllm_ascend.quantization.utils import check_modelslim_quantization_config
+
 from .interaction.elastic import ElasticServer
 from .load import elastic_load
 from .utils import find_free_port, is_valid_path_prefix
@@ -143,6 +145,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
         if self.model_path is None:
             self.model_path = model_config.model
             logger.info(f"model_path is set to {self.model_path}")
+
+        # Check if the model is quantized by ModelSlim but missing quantization config.
+        # This provides a friendly error message instead of a confusing KeyError.
+        check_modelslim_quantization_config(self.model_path, model_config.quantization)
 
         device_id = torch.distributed.get_rank()
 
