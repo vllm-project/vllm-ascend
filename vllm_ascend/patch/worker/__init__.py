@@ -29,6 +29,7 @@ import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_deepseek  # noqa
 import vllm_ascend.patch.worker.patch_multimodal_merge  # noqa
 import vllm_ascend.patch.worker.patch_minicpm  # noqa
+import vllm_ascend.patch.worker.patch_model_runner  # noqa
 import vllm_ascend.patch.worker.patch_rope  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa

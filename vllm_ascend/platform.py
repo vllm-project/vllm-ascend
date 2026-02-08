@@ -333,12 +333,6 @@ class NPUPlatform(Platform):
                 vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
 
-            # When open PD separation + MTP + Full Graph + asynchronous scheduling,
-            # patch gpu_model_runner._update_states for solving
-            # decode nodes may be in eager mode.
-            if vllm_config.speculative_config and vllm_config.kv_transfer_config:
-                import vllm_ascend.patch.worker.patch_model_runner  # noqa
-
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
             vllm_config.scheduler_config.scheduler_cls = (
