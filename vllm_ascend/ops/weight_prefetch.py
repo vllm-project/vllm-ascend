@@ -188,11 +188,27 @@ class WeightPrefetchMethod:
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
 
-    def maybe_prefetch_weight_in_current_stream(
-        self, inputs: torch.Tensor, dependency: torch.Tensor, max_size: int = 0
+    def maybe_prefetch_mla_or_sla_weight_in_current_stream(
+        self,
+        inputs: torch.Tensor,
+        dependency: torch.Tensor,
+        max_size: int = 0,
+        linear_layer: torch.nn.Module | None = None,
     ) -> None:
         if not self.mla_sfa_prefetch_enable:
             return
+
+        # The prefetching of the weights of the o_proj matrix in the W8A8
+        # scene is already performed once in AscendW8A8LinearMethod, so it
+        # is not needed here.
+        if linear_layer is not None:
+            from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
+
+            if isinstance(
+                getattr(linear_layer.quant_method, "quant_method", None),
+                AscendW8A8LinearMethod,
+            ):
+                return
 
         input_size = inputs.element_size() * inputs.numel()
         if max_size <= 0 or max_size > input_size:

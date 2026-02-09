@@ -760,7 +760,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
             weight_prefetch_method = get_weight_prefetch_method()
-            weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
+            weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
                 inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
             )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
@@ -868,14 +868,12 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         attn_output = self._v_up_proj(attn_output)
         weight_prefetch_method = get_weight_prefetch_method()
-        # The prefetching of the weights of the o_proj matrix in the W8A8 scene is already performed once
-        # in AscendW8A8LinearMethod, so it is not needed here.
-        if not isinstance(getattr(self.o_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod):
-            weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
-                inputs=self.o_proj.weight,
-                dependency=attn_output,
-                max_size=MAX_O_PROJ_PREFETCH_SIZE,
-            )
+        weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
+            inputs=self.o_proj.weight,
+            dependency=attn_output,
+            max_size=MAX_O_PROJ_PREFETCH_SIZE,
+            linear_layer=self.o_proj,
+        )
 
         if self.enable_dsa_cp and not self.enable_dsa_cp_prefill_only:
             # When using SFA-CP with pd mixed, o_proj has two cases:
