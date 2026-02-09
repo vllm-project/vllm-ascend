@@ -324,7 +324,7 @@ class NPUModelRunner(GPUModelRunner):
         with torch.npu.stream(self.num_computed_tokens_stream):
             self.num_computed_tokens_stream.wait_stream(default_stream)
             self.num_computed_tokens_cpu.copy_(
-                self.req_states.num_computed_tokens,
+                self.req_states.num_computed_tokens.gpu,
                 non_blocking=True,
             )
             self.num_computed_tokens_event.record()
