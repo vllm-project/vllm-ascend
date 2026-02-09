@@ -37,7 +37,7 @@ if HAS_TRITON:
 
 
 try:
-    import custom_ops  # noqa
+    import batch_invariant_ops  # type: ignore[import-not-found] # noqa
 
     HAS_ASCENDC_BATCH_INVARIANT = True
 except ImportError:
@@ -68,12 +68,14 @@ def enable_batch_invariant_mode():
 
     # Register operators implemented in Ascend batch-invariant ops in priority.
     if HAS_ASCENDC_BATCH_INVARIANT:
-        _batch_invariant_LIB.impl("aten::mm", torch.ops.myops.npu_mm_batch_invariant, "NPU")
-        _batch_invariant_LIB.impl("aten::matmul", torch.ops.myops.npu_matmul_batch_invariant, "NPU")
-        _batch_invariant_LIB.impl("aten::sum", torch.ops.myops.npu_reduce_sum_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::mm", torch.ops.batch_invariant_ops.npu_mm_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::matmul", torch.ops.batch_invariant_ops.npu_matmul_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::sum", torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant, "NPU")
         # torch_npu.npu_fused_infer_attention_score is a function of torch_npu, not a torch.ops.Operator,
         # so we need to patch it directly.
-        torch_npu.npu_fused_infer_attention_score = torch.ops.myops.npu_fused_infer_attention_score_batch_invariant
+        torch_npu.npu_fused_infer_attention_score = (
+            torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
+        )
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
