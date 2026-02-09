@@ -22,6 +22,7 @@ extern aclnnStatus aclnnInnerMoeCombineNormalGetWorkspaceSize(
     int64_t epWorldSize,
     int64_t epRankId,
     char *tpGroupNameOptional,
+    
     int64_t tpWorldSize,
     int64_t tpRankId,
     int64_t moeExpertNum,
