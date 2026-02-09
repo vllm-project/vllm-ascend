@@ -70,7 +70,7 @@ class QKNormRopeFusionPattern:
 
             q_flat = q_norm_out.view(q.shape)
             k_flat = k_norm_out.view(k.shape)
-            q_rope, k_rope = torch.ops.vllm.rope_forward_triton_with_positions(
+            q_rope, k_rope = torch.ops.vllm.rope_forward_oot(
                 positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
             )
 
@@ -148,7 +148,7 @@ class QKNormRopeFusionPatternWithBias:
 
             q_flat = q_normed.view(q.shape)
             k_flat = k_normed.view(k.shape)
-            q_rope, k_rope = torch.ops.vllm.rope_forward_triton_with_positions(
+            q_rope, k_rope = torch.ops.vllm.rope_forward_oot(
                 positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
             )
 
@@ -191,7 +191,7 @@ class QKNormRopeFusionPass(VllmInductorPass):
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(pass_name="qknorm_rope_fusion_pass")
 
         dtype = vllm_config.model_config.dtype
-        if dtype not in (torch.bfloat16, torch.float16):
+        if dtype not in (torch.bfloat16,):
             logger.debug("QKNorm and Rope fusion not enabled: unsupported dtype %s", dtype)
             return
 
