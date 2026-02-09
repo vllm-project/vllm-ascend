@@ -34,6 +34,7 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, has_rope
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+
     from vllm_ascend.ops.triton.rope import rope_forward_triton
 
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
@@ -157,8 +158,7 @@ def rope_forward_oot(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
-        raise NotImplementedError(
-            "Batched rotary embedding is currently not supported on NPU.")
+        raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
     if HAS_TRITON:
         num_tokens = query.shape[0]
         query, key = rope_forward_triton(
@@ -167,7 +167,7 @@ def rope_forward_oot(
             cos_sin_cache=cos_sin_cache,
             positions=positions,
             rope_dim=rotary_dim,
-            is_neox_style=is_neox_style
+            is_neox_style=is_neox_style,
         )
     else:
         if rotary_dim < head_size:
@@ -235,13 +235,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
         return torch.ops.vllm.rope_forward_oot(
-            positions,
-            query,
-            key,
-            self.cos_sin_cache,
-            self.head_size,
-            self.rotary_dim,
-            is_neox_style
+            positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )
 
 
@@ -452,13 +446,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
             b, h_k, d = key.shape
             key = key.view(b, h_k, d // 2, 2).transpose(3, 2).reshape(b, h_k, d)
         q_pe, k_pe = torch.ops.vllm.rope_forward_oot(
-            positions,
-            query,
-            key,
-            self.cos_sin_cache,
-            self.head_size,
-            self.rotary_dim,
-            is_neox_style
+            positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )
         return q_pe, k_pe
 

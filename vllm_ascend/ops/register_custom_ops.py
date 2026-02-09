@@ -189,9 +189,13 @@ def _quantize_impl_fake(
 
 
 def _rope_forward_oot_impl_fake(
-    positions: torch.Tensor, query: torch.Tensor,
-    key: torch.Tensor, cos_sin_cache: torch.Tensor, 
-    head_dim: int, rotary_dim: int, is_neox_style: bool = True
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_dim: int,
+    rotary_dim: int,
+    is_neox_style: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return query, key
 
@@ -265,5 +269,5 @@ direct_register_custom_op(
     op_func=rope_forward_oot,
     fake_impl=_rope_forward_oot_impl_fake,
     mutates_args=[],
-    dispatch_key="PrivateUse1"
+    dispatch_key="PrivateUse1",
 )

@@ -234,9 +234,10 @@ def rope_forward_triton(
             USE_COS_SIN=False,
         )
     else:
-        raise ValueError("Currently, rope_forward_triton supports passing:\n"
-                         "1. positions and original cos_sin_cache.\n"
-                         "2. cos and sin which are already selected by positions\n"
-                         "Please check whether you call rope_forward_triton correctly.")
+        raise ValueError(
+            "Currently, rope_forward_triton supports passing:\n"
+            "1. positions and original cos_sin_cache.\n"
+            "2. cos and sin which are already selected by positions\n"
+            "Please check whether you call rope_forward_triton correctly."
+        )
     return q, k
-

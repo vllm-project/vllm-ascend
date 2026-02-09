@@ -94,8 +94,7 @@ def split_qkv_rmsnorm_rope_kernel(
         roped_q1 = x1 * cos - x2 * sin
         roped_q2 = x2 * cos + x1 * sin
 
-        roped_q = tl.zeros((Q_BLOCK_SIZE // HEAD_DIM, HEAD_DIM),
-                         dtype=tl.bfloat16)
+        roped_q = tl.zeros((Q_BLOCK_SIZE // HEAD_DIM, HEAD_DIM), dtype=tl.bfloat16)
         roped_q = tl.insert_slice(
             roped_q,
             roped_q1,
@@ -139,8 +138,7 @@ def split_qkv_rmsnorm_rope_kernel(
         if BIAS:
             normalized_values = (normalized_values * weight_values + bias_values).to(tl.bfloat16)
         else:
-            normalized_values = (normalized_values * weight_values).to(
-                tl.bfloat16)
+            normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
 
         pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
         cos_offsets = pos_idx * HEAD_DIM + tl.arange(0, HALF_HEAD_DIM)
@@ -162,8 +160,7 @@ def split_qkv_rmsnorm_rope_kernel(
         roped_k1 = x1 * cos - x2 * sin
         roped_k2 = x2 * cos + x1 * sin
 
-        roped_k = tl.zeros((KV_BLOCK_SIZE // HEAD_DIM, HEAD_DIM),
-                         dtype=tl.bfloat16)
+        roped_k = tl.zeros((KV_BLOCK_SIZE // HEAD_DIM, HEAD_DIM), dtype=tl.bfloat16)
         roped_k = tl.insert_slice(
             roped_k,
             roped_k1,
