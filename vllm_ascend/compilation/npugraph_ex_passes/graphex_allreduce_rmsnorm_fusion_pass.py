@@ -17,7 +17,7 @@
 import torch
 import torchair
 from torch._inductor.pattern_matcher import Match
-from vllm.compilation.inductor_pass import get_pass_context
+from vllm.compilation.passes.inductor_pass import get_pass_context
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce

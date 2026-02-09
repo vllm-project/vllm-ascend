@@ -17,7 +17,7 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
