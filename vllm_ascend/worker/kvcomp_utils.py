@@ -6,10 +6,50 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import List, Optional
 import torch_npu
-
+from pathlib import Path
 import numpy as np
 import logging
 logger = logging.getLogger(__name__)
+
+def get_kvcomp_config_path_for_model(vllm_config) -> str:
+    model = vllm_config.model_config.model.lower()
+    logger.info(f"[KVComp] model name: {model}")
+
+    if "deepseek" in model and "r1" in model:
+        rel = (
+            "vllm_ascend/attention/kvcomp_configs/KVComp_DeepSeek_R1_W8A8_config.json"
+        )
+    elif "qwen3" in model and "32b" in model:
+        rel = "vllm_ascend/attention/kvcomp_configs/KVComp_Qwen3_32B_config.json"
+    elif "qwen3" in model and "30b" in model and "coder" in model:
+        rel = "vllm_ascend/attention/kvcomp_configs/KVComp_Qwen3_30B_A3B_config.json"
+    elif "qwen3" in model and "4b" in model:
+        rel = "vllm_ascend/attention/kvcomp_configs/KVComp_Qwen3_4B_config.json"
+    else:
+        raise ValueError(f"[KVComp] Unsupported model for KVComp: {model}")
+
+    logger.info(f"[KVComp] target relative path: {rel}")
+
+    cur = Path(__file__).resolve()
+    repo = cur
+    for depth in range(30):
+        if (
+            (repo / "pyproject.toml").is_file()
+            and (repo / "collect_env.py").is_file()
+        ):
+            p = repo / rel
+            logger.info(f"[KVComp] repo root detected at depth={depth}: {repo}")
+            if p.is_file():
+                logger.info(f"[KVComp] config loaded from SOURCE tree: {p}")
+                return str(p)
+            logger.warning(f"[KVComp] repo root found but config missing: {p}")
+            break
+        if repo.parent == repo:
+            logger.debug("[KVComp] reached filesystem root, stop searching")
+            break
+        repo = repo.parent
+    
+    return None
 
 # largely follow vllm.v1.worker.utils.bind_kv_cache
 def bind_hashk_cache(

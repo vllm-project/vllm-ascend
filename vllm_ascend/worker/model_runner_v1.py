@@ -372,10 +372,16 @@ class NPUModelRunner(GPUModelRunner):
             print(f"VLLM_ASCEND_ENABLE_KVCOMP_SPARSE: {os.getenv('VLLM_ASCEND_ENABLE_KVCOMP_SPARSE')}")
             print(f"KVComp is enabled")
 
-            from vllm_ascend.worker.kvcomp_utils import KVCompConfig, HashEncoder, KVCompMetaData
+            from vllm_ascend.worker.kvcomp_utils import KVCompConfig, HashEncoder, KVCompMetaData, get_kvcomp_config_path_for_model
             from vllm.utils.math_utils import cdiv
 
-            kvcomp_config = KVCompConfig.from_json(os.getenv("VLLM_ASCEND_KVCOMP_CONFIG_PATH"))
+            # auto detect config file for KVComp
+            kvcomp_config_path = get_kvcomp_config_path_for_model(vllm_config)
+            if kvcomp_config_path is not None:
+                kvcomp_config = KVCompConfig.from_json(kvcomp_config_path)
+            else:
+                raise RuntimeError("KVComp config file not found")
+
             chunk_sizes_for_hamming_full = torch.full([self.max_num_reqs], fill_value=self.block_size, dtype=torch.int32, device=self.device)
             topk_for_hamming_full = torch.full([self.max_num_reqs], fill_value=kvcomp_config.vllm_hash_attention_topk // self.block_size, dtype=torch.int32, device=self.device)
             topk_for_hamming_full_cpu = torch.full([self.max_num_reqs], fill_value=kvcomp_config.vllm_hash_attention_topk // self.block_size, dtype=torch.int32, device="cpu")
