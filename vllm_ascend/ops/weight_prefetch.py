@@ -47,7 +47,7 @@ class WeightPrefetchMethod:
 
     def __init__(self, weight_prefetch_config: WeightPrefetchConfig) -> None:
         self.is_moe = is_moe_model(get_current_vllm_config())
-        self.other_prefetch_enable = weight_prefetch_config.enabled
+        self.mla_sfa_prefetch_enable = weight_prefetch_config.enabled
 
         self.attn = ModuleWeightPrefetchConfig(
             module_name="attn",
@@ -191,7 +191,7 @@ class WeightPrefetchMethod:
     def maybe_prefetch_weight_in_current_stream(
         self, inputs: torch.Tensor, dependency: torch.Tensor, max_size: int = 0
     ) -> None:
-        if not self.other_prefetch_enable:
+        if not self.mla_sfa_prefetch_enable:
             return
 
         input_size = inputs.element_size() * inputs.numel()

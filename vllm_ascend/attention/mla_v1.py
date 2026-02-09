@@ -1416,10 +1416,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         has_prefill = attn_metadata.num_prefills > 0
         if self.fused_qkv_a_proj is not None:
             weight_prefetch_method = get_weight_prefetch_method()
-            if weight_prefetch_method is not None:
-                weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
-                    inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
-                )
+            weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
+                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
+            )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -1551,15 +1550,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         # O proj
         weight_prefetch_method = get_weight_prefetch_method()
-        if weight_prefetch_method is not None:
-            # The prefetching of the weights of the o_proj matrix in the W8A8 scene is already performed once
-            # in AscendW8A8LinearMethod, so it is not needed here.
-            if not isinstance(getattr(self.o_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod):
-                weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
-                    inputs=self.o_proj.weight,
-                    dependency=o_proj_input,
-                    max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                )
+        # The prefetching of the weights of the o_proj matrix in the W8A8 scene is already performed once
+        # in AscendW8A8LinearMethod, so it is not needed here.
+        if not isinstance(getattr(self.o_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod):
+            weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
+                inputs=self.o_proj.weight,
+                dependency=o_proj_input,
+                max_size=MAX_O_PROJ_PREFETCH_SIZE,
+            )
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 
         del o_proj_input
