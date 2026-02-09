@@ -16,7 +16,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import importlib
 import os
 
 import torch
