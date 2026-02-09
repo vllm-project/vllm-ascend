@@ -37,7 +37,6 @@ from vllm_ascend.ops.layer_shard_linear import (
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton
-from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
@@ -45,6 +44,7 @@ from vllm_ascend.utils import (
     dispose_layer,
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
+    get_weight_prefetch_method,
     maybe_trans_nz,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -378,7 +378,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-        self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
 
         # In sfa, prefill and decode have the same calculation formula,
         # so do not distinguish between prefill and decode here.
@@ -760,9 +759,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
-            maybe_npu_prefetch(
-                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states, enabled=self.enable_prefetch
-            )
+            weight_prefetch_method = get_weight_prefetch_method()
+            if weight_prefetch_method is not None:
+                weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
+                    inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
+                )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -867,12 +868,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
 
         attn_output = self._v_up_proj(attn_output)
-        maybe_npu_prefetch(
-            inputs=self.o_proj.weight,
-            dependency=attn_output,
-            max_size=MAX_O_PROJ_PREFETCH_SIZE,
-            enabled=self.enable_prefetch,
-        )
+        weight_prefetch_method = get_weight_prefetch_method()
+        if weight_prefetch_method is not None:
+            if not isinstance(
+                getattr(self.o_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod
+            ):
+                weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
+                    inputs=self.o_proj.weight,
+                    dependency=attn_output,
+                    max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                )
 
         if self.enable_dsa_cp and not self.enable_dsa_cp_prefill_only:
             # When using SFA-CP with pd mixed, o_proj has two cases:

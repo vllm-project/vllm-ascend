@@ -43,9 +43,9 @@ from vllm_ascend.ops.layer_shard_linear import (
     register_all_layers_to_shard_weight_series,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, maybe_trans_nz, weak_ref_tensors
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, get_weight_prefetch_method, maybe_trans_nz, vllm_version_is, weak_ref_tensors
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -703,7 +703,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-        self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
         self.enable_kv_nz = ascend_config.enable_kv_nz
 
         self.ring_mla_mask_size = 512
@@ -1412,9 +1411,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         if self.fused_qkv_a_proj is not None:
-            maybe_npu_prefetch(
-                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states, enabled=self.enable_prefetch
-            )
+            weight_prefetch_method = get_weight_prefetch_method()
+            if weight_prefetch_method is not None:
+                #print(f'MLAImple Layer {layer_name}: prefetch fused_qkv_a_proj weight ==========================================')
+                weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
+                    inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
+                )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -1545,13 +1547,19 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         # O proj
-        MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
-        maybe_npu_prefetch(
-            inputs=self.o_proj.weight,
-            dependency=o_proj_input,
-            max_size=MAX_O_PROJ_PREFETCH_SIZE,
-            enabled=self.enable_prefetch,
-        )
+        weight_prefetch_method = get_weight_prefetch_method()
+        if weight_prefetch_method is not None:
+            if not isinstance(
+                getattr(self.o_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod
+            ):
+                #print(f'MLAImple Layer {layer_name}: prefetch o_proj weight ==========================================')
+                weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
+                    inputs=self.o_proj.weight,
+                    dependency=o_proj_input,
+                    max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                )
+            # else:
+            #     print(f'MLAImpl Layer {layer_name}: skip prefetch o_proj weight for W8A8 quantization ==========================================')
 
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 

@@ -47,6 +47,7 @@ class WeightPrefetchMethod:
 
     def __init__(self, weight_prefetch_config: WeightPrefetchConfig) -> None:
         self.is_moe = is_moe_model(get_current_vllm_config())
+        self.other_prefetch_enable = weight_prefetch_config.enabled
 
         self.attn = ModuleWeightPrefetchConfig(
             module_name="attn",
@@ -94,6 +95,9 @@ class WeightPrefetchMethod:
         if not self.moe.is_active_this_forward:
             return
         forward_context = get_forward_context()
+        if not forward_context or forward_context.model_instance is None:
+            return
+
         # layer_idx is subtracted by 1 because layer_idx was incremented by 1 at layernorm.
         weight = forward_context.model_instance.model.layers[forward_context.layer_idx - 1].mlp.experts.w13_weight
         weight_size = weight.data.element_size() * weight.data.numel() * self.moe.prefetch_ratio.get(prefix, 0)
@@ -184,6 +188,19 @@ class WeightPrefetchMethod:
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
 
+    def maybe_prefetch_weight_in_current_stream(self,
+                            inputs: torch.Tensor,
+                            dependency: torch.Tensor,
+                            max_size: int = 0) -> None:
+        if not self.other_prefetch_enable:
+            return
+
+        input_size = inputs.element_size() * inputs.numel()
+        if max_size <= 0 or max_size > input_size:
+            max_size = input_size
+        torch.ops.vllm.prefetch_preprocess(weight=inputs,
+                                        start_flag=dependency,
+                                        max_weight_size=int(max_size))
 
 def maybe_npu_prefetch(
     inputs: torch.Tensor, dependency: torch.Tensor, max_size: int = 0, offset: int = 0, *, enabled: bool = True
