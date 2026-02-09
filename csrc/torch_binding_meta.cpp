@@ -468,6 +468,18 @@ at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq,
     at::Tensor out = at::empty({n_bs, n_kv_heads, n_max_kv}, torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
     return out;
 }
+
+at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input, 
+                                   const int64_t size) {
+    int64_t ySize = (input.size(0) + 7) / 8;
+    int64_t outDim = 0;
+    if (size != 0) {
+        outDim = ySize / size;
+    }
+
+    at::Tensor out = torch::empty({size, outDim}, torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));                                 
+    return out;
+}
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -512,5 +524,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_hamming_dist_top_k", &vllm_ascend::meta::npu_hamming_dist_top_k_meta);
     // reshape_and_cache_bnsd
     ops.impl("npu_reshape_and_cache_bnsd", &vllm_ascend::meta::npu_reshape_and_cache_bnsd_meta);
+    // npu_sign_bits_pack
+    ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
 }
 }
