@@ -44,8 +44,12 @@ from vllm_ascend.ops.layer_shard_linear import (
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, maybe_trans_nz, weak_ref_tensors
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, get_weight_prefetch_method, maybe_trans_nz, vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_ND,
+    get_weight_prefetch_method,
+    maybe_trans_nz,
+    weak_ref_tensors,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -1413,7 +1417,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.fused_qkv_a_proj is not None:
             weight_prefetch_method = get_weight_prefetch_method()
             if weight_prefetch_method is not None:
-                #print(f'MLAImple Layer {layer_name}: prefetch fused_qkv_a_proj weight ==========================================')
                 weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
                     inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
                 )
@@ -1549,18 +1552,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         # O proj
         weight_prefetch_method = get_weight_prefetch_method()
         if weight_prefetch_method is not None:
-            if not isinstance(
-                getattr(self.o_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod
-            ):
-                #print(f'MLAImple Layer {layer_name}: prefetch o_proj weight ==========================================')
+            # The prefetching of the weights of the o_proj matrix in the W8A8 scene is already performed once
+            # in AscendW8A8LinearMethod, so it is not needed here.
+            if not isinstance(getattr(self.o_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod):
                 weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
                     inputs=self.o_proj.weight,
                     dependency=o_proj_input,
                     max_size=MAX_O_PROJ_PREFETCH_SIZE,
                 )
-            # else:
-            #     print(f'MLAImpl Layer {layer_name}: skip prefetch o_proj weight for W8A8 quantization ==========================================')
-
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 
         del o_proj_input

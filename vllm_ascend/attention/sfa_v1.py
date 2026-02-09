@@ -870,9 +870,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_output = self._v_up_proj(attn_output)
         weight_prefetch_method = get_weight_prefetch_method()
         if weight_prefetch_method is not None:
-            if not isinstance(
-                getattr(self.o_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod
-            ):
+            # The prefetching of the weights of the o_proj matrix in the W8A8 scene is already performed once
+            # in AscendW8A8LinearMethod, so it is not needed here.
+            if not isinstance(getattr(self.o_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod):
                 weight_prefetch_method.maybe_prefetch_weight_in_current_stream(
                     inputs=self.o_proj.weight,
                     dependency=attn_output,

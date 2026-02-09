@@ -188,19 +188,17 @@ class WeightPrefetchMethod:
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
 
-    def maybe_prefetch_weight_in_current_stream(self,
-                            inputs: torch.Tensor,
-                            dependency: torch.Tensor,
-                            max_size: int = 0) -> None:
+    def maybe_prefetch_weight_in_current_stream(
+        self, inputs: torch.Tensor, dependency: torch.Tensor, max_size: int = 0
+    ) -> None:
         if not self.other_prefetch_enable:
             return
 
         input_size = inputs.element_size() * inputs.numel()
         if max_size <= 0 or max_size > input_size:
             max_size = input_size
-        torch.ops.vllm.prefetch_preprocess(weight=inputs,
-                                        start_flag=dependency,
-                                        max_weight_size=int(max_size))
+        torch.ops.vllm.prefetch_preprocess(weight=inputs, start_flag=dependency, max_weight_size=int(max_size))
+
 
 def maybe_npu_prefetch(
     inputs: torch.Tensor, dependency: torch.Tensor, max_size: int = 0, offset: int = 0, *, enabled: bool = True
