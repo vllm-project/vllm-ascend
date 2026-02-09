@@ -102,7 +102,7 @@ class TestBatchInvariant:
         (True, True),
         (False, False)
     ])
-    def test_has_ascendc_batch_invariant(self, custom_ops_available):
+    def test_has_ascendc_batch_invariant(self, custom_ops_available, expected_value):
         """Test HAS_ASCENDC_BATCH_INVARIANT detection"""
         # Control custom_ops availability
         if custom_ops_available:
@@ -166,7 +166,7 @@ class TestBatchInvariant:
         batch_invariant.enable_batch_invariant_mode()
         
         # Verify operator registrations
-        assert mock_library.impl.call_count == 4
+        assert mock_library.impl.call_count == 5
         mock_library.impl.assert_any_call("aten::addmm", batch_invariant.addmm_batch_invariant, "NPU")
         mock_library.impl.assert_any_call("aten::bmm", batch_invariant.bmm_batch_invariant, "NPU")
         mock_library.impl.assert_any_call("aten::mm", batch_invariant.mm_batch_invariant, "NPU")
@@ -215,13 +215,16 @@ class TestBatchInvariant:
             batch_invariant.override_envs_for_invariance.assert_not_called()
             batch_invariant.enable_batch_invariant_mode.assert_not_called()
             logger.warning.assert_called_once_with(
-                "Batch-invariant mode requested but Triton is not available.skipping batch-invariant initialization."
+                "Batch-invariant mode requested but Triton or AscendC batch-invariant "
+                "ops is not available.skipping batch-invariant initialization."
             )
         else:
             batch_invariant.override_envs_for_invariance.assert_not_called()
             batch_invariant.enable_batch_invariant_mode.assert_not_called()
-            logger.info.assert_not_called()
-            logger.warning.assert_not_called()
+            logger.warning.assert_called_once_with(
+                "Batch-invariant mode requested but Triton or AscendC batch-invariant "
+                "ops is not available.skipping batch-invariant initialization."
+            )
 
 
 if __name__ == "__main__":

@@ -107,5 +107,6 @@ def init_batch_invariance():
             enable_batch_invariant_mode()
         else:
             logger.warning(
-                "Batch-invariant mode requested but Triton is not available.skipping batch-invariant initialization.",
+                "Batch-invariant mode requested but Triton or AscendC batch-invariant "
+                "ops is not available.skipping batch-invariant initialization."
             )
