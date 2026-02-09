@@ -28,10 +28,12 @@ from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check im
 )
 from vllm_ascend.utils import vllm_version_is
 
+# isort: off
 if vllm_version_is("v0.15.0"):
-    from vllm.compilation.inductor_pass import get_pass_context
+    from vllm.compilation.inductor_pass import get_pass_context  # type: ignore
 else:
-    from vllm.compilation.passes.inductor_pass import get_pass_context
+    from vllm.compilation.passes.inductor_pass import get_pass_context  # type: ignore
+# isort: on
 
 
 # computation-communication tiling block is 512

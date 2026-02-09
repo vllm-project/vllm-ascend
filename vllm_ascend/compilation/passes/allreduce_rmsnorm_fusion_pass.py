@@ -25,10 +25,12 @@ from vllm.logger import logger
 
 from vllm_ascend.utils import vllm_version_is
 
+# isort: off
 if vllm_version_is("v0.15.0"):
-    from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+    from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
 else:
-    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
+    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass  # type: ignore
+# isort: on
 
 
 # computation-communication tiling block is 512

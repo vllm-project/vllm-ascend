@@ -21,12 +21,14 @@ from vllm.config import VllmConfig
 
 from vllm_ascend.utils import vllm_version_is
 
+# isort: off
 if vllm_version_is("v0.15.0"):
-    from vllm.compilation.inductor_pass import get_pass_context
-    from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+    from vllm.compilation.inductor_pass import get_pass_context  # type: ignore
+    from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
 else:
-    from vllm.compilation.passes.inductor_pass import get_pass_context
-    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
+    from vllm.compilation.passes.inductor_pass import get_pass_context  # type: ignore
+    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass  # type: ignore
+# isort: on
 
 
 class NpuGraphEXPassManager:
