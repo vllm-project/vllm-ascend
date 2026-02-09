@@ -26,7 +26,7 @@ import torch
 import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
-
+from vllm.config.kernel import IrOpPriorityConfig
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
@@ -540,6 +540,13 @@ class NPUPlatform(Platform):
     def support_static_graph_mode(cls) -> bool:
         return True
 
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        from vllm.config.kernel import IrOpPriorityConfig
+        return IrOpPriorityConfig.with_default(["ascend_c", "native"])
+    
     @classmethod
     def set_additional_forward_context(
         cls,
