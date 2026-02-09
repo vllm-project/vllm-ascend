@@ -431,7 +431,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.weights_proj = self.indexer.weights_proj
         self.k_norm = self.indexer.k_norm
         self.cp_size = 1
-
+        self.is_rope_neox_style = not getattr(self.vllm_config.model_config.hf_config, "indexer_rope_interleave", True)
         self.enable_dsa_cp = enable_dsa_cp()
         self.enable_dsa_cp_prefill_only = enable_dsa_cp_with_layer_shard()
         if self.enable_dsa_cp:
@@ -973,7 +973,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
-            q, k = rope_forward_triton(q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=False)
+            q, k = rope_forward_triton(
+                q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+            )
         else:
             k_pe, k_nope = torch.split(k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
 
