@@ -608,7 +608,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_manager.pcp_use_hybrid_attn and tokens_padded is not None:
                 num_scheduled_tokens_padded = np.array(tokens_padded, dtype=np.int32)
             # Re-update after PCP split sequences.
-            total_num_scheduled_tokens = sum(num_scheduled_tokens)
+            total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
             cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
             positions_np = self.positions.np[:total_num_scheduled_tokens]
@@ -809,7 +809,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
             logits_indices = nn.functional.pad(logits_indices, (0, max_num_reqs_across_dp - logits_indices.shape[0]))
 
-        return logits_indices, spec_decode_metadata, max_num_tokens_across_pcp, num_scheduled_tokens_padded
+        return logits_indices, spec_decode_metadata, max_num_tokens_across_pcp, num_scheduled_tokens_padded, total_num_scheduled_tokens
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
@@ -1132,6 +1132,7 @@ class NPUModelRunner(GPUModelRunner):
                     spec_decode_metadata,
                     max_num_tokens_across_pcp,
                     num_scheduled_tokens_padded,
+                    total_num_scheduled_tokens,
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
@@ -1200,7 +1201,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded = self._pad_query_start_loc_for_fia(num_tokens_padded, num_reqs_padded, num_reqs)
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
-                    num_tokens=num_tokens_unpadded,
+                    num_tokens=num_tokens_unpadded if not self.pcp_manager.pcp_use_hybrid_attn else total_num_scheduled_tokens,
                     num_tokens_padded=num_tokens_padded,
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded,

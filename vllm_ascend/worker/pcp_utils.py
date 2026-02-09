@@ -268,7 +268,7 @@ class PCPManager:
         self.pcp_padded_tokens_length = pcp_padded_arange.shape[0]
         # Build the mask that marks which positions in the padded allgather buffer
         # correspond to real (unpadded) tokens.
-        self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length] = self.pcp_padded_tokens_length < np.repeat(
+        self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length] = pcp_padded_arange < np.repeat(
             num_scheduled_tokens, num_padded_scheduled_tokens
         )
         unpad_mask_decode = self.pcp_unpad_mask_cpu[: self.num_decode_tokens * self.pcp_world_size]
@@ -405,10 +405,11 @@ class PCPManager:
             elif enter_fa_prefill_restore_idx is not None:
                 pcp_enter_fa_restore_idx = torch.from_numpy(enter_fa_prefill_restore_idx)
             self.pcp_enter_fa_restore_idx[:pcp_enter_fa_restore_idx.shape[0]].copy_(pcp_enter_fa_restore_idx.long(), non_blocking=True)
-
+            padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
+            padded_pos_start_loc[0] = 0
             if self.num_reqs > self.num_decode_reqs:
                 all_positions_prefill = [
-                    get_current_rank_positions(cu_padded_tokens, rank_i)[self.num_decode_tokens:] - self.num_decode_tokens * self.pcp_world_size
+                    get_current_rank_positions(padded_pos_start_loc, rank_i)[self.num_decode_tokens:] - self.num_decode_tokens * self.pcp_world_size
                     for rank_i in range(self.pcp_world_size)
                 ]
                 all_positions_prefill_tensor = torch.from_numpy(np.concatenate(all_positions_prefill))
@@ -430,13 +431,15 @@ class PCPManager:
                 pcp_fa_query_idx_tensor = torch.from_numpy(positions_prefill)                
                 self.pcp_fa_query_idx[:pcp_fa_query_idx_tensor.shape[0]].copy_(
                     pcp_fa_query_idx_tensor.long(), non_blocking=True)
-                self.pcp_tokens[:self.num_reqs] = pcp_tokens[:self.num_reqs]
+            self.pcp_tokens[:self.num_reqs] = pcp_tokens[:self.num_reqs]
+            if self.pcp_use_hybrid_attn:
+                self.total_num_sampled_tokens_pcp = num_scheduled_tokens[:self.num_reqs].sum()
+            else:
                 self.total_num_sampled_tokens_pcp = pcp_tokens[:self.num_reqs].sum()
-            return num_padded_scheduled_tokens, pcp_tokens, max_scheduled_tokens, positions_linear
+
+            return num_padded_scheduled_tokens, pcp_tokens[:self.num_reqs], max_scheduled_tokens, positions_linear
         else:
             # Build the restore index used after allgather.
-            padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
-            padded_pos_start_loc[0] = 0
             all_positions_lst = [
                 get_current_rank_positions(padded_pos_start_loc, rank_i) for rank_i in range(self.pcp_world_size)
             ]
@@ -444,9 +447,9 @@ class PCPManager:
             self.pcp_allgather_restore_idx.np[: all_positions.shape[0]] = all_positions.argsort()
             self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
 
-        self.pcp_tokens[:self.num_reqs] = pcp_tokens[:self.num_reqs]
-        self.total_num_sampled_tokens_pcp = pcp_tokens[:self.num_reqs].sum()
-        return pcp_tokens[:self.num_reqs], None, sum(pcp_tokens), positions
+            self.pcp_tokens[:self.num_reqs] = pcp_tokens[:self.num_reqs]
+            self.total_num_sampled_tokens_pcp = pcp_tokens[:self.num_reqs].sum()
+            return pcp_tokens[:self.num_reqs], None, sum(pcp_tokens), positions
 
     def get_logits_indices(self, cu_num_tokens: np.ndarray):
         return torch.from_numpy(cu_num_tokens) * self.pcp_world_size - self.num_pcp_pads_cpu_tensor[: self.num_reqs] - 1
@@ -872,7 +875,7 @@ class PCPManager:
                                                                                                      num_actual_tokens_pcp_padded]
                 else:
                     long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[:
-                                                                                                     total_num_scheduled_tokens - num_decodes]
+                                                                                                     sum(num_scheduled_tokens) - num_decodes]
 
                 long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[: num_actual_tokens_pcp_padded // self.pcp_world_size - num_decodes]
                 long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[: sum(pcp_unpad_mask) + num_decodes * (self.pcp_world_size - 1)]
