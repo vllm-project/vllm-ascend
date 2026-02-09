@@ -24,7 +24,6 @@ from compressed_tensors.quantization import QuantizationArgs, QuantizationStrate
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
@@ -40,18 +39,11 @@ from .methods import AscendLinearScheme, AscendMoEScheme
 logger = init_logger(__name__)
 
 
-# Remove the original compressed_tensors method to replace with our implementation
-def _remove_quantization_method():
-    if COMPRESSED_TENSORS_METHOD in QUANTIZATION_METHODS:
-        QUANTIZATION_METHODS.remove(COMPRESSED_TENSORS_METHOD)
-
-
-_remove_quantization_method()
-
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, "QuantizationArgs"] | None]
 
 
-@register_quantization_config(COMPRESSED_TENSORS_METHOD)
+# TODO: Remove all the AscendCompressedTensorsConfig implement when finishing all compressed-tensors schemes
+# @register_quantization_config(COMPRESSED_TENSORS_METHOD)
 class AscendCompressedTensorsConfig(QuantizationConfig):
     """Config class for LLM-Compressor (compressed_tensors) quantization on Ascend.
 

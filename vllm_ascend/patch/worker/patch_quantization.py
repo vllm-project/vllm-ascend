@@ -1,0 +1,13 @@
+import vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe as ct_moe_module
+import vllm.model_executor.layers.quantization.kernels.mixed_precision as mixed_precision_module
+from vllm.platforms import PlatformEnum
+
+from vllm_ascend.quantization.compressed_tensors.schemes.wNa16 import AscendW4A16FusedMoEMethod
+from vllm_ascend.quantization.kernels.mixed_precision.npu import AscendwNa16LinearKernel
+
+mixed_precision_module._POSSIBLE_KERNELS[PlatformEnum.OOT] = [AscendwNa16LinearKernel]
+
+ct_moe_module.CompressedTensorsWNA16MarlinMoEMethod.apply = AscendW4A16FusedMoEMethod.apply
+ct_moe_module.CompressedTensorsWNA16MarlinMoEMethod.process_weights_after_loading = (
+    AscendW4A16FusedMoEMethod.process_weights_after_loading
+)
