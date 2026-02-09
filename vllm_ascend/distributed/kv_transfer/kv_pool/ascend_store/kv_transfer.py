@@ -168,21 +168,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ends.append(end)
             keys.append(key.to_string())
 
-        # Create KV event
-        stored_event = None
-        if self.enable_kv_event:
-            new_block_hashes = [maybe_convert_block_hash(bh) for bh in req_meta.block_hashes]
-            stored_event = BlockStored(
-                block_hashes=new_block_hashes,
-                parent_block_hash=None,
-                token_ids=req_meta.token_ids,
-                block_size=req_meta.original_block_size,
-                lora_id=None,
-                medium="cpu",
-                lora_name=None,
-            )
-            logger.debug(f"Added kv cache event '{stored_event}' to kv cache events queue")
-
         if not self.dcp_size > 1:
             starts = starts[self.tp_rank % self.put_step :: self.put_step]
             ends = ends[self.tp_rank % self.put_step :: self.put_step]
@@ -219,10 +204,30 @@ class KVCacheStoreSendingThread(KVTransferThread):
             """
             addrs = []
             sizes = []
+            stored_events = []
+            prev_key = None
+            new_block_hashes = [maybe_convert_block_hash(bh) for bh in req_meta.block_hashes[skip_block_num:]]
             for index, start in enumerate(starts):
                 addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids)
                 addrs.append(addr)
                 sizes.append(size)
+
+                # Create KV event
+                if self.enable_kv_event:
+                    token_ids = req_meta.token_ids[start:start+req_meta.original_block_size]
+                    stored_event = BlockStored(
+                        block_hashes=new_block_hashes[index],
+                        parent_block_hash=prev_key,
+                        token_ids=token_ids,
+                        block_size=req_meta.original_block_size,
+                        lora_id=None,
+                        medium="cpu",
+                        lora_name=None,
+                    )
+                    stored_events.append(stored_event)
+                    prev_key = new_block_hashes[index]
+                    logger.debug(f"Added kv cache event '{stored_event}' to kv cache events queue")
+
 
             if self.kv_role == "kv_consumer":
                 keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
@@ -232,8 +237,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.m_store.put(keys, addrs, sizes)
 
             # TODO Query specific replica info to update the event
-            if self.enable_kv_event and stored_event is not None:
-                self.update_kv_event(stored_event)
+            if self.enable_kv_event and stored_events is not None:
+                self.update_kv_event(stored_events)
 
         self.dec_stored_request(req_id)
         self.request_queue.task_done()
@@ -346,27 +351,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             addr_list.append(addr)
             size_list.append(size)
 
-        # Create KV event
-        stored_event = None
-        if self.enable_kv_event:
-            new_block_hashes = [maybe_convert_block_hash(bh) for bh in req_meta.block_hashes]
-            stored_event = BlockStored(
-                block_hashes=new_block_hashes,
-                parent_block_hash=req_meta.parent_block_hash,
-                token_ids=req_meta.token_ids,
-                block_size=self.token_database.block_size,
-                lora_id=None,
-                medium="cpu",
-                lora_name=None,
-            )
-            logger.debug(f"Added kv cache event '{stored_event}' to kv cache events queue")
 
         if current_event is not None:
             current_event.synchronize()
         self.m_store.put(key_list, addr_list, size_list)
-
-        if self.enable_kv_event and stored_event is not None:
-            self.update_kv_event(stored_event)
 
         if layer_id == self.final_layer_id and is_last_chunk:
             self.set_finished_request(req_meta.req_id)

@@ -230,6 +230,7 @@ class KVPoolScheduler:
                         token_len=num_tokens_to_compute,
                         allocated_block_ids=new_block_ids,
                         num_saved_tokens=0,
+                        token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
                     )
                     self._request_trackers[req_id] = request_tracker
                     last_chunk_tokens_num = (
@@ -245,6 +246,7 @@ class KVPoolScheduler:
                         block_hashes=request_real.block_hashes,
                         is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
                         discard_partial_chunks=self._discard_partial_chunks,
+                        original_block_size=self.original_block_size,
                     )
 
                 # decode/chunked request
@@ -279,6 +281,7 @@ class KVPoolScheduler:
                         block_hashes=request.block_hashes,
                         is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
                         discard_partial_chunks=self._discard_partial_chunks,
+                        original_block_size=self.original_block_size,
                     )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -299,6 +302,7 @@ class KVPoolScheduler:
                     token_len=num_tokens_to_compute,
                     allocated_block_ids=block_ids,
                     num_saved_tokens=0,
+                    token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy()
                 )
 
                 self._request_trackers[request_id] = request_tracker
@@ -309,6 +313,7 @@ class KVPoolScheduler:
                     skip_save=None,
                     block_hashes=request.block_hashes,
                     discard_partial_chunks=self._discard_partial_chunks,
+                    original_block_size=self.original_block_size,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)

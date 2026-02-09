@@ -272,7 +272,6 @@ class RequestTracker:
         """Update the request tracker when a running request is
         scheduled again
         """
-        # TODO Check here to see if new_token_ids need to be updated
         if len(new_block_ids) == 0:
             new_block_ids = []
         elif isinstance(new_block_ids, tuple):
@@ -323,11 +322,11 @@ class ReqMeta:
 
         Args:
             tracker (RequestTracker): the request tracker.
-            block_size (int): the block size in AscendConnector. block_size = block_size * pcp_size * dcp_size
+            block_size (int): the block size in vLLM scheduler and AscendConnector. block_size = block_size * pcp_size * dcp_size
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
             skip_save (bool): whether to skip the save operation.
             discard_partial_chunks (bool): whether to discard partial chunks.
-            original_block_size (int | None): the block size in vLLM. This is only used for kv event generation.
+            original_block_size (int | None): the block size in vLLM worker. This is only used for kv event generation.
 
         Returns:
             the request metadata if we need to perform load/save
@@ -336,8 +335,6 @@ class ReqMeta:
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
-        if tracker.token_ids:
-            input_token_len = len(tracker.token_ids)
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
@@ -355,8 +352,10 @@ class ReqMeta:
         if not skip_save:
             tracker.num_saved_tokens = num_tokens_to_save
 
-        # Calculate the token ids and slot mappings for load and save
-        token_ids = tracker.token_ids[:num_tokens_to_save]
+        # Get the token ids for kv event generation in kv_transfer
+        token_ids = None
+        if tracker.token_ids:
+            token_ids = tracker.token_ids
 
         # # For load operation: check whether the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
