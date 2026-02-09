@@ -63,8 +63,8 @@ class AscendRequestState(RequestState):
         # NOTE(Ronald1995): Ascend NPUs do not support UVA yet,
         # so we use CpuGpuBuffer to allocate prefill_token_ids buffer.
         self.prefill_token_ids: CpuGpuBuffer = self._make_buffer(  # type: ignore
-            (self.max_num_reqs, self.max_model_len),
-            dtype=torch.int32)
+            (self.max_num_reqs, self.max_model_len), dtype=torch.int32
+        )
 
     def add_request(
         self,
@@ -75,7 +75,6 @@ class AscendRequestState(RequestState):
         sampling_params,
         lora_request,
     ):
-
         super().add_request(
             req_id,
             prompt_len,
@@ -93,7 +92,6 @@ def uva_wrapper():
     """Context manager to disable UVA for Ascend NPUs."""
 
     class UvaBufferWrapper:
-
         def __init__(self, *args, **kwargs):
             pass
 

@@ -18,7 +18,7 @@
 FROM quay.io/ascend/cann:8.5.0-910b-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-ARG MOONCAKE_TAG="v0.3.7.post2"
+ARG MOONCAKE_TAG="v0.3.8.post1"
 ARG SOC_VERSION="ascend910b1"
 
 # Define environments
@@ -37,7 +37,9 @@ RUN apt-get update -y && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     cd /vllm-workspace/Mooncake && bash mooncake_installer.sh -y && \
-    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/lib64 && \
+    ARCH=$(uname -m) && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64:$LD_LIBRARY_PATH && \
     mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \
     make -j$(nproc) && make install && \
     rm -fr /vllm-workspace/Mooncake/build && \

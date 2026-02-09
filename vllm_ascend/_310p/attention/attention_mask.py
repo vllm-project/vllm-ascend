@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,84 +15,140 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from collections.abc import Callable
-from typing import Any
-
 import torch
 import torch_npu
 
-import vllm_ascend.attention.attention_mask as _base_mask
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_spec
-
-_BASE_BUILDER: Callable[[torch.device], Any] = _base_mask.AttentionMaskBuilder
+from vllm_ascend.attention.attention_v1 import AscendMetadata
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d, nd_to_nz_spec
 
 
-def _gen_causal_additive_mask_fp16(max_seq_len: int, device: torch.device) -> torch.Tensor:
-    tril = torch.ones((max_seq_len, max_seq_len), dtype=torch.bool, device=device).tril_()
-    upper = ~tril
-    m = torch.zeros((max_seq_len, max_seq_len), dtype=torch.float16, device=device)
-    m.masked_fill_(upper, float("-inf"))
-    return m
-
-
-def build_splitfuse_attn_mask_310p(attn_metadata, device, *, full_mask_cache=None, full_mask_cache_len=0):
-    qsl = attn_metadata.query_start_loc.detach().to("cpu", dtype=torch.int32)
-    qlens = qsl[1:] - qsl[:-1]
-
-    context_lens = attn_metadata.seq_lens.to(dtype=torch.int32)
-    L = int(context_lens.max().item())
-
-    q_list = qlens.tolist()
-    c_list = context_lens.detach().to("cpu", dtype=torch.int64).tolist()
-    pos_list = [p for ql, cl in zip(q_list, c_list) for p in range(cl - ql, cl)]
-    position = torch.tensor(pos_list, dtype=torch.long, device=device)
-
-    if full_mask_cache is None or full_mask_cache.device != device or full_mask_cache_len < L:
-        tril = torch.ones((L, L), dtype=torch.bool, device=device).tril_()
-        full = torch.zeros((L, L), dtype=torch.float16, device=device)
-        full.masked_fill_(~tril, float("-inf"))
-        full_mask_cache, full_mask_cache_len = full, L
-    else:
-        full = full_mask_cache[:L, :L].contiguous()
-
-    rows = full.index_select(0, position).contiguous()
-    mask = torch_npu.npu_format_cast(nd_to_nz_spec(rows).contiguous(), ACL_FORMAT_FRACTAL_NZ)
-    return mask, full_mask_cache, full_mask_cache_len
-
-
-class _AttentionMaskBuilder310P:
-    """
-    310P adapter:
-      - overrides fp16 causal additive mask generation (use -inf fp16)
-      - delegates all other behaviors to base AttentionMaskBuilder
-      - pooling runner_type is NOT supported on 310P (explicit)
-    """
+class AttentionMaskBuilder310:
+    chunked_prefill_attn_mask = None
+    max_seqlen = 2048
 
     def __init__(self, device: torch.device):
-        self._base = _BASE_BUILDER(device)
+        """
+        Initializes the AttentionMaskBuilder for the 310P device.
 
-        self._fp16_mask_cache: torch.Tensor | None = None
-        self._fp16_mask_cached_len: int = 0
+        Args:
+            device (torch.device): The device on which tensors will be allocated.
+        """
+        self.attn_mask_cache = None
+        self.device = device
+        self.swa_mask = None
+        self._seq_len_cached = 0
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._base, name)
+    @staticmethod
+    def gen_causal_additive_mask(max_seq_len: int, device: torch.device):
+        """
+        Generates a standard causal lower-triangular attention mask.
 
-    @property
-    def device(self) -> torch.device:
-        return self._base.device
+        The upper triangular part is filled with negative infinity (float("-inf"))
+        to mask out future tokens, while the lower triangular part is kept as 0.
 
-    def _get_fp16_mask(self, max_seq_len: int) -> torch.Tensor:
-        if self._fp16_mask_cache is None or max_seq_len > self._fp16_mask_cached_len:
-            self._fp16_mask_cache = _gen_causal_additive_mask_fp16(max_seq_len, self.device)
-            self._fp16_mask_cached_len = max_seq_len
-        assert self._fp16_mask_cache is not None
-        return self._fp16_mask_cache[:max_seq_len, :max_seq_len].contiguous()
+        Args:
+            max_seq_len (int): The maximum sequence length for the mask.
+            device (torch.device): The target device for the tensor.
+
+        Returns:
+            torch.Tensor: A float16 tensor representing the causal mask.
+        """
+        tril = torch.ones((max_seq_len, max_seq_len), dtype=torch.bool, device=device).tril_()
+        upper = ~tril
+        mask = torch.zeros((max_seq_len, max_seq_len), dtype=torch.float16, device=device)
+        mask.masked_fill_(upper, float("-inf"))
+        return mask
+
+    @classmethod
+    def get_splitfuse_mask(cls, attn_metadata: AscendMetadata, device: torch.device):
+        """
+        Generates and formats the attention mask for SplitFuse (chunked prefill) decoding.
+
+        It calculates the specific indices required based on query start locations
+        and context lengths, selects the relevant parts from the global chunked
+        mask, and converts the result to the NPU-specific fractal format.
+
+        Args:
+            attn_metadata (AscendMetadata): Metadata containing query start locations and sequence lengths.
+            device (torch.device): The device to perform operations on.
+
+        Returns:
+            torch.Tensor: The splitfuse attention mask cast to ACL_FORMAT_FRACTAL_NZ.
+        """
+        if cls.chunked_prefill_attn_mask is None:
+            cls.chunked_prefill_attn_mask = cls.gen_causal_additive_mask(cls.max_seqlen, device)
+        qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
+        qlens = qsl[1:] - qsl[:-1]
+        q_list = qlens.tolist()
+        context_lens = attn_metadata.seq_lens.to("cpu", dtype=torch.int32)
+        c_list = context_lens.tolist()
+        pos_list = [p for ql, cl in zip(q_list, c_list) for p in range(cl - ql, cl)]
+        position = torch.tensor(pos_list, dtype=torch.int32, device=device)
+        splitfuse_mask = cls.chunked_prefill_attn_mask.index_select(0, position)
+        splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
+        return splitfuse_mask_nz
+
+    def get_swa_mask(self, dtype: torch.dtype, sliding_window):
+        """
+        Generates or retrieves a cached Sliding Window Attention (SWA) mask.
+
+        This mask allows attention only within a specific local window (diagonal band),
+        masking out tokens that are too far in the past or in the future.
+
+        Args:
+            dtype (torch.dtype): Data type of the mask.
+            sliding_window (int): The size of the sliding window.
+
+        Returns:
+            torch.Tensor: The SWA mask cast to ACL_FORMAT_FRACTAL_NZ.
+        """
+        assert dtype == torch.float16
+        if sliding_window is not None and self.swa_mask is None:
+            mask = torch.ones(self.max_seqlen, self.max_seqlen, dtype=torch.bool)
+            triu_mask = torch.triu(mask, diagonal=1).to(self.device)
+            tril_mask = torch.tril(mask, -sliding_window).to(self.device)
+            mask = triu_mask + tril_mask
+            swa_mask = torch.zeros((self.max_seqlen, self.max_seqlen), dtype=dtype, device=self.device)
+            swa_mask.masked_fill_(mask, float("-inf"))
+            self.swa_mask = torch_npu.npu_format_cast(nd_to_nz_2d(swa_mask), ACL_FORMAT_FRACTAL_NZ)
+        return self.swa_mask
 
     def get_attention_mask(self, model_config) -> torch.Tensor:
+        """
+        Retrieves the appropriate attention mask based on the model configuration.
+
+        It explicitly checks for 'pooling' runner types which are not supported
+        on 310P hardware.
+
+        Args:
+            model_config: Configuration object containing runner details.
+
+        Returns:
+            torch.Tensor: The causal attention mask.
+
+        Raises:
+            NotImplementedError: If the runner_type is 'pooling'.
+        """
         if getattr(model_config, "runner_type", None) == "pooling":
+            # TODO: pooling model will be supported soon.
             raise NotImplementedError("310P does not support runner_type='pooling'")
-        return self._get_fp16_mask(2048)
+        return self._get_causal_mask(self.max_seqlen)
 
+    def _get_causal_mask(self, max_seq_len: int) -> torch.Tensor:
+        """
+        Internal method to get or update the cached causal attention mask.
 
-def AttentionMaskBuilder(device: torch.device) -> _AttentionMaskBuilder310P:
-    return _AttentionMaskBuilder310P(device)
+        If the cache is empty or the requested length exceeds the cached length,
+        a new mask is generated and converted to the NPU fractal format.
+
+        Args:
+            max_seq_len (int): The required sequence length.
+
+        Returns:
+            torch.Tensor: The cached causal mask in ACL_FORMAT_FRACTAL_NZ.
+        """
+        if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
+            attn_mask = self.gen_causal_additive_mask(max_seq_len, self.device)
+            self.attn_mask_cache = torch_npu.npu_format_cast(nd_to_nz_2d(attn_mask), ACL_FORMAT_FRACTAL_NZ)
+            self._seq_len_cached = max_seq_len
+        return self.attn_mask_cache
