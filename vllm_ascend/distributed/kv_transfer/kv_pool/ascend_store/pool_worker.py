@@ -321,8 +321,9 @@ class KVPoolWorker:
                 logger.debug(f"Retrieved {num_retrieved_tokens} tokens")
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        invalid_blocks = self._invalid_block_ids.copy()
-        self._invalid_block_ids.clear()
+        with self._invalid_block_ids_lock:
+            invalid_blocks = self._invalid_block_ids.copy()
+            self._invalid_block_ids.clear()
         return invalid_blocks
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
