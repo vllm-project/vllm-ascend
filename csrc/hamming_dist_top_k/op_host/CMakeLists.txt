@@ -16,8 +16,6 @@ add_ops_compile_options(
                 --op_relocatable_kernel_binary=true
 )
 
-set(hamming_dist_top_k PARENT_SCOPE)
-
 target_sources(op_host_aclnn PRIVATE
         hamming_dist_top_k_def.cpp
 )
