@@ -72,8 +72,8 @@ def create_scheme_for_layer(
     scheme_cls = get_scheme_class(quant_type, layer_type)
     if scheme_cls is not None:
         return scheme_cls()
-
-    raise NotImplementedError(f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}.")
+    else:
+        raise NotImplementedError(f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}.")
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)

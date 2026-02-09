@@ -48,6 +48,8 @@ class AllGatherCommImpl310(AllGatherCommImpl):
         w2_scale: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
     ) -> FusedExpertsResult:
+        # This method is overridden to use the 310p-specific unified_apply_mlp
+        # which provides optimized MLP computation for the 310p platform
         moe_comm_method = get_forward_context().moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
