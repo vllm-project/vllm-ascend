@@ -10,6 +10,11 @@ NC="\033[0m" # No Color
 
 # Configuration
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+# cann and atb environment setup
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/cann-8.5.0/share/info/ascendnpu-ir/bin/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
 # Home path for aisbench
 export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
 
@@ -18,7 +23,7 @@ export VLLM_LOGGING_LEVEL="INFO"
 # Reduce glog verbosity for mooncake
 export GLOG_minloglevel=1
 # Set transformers to offline mode to avoid downloading models during tests
-export TRANSFORMERS_OFFLINE="1"
+export HF_HUB_OFFLINE="1"
 
 # Function to print section headers
 print_section() {
@@ -125,33 +130,12 @@ install_extra_components() {
     echo "====> Extra components installation completed"
 }
 
-install_triton_ascend() {
-    echo "====> Installing triton_ascend"
-    apt-get update && apt-get install -y clang-15
-    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+show_triton_ascend_info() {
+    echo "====> Check triton ascend info"
     clang -v
-
-    BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
-    BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-
-    if ! wget -q -O "${BISHENG_NAME}" "${BISHENG_URL}"; then
-        echo "Failed to download ${BISHENG_NAME}"
-        return 1
-    fi
-    chmod +x "${BISHENG_NAME}"
-
-    if ! "./${BISHENG_NAME}" --install; then
-        rm -f "${BISHENG_NAME}"
-        echo "Failed to install ${BISHENG_NAME}"
-        return 1
-    fi
-    rm -f "${BISHENG_NAME}"
-
-    export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
     which bishengir-compile
-    python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
-    echo "====> Triton ascend installation completed"
+    pip show triton-ascend
 }
 
 kill_npu_processes() {
@@ -181,7 +165,7 @@ main() {
     check_npu_info
     check_and_config
     show_vllm_info
-    install_triton_ascend
+    show_triton_ascend_info
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
     fi

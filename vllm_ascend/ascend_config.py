@@ -14,10 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import warnings
 from typing import TYPE_CHECKING
 
 from vllm.logger import logger
-from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -37,6 +38,9 @@ class AscendConfig:
         ascend_compilation_config = additional_config.get("ascend_compilation_config", {})
         self.ascend_compilation_config = AscendCompilationConfig(**ascend_compilation_config)
 
+        ascend_fusion_config = additional_config.get("ascend_fusion_config", {})
+        self.ascend_fusion_config = AscendFusionConfig(**ascend_fusion_config)
+
         finegrained_tp_config = additional_config.get("finegrained_tp_config", {})
         self.finegrained_tp_config = FinegrainedTPConfig(finegrained_tp_config, vllm_config)
 
@@ -45,9 +49,7 @@ class AscendConfig:
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)
-
-        weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
-        self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
+        self._construct_weight_prefetch_config(additional_config)
         self.layer_sharding = additional_config.get("layer_sharding", None)
         logger.info_once(
             f"Linear layer sharding enabled with config: {self.layer_sharding}. "
@@ -58,11 +60,27 @@ class AscendConfig:
         self.enable_shared_expert_dp = (
             additional_config.get("enable_shared_expert_dp", False)
             and vllm_config.parallel_config.enable_expert_parallel
+            and vllm_config.parallel_config.tensor_parallel_size > 1
         )
-        if self.enable_shared_expert_dp:
-            from vllm_ascend.utils import enable_sp
+        from vllm_ascend.utils import enable_sp
 
+        if self.enable_shared_expert_dp:
             assert enable_sp(vllm_config=vllm_config, enable_shared_expert_dp=True)
+
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vllm_config):
+            tp_pcp_size = (
+                vllm_config.parallel_config.tensor_parallel_size
+                * vllm_config.parallel_config.prefill_context_parallel_size
+            )
+            if vllm_config.scheduler_config.max_num_batched_tokens % tp_pcp_size != 0:
+                vllm_config.scheduler_config.max_num_batched_tokens = (
+                    cdiv(vllm_config.scheduler_config.max_num_batched_tokens, tp_pcp_size) * tp_pcp_size
+                )
+                logger.warning_once(
+                    f"When using FLASHCOMM1, the max_num_batched_tokens should be divisible"
+                    f"by tp_size * pcp_size ({tp_pcp_size}). It has been adjusted to"
+                    f"{vllm_config.scheduler_config.max_num_batched_tokens}."
+                )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
@@ -99,7 +117,8 @@ class AscendConfig:
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
 
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)
-        self.enable_npugraph_ex = additional_config.get("enable_npugraph_ex", False)
+        npugraph_ex_config = additional_config.get("npugraph_ex_config", {})
+        self.npugraph_ex_config = NpugraphExConfig(**npugraph_ex_config)
         # We find that _npu_paged_attention still performs better than
         # npu_fused_infer_attention_score in some cases. We allow to execute
         # _npu_paged_attention in this cases. This should be removed once
@@ -117,6 +136,29 @@ class AscendConfig:
                 raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
+
+    def _construct_weight_prefetch_config(self, additional_config):
+        weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
+        self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
+        # Deprecated env var handling for backward compatibility
+        if os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0") == "1":
+            MAX_PREFETCH_WEIGHT_SIZE: int = 18 * 1024 * 1024
+            gate_up_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
+            down_prefetch_szie = int(os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
+            self.weight_prefetch_config.set_mlp_pre_version_compatibale_config(
+                gate_up_prefetch_size, down_prefetch_szie
+            )
+            logger.info_once(
+                f"MLP weight prefetch enabled from env variable VLLM_ASCEND_ENABLE_PREFETCH_MLP."
+                f"gate_up_prefetch_size={gate_up_prefetch_size}, "
+                f"down_prefetch_szie={down_prefetch_szie}."
+            )
+            warnings.warn(
+                "VLLM_ASCEND_ENABLE_PREFETCH_MLP is deprecated and will be removed in a v0.16.0 version. "
+                "Please use weight_prefetch_config in additional-config for now instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
 
 class FinegrainedTPConfig:
@@ -169,7 +211,9 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, fuse_norm_quant: bool = True, fuse_qknorm_rope: bool = False, **kwargs):
+    def __init__(
+        self, fuse_norm_quant: bool = True, fuse_qknorm_rope: bool = True, fuse_allreduce_rms: bool = False, **kwargs
+    ):
         """
         Initialize the configuration.
 
@@ -178,11 +222,80 @@ class AscendCompilationConfig:
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: True
+            fuse_allreduce_rms (bool): Whether to enable allreduce and addrmsnorm fusion optimization.
                 Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
-        self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
+        self.fuse_qknorm_rope = fuse_qknorm_rope
+        self.fuse_allreduce_rms = fuse_allreduce_rms
+
+
+class AscendFusionConfig:
+    """
+    Configuration for controlling whether to use a fused operator gmmswigluquant.
+    """
+
+    def __init__(self, fusion_ops_gmmswigluquant: bool = True, **kwargs):
+        """
+        Initialize the configuration.
+
+        Args:
+            fusion_ops_gmmswigluquant (bool): Whether to use a fused operator gmmswigluquant.
+                When set to True, the system will use a fused operator gmmswigluquant.
+                Default: True
+            **kwargs: Additional optional parameters for forward compatibility and configuration extension.
+        """
+        self.fusion_ops_gmmswigluquant = fusion_ops_gmmswigluquant
+
+
+class NpugraphExConfig:
+    """
+    Configuration for controlling the behavior of npugraph_ex backend.
+
+    This class provides a way to configure whether to use the npugraph_ex backend and static kernel.
+    These configurations can directly impact the performance and behavior of models deployed on Ascend platforms.
+    """
+
+    def __init__(
+        self,
+        enable: bool = False,
+        enable_static_kernel: bool = False,
+        fuse_norm_quant: bool = True,
+        fuse_qknorm_rope: bool = True,
+        fuse_allreduce_rms: bool = False,
+        **kwargs,
+    ):
+        """
+        Initialize the configuration.
+
+        Args:
+            enable (bool): Whether to enable npugraph_ex backend.
+                When set to True, the Fx graph generated by Dymano will be
+                optimized and compiled by the npugraph_ex backend.
+                Default: False
+            enable_static_kernel (bool): Whether to enable static kernel.
+                Static kernel is suitable for scenarios with purely static shapes
+                or minimal shape changes, and can improve network performance.
+                When set to True, when during graph capture, it will compile operator
+                binary files with the corresponding shapes based on the current batch_size,
+                which usually takes some time.
+                Default: False
+            fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
+                When set to True, the system will optimize norm and quant operations.
+                Default: True
+            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: True
+            fuse_allreduce_rms (bool): Whether to enable allreduce and addrmsnorm fusion optimization.
+                Default: False
+            **kwargs: Additional optional parameters for forward compatibility and configuration extension.
+        """
+        self.enable = enable
+        self.enable_static_kernel = enable_static_kernel
+        self.fuse_norm_quant = fuse_norm_quant
+        self.fuse_qknorm_rope = fuse_qknorm_rope
+        self.fuse_allreduce_rms = fuse_allreduce_rms
 
 
 class XliteGraphConfig:
@@ -214,17 +327,27 @@ class WeightPrefetchConfig:
     Configuration Object for weight_prefetch_config from additional_config
     """
 
+    mlp_pre_version_compatibale_config: dict = {}
+
     prefetch_ratio: dict = {
         "attn": {
             "qkv": 1.0,
             "o": 1.0,
         },
         "moe": {"gate_up": 0.8},
+        "mlp": {"gate_up": 1, "down": 1.0},
     }
 
     def __init__(self, weight_prefetch_config: dict):
         self.enabled = weight_prefetch_config.get("enabled", False)
         self.prefetch_ratio = weight_prefetch_config.get("prefetch_ratio", self.prefetch_ratio)
+
+    def set_mlp_pre_version_compatibale_config(self, gate_up_prefetch_size: int, down_prefetch_size: int):
+        config = {
+            "gate_up": gate_up_prefetch_size,
+            "down": down_prefetch_size,
+        }
+        self.mlp_pre_version_compatibale_config = config
 
 
 class EplbConfig:

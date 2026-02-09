@@ -78,7 +78,7 @@ __aicore__ inline void MoeCustomFullLoadUnquantized<T>::Process()
         this->CopyIn();
         this->Compute();
 
-        // vaild expert equal zero
+        // valid expert equal zero
         if (this->needCoreNum_ < 1) {
             if (this->blockIdx_ == 0) {
                 if (this->rowIdxType_ == GATHER) {

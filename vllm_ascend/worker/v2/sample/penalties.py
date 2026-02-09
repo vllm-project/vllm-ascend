@@ -20,7 +20,7 @@
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
+from vllm.v1.sample.metadata import SamplingMetadata
 
 
 @triton.jit
@@ -68,29 +68,33 @@ def _penalties_and_temperature_kernel(
     if use_penalty:
         req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
         output_bin_counts = tl.load(
-            output_bin_counts_ptr + req_state_idx * output_bin_counts_stride +
-            block,
+            output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + block,
             mask=mask,
         )
-        output_bin_mask = output_bin_counts > 0
+        # to use vector core, if use > 0 will use scalar to slow down performance
+        output_bin_mask = output_bin_counts != 0
 
         # Apply repetition penalties.
         if use_rep_penalty:
-            packed_block = block_idx * BLOCK_SIZE // 32 + tl.arange(
-                0, BLOCK_SIZE // 32)
+            packed_block = block_idx * BLOCK_SIZE // 32 + tl.arange(0, BLOCK_SIZE // 32)
             packed_mask = tl.load(
-                prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride +
-                packed_block,
+                prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride + packed_block,
                 mask=packed_block < tl.cdiv(vocab_size, 32),
             )
-            prompt_bin_mask = (packed_mask[:, None] >>
-                               (tl.arange(0, 32)[None, :])) & 1
+            # the compiler itself does not optimize right-shift operations, so we change the same func
+            bit_masks = 1 << tl.arange(0, 32)
+            bit_masks_expanded = bit_masks[None, :]
+
+            packed_expanded = packed_mask[:, None]
+            bits_matrix = (packed_expanded & bit_masks_expanded) != 0
+
+            prompt_bin_mask = bits_matrix.reshape(BLOCK_SIZE)
+
             prompt_bin_mask = prompt_bin_mask.to(tl.int1)
             prompt_bin_mask = prompt_bin_mask.reshape(BLOCK_SIZE)
 
             # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
-            scale = tl.where(prompt_bin_mask | output_bin_mask, rep_penalty,
-                             1.0)
+            scale = tl.where(prompt_bin_mask | output_bin_mask, rep_penalty, 1.0)
             # If logits are positive, divide by penalty, otherwise multiply by penalty.
             logits *= tl.where(logits > 0, 1.0 / scale, scale)
 

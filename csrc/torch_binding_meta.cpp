@@ -36,24 +36,6 @@
 namespace vllm_ascend {
 namespace meta {
 const int64_t INT4_NUMS_IN_INT32 = 8;
-std::tuple<at::Tensor, at::Tensor> rotary_embedding_meta(
-  at::Tensor &positions,
-  at::Tensor &query,
-  at::Tensor &key,
-  int64_t head_size,
-  at::Tensor &cos_sin_cache,
-  bool is_neox) {
-    auto num_tokens = positions.sym_numel();
-    auto query_hidden_size = query.sym_numel() / num_tokens;
-    auto key_hidden_size = key.sym_numel() / num_tokens;
-
-    auto num_heads = query_hidden_size / head_size;
-    auto num_kv_heads = key_hidden_size / head_size;
-    at::Tensor query_dst = at::empty_symint({num_tokens, num_heads, head_size}, query.options());
-    at::Tensor key_dst = at::empty_symint({num_tokens, num_kv_heads, head_size}, key.options());
-
-    return {query_dst, key_dst};
-}
 
 std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     at::Tensor &input,
@@ -194,7 +176,7 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
     return;
 }
 
-at::Tensor& dispatch_ffn_combine_meta(
+std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& x,
     const at::TensorList& weight1,
     const at::TensorList& weight2,
@@ -204,9 +186,10 @@ at::Tensor& dispatch_ffn_combine_meta(
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
-    at::Tensor& out
+    at::Tensor& out,
+    at::Tensor& expert_token_nums
 ) {
-    return out;
+    return {out, expert_token_nums};
 }
 
 at::Tensor npu_lightning_indexer_meta(
@@ -403,6 +386,51 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
 }
+
+std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
+    const at::Tensor& x1,
+    const at::Tensor& x2,
+    const at::Tensor& gamma,
+    const c10::optional<at::Tensor> &beta,
+    double epsilon)
+{
+    int64_t dim_x = x1.dim();
+    int64_t dim_gamma = gamma.dim();
+    int64_t diff = dim_x - dim_gamma;
+    c10::SymDimVector new_shape;
+    at::Tensor rstd;
+    
+    if (diff > 0) {
+        new_shape.reserve(dim_x);
+        auto x1_sizes = x1.sym_sizes();
+        for (int64_t i = 0; i < diff; ++i) {
+            new_shape.push_back(x1_sizes[i]);
+        }
+        for (int64_t i = 0; i < dim_gamma; ++i) {
+            new_shape.push_back(c10::SymInt(1));
+        }
+    } else {
+        new_shape.assign(dim_x, c10::SymInt(1));
+    }
+    rstd = at::empty_symint(new_shape, x1.options().dtype(at::kFloat));
+    at::Tensor y = at::empty_symint(x1.sym_sizes(), x1.options());
+    at::Tensor x = at::empty_symint(x1.sym_sizes(), x1.options());
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
+}
+
+void transpose_kv_cache_by_block_meta(
+    const at::TensorList &k_cache,
+    const at::TensorList &v_cache,
+    const at::Tensor &block_ids,
+    int64_t block_size,
+    int64_t head_num,
+    int64_t head_dim,
+    int64_t split_num,
+    int64_t layer_num)
+{
+    return;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -411,8 +439,6 @@ namespace {
 // the custom kernel been captured into aclgraph
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
 
-    // Rotary embedding meta implementation
-    ops.impl("rotary_embedding", &vllm_ascend::meta::rotary_embedding_meta);
     // Masked input and mask meta implementation
     ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
     // Bgmv expand
@@ -441,5 +467,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_moe_init_routing_custom", &vllm_ascend::meta::npu_moe_init_routing_custom_meta);
     // Moe_gating_top_k
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
+    // Add_Rms_Norm_Bias
+    ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
+    // transpose_kv_cache_by_block
+    ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
 }
 }

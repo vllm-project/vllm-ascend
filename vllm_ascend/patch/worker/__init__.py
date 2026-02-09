@@ -22,9 +22,9 @@ if HAS_TRITON:
 
 # isort: off
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
+import vllm_ascend.patch.worker.patch_unquantized_gemm  # noqa
 import vllm_ascend.patch.worker.patch_bert  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
-import vllm_ascend.patch.worker.patch_deepseek  # noqa
 import vllm_ascend.patch.worker.patch_multimodal_merge  # noqa
 import vllm_ascend.patch.worker.patch_rope  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
@@ -32,3 +32,4 @@ import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
 import vllm_ascend.patch.worker.patch_v2_egale  # noqa
+import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa

@@ -17,17 +17,27 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request: 
+    branches:
+      - 'main'
+    types: [ labeled, synchronize ]
   workflow_dispatch:
     inputs:
       tag:
         description: 'Docker tag for build results'
-        type: string
         default: main
         required: true
+        type: choice
+        options:
+          - main
+          - v0.15.0rc1
+          - v0.14.0rc1
+          - v0.13.0rc3
 
 jobs:
   image_build:
     name: Image Build and Push
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'image-build')  }}
     strategy:
       matrix:
         build_meta:
@@ -43,16 +53,18 @@ jobs:
           - name: A3 openEuler
             dockerfile: Dockerfile.a3.openEuler
             suffix: 'a3-openeuler'
-          # - name: 310P Ubuntu
-          #   dockerfile: Dockerfile.310p
-          # - name: 310P openEuler
-          #   dockerfile: Dockerfile.310p.openEuler
+          - name: 310P Ubuntu
+            dockerfile: Dockerfile.310p
+            suffix: '310p'
+          - name: 310P openEuler
+            dockerfile: Dockerfile.310p.openEuler
+            suffix: '310p-openeuler'
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
       quay_username: ${{ vars.QUAY_USERNAME }}
-      should_push: ${{ github.repository_owner == 'vllm-project' }}
+      should_push: ${{ github.repository_owner == 'vllm-project' && (github.event_name != 'pull_request') }}
       workflow_dispatch_tag: ${{ inputs.tag }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}

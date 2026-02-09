@@ -105,75 +105,6 @@ AscendType get_dtype_from_torch(at::ScalarType scalarType)
     }
 }
 
-std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::Tensor &query, at::Tensor &key,
-    int64_t head_size, at::Tensor &cos_sin_cache,  bool is_neox)
-{
-    int32_t deviceId = 0;
-    int64_t num_tokens = positions.numel();
-    int positions_ndim = positions.dim();
-    TORCH_CHECK(
-        positions_ndim == 1 || positions_ndim == 2,
-        "positions must have shape [num_tokens] or [batch_size, seq_len]");
-    if (positions_ndim == 1) {
-      TORCH_CHECK(
-          query.size(0) == positions.size(0) && key.size(0) == positions.size(0),
-          "query, key and positions must have the same number of tokens");
-    }
-    if (positions_ndim == 2) {
-      TORCH_CHECK(
-          query.size(0) == positions.size(0) &&
-              key.size(0) == positions.size(0) &&
-              query.size(1) == positions.size(1) &&
-              key.size(1) == positions.size(1),
-          "query, key and positions must have the same batch_size and seq_len");
-    }
-    TORCH_CHECK(head_size % 32 == 0, "rotary_embedding: headSize should be divisible by 32");
-    int query_hidden_size = query.numel() / num_tokens;
-    int key_hidden_size = key.numel() / num_tokens;
-    TORCH_CHECK(query_hidden_size % head_size == 0);
-    TORCH_CHECK(key_hidden_size % head_size == 0);
-    TORCH_CHECK(is_neox == true, "rotary_embedding: neox=false is not supported as custom kernel in vllm-ascend");
-
-    // Make sure query and key have consistent number of heads
-    int num_heads = query_hidden_size / head_size;
-    int num_kv_heads = key_hidden_size / head_size;
-    TORCH_CHECK(num_heads % num_kv_heads == 0);
-    at::Tensor query_dst = at::empty({num_tokens, num_heads, head_size}, query.options());
-    at::Tensor key_dst = at::empty({num_tokens, num_kv_heads, head_size}, key.options());
-
-    int rot_dim = cos_sin_cache.size(1);
-    int seq_dim_idx = positions_ndim - 1;
-    int64_t *position_ids_ptr = positions.data_ptr<int64_t>();
-    void *query_dst_ptr = query_dst.data_ptr();
-    void *key_dst_ptr = key_dst.data_ptr();
-    void *query_ptr = query.data_ptr();
-    void *key_ptr = key.data_ptr();
-    void *cos_sin_cache_ptr = cos_sin_cache.data_ptr();
-    int64_t query_stride = query.stride(seq_dim_idx);
-    int64_t key_stride = key.stride(seq_dim_idx);
-    int64_t dst_query_stride = query_dst.stride(0);
-    int64_t dst_key_stride = key_dst.stride(0);
-    at::ScalarType scalar_type = query.scalar_type();
-    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-    at_npu::native::OpCommand cmd;
-    cmd.Name("rotary_embedding");
-    cmd.SetCustomHandler([scalar_type, is_neox, num_tokens, stream, position_ids_ptr, query_dst_ptr, key_dst_ptr,
-                          query_ptr, key_ptr, cos_sin_cache_ptr, rot_dim, query_stride, key_stride,
-                          dst_query_stride, dst_key_stride, num_heads, num_kv_heads, head_size]() -> int {
-        auto dtype_num = get_dtype_from_torch(scalar_type);
-        int device_id = 0;
-        int64_t aiv_num = 0;
-        TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
-        uint32_t loop_cnt = (num_tokens + aiv_num - 1) / aiv_num;
-        rotary_embedding_impl(dtype_num, is_neox, stream, position_ids_ptr, query_dst_ptr, key_dst_ptr, query_ptr,
-                                key_ptr, cos_sin_cache_ptr, rot_dim, query_stride, key_stride, dst_query_stride,
-                                dst_key_stride, num_heads, num_kv_heads, head_size, num_tokens, loop_cnt, aiv_num);
-        return 0;
-    });
-    cmd.Run();
-    return {query_dst, key_dst};
-}
-
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState, const at::Tensor &wdqkv,
     const c10::optional<at::Tensor> &descale0, const at::Tensor &gamma1, const c10::optional<at::Tensor> &beta1, const at::Tensor &wuq,
@@ -725,7 +656,7 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
     return;
 }
 
-at::Tensor& dispatch_ffn_combine(
+std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     const at::Tensor& x,
     const at::TensorList& weight1,
     const at::TensorList& weight2,
@@ -735,10 +666,13 @@ at::Tensor& dispatch_ffn_combine(
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
-    at::Tensor& out
+    at::Tensor& out,
+    at::Tensor& expert_token_nums
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
-    EXEC_NPU_CMD(aclnnDispatchFFNCombine,
+    bool is_int8 = weight1[0].dtype() == at::kChar;
+    if (is_int8) {
+        EXEC_NPU_CMD(aclnnDispatchFFNCombine,
                  x,
                  weight1,
                  weight2,
@@ -748,8 +682,23 @@ at::Tensor& dispatch_ffn_combine(
                  probs,
                  group_ep_ptr,
                  max_output_size,
-                 out);
-    return out;
+                 out,
+                 expert_token_nums);
+    } else {
+        EXEC_NPU_CMD(aclnnDispatchFFNCombineBF16,
+                 x,
+                 weight1,
+                 weight2,
+                 expert_idx,
+                 scale1,
+                 scale2,
+                 probs,
+                 group_ep_ptr,
+                 max_output_size,
+                 out,
+                 expert_token_nums);
+    }    
+    return {out, expert_token_nums};
 }
 
 at::Tensor npu_lightning_indexer(
@@ -1219,6 +1168,26 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_
     return std::tie(expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale);
 }
 
+at::Tensor npu_apply_top_k_top_p(
+    const at::Tensor& logits,
+    const c10::optional<at::Tensor>& p,
+    const c10::optional<at::Tensor>& k)
+{
+    TORCH_CHECK(p.has_value() || k.has_value(),
+                "apply_top_k_top_p: p and k cannot be None at the same time.");
+
+    at::Tensor out = at::empty_like(logits);
+
+    EXEC_NPU_CMD(
+        aclnnApplyTopKTopPCustom,
+        logits,
+        p,
+        k,
+        out);
+
+    return out;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k(
     const at::Tensor& x,
     int64_t k,
@@ -1273,6 +1242,54 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
 }
 
+std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias(
+    const at::Tensor& x1,
+    const at::Tensor& x2,
+    const at::Tensor& gamma,
+    const c10::optional<at::Tensor> &beta,
+    double epsilon)
+{
+    int64_t dim_x = x1.dim();
+    int64_t dim_gamma = gamma.dim();
+    int64_t diff = dim_x - dim_gamma;
+    std::vector<int64_t> new_shape;
+    at::Tensor rstd;
+    
+    if (diff > 0) {
+        new_shape.reserve(dim_x);
+        auto x1_sizes = x1.sizes();
+        for (int64_t i = 0; i < diff; ++i) {
+            new_shape.push_back(x1_sizes[i]);
+        }
+        for (int64_t i = 0; i < dim_gamma; ++i) {
+            new_shape.push_back(1);
+        }
+    } else {
+        new_shape.assign(dim_x, 1);
+    }
+    rstd = at::empty(new_shape, x1.options().dtype(at::kFloat));
+    at::Tensor y = at::empty(x1.sizes(), x1.options());
+    at::Tensor x = at::empty(x1.sizes(), x1.options());
+    EXEC_NPU_CMD(aclnnAddRmsNormBias, x1, x2, gamma, beta, epsilon, y, rstd, x);
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
+}
+
+void transpose_kv_cache_by_block(
+    const at::TensorList &kCache,
+    const at::TensorList &vCache,
+    const at::Tensor &blockIDs,
+    int64_t blockSize,
+    int64_t headNum,
+    int64_t headDim,
+    int64_t splitNum,
+    int64_t layerNum)
+{
+
+    EXEC_NPU_CMD(aclnnTransposeKvCacheByBlock, kCache, vCache, blockIDs,
+                 blockSize, headNum, headDim, splitNum, layerNum);
+
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -1281,14 +1298,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     // vLLM-Ascend custom ops
     ops.def("weak_ref_tensor(Tensor input) -> Tensor");
     ops.impl("weak_ref_tensor", torch::kPrivateUse1, &vllm_ascend::weak_ref_tensor);
-
-    // Rotary embedding
-    // Apply GPT-NeoX style rotary embedding to query and key.
-    ops.def(
-        "rotary_embedding(Tensor positions, Tensor! query,"
-        "                 Tensor! key, int head_size,"
-        "                 Tensor cos_sin_cache, bool is_neox) -> (Tensor query, Tensor key)");
-    ops.impl("rotary_embedding", torch::kPrivateUse1, &vllm_ascend::rotary_embedding);
 
     ops.def(
         "get_masked_input_and_mask(Tensor input, "
@@ -1385,7 +1394,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
         "                     Tensor[] scale1, Tensor[] scale2, Tensor probs, str group,"
-        "                     int max_output_size, Tensor! out) -> Tensor"
+        "                     int max_output_size, Tensor! out, Tensor! expert_token_nums) -> (Tensor out, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 
@@ -1438,4 +1447,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor expert_idx, Tensor out)"
         );
     ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
+
+    ops.def(
+        "npu_add_rms_norm_bias(Tensor x1, "
+                            "Tensor x2, "
+                            "Tensor gamma, "
+                            "Tensor? beta=None, "
+                            "float epsilon=1e-6)"
+        "-> (Tensor y ,Tensor rstd, Tensor x)"
+        );
+    ops.impl("npu_add_rms_norm_bias", torch::kPrivateUse1, &vllm_ascend::npu_add_rms_norm_bias);
+
+    ops.def("npu_apply_top_k_top_p(Tensor logits, Tensor? p=None, Tensor? k=None) -> Tensor");
+    ops.impl("npu_apply_top_k_top_p", torch::kPrivateUse1, &vllm_ascend::npu_apply_top_k_top_p);
+    ops.def(
+        "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
+    );
+    ops.impl("transpose_kv_cache_by_block", torch::kPrivateUse1, &vllm_ascend::transpose_kv_cache_by_block);
 }

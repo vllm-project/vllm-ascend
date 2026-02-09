@@ -15,29 +15,25 @@
 # limitations under the License.
 #
 
-from typing import List, Optional, Union
 
 import torch
 import vllm
 from torch.distributed import Backend
-from vllm.distributed.parallel_state import (GroupCoordinator,
-                                             _get_unique_name, _register_group)
+from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 
-from vllm_ascend.distributed.device_communicators.npu_communicator import \
-    NPUCommunicator
+from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.utils import create_hccl_pg_options
 
 
 class GroupCoordinatorPatch(GroupCoordinator):
-
     def __init__(
         self,
         group_ranks: list[list[int]],
         local_rank: int,
-        torch_distributed_backend: Union[str, Backend],
+        torch_distributed_backend: str | Backend,
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
-        group_name: Optional[str] = None,
+        group_name: str | None = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -52,9 +48,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
-                ranks,
-                backend=torch_distributed_backend,
-                pg_options=hccl_pg_options)
+                ranks, backend=torch_distributed_backend, pg_options=hccl_pg_options
+            )
 
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
@@ -83,22 +78,23 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 unique_name=self.unique_name,
             )
 
-        from vllm.distributed.device_communicators.shm_broadcast import \
-            MessageQueue
-        self.mq_broadcaster: Optional[MessageQueue] = None
+        from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+
+        self.mq_broadcaster: MessageQueue | None = None
         if use_message_queue_broadcaster and self.world_size > 1:
-            self.mq_broadcaster = MessageQueue.create_from_process_group(
-                self.cpu_group, 1 << 22, 6)
+            self.mq_broadcaster = MessageQueue.create_from_process_group(self.cpu_group, 1 << 22, 6)
 
         self.use_custom_op_call = False
         self.use_cpu_custom_send_recv = False
 
-    def all_to_all(self,
-                   input_: torch.Tensor,
-                   scatter_dim: int = 0,
-                   gather_dim: int = -1,
-                   scatter_sizes: Optional[List[int]] = None,
-                   gather_sizes: Optional[List[int]] = None) -> torch.Tensor:
+    def all_to_all(
+        self,
+        input_: torch.Tensor,
+        scatter_dim: int = 0,
+        gather_dim: int = -1,
+        scatter_sizes: list[int] | None = None,
+        gather_sizes: list[int] | None = None,
+    ) -> torch.Tensor:
         if self.world_size == 1:
             return input_
         assert -input_.dim() <= scatter_dim < input_.dim(), (
@@ -108,9 +104,12 @@ class GroupCoordinatorPatch(GroupCoordinator):
             f"Invalid gather dim ({gather_dim}) for input tensor with shape {input_.size()}"
         )
         assert self.device_communicator is not None, "device_communicator should be initialized when world_size > 1"
-        return self.device_communicator.all_to_all(input_, scatter_dim,
-                                                   gather_dim, scatter_sizes,
-                                                   gather_sizes)
+        return self.device_communicator.all_to_all(input_, scatter_dim, gather_dim, scatter_sizes, gather_sizes)
+
+    def all_reduce(self, input_):
+        if self.world_size == 1:
+            return input_
+        return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
 
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch

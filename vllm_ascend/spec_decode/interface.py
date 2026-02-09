@@ -1,5 +1,4 @@
 import enum
-from typing import Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -14,14 +13,11 @@ class SpecDcodeType(enum.Enum):
     EAGLE3 = 2
     MTP = 4
     SUFFIX = 5
+    MEDUSA = 6
 
 
 class Proposer:
-
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 device: torch.device = None,
-                 runner=None):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device = None, runner=None):
         pass
 
     def load_model(self, model):
@@ -29,25 +25,29 @@ class Proposer:
         raise NotImplementedError
 
     @torch.inference_mode()
-    def dummy_run(self,
-                  num_tokens: int,
-                  with_prefill: bool = False,
-                  in_graph_capturing: bool = False,
-                  num_reqs: int = 0,
-                  num_tokens_across_dp: Optional[torch.Tensor] = None,
-                  aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-                  batch_descriptor=None):
+    def dummy_run(
+        self,
+        num_tokens: int,
+        with_prefill: bool = False,
+        in_graph_capturing: bool = False,
+        num_reqs: int = 0,
+        num_tokens_across_dp: torch.Tensor | None = None,
+        aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        batch_descriptor=None,
+    ):
         """Called by dummy_run in modle_runner"""
         raise NotImplementedError
 
-    def generate_token_ids(self,
-                           valid_sampled_token_ids: list[list[int]],
-                           sampling_metadata: SamplingMetadata = None,
-                           scheduler_output: SchedulerOutput = None,
-                           spec_decode_metadata: SpecDecodeMetadata = None,
-                           positions: torch.Tensor = None,
-                           num_scheduled_tokens: int = 0,
-                           hidden_states: torch.Tensor = None,
-                           aux_hidden_states: torch.Tensor = None):
+    def generate_token_ids(
+        self,
+        valid_sampled_token_ids: list[list[int]],
+        sampling_metadata: SamplingMetadata = None,
+        scheduler_output: SchedulerOutput = None,
+        spec_decode_metadata: SpecDecodeMetadata = None,
+        positions: torch.Tensor = None,
+        num_scheduled_tokens: int = 0,
+        hidden_states: torch.Tensor = None,
+        aux_hidden_states: torch.Tensor = None,
+    ):
         """Called by execute_model in model_runner"""
         raise NotImplementedError

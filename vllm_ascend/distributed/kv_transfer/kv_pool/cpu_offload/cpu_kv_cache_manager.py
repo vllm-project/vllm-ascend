@@ -1,20 +1,17 @@
 import time
 from collections import defaultdict
-from typing import Optional
 
 from vllm.logger import logger
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock)
-from vllm.v1.core.single_type_kv_cache_manager import \
-    get_manager_for_kv_cache_spec
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.v1.metrics.stats import (PrefixCacheStats, CachingMetrics)
+from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 
 class CPUCacheStats:
-
     def __init__(self, enable_prefix_caching: bool, log_stats: bool = False):
         self.enable_prefix_caching = enable_prefix_caching
         self.log_stats = log_stats
@@ -27,10 +24,9 @@ class CPUCacheStats:
         # Log the prefix cache hit rate every 10 seconds.
         if current_time_sec - self.time_sec >= 10:
             self.time_sec = current_time_sec
-            logger.info("CPU Prefix cache hit rate: %.1f%%",
-                        self.cpu_prefix_cache_metrics.hit_rate * 100)
+            logger.info("CPU Prefix cache hit rate: %.1f%%", self.cpu_prefix_cache_metrics.hit_rate * 100)
 
-    def make_prefix_cache_stats(self) -> Optional[PrefixCacheStats]:
+    def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
         Returns:
             The current prefix caching stats, or None if logging is disabled.
@@ -57,7 +53,6 @@ class CPUCacheStats:
 
 
 class CPUKVCacheManager:
-
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
@@ -70,30 +65,26 @@ class CPUKVCacheManager:
         self.num_cpu_blocks = num_cpu_blocks
         self.caching_hash_fn = sha256 if caching_hash_algo == "sha256" else hash
         self.use_eagle = use_eagle
-        self.block_pool = BlockPool(self.num_cpu_blocks, True,
-                                    enable_kv_cache_events)
+        self.block_pool = BlockPool(self.num_cpu_blocks, True, enable_kv_cache_events)
         self.single_type_manager = get_manager_for_kv_cache_spec(
             kv_cache_spec=kv_cache_spec,
             block_pool=self.block_pool,
             kv_cache_group_id=0,
         )
         # Record kv block hashes, avoid redundant computation.
-        self.req_to_block_hashes: defaultdict[
-            str, list[BlockHash]] = defaultdict(list)
+        self.req_to_block_hashes: defaultdict[str, list[BlockHash]] = defaultdict(list)
         # Record blocks touched in get_matched_num_and_touch().
-        self.req_to_computed_blocks: defaultdict[
-            str, list[KVCacheBlock]] = defaultdict(list)
+        self.req_to_computed_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(list)
         # Record the request that failed to allocate.
         self.req_failed_to_allocate: defaultdict[str, bool] = defaultdict(bool)
         self.req_to_num_tokens: defaultdict[str, int] = defaultdict(int)
-        self.cpu_cache_stats = CPUCacheStats(enable_prefix_caching=True,
-                                             log_stats=True)
+        self.cpu_cache_stats = CPUCacheStats(enable_prefix_caching=True, log_stats=True)
         # Record request that will be free after finish sending
         self.req_to_free: defaultdict[str, Request] = defaultdict(Request)
 
     def get_matched_num_and_touch(self, request: Request) -> tuple[int, bool]:
         # When the request requires prompt logprobs, we skip prefix caching.
-        if (request.sampling_params.prompt_logprobs is not None):
+        if request.sampling_params.prompt_logprobs is not None:
             return 0, False
         request_id = request.request_id
         # The block hashes for the request may already be computed
@@ -119,10 +110,8 @@ class CPUKVCacheManager:
 
         # cup prefix cache status set and log
         assert self.cpu_cache_stats is not None and self.cpu_cache_stats.prefix_cache_stats is not None
-        self.cpu_cache_stats.set_cache_stats(request.num_tokens,
-                                             num_computed_tokens)
-        self.cpu_cache_stats.cpu_prefix_cache_metrics.observe(
-            self.cpu_cache_stats.prefix_cache_stats)
+        self.cpu_cache_stats.set_cache_stats(request.num_tokens, num_computed_tokens)
+        self.cpu_cache_stats.cpu_prefix_cache_metrics.observe(self.cpu_cache_stats.prefix_cache_stats)
         self.cpu_cache_stats.log()
 
         return num_computed_tokens, False
@@ -130,12 +119,10 @@ class CPUKVCacheManager:
     def _release_ahead_touch(self, request_id: str):
         computed_blocks = self.req_to_computed_blocks[request_id]
         if computed_blocks:
-            self.single_type_manager.block_pool.free_blocks(
-                reversed(computed_blocks))
+            self.single_type_manager.block_pool.free_blocks(reversed(computed_blocks))
             self.req_to_computed_blocks.pop(request_id, None)
 
-    def allocate_slots(self, req_to_num_tokens: dict[str, int],
-                       unallocated_req_ids: set[str]) -> dict[str, list[int]]:
+    def allocate_slots(self, req_to_num_tokens: dict[str, int], unallocated_req_ids: set[str]) -> dict[str, list[int]]:
         for request_id in unallocated_req_ids:
             self._free_slots(request_id)
         req_to_new_blocks = {}
@@ -143,44 +130,34 @@ class CPUKVCacheManager:
             if self.req_failed_to_allocate[request_id]:
                 continue
             new_computed_blocks = self.req_to_computed_blocks[request_id]
-            num_blocks_to_allocate = (
-                self.single_type_manager.get_num_blocks_to_allocate(
-                    request_id=request_id,
-                    num_tokens=num_tokens,
-                    new_computed_blocks=new_computed_blocks,
-                ))
+            num_blocks_to_allocate = self.single_type_manager.get_num_blocks_to_allocate(
+                request_id=request_id,
+                num_tokens=num_tokens,
+                new_computed_blocks=new_computed_blocks,
+            )
             if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
                 self._release_ahead_touch(request_id)
                 self.req_failed_to_allocate[request_id] = True
                 continue
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
-            self.single_type_manager.save_new_computed_blocks(
-                request_id, new_computed_blocks)
+            self.single_type_manager.save_new_computed_blocks(request_id, new_computed_blocks)
             # Allocate new blocks but do not cache now.
-            new_blocks = self.single_type_manager.allocate_new_blocks(
-                request_id, num_tokens)
+            new_blocks = self.single_type_manager.allocate_new_blocks(request_id, num_tokens)
             self.req_to_num_tokens[request_id] = num_tokens
             # No need to release ref_cnt because we use officially.
             self.req_to_computed_blocks.pop(request_id, None)
-            req_to_new_blocks[request_id] = [
-                block.block_id for block in new_computed_blocks + new_blocks
-            ]
+            req_to_new_blocks[request_id] = [block.block_id for block in new_computed_blocks + new_blocks]
         return req_to_new_blocks
 
     def record_request_cache_and_free_slots(self, request: Request):
-        logger.debug(
-            f"record_request_cache_and_free_slots for request {request.request_id} in cpu_kv_cache_manager"
-        )
+        logger.debug(f"record_request_cache_and_free_slots for request {request.request_id} in cpu_kv_cache_manager")
         self.req_to_free[request.request_id] = request
 
     def cache_and_free_slots(self, request_id: str):
-        logger.debug(
-            f"Cache and free slots for request {request_id} in cpu_kv_cache_manager"
-        )
+        logger.debug(f"Cache and free slots for request {request_id} in cpu_kv_cache_manager")
         if request_id not in self.req_to_free:
-            logger.Error(
-                f"request {request_id} not in req_to_free, maybe bug!")
+            logger.Error(f"request {request_id} not in req_to_free, maybe bug!")
             return
         request = self.req_to_free[request_id]
         if not self.req_failed_to_allocate[request_id]:
@@ -189,8 +166,7 @@ class CPUKVCacheManager:
                 self.req_to_num_tokens[request_id],
             )
         self._free_slots(request_id)
-        logger.debug(
-            f"delete request {request_id} in cpu_kv_cache_manager req_to_free")
+        logger.debug(f"delete request {request_id} in cpu_kv_cache_manager req_to_free")
         del self.req_to_free[request_id]
 
     def _free_slots(self, request_id: str):

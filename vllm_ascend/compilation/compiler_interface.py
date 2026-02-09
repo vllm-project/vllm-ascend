@@ -26,9 +26,10 @@ from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tu
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
+from vllm.config import VllmConfig
 from vllm.config.utils import Range
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import NpugraphExConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
@@ -68,29 +69,12 @@ def npugraph_ex_compile(
     graph: fx.GraphModule,
     example_inputs: list[Any],
     compiler_config: dict[str, Any],
+    vllm_config: VllmConfig,
+    npugraph_ex_config: NpugraphExConfig,
     compile_range: Range,
     key: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
-    # When currently using the FULL_DECODE_ONLY mode,
-    # the piecewise compilation level slicing process
-    # in vllm is also encountered.
-    # This process causes the output to no longer be
-    # wrapped as a tuple when the fx graph has a single
-    # output, but torch.compile has a mandatory check.
-    fx_graph = graph.graph
-    if not graph_returns_tuple(graph):
-        output_node = fx_graph.output_node()
-        with fx_graph.inserting_before(output_node):
-            return_value = output_node.args[0]
-            tuple_node = fx_graph.create_node("call_function", tuple, args=([return_value],))
-        output_node.args = (tuple_node,)
-        graph.recompile()
-
     import torchair
-
-    # TODO: use a better way to lazy register replacement, instead of import one by one
-    # As an example, we directly import here to register replacement.
-    # import vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant  # noqa
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()
@@ -98,12 +82,28 @@ def npugraph_ex_compile(
     config.mode = "reduce-overhead"
     # execute FX graph in eager mode before graph mode to optimize FX graph.
     config.debug.run_eagerly = True
-    # static kernel switch, suitable for static shapes or scenes with less shape changes.
-    config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
+    if npugraph_ex_config.enable_static_kernel:
+        config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
+        # According to the cudagraph_capture_size configuration, set the shapes
+        # that can trigger the compilation of static kernel. If this configuration is
+        # not applied, new shapes will trigger the compilation of static kernels,
+        # affecting program execution.
+        num_spec_tokens = vllm_config.speculative_config.num_speculative_token if vllm_config.speculative_config else 0
+        uniform_decode_query_len = num_spec_tokens + 1
+        max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
+        decode_cudagraph_batch_sizes = [
+            x
+            for x in vllm_config.compilation_config.cudagraph_capture_sizes
+            if max_num_tokens >= x >= uniform_decode_query_len
+        ]
+        config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
 
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
-    compile_graph = npugraph_ex(graph, example_inputs)
-    return compile_graph, None
+
+    # torch.compile requires the output of the fx graph to be a tuple
+    if not graph_returns_tuple(graph):
+        return make_graph_return_tuple(graph, example_inputs, npugraph_ex), None
+    return npugraph_ex(graph, example_inputs), None
 
 
 class AscendCompiler(CompilerInterface):
@@ -115,6 +115,12 @@ class AscendCompiler(CompilerInterface):
 
     name = "AscendCompiler"
 
+    def compute_hash(self, vllm_config: VllmConfig) -> str:
+        npugraph_ex_config = get_ascend_config().npugraph_ex_config
+        if npugraph_ex_config.enable:
+            self.vllm_config = vllm_config
+        return vllm_config.compute_hash()
+
     def compile(
         self,
         graph: fx.GraphModule,
@@ -123,8 +129,11 @@ class AscendCompiler(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
-        ascend_config = get_ascend_config()
-        if ascend_config.enable_npugraph_ex:
-            return npugraph_ex_compile(graph, example_inputs, compiler_config, compile_range, key)
+        npugraph_ex_config = get_ascend_config().npugraph_ex_config
+        if npugraph_ex_config.enable:
+            assert hasattr(self, "vllm_config")
+            return npugraph_ex_compile(
+                graph, example_inputs, compiler_config, self.vllm_config, npugraph_ex_config, compile_range, key
+            )
         else:
             return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)
