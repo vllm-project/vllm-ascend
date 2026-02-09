@@ -16,6 +16,7 @@
 
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 from torch.nn.functional import pad
 from vllm.forward_context import get_forward_context
@@ -266,6 +267,23 @@ def quant_apply_mlp(
     return hidden_states
 
 
+def swiglustep_and_mul_out(
+    x: torch.Tensor,
+    limit: float = 7.0,
+) -> torch.Tensor:
+    """Out-variant of swiglustep activation.
+
+    Writes into `out`:
+      silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
+    """
+    gate, up = x.chunk(2, dim=-1)
+    gate = F.silu(gate)
+    gate = gate.clamp(max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    out = gate * up
+    return out
+
+
 def unquant_apply_mlp(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -274,6 +292,7 @@ def unquant_apply_mlp(
     group_list_type: int = 1,
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
+    activation: str = "silu",
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
@@ -287,7 +306,12 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
-    gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+
+    if activation == "swiglustep":
+        gate_up_out = swiglustep_and_mul_out(gate_up_out)
+
+    else:
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
@@ -321,6 +345,7 @@ def unified_apply_mlp(
     fusion: bool = False,
     need_trans: bool = True,
     dynamic_eplb: bool = False,
+    activation: str = "silu",
 ) -> torch.Tensor:
     if with_quant:
         assert w1_scale is not None and w2_scale is not None
@@ -349,4 +374,5 @@ def unified_apply_mlp(
             group_list_type=group_list_type,
             topk_scales=topk_scales,
             need_trans=need_trans,
+            activation=activation,
         )

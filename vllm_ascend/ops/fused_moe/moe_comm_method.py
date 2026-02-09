@@ -149,6 +149,7 @@ class MoECommMethod(ABC):
             apply_router_weight_on_input=apply_router_weight_on_input,
             with_quant=use_int8_w8a8 or use_int4_w4a8,
             dynamic_eplb=dynamic_eplb,
+            activation=activation,
             pertoken_scale=pertoken_scale,
         )
 
