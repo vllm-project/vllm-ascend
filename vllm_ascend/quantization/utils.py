@@ -144,6 +144,4 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     # downstream model-loading code can use it.
     from vllm.config import VllmConfig as _VllmConfig
 
-    vllm_config.quant_config = _VllmConfig._get_quantization_config(
-        model_config, vllm_config.load_config
-    )
+    vllm_config.quant_config = _VllmConfig._get_quantization_config(model_config, vllm_config.load_config)
