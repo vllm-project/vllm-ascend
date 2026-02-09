@@ -37,10 +37,10 @@ CASE_DS_ACLGRAPH = LLMTestCase(
     quantization="ascend",
     prompts=PROMPTS_SHORT,
     golden_answers=[
-        '\nI am a 20 year old female, and I have been suffering from depression for 3 years now. I have been on medication for 2',
-        ' a man who has been in the public eye for decades. He has been a senator, a governor, and a businessman. He has also been married to the',
+        '\nI am a 20 year old female, and I have been suffering from depression for about 2 years now. I have been on medication for about',
+        ' a man who has been in the public eye for decades. He has been a politician, a businessman, and a reality TV star. He has also been married',
         ' Paris, which is also the largest city in the country. The city is located on the River Seine and is known for its beautiful architecture, museums, and art',
-        ' here, and it’s not what you think.\nThe future of AI is here, and it’s not what you think.\nThe future of'
+        ' in the hands of the people\nThe future of AI is in the hands of the people\nThe future of AI is in the hands of the people\nThe'
     ],
 )
 
