@@ -106,7 +106,6 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
-from vllm_ascend.quantization.utils import check_modelslim_quantization_config
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
@@ -2305,10 +2304,6 @@ class NPUModelRunner(GPUModelRunner):
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
-
-        # Check if the model is quantized by ModelSlim but missing quantization config.
-        # This provides a friendly error message instead of a confusing KeyError.
-        check_modelslim_quantization_config(self.model_config.model, self.model_config.quantization)
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)

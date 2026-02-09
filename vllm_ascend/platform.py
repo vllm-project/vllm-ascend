@@ -175,6 +175,14 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # Auto-detect quantization method from model directory before any
+        # heavy weight loading.  This must run before other config checks
+        # that may depend on the quantization setting.
+        from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
+
+        if vllm_config.model_config is not None:
+            maybe_auto_detect_quantization(vllm_config)
+
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
         ascend_config = init_ascend_config(vllm_config)
