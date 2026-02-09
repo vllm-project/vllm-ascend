@@ -19,7 +19,6 @@ from collections.abc import Callable
 import torch
 
 from vllm_ascend.ops.fused_moe.experts_selector import _native_select_experts
-from vllm_ascend.utils import get_weight_prefetch_method
 
 
 def select_experts(
@@ -55,10 +54,6 @@ def select_experts(
         topk_weights: router weights of shape (num_tokens, top_k).
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
-    # prefetch w1_w3_proj.weight preprocess
-    weight_prefetch_method = get_weight_prefetch_method()
-    if weight_prefetch_method:
-        weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
     topk_weights, topk_ids = _native_select_experts(
         hidden_states=hidden_states,
         router_logits=router_logits,

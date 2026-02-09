@@ -38,15 +38,8 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         expert_map: torch.Tensor | None = None,
-        global_redundant_expert_num: int = 0,
-        mc2_mask: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
-        with_quant: bool = False,
-        dynamic_eplb: bool = False,
-        pertoken_scale: torch.Tensor | None = None,
     ):
-        if with_quant:
-            raise RuntimeError("Quant is not supported for 310P currently.")
         self.original_shape = hidden_states.shape
 
         num_tokens = hidden_states.shape[:-1].numel()
@@ -77,7 +70,6 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
 
         return TokenDispatchResult(
             hidden_states=sorted_hidden_states,
-            dynamic_scale=None,
             group_list=expert_tokens,
             group_list_type=group_list_type,
             context_metadata=context_metadata,
