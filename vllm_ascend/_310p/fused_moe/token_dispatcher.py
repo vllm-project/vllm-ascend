@@ -32,7 +32,7 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    def token_dispatch(
+    def token_dispatch(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
