@@ -8,10 +8,10 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
+from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MLAAttentionImpl  # type: ignore
-from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
@@ -23,7 +23,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     enable_cp,
-    enabling_malpo,
+    enabling_mlapo,
     maybe_save_kv_layer_to_connector,
     split_decodes_and_prefills,
     trans_rope_weight,
@@ -88,6 +88,10 @@ class AscendMLABackend(AttentionBackend):
 
             return AscendMlaCPImpl
         return AscendMLAImpl
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [128]
 
 
 @dataclass
@@ -705,7 +709,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.enable_mlapo = enabling_malpo(self.vllm_config)
+        self.enable_mlapo = enabling_mlapo(self.vllm_config)
 
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
@@ -728,6 +732,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         vllm_config=None,
         speculative_config=None,
         num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
     ):
         if forward_context.is_draft_model:
             graph_params = get_draft_graph_params()
@@ -1444,6 +1449,28 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def get_num_actual_tokens(self, attn_metadata: M):
         return attn_metadata.num_actual_tokens
+
+    def forward_mha(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: M,
+        need_gather_q_kv: bool = False,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("forward_mha is not supported for MLA attention. Use forward() instead.")
+
+    def forward_mqa(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: M,
+        need_gather_q_kv: bool = False,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("forward_mqa is not supported for MLA attention. Use forward() instead.")
 
     def forward(
         self,

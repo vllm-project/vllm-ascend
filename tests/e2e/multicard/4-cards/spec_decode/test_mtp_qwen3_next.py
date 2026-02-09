@@ -34,7 +34,6 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 MODELS = ["Qwen/Qwen3-Next-80B-A3B-Instruct"]
 
 
-@pytest.mark.skip(reason="Failed with CANN8.5, fix me")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_qwen3_next_mtp_acceptance_tp4(model_name):
     golden = [0.85, 0.46, 0.19]
@@ -152,4 +151,38 @@ def test_qwen3_next_mtp_correctness_tp4(model_name: str,
     # Heuristic: expect at least 66% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
+    cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.parametrize("num_speculative_tokens", [1])
+def test_qwen3_next_mtp_full_decode(model_name: str,
+                                        num_speculative_tokens: int):
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    max_tokens = 20
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using mtp speculative decoding.
+    '''
+    with VllmRunner(model_name,
+                    tensor_parallel_size=4,
+                    max_model_len=4096,
+                    gpu_memory_utilization=0.8,
+                    distributed_executor_backend="mp",
+                    speculative_config={
+                        "method": "qwen3_next_mtp",
+                        "num_speculative_tokens": num_speculative_tokens,
+                    },
+                    compilation_config=CompilationConfig(
+                        cudagraph_mode="FULL_DECODE_ONLY",
+                        cudagraph_capture_sizes=[4])) as llm:
+        outputs = llm.generate_greedy(example_prompts, max_tokens)
+        print(outputs)
+    del llm
     cleanup_dist_env_and_memory()

@@ -33,6 +33,8 @@ class TestMtpProposer:
         config.speculative_config.method = "mtp"
         config.speculative_config.draft_model_config = MagicMock()
         config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
+        config.speculative_config.draft_model_config.uses_mrope = False
+        config.speculative_config.draft_model_config.uses_xdrope_dim = 0
         config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
         ])
@@ -41,9 +43,11 @@ class TestMtpProposer:
         config.model_config.dtype = torch.float16
         config.model_config.max_model_len = 2048
         config.model_config.uses_mrope = False
+        config.model_config.uses_xdrope_dim = 0
         config.model_config.hf_text_config = None
         config.model_config.hf_config = None
         config.parallel_config.tensor_parallel_size = 1
+        config.parallel_config.data_parallel_rank = 0
         config.speculative_config.draft_tensor_parallel_size = 1
 
         config.load_config = None
