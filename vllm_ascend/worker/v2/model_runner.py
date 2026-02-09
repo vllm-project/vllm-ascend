@@ -35,7 +35,7 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_state
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
+from vllm_ascend.worker.v2.input_batch import AscendInputBuffers, AscendInputBatch
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
@@ -117,7 +117,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: SchedulerOutput,
         num_tokens_after_padding: int,
-    ) -> InputBatch:
+    ) -> AscendInputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
@@ -269,10 +269,11 @@ class NPUModelRunner(GPUModelRunner):
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
         positions = self.input_buffers.positions[:num_tokens_after_padding]
+        mrope_positions = None
         if self.uses_mrope:
             mrope_positions = self.mrope_states.mrope_positions
             mrope_positions = mrope_positions[:, :num_tokens_after_padding]
-        return InputBatch(
+        return AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
             idx_mapping=idx_mapping,
