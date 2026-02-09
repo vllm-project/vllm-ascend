@@ -106,28 +106,9 @@ check_and_config() {
 }
 
 install_extra_components() {
-    echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
-    
-    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
-        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
-        return 1
-    fi
-    chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-    ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-    
-    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
-        echo "Failed to download custom_ops wheel"
-        return 1
-    fi
-    pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-    
-    export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
-    export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    
-    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
-          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-    echo "====> Extra components installation completed"
+    echo "====> Installing extra components for DeepSeek-v3.2-w8a8"
+    source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+    python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
 }
 
 
@@ -161,6 +142,23 @@ If this is insufficient to pinpoint the error, please download and review the lo
     fi
 }
 
+upgrade_vllm_ascend_scr() {
+    # Fix me(Potabk): Remove this once our image build use
+    # The separate architecture build process currently suffers from errors during cross-compilation
+    # causing the image to fail to build correctly.
+    # This results in the nightly test code not being the latest version.
+    cd "$WORKSPACE/vllm-ascend"
+    # git pull origin main
+    git clone -b v3.0-20250930-master --depth 1 https://gitee.com/aisbench/benchmark.git /vllm-workspace/vllm-ascend/benchmark
+    cd /vllm-workspace/vllm-ascend/benchmark
+    pip install pytest asyncio pytest-asyncio
+    pip install -e . -r requirements/api.txt -r requirements/extra.txt
+    python3 -m pip cache purge
+    cd /vllm-workspace/vllm-ascend
+    git fetch origin pull/6632/head:pr-6632
+    git checkout pr-6632
+}
+
 main() {
     check_npu_info
     check_and_config
@@ -169,6 +167,7 @@ main() {
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
     fi
+    upgrade_vllm_ascend_scr
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }
