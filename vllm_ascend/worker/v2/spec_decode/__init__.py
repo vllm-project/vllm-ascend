@@ -30,9 +30,7 @@ def init_speculator(
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if speculative_config.use_eagle():
-        from vllm_ascend.worker.v2.spec_decode.eagle import \
-            AscendEagleSpeculator
+        from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
 
         return AscendEagleSpeculator(vllm_config, device)
-    raise NotImplementedError(
-        f"{speculative_config.method} is not supported yet.")
+    raise NotImplementedError(f"{speculative_config.method} is not supported yet.")
