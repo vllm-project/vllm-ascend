@@ -35,7 +35,7 @@ class AllGatherCommImpl310(AllGatherCommImpl):
     to handle the token-to-expert mapping and communication efficiently.
     """
 
-    def fused_experts(
+    def fused_experts(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
