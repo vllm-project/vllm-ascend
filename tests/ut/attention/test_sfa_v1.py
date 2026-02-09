@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from tests.ut.attention.utils import patch_distributed_groups
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm.distributed.parallel_state import GroupCoordinator
@@ -41,7 +42,7 @@ class TestAscendSFAMetadata(TestBase):
         slot_mapping = torch.randn(100, 4, 1024)
         seq_lens = torch.tensor([30, 50])
         cum_query_lens = torch.tensor([0, 30, 80])
-        block_tables = torch.randint(0, 100, (100, 4))
+        block_table = torch.randint(0, 100, (100, 4))
 
         rope_dim = 32
         max_seq_len = int(seq_lens.max().item())
@@ -58,7 +59,7 @@ class TestAscendSFAMetadata(TestBase):
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             cum_query_lens=cum_query_lens,
-            block_tables=block_tables,
+            block_table=block_table,
             sin=sin,
             cos=cos,
             num_input_tokens=num_input_tokens,
@@ -71,7 +72,7 @@ class TestAscendSFAMetadata(TestBase):
         self.assertIs(metadata.slot_mapping, slot_mapping)
         self.assertTrue(torch.equal(metadata.seq_lens, seq_lens))
         self.assertTrue(torch.equal(metadata.cum_query_lens, cum_query_lens))
-        self.assertIs(metadata.block_tables, block_tables)
+        self.assertIs(metadata.block_table, block_table)
         self.assertIs(metadata.sin, sin)
         self.assertIs(metadata.cos, cos)
         self.assertEqual(metadata.num_input_tokens, num_input_tokens)
@@ -135,6 +136,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         self.patcher.stop()
         self.parent_init_patcher.stop()
 
+    @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_default(self):
         kv_cache_spec = MagicMock()
         layer_names = ["layer1", "layer2"]
@@ -160,6 +162,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp")
+    @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build(
         self,
         mock_enable_dsa_cp,
@@ -222,6 +225,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
+    @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build_for_graph_capture(
             self, mock_get_cos_and_sin_mla, mock_get_current_vllm_config):
         cfg = MagicMock()
