@@ -1039,7 +1039,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             block_table = attn_metadata.sfa_cp_metadata.block_table_cp
 
         # topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
-        topk_indices = torch_npu.npu_lightning_indexer(
+        topk_indices, _ = torch_npu.npu_lightning_indexer(
             query=q,
             key=key,
             weights=weights,
