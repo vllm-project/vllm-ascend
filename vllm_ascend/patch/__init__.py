@@ -112,20 +112,6 @@
 #       Remove this patch when the refactor of all2all manager is done.
 #       Remove this patch when vLLM support all_reduce as customop.
 #
-# ** 2. File: worker/patch_minicpm.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.minicpm.MiniCPMAttention.forward`
-#    Why:
-#       The forward func of MiniCPMAttention in vllm do a datatype convert
-#       (original datatype --> float32) to ensure the precision on cuda.
-#       However float32 is not supported in cann rope op, thus we keep this patch
-#    How：
-#       Removed the dtype convert operations in forward
-#    Related PR (if no, explain why):
-#       NO, only for npu due to rope op.
-#    Future Plan:
-#       Keep this patch in vllm-ascend.
-#
 # ** 3. File: worker/patch_multimodal_merge.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.utils._merge_multimodal_embeddings`
