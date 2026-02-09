@@ -17,6 +17,7 @@
 
 import os
 
+from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
@@ -40,7 +41,7 @@ def check_modelslim_quantization_config(model_path: str, quantization: str | Non
         return
 
     # Check if quant_model_description.json exists in the model directory
-    quant_description_file = os.path.join(model_path, "quant_model_description.json")
+    quant_description_file = os.path.join(model_path, MODELSLIM_CONFIG_FILENAME)
     if os.path.isfile(quant_description_file):
         error_msg = (
             "\n"
@@ -49,7 +50,7 @@ def check_modelslim_quantization_config(model_path: str, quantization: str | Non
             "=" * 80 + "\n"
             f"\n"
             f"The model at '{model_path}' appears to be quantized using ModelSlim\n"
-            f"(detected 'quant_model_description.json' file), but you haven't specified\n"
+            f"(detected '{MODELSLIM_CONFIG_FILENAME}' file), but you haven't specified\n"
             f"the required quantization configuration.\n"
             f"\n"
             f"To fix this issue, please add the following argument to your command:\n"
@@ -60,7 +61,7 @@ def check_modelslim_quantization_config(model_path: str, quantization: str | Non
             f"    vllm serve {model_path} --quantization ascend\n"
             f"\n"
             f"Or in Python:\n"
-            f"    LLM(model=\"{model_path}\", quantization=\"ascend\")\n"
+            f'    LLM(model="{model_path}", quantization="ascend")\n'
             f"\n"
             "=" * 80
         )
