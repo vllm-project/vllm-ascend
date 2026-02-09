@@ -955,8 +955,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output[:num_tokens] = attn_output[:num_tokens]
             return output
         if output_padded is not None:
-            output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
+            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
         else:
-            output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
         output[:num_tokens] = attn_output[:num_tokens]
         return output

@@ -357,7 +357,7 @@ class PCPManager:
 
                 max_scheduled_prefill_tokens = sum(num_prefill_tokens_allranks[:, 0, 0])
                 num_prefill_tokens = sum(num_scheduled_tokens[self.num_decode_reqs:])
-                self.total_pcp_padding_tokens_fla = max_scheduled_prefill_tokens & self.pcp_world_size - num_prefill_tokens
+                self.total_pcp_padding_tokens_fla = max_scheduled_prefill_tokens * self.pcp_world_size - num_prefill_tokens
                 self.pcp_padded_tokens_fla += max_scheduled_prefill_tokens - sum(num_prefill_scheduled_tokens_linear)
             
             max_scheduled_tokens = max_scheduled_prefill_tokens + self.num_decode_tokens

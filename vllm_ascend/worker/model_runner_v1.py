@@ -599,12 +599,12 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         max_num_tokens_across_pcp = 0
+        num_scheduled_tokens_padded = None
         if self.pcp_size > 1:
             num_scheduled_tokens[:num_reqs], tokens_padded, max_num_tokens_across_pcp, position_pcp = self.pcp_manager.update_tokens_for_pcp(
                                      num_scheduled_tokens[:num_reqs],
                                      self.arange_np,
                                  )
-            num_scheduled_tokens_padded = None
             if self.pcp_manager.pcp_use_hybrid_attn and tokens_padded is not None:
                 num_scheduled_tokens_padded = np.array(tokens_padded, dtype=np.int32)
             # Re-update after PCP split sequences.
@@ -1201,7 +1201,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded = self._pad_query_start_loc_for_fia(num_tokens_padded, num_reqs_padded, num_reqs)
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
-                    num_tokens=num_tokens_unpadded if not self.pcp_manager.pcp_use_hybrid_attn else total_num_scheduled_tokens,
+                    num_tokens=num_tokens_unpadded if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn) else total_num_scheduled_tokens,
                     num_tokens_padded=num_tokens_padded,
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded,
@@ -1222,7 +1222,11 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors,
                 model_kwargs,
                 ec_connector_output,
-            ) = self._preprocess(scheduler_output, num_tokens_padded, intermediate_tensors)
+            ) = self._preprocess(
+                scheduler_output,
+                num_tokens_padded if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn) else total_num_scheduled_tokens,
+                intermediate_tensors,
+            )
             # update global cos, sin
             update_cos_sin(positions)
         # Set cudagraph mode to none if calc_kv_scales is true.
