@@ -63,7 +63,6 @@ class AscendRequestState(RequestState):
         prefill_token_ids,
         num_computed_tokens,
     ):
-
         super().add_request(
             req_id,
             prompt_len,

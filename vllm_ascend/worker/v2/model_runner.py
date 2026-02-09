@@ -23,15 +23,17 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.input_batch import (InputBatch,
-                                            combine_sampled_and_draft_tokens,
-                                            prepare_pos_seq_lens,
-                                            prepare_prefill_inputs,expand_idx_mapping,)
+from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
+    combine_sampled_and_draft_tokens,
+    prepare_pos_seq_lens,
+    prepare_prefill_inputs,
+    expand_idx_mapping,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
-from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
-                                              build_attn_state, build_slot_mappings_by_layer)
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_state, build_slot_mappings_by_layer
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -136,9 +138,7 @@ class NPUModelRunner(GPUModelRunner):
         if scheduler_output.scheduled_spec_decode_tokens:
             num_valid_tokens = np.array(
                 [
-                    num_tokens - len(
-                        scheduler_output.scheduled_spec_decode_tokens.get(
-                            i, []))
+                    num_tokens - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
                     for num_tokens, i in zip(num_scheduled_tokens, req_ids)
                 ],
                 dtype=np.int32,
@@ -162,9 +162,7 @@ class NPUModelRunner(GPUModelRunner):
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(
-                num_reqs + 1, device=self.device, dtype=torch.int32
-            )
+            cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
             expanded_idx_mapping = idx_mapping
         else:
             num_draft_tokens = np.array(
@@ -181,15 +179,12 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
             max_expand_len = self.num_speculative_steps + 1
-            expanded_idx_mapping = expand_idx_mapping(
-                idx_mapping, total_num_logits, cu_num_logits, max_expand_len
-            )
-
+            expanded_idx_mapping = expand_idx_mapping(idx_mapping, total_num_logits, cu_num_logits, max_expand_len)
 
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
 
-       # Get query_start_loc.
+        # Get query_start_loc.
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
@@ -215,14 +210,14 @@ class NPUModelRunner(GPUModelRunner):
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
-            idx_mapping,        
+            idx_mapping,
             query_start_loc,
             self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
-        
+
         # Prepare M-RoPE positions.
         if self.uses_mrope:
             self.mrope_states.prepare_mrope_positions(
@@ -248,11 +243,10 @@ class NPUModelRunner(GPUModelRunner):
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
-            idx_mapping,query_start_loc, self.input_buffers.positions[:num_tokens])
-         # Layer name -> slot mapping.
-        slot_mappings_by_layer = build_slot_mappings_by_layer(
-            slot_mappings, self.kv_cache_config
+            idx_mapping, query_start_loc, self.input_buffers.positions[:num_tokens]
         )
+        # Layer name -> slot mapping.
+        slot_mappings_by_layer = build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config)
         # Layer name -> attention metadata.
         # TODO(Ronald1995): try to add a new method `build_attn_metadata` in
         # vllm gpu_model_runner_v2, maybe we don't overwrite `prepare_inputs`
@@ -265,8 +259,7 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
             seq_lens_np=self.input_buffers.seq_lens_np,
-            num_computed_tokens_cpu=self.req_states.
-            num_computed_tokens_cpu[idx_mapping_cpu],
+            num_computed_tokens_cpu=self.req_states.num_computed_tokens_cpu[idx_mapping_cpu],
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
@@ -346,16 +339,13 @@ class NPUModelRunner(GPUModelRunner):
             req_index = self.req_states.req_id_to_index[req_id]
             # num_computed_tokens_cpu has reverted by num_rejected_tokens already.
             # in super postprocess method.
-            self.req_states.num_computed_tokens_cpu[
-                req_index] = self.num_computed_tokens_cpu[req_index]
+            self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
 
         # update seq_lens_cpu
         for i, req_id in enumerate(req_ids):
             req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens = self.req_states.num_computed_tokens_cpu[
-                req_index]
-            self.input_buffers.seq_lens_cpu[
-                i] = num_computed_tokens + num_scheduled_tokens[req_id]
+            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
+            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
 
     def eplb_warmup(self):
         # TODO(Ronald1995): just define the method in case calling error in
