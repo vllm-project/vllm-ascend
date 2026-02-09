@@ -1,7 +1,13 @@
 import torch
 import vllm.v1.worker.utils as utils
-from vllm.attention.layer import Attention
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("v0.15.0"):
+    from vllm.attention.layer import Attention  # type: ignore
+else:
+    from vllm.model_executor.layers.attention import Attention
 
 
 # Without this patch, it will raise an exception when initialize kv_cache.
@@ -34,8 +40,7 @@ def bind_kv_cache(
     # Convert kv_caches dict to a list of tensors in the order of layer_index.
     index2name = defaultdict(list)
     for layer_name in kv_caches:
-        index2name[extract_layer_index(layer_name,
-                                       num_attn_module)].append(layer_name)
+        index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
 
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]

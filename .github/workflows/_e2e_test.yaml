@@ -6,9 +6,6 @@ on:
       vllm:
         required: true
         type: string
-      runner:
-        required: true
-        type: string
       image:
         required: true
         type: string
@@ -25,6 +22,7 @@ jobs:
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a2b3-1
     strategy:
+      fail-fast: false
       matrix:
         part: [0]
     container:
@@ -89,6 +87,7 @@ jobs:
     if: ${{ inputs.type == 'full' }}
     runs-on: linux-aarch64-a2b3-1
     strategy:
+      fail-fast: false
       matrix:
         part: [0, 1]
     container:
@@ -153,6 +152,7 @@ jobs:
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a3-2
     strategy:
+      fail-fast: false
       matrix:
         part: [0]
     container:
@@ -216,6 +216,7 @@ jobs:
     if: ${{ inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-2
     strategy:
+      fail-fast: false
       matrix:
         part: [0]
     container:
@@ -287,6 +288,7 @@ jobs:
     if: ${{ inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     strategy:
+      fail-fast: false
       matrix:
         part: [0]
     container:
@@ -401,7 +403,7 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          pytest -sv --durations=0 tests/e2e/310p/test_offline_inference_310p.py
+          pytest -sv --durations=0 tests/e2e/310p/singlecard/test_dense_model_singlecard.py
 
   e2e_310p-4cards:
     name: 310p multicards 4cards
@@ -459,4 +461,6 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          pytest -sv --durations=0 tests/e2e/310p/test_offline_inference_parallel_310p.py
+          pytest -sv --durations=0 \
+          tests/e2e/310p/multicard/test_dense_model_multicard.py \
+          tests/e2e/310p/multicard/test_moe_model_multicard.py

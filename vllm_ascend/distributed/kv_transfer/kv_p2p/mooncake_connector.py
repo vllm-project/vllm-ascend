@@ -46,10 +46,11 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import is_vl_model
+from vllm_ascend.utils import enable_custom_op, is_vl_model
 
 # isort: off
 if TYPE_CHECKING:
@@ -332,7 +333,6 @@ class KVCacheRecvingThread(threading.Thread):
         self.block_len = block_len
         # TODO(jianzs): find a better way to detect MLA.
         self.use_mla = len(block_len) == 2
-        self.use_sparse = len(block_len) == 3
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.executor = ThreadPoolExecutor(max_workers=32)
@@ -528,15 +528,11 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
+        block_length = len(self.block_len)
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
             zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
         ):
-            if self.use_mla:
-                block_len = self.block_len[k % 2]
-            elif self.use_sparse:
-                block_len = self.block_len[k % 3]
-            else:
-                block_len = self.block_len[0]
+            block_len = self.block_len[k % block_length]
             inner_block_len = block_len // tp_num_need_pulls
             for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
                 src = src_layer_base_addr + local_block_id[0] * block_len + inner_offset * inner_block_len
@@ -570,8 +566,39 @@ class KVCacheRecvingThread(threading.Thread):
         is_kv_transfer_end = global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
         need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
+        use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
         if need_nz_cache or need_cat_cache:
-            self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, need_cat_cache, need_nz_cache)
+            # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
+            if use_fused_op and enable_custom_op():
+                if need_cat_cache:
+                    # the fused op only support cat GQA/MHA kv cache by head
+                    self.reformat_kv_cache_with_fused_op(grouped_local_block_ids, tp_num_need_pulls)
+                if need_nz_cache:
+                    # maybe use fused op to reformat kv nz too in the future.
+                    self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, False, need_nz_cache)
+            else:
+                self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, need_cat_cache, need_nz_cache)
+
+    def reformat_kv_cache_with_fused_op(self, block_ids: list[list[int]], tp_num_need_pulls: int):
+        # Get necessary parameters
+        k_cache = list(self.kv_caches.values())[0][0]
+        device = k_cache.device
+        head_dim = self.model_config.hf_text_config.head_dim
+        block_size = self.vllm_config.cache_config.block_size
+        num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
+        layers = self.model_config.hf_text_config.num_hidden_layers
+        flat_block_ids = [item for sublist in block_ids for item in sublist]
+        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)
+
+        k_caches = []
+        v_caches = []
+        for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
+            k_caches.append(k_cache_layer)
+            v_caches.append(v_cache_layer)
+
+        torch.ops._C_ascend.transpose_kv_cache_by_block(
+            k_caches, v_caches, block_ids_tensor, block_size, num_kv_head, head_dim, tp_num_need_pulls, layers
+        )
 
     def reformat_kv_cache(
         self,
@@ -1164,51 +1191,25 @@ class MooncakeConnectorWorker:
             first_kv_cache_tuple[0].size(-1) != first_kv_cache_tuple[1].size(-1) and len(first_kv_cache_tuple) == 2
         )
         self.use_sparse = len(first_kv_cache_tuple) == 3
-        if self.use_mla:
-            # MLA case.[num_block, block_size, 1, hidden_dim]
-            self.num_blocks = first_kv_cache.shape[0]
+
+        self.num_blocks = first_kv_cache.shape[0]
+        logger.info("num_blocks: %s", self.num_blocks)
+        self.block_len = []
+        if self.use_mla or self.use_sparse:
             block_rank = 3  # [block_size, latent_dim]
-            block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
-            block_shape_pe = first_kv_cache_tuple[1].shape[-block_rank:]
-            self.block_len = [
-                first_kv_cache[0].element_size() * math.prod(block_shape_norm),
-                first_kv_cache[1].element_size() * math.prod(block_shape_pe),
-            ]
-            logger.info(
-                "num_blocks: %s, block_shape_norm: %s, block_shape_pe: %s",
-                self.num_blocks,
-                block_shape_norm,
-                block_shape_pe,
-            )
-        elif self.use_sparse:
-            self.num_blocks = first_kv_cache.shape[0]
-            block_rank = 3  # [block_size, latent_dim]
-            block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
-            block_shape_pe = first_kv_cache_tuple[1].shape[-block_rank:]
-            block_shape_k = first_kv_cache_tuple[2].shape[-block_rank:]
-            self.block_len = [
-                first_kv_cache[0].element_size() * math.prod(block_shape_norm),
-                first_kv_cache[1].element_size() * math.prod(block_shape_pe),
-                first_kv_cache[2].element_size() * math.prod(block_shape_k),
-            ]
-            logger.info(
-                "num_blocks: %s, block_shape_norm: %s, block_shape_pe: %s, block_shape_k: %s",
-                self.num_blocks,
-                block_shape_norm,
-                block_shape_pe,
-                block_shape_k,
-            )
+            for i in range(len(first_kv_cache_tuple)):
+                block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
+                logger.info("block_shape: %s", block_shape)
+                self.block_len.append(first_kv_cache[i].element_size() * math.prod(block_shape))
         else:
             # eager:[num_block, block_size, num_head, hidden_dim]
-            # torchair:[num_block, block_size, num_head*hidden_dim]
-            self.num_blocks = first_kv_cache.shape[0]
-            kv_elem_size = first_kv_cache.element_size()
             block_rank = (
                 len(first_kv_cache.shape) - 1
             )  # [block_size, kv_heads, head_dim] or [block_size, kv_heads*head_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
-            self.block_len = [kv_elem_size * math.prod(block_shape)]
-            logger.info("num_blocks: %s, block_shape: %s", self.num_blocks, block_shape)
+            logger.info("block_shape: %s", block_shape)
+            self.block_len = [first_kv_cache.element_size() * math.prod(block_shape)]
+
         logger.info(
             "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
             self.use_mla,
@@ -1220,30 +1221,15 @@ class MooncakeConnectorWorker:
         kv_caches_base_addr = []
         ptrs = []
         lengths = []
+        length = len(self.block_len)
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
-            if self.use_mla:
-                for i, cache in enumerate(cache_or_caches, 0):
-                    base_addr = cache.data_ptr()
-                    region_len = self.num_blocks * self.block_len[i % 2]
-                    kv_caches_base_addr.append(base_addr)
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
-            elif self.use_sparse:
-                for i, cache in enumerate(cache_or_caches, 0):
-                    base_addr = cache.data_ptr()
-                    region_len = self.num_blocks * self.block_len[i % 3]
-                    kv_caches_base_addr.append(base_addr)
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
-            else:
-                cache_list = [cache_or_caches] if self.use_mla or self.use_sparse else cache_or_caches
-                for cache in cache_list:
-                    base_addr = cache.data_ptr()
-                    region_len = self.num_blocks * self.block_len[0]
-                    kv_caches_base_addr.append(base_addr)
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
+            for i, cache in enumerate(cache_or_caches, 0):
+                base_addr = cache.data_ptr()
+                region_len = self.num_blocks * self.block_len[i % length]
+                kv_caches_base_addr.append(base_addr)
+                ptrs.append(base_addr)
+                lengths.append(region_len)
         global_te.register_buffer(ptrs, lengths)
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
