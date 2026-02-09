@@ -120,9 +120,9 @@ def test_deepseek_mtp_correctness(model_name: str, num_speculative_tokens: int,
     del spec_llm
 
 
-@pytest.mark.skip(reason="Failed with CANN8.5, fix me")
-@pytest.mark.parametrize("model_name", MODELS_EAGLE)
-@pytest.mark.parametrize("model_name_main", MODELS_MAIN)
+# @pytest.mark.skip(reason="Failed with CANN8.5, fix me")
+@pytest.mark.parametrize("model_name", "/mnt/share/weight/Qwen3-8B-speculator.eagle3")
+@pytest.mark.parametrize("model_name_main", "/mnt/share/weight/Qwen3-8B")
 @pytest.mark.parametrize("num_speculative_tokens", [1, 2])
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
