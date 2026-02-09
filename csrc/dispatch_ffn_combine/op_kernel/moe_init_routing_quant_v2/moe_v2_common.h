@@ -44,6 +44,8 @@ constexpr int64_t EXERPT_TOKENS_COUNT = 2;
 constexpr int64_t EXERPT_TOKENS_CUMSUM = 1;
 constexpr int64_t EXERPT_TOKENS_NONE = 0;
 constexpr int64_t EXERPT_TOKENS_BEFORE_CAPACITY = 1;
+constexpr int64_t ALIGN_512 = 512;
+constexpr int64_t ALIGN_128 = 128;
 
 const __gm__ int32_t assist[256] = {
     0,  0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 0, 0, 2,  0, 0, 0, 0, 0, 0, 0, 3,  0, 0, 0, 0, 0, 0, 0,
