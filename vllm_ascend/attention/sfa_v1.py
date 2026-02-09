@@ -913,7 +913,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
-            q, k = rope_forward_triton(q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=True)
+            q, k = rope_forward_triton(q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=False)
         else:
             k_pe, k_nope = torch.split(k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
 
@@ -971,7 +971,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         block_table = attn_metadata.block_tables
 
-        topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+        # topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+        topk_indices = torch_npu.npu_lightning_indexer(
             query=q,
             key=kv_cache[2],
             weights=weights,
