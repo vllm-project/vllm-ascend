@@ -33,7 +33,8 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_state, build_slot_mappings_by_layer
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_state
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
