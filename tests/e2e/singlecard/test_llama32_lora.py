@@ -36,7 +36,7 @@ else:
         "SELECT COUNT(*) FROM candidate",
         "SELECT COUNT(*) FROM candidate",
         "SELECT Poll_Source FROM candidate GROUP BY Poll_Source ORDER BY COUNT(*) DESC LIMIT 1;",
-        "SELECT t1.Poll_Source FROM candidate AS t1 JOIN people AS t2 ON t1.People_ID = t2.People_ID GROUP BY t1.Poll_Source ORDER BY COUNT(*) DESC LIMIT 1",  # noqa: E501
+        "SELECT t1.Poll_Source FROM candidate AS t1 JOIN people AS t2 ON t1.People_ID  =  t2.People_ID GROUP BY t1.Poll_Source ORDER BY COUNT(*) DESC LIMIT 1",  # noqa: E501
     ]
 
 EXPECTED_BASE_MODEL_OUTPUT = [
