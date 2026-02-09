@@ -70,14 +70,14 @@ def test_RMSNorm_forward(
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
 @patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
 def test_RMSNorm_forward_310p(
-    mock_addrmsnorm, mock_rmsnorm, residual, dummy_tensor, default_vllm_config
+    mock_add_rmsnorm, mock_rmsnorm, residual, dummy_tensor, default_vllm_config
 ):
     layer = RMSNorm(hidden_size=8, eps=1e-05)
     if residual is not None:
         out_x, out_residual = layer.forward_oot(dummy_tensor, residual)
         expected_out_x = 2 * dummy_tensor
         expected_out_residual = 2 * residual
-        mock_rmsnorm.assert_called_once()
+        mock_add_rmsnorm.assert_called_once()
         mock_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
         assert torch.allclose(out_residual, expected_out_residual)
@@ -85,5 +85,5 @@ def test_RMSNorm_forward_310p(
         out_x = layer.forward_oot(dummy_tensor, residual)
         expected_out_x = dummy_tensor + 1
         mock_rmsnorm.assert_called_once()
-        mock_addrmsnorm.assert_called_once()
+        mock_add_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
