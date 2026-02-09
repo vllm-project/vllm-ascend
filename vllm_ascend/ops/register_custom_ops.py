@@ -216,9 +216,9 @@ direct_register_custom_op(
 )
 
 direct_register_custom_op(
-    op_name="prefetch_preprocess",
-    op_func=_prefetch_preprocess_impl,
-    fake_impl=_prefetch_preprocess_impl_fake,
+    op_name="maybe_pad_and_reduce",
+    op_func=_maybe_pad_and_reduce_impl,
+    fake_impl=_maybe_pad_and_reduce_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

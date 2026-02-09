@@ -90,7 +90,7 @@ class MtpProposer(EagleProposer):
                     ].get_device_tensor()[: num_reqs * self.decode_threshold]
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
-                # `AscendAttentionState.SpecDecoding` is only designed for mla,
+                # `AscendAttentionState.SpecDecoding` is only designed for MLA.
                 # `AscendAttentionState.ChunkedPrefill` is used in self-attention.
                 attn_state = (
                     AscendAttentionState.SpecDecoding
@@ -339,14 +339,14 @@ class MtpProposer(EagleProposer):
                     positions = self._get_positions(num_input_tokens)
                     hidden_states = self.hidden_states[:num_input_tokens]
 
-                hidden_states, positions = self.maybe_pad_and_reduce(hidden_states, positions)
+                    hidden_states, positions = self.maybe_pad_and_reduce(hidden_states, positions)
 
-                hidden_states = self.model(input_ids=input_ids, positions=positions, hidden_states=hidden_states)
-                forward_context = get_forward_context()
-                if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not self.use_sparse:
-                    self._update_full_graph_params(forward_context, num_input_tokens)
+                    hidden_states = self.model(input_ids=input_ids, positions=positions, hidden_states=hidden_states)
+                    forward_context = get_forward_context()
+                    if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not self.use_sparse:
+                        self._update_full_graph_params(forward_context, num_input_tokens)
 
-                hidden_states, positions, _ = self.maybe_all_gather_and_unpad(hidden_states, positions)
+                    hidden_states, positions, _ = self.maybe_all_gather_and_unpad(hidden_states, positions)
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
@@ -411,7 +411,8 @@ class MtpProposer(EagleProposer):
                         - 1
                     )
                     num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
-                    ori_seq_len = attn_metadata_i.seq_lens
+                    # `AscendAttentionState.SpecDecoding` is only designed for MLA.
+                    # `AscendAttentionState.ChunkedPrefill` is used in self-attention.
                     mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
                     # slot_mapping index base offset:
@@ -494,7 +495,7 @@ class MtpProposer(EagleProposer):
             if self.pcp_size * self.dcp_size > 1:
                 # update local seq_len
                 num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
-                    ori_seq_len + step + 1,
+                    attn_metadata_i.seq_lens[:batch_size],
                     self.pcp_size,
                     self.dcp_size,
                     self.runner.parallel_config.cp_kv_cache_interleave_size,

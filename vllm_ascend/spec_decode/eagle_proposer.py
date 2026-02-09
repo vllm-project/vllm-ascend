@@ -347,7 +347,7 @@ class EagleProposer(VllmEagleProposer):
 
         model_positions = self._get_positions(num_tokens)
 
-        batch_size = num_tokens // (self.num_speculative_tokens + 1)
+        batch_size = num_tokens // (self.num_speculative_tokens + 1) if not is_profile else self.runner.max_num_reqs
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -544,10 +544,9 @@ class EagleProposer(VllmEagleProposer):
         multi_steps_attn_metadata,
         is_dummy=False,
     ) -> torch.Tensor:
-        # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all speculative
-        # tokens' proposings.
-        # `model_input_ids`, `model_positions` and `model_hidden_states` are used to represent the
-        # inputs of speculative model.
+        # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all
+        # speculative tokens' proposings. `model_input_ids`, `model_positions` and
+        # `model_hidden_states` represent the speculative model inputs.
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
         model_hidden_states = self.hidden_states[:num_input_tokens]
@@ -614,7 +613,7 @@ class EagleProposer(VllmEagleProposer):
         hidden_states = hidden_states[last_token_indices]
         last_token_indices = self.arange[:batch_size]
 
-        input_batch_size = num_input_tokens
+        input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
 
         forward_context = get_forward_context()
         forward_context.num_tokens = input_batch_size
@@ -668,10 +667,9 @@ class EagleProposer(VllmEagleProposer):
 
             # Run the model.
 
-            # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all speculative
-            # tokens' proposings.
-            # `model_input_ids`, `model_positions` and `model_hidden_states` are used to represent the
-            # inputs of speculative model.
+            # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all
+            # speculative tokens' proposings. `model_input_ids`, `model_positions` and
+            # `model_hidden_states` represent the speculative model inputs.
             model_input_ids = self.input_ids[:input_batch_size]
             model_positions = self._get_positions(input_batch_size)
             model_hidden_states = self.hidden_states[:input_batch_size]
