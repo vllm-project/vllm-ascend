@@ -48,7 +48,7 @@ def build_attn_metadata(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     num_reqs: int,
     num_tokens: int,
-    query_start_loc_gpu: torch.Tensor,
+    query_start_loc: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
     seq_lens: torch.Tensor,
     seq_lens_np: np.ndarray,
@@ -79,7 +79,7 @@ def build_attn_metadata(
         slot_mapping = slot_mappings[i]
 
         common_attn_metadata = AscendCommonAttentionMetadata(
-            query_start_loc=query_start_loc_gpu,
+            query_start_loc=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu[:num_reqs],
             seq_lens=seq_lens[:num_reqs],
