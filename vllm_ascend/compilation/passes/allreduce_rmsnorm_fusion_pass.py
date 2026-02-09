@@ -24,7 +24,7 @@ from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import ALLREDUCE_NORM_FUSE_THRESHOLD, vllm_version_is
 
 if vllm_version_is("0.15.0"):
     from vllm.compilation.inductor_pass import get_pass_context  # type: ignore
@@ -32,9 +32,6 @@ if vllm_version_is("0.15.0"):
 else:
     from vllm.compilation.passes.inductor_pass import get_pass_context
     from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
-
-# computation-communication tiling block is 512
-ALLREDUCE_NORM_FUSE_THRESHOLD = 512
 
 
 def get_compile_range_and_extra_stream_check():

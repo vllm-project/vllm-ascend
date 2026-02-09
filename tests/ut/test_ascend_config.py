@@ -32,7 +32,7 @@ class TestAscendConfig(TestBase):
         return wrapper
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform._fix_incompatible_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
@@ -47,7 +47,7 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_fusion_config.fusion_ops_gmmswigluquant)
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform._fix_incompatible_config")
     def test_init_ascend_config_with_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
@@ -78,7 +78,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform._fix_incompatible_config")
     def test_init_ascend_config_enable_npugraph_ex(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
@@ -94,7 +94,7 @@ class TestAscendConfig(TestBase):
         self.assertTrue(npugraph_ex_config.enable_static_kernel)
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform._fix_incompatible_config")
     def test_get_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
@@ -106,7 +106,7 @@ class TestAscendConfig(TestBase):
             get_ascend_config()
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform._fix_incompatible_config")
     def test_clear_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
