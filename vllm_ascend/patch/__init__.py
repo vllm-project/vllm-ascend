@@ -150,7 +150,7 @@
 #    Future Plan:
 #       Revert this when CANN support shift aclnn operation
 #
-# ** 5. File: worker/patch_npugraph_ex_triton.py**
+# ** 5. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
