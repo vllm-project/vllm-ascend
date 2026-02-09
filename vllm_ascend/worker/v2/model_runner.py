@@ -153,7 +153,7 @@ class NPUModelRunner(GPUModelRunner):
         idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
         idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
         idx_mapping_cpu = torch.from_numpy(idx_mapping_np)
-        idx_mapping_npu = async_copy_to_gpu(idx_mapping_cpu, device=self.device)
+        idx_mapping = async_copy_to_gpu(idx_mapping_cpu, device=self.device)
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -165,7 +165,7 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits = torch.arange(
                 num_reqs + 1, device=self.device, dtype=torch.int32
             )
-            expanded_idx_mapping = idx_mapping_npu
+            expanded_idx_mapping = idx_mapping
         else:
             num_draft_tokens = np.array(
                 [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
@@ -182,12 +182,12 @@ class NPUModelRunner(GPUModelRunner):
 
             max_expand_len = self.num_speculative_steps + 1
             expanded_idx_mapping = expand_idx_mapping(
-                idx_mapping_npu, total_num_logits, cu_num_logits, max_expand_len
+                idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
 
 
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
-        block_tables = self.block_tables.gather_block_tables(idx_mapping_npu)
+        block_tables = self.block_tables.gather_block_tables(idx_mapping)
 
        # Get query_start_loc.
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
@@ -206,7 +206,7 @@ class NPUModelRunner(GPUModelRunner):
         prepare_prefill_inputs(
             self.input_buffers.input_ids,
             self.req_states.next_prefill_tokens,
-            idx_mapping_npu,
+            idx_mapping,
             query_start_loc,
             self.req_states.prefill_token_ids.gpu,
             self.req_states.prefill_len.gpu,
@@ -215,7 +215,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
-            idx_mapping_npu,
+            idx_mapping,        
             query_start_loc,
             self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
@@ -226,7 +226,7 @@ class NPUModelRunner(GPUModelRunner):
         # Prepare M-RoPE positions.
         if self.uses_mrope:
             self.mrope_states.prepare_mrope_positions(
-                idx_mapping_npu,
+                idx_mapping,
                 query_start_loc,
                 self.req_states.prefill_len.gpu,
                 self.req_states.num_computed_tokens.gpu,
@@ -236,7 +236,7 @@ class NPUModelRunner(GPUModelRunner):
         # and draft tokens. Also, get the logits indices to sample tokens from.
         logits_indices = combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids,
-            idx_mapping_npu,
+            idx_mapping,
             self.req_states.last_sampled_tokens,
             query_start_loc,
             seq_lens,
@@ -248,7 +248,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
-            idx_mapping_npu,query_start_loc, self.input_buffers.positions[:num_tokens])
+            idx_mapping,query_start_loc, self.input_buffers.positions[:num_tokens])
          # Layer name -> slot mapping.
         slot_mappings_by_layer = build_slot_mappings_by_layer(
             slot_mappings, self.kv_cache_config
@@ -281,8 +281,9 @@ class NPUModelRunner(GPUModelRunner):
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
-            idx_mapping=idx_mapping_npu,
+            idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
+            expanded_idx_mapping=expanded_idx_mapping,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
@@ -290,12 +291,17 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
-            seq_lens_np=self.input_buffers.seq_lens_np,
             input_ids=input_ids,
             positions=positions,
+            mrope_positions=mrope_positions,
+            inputs_embeds=None,
             attn_metadata=attn_metadata,
+            slot_mappings=slot_mappings_by_layer,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
+            cu_num_logits_np=cu_num_logits_np,
+            has_structured_output_reqs=scheduler_output.has_structured_output_requests,
+            seq_lens_np=self.input_buffers.seq_lens_np,
         )
 
     def postprocess(
