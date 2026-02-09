@@ -9,11 +9,6 @@
  */
 #include "aclnn_dispatch_ffn_combine.h"
 #include <algorithm>
-// #include "aclnn_kernels/common/op_error_check.h"
-// #include "opdev/op_log.h"
-// #include "opdev/common_types.h"
-// #include "opdev/platform.h"
-// #include "ophost/matmul_util.h"
 #include <unistd.h>
 #include <vector>
 #include <string>
@@ -24,9 +19,6 @@
 #include <sys/file.h>
 #include <climits>
 #include "../op_host/error_log.h"
-// using namespace op;
-
-// using namespace op;
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,7 +37,7 @@ enum NnopbaseHcclServerType {
 extern aclnnStatus aclnnInnerDispatchFFNCombineGetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensorList* weight2,
                                                          const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                          const aclTensor* probs,
-                                                         const char* group, int64_t maxOutputSize,
+                                                         const char* group,
                                                          bool transB, bool weightNz,
                                                          const aclTensor* out, const aclTensor* expertTokenNums,
                                                          uint64_t* workspaceSize, aclOpExecutor** executor);
@@ -58,7 +50,7 @@ extern "C" void __attribute__((weak)) NnopbaseSetHcclServerType(void *executor, 
 aclnnStatus aclnnDispatchFFNCombineGetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensorList* weight2,
                                                     const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                     const aclTensor* probs,
-                                                    const char* group, int64_t maxOutputSize,
+                                                    const char* group,
                                                     const aclTensor* out, const aclTensor* expertTokenNums,
                                                     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
@@ -66,7 +58,7 @@ aclnnStatus aclnnDispatchFFNCombineGetWorkspaceSize(const aclTensor* x, const ac
     bool weightNz = true;
 
     aclnnStatus ret = aclnnInnerDispatchFFNCombineGetWorkspaceSize(x, weight1, weight2, expertId, scale1, scale2, probs, group, 
-                                                                    maxOutputSize, transB, weightNz,
+                                                                    transB, weightNz,
                                                                     out, expertTokenNums, workspaceSize, executor);
     return ret;
 }

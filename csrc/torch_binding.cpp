@@ -665,7 +665,6 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     const at::TensorList& scale2,
     const at::Tensor& probs,
     c10::string_view group,
-    int64_t max_output_size,
     at::Tensor& out,
     at::Tensor& expert_token_nums
 ) {
@@ -681,7 +680,6 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  scale2,
                  probs,
                  group_ep_ptr,
-                 max_output_size,
                  out,
                  expert_token_nums);
     } else {
@@ -694,7 +692,6 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  scale2,
                  probs,
                  group_ep_ptr,
-                 max_output_size,
                  out,
                  expert_token_nums);
     }    
@@ -1394,7 +1391,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
         "                     Tensor[] scale1, Tensor[] scale2, Tensor probs, str group,"
-        "                     int max_output_size, Tensor! out, Tensor! expert_token_nums) -> (Tensor out, Tensor expert_token_nums)"
+        "                     Tensor! out, Tensor! expert_token_nums) -> (Tensor out, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 

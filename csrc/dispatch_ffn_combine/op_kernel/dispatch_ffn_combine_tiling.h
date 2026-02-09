@@ -44,6 +44,7 @@ struct CoCTiling {
     int32_t commNpuSplit = -1;
     int32_t commDataSplit = -1;
     int32_t lenPerLoop = -1;
+    int32_t epilogueGranularity = -1;
     uint64_t initRoutingQuantTilingKey;
     optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData;
 };
