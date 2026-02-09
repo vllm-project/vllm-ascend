@@ -36,7 +36,13 @@ if HAS_TRITON:
         mm_batch_invariant,
     )
 
-HAS_ASCENDC_BATCH_INVARIANT = importlib.util.find_spec("custom_ops") is not None
+
+try:
+    import custom_ops  # noqa
+
+    HAS_ASCENDC_BATCH_INVARIANT = True
+except ImportError:
+    HAS_ASCENDC_BATCH_INVARIANT = False
 
 
 def override_envs_for_invariance():
@@ -63,8 +69,6 @@ def enable_batch_invariant_mode():
 
     # Register operators implemented in Ascend batch-invariant ops in priority.
     if HAS_ASCENDC_BATCH_INVARIANT:
-        import custom_ops  # noqa
-
         _batch_invariant_LIB.impl("aten::mm", torch.ops.myops.npu_mm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::matmul", torch.ops.myops.npu_matmul_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::sum", torch.ops.myops.npu_reduce_sum_batch_invariant, "NPU")
