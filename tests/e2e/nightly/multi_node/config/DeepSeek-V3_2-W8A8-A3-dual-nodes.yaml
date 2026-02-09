@@ -66,24 +66,34 @@ deployment:
       --tokenizer-mode deepseek_v32
       --reasoning-parser deepseek_v3
 benchmarks:
-  perf:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 512
-    max_out_len: 3000
-    batch_size: 512
-    request_rate: 11.2
-    baseline: 1253.8466 
-    threshold: 0.97
+  # perf:
+  #   case_type: performance
+  #   dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+  #   request_conf: vllm_api_stream_chat
+  #   dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  #   num_prompts: 512
+  #   max_out_len: 3000
+  #   batch_size: 512
+  #   request_rate: 11.2
+  #   baseline: 1253.8466 
+  #   threshold: 0.97
     
-  acc:
+  # acc:
+  #   case_type: accuracy
+  #   dataset_path: vllm-ascend/gsm8k-lite
+  #   request_conf: vllm_api_general_chat
+  #   dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+  #   max_out_len: 4096
+  #   batch_size: 64
+  #   baseline: 95
+  #   threshold: 5
+
+  acc_aime2025:
     case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k-lite
+    dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 4096
-    batch_size: 64
-    baseline: 95
-    threshold: 5
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 80000
+    batch_size: 32
+    baseline: 40
+    threshold: 7
