@@ -248,7 +248,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         block_id_list_c = block_id_list[offset:] + block_id_list[:offset]
         ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
 
-        if ret is not None and any(r < 0 for r in ret):
+        if ret is not None and any(r != 0 for r in ret):
             missing_block_ids = record_failed_blocks(
                 block_id_list_c,
                 ret,
@@ -395,7 +395,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         block_id_list_c = block_id_list[offset:] + block_id_list[:offset]
         ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
 
-        if ret is not None and any(r < 0 for r in ret):
+        if ret is not None and any(r != 0 for r in ret):
             missing_block_ids = record_failed_blocks(
                 block_id_list_c,
                 ret,
