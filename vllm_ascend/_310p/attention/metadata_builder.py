@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,19 +15,26 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from __future__ import annotations
-
 from typing import Any
 
 import torch
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder as _BaseBuilder
+from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder310
+from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder
 
 
-class AscendAttentionMetadataBuilder310P(_BaseBuilder):
+class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
+    """
+    Metadata builder specialized for the Huawei Ascend 310P NPU.
+
+    This class extends the base Ascend attention metadata builder to use
+    the 310P-specific attention mask builder, ensuring that masks are
+    generated in the correct format (FRACTAL_NZ) and logic required by
+    the 310P hardware.
+    """
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -35,6 +42,16 @@ class AscendAttentionMetadataBuilder310P(_BaseBuilder):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        """
+        Initializes the metadata builder and the 310P-specific mask builder.
+
+        Args:
+            kv_cache_spec (AttentionSpec): Specification for the KV cache (block size, etc.).
+            layer_names (list[str]): List of layer names in the model.
+            vllm_config (VllmConfig): Global vLLM configuration object.
+            device (torch.device): The device (NPU) to run operations on.
+        """
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
-        self.attn_mask_builder: Any = AttentionMaskBuilder(self.device)
+        # Override the mask builder with the 310P-specific version
+        self.attn_mask_builder: Any = AttentionMaskBuilder310(self.device)
