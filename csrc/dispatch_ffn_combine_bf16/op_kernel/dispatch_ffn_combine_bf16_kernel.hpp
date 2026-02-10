@@ -895,6 +895,11 @@ CATLASS_DEVICE
         int32_t syncLoopIdx = 0;
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentExpertM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
+            if (preSrcExpertSum >= params.maxOutputSize) {
+                currentExpertM = 0;
+            } else if (preSrcExpertSum + currentExpertM > params.maxOutputSize) {
+                currentExpertM = params.maxOutputSize - preSrcExpertSum;
+            }
             GemmCoord inGroupProblemShape{currentExpertM, n2, k2}; // M N K
             blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
             uint32_t coreLoops = blockScheduler.GetCoreLoops();

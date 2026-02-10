@@ -391,7 +391,6 @@ private:
         uint16_t syncgmmIdx = 0;
         AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx / CROSS_CORE_FLAG_MAX_SET_COUNT); // Wait for AIV to finish cumsum for matmul
         syncgmmIdx++;
-        AscendC::PipeBarrier<PIPE_ALL>();
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
@@ -405,7 +404,6 @@ private:
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
             gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(arrayGroupIdx, params.ptrB1)));
             gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(arrayGroupIdx, params.ptrScale1)));
-            AscendC::PipeBarrier<PIPE_ALL>();
             if (currentM <= L1TileShape::M) {
                 gmB1.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
             }
@@ -502,8 +500,6 @@ private:
         if (params.epilogueGranularity < params.expertPerRank) {
             lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
         }
-
-        AscendC::PipeBarrier<PIPE_ALL>();
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
