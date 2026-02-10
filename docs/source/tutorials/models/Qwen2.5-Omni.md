@@ -8,9 +8,9 @@ The `Qwen2.5-Omni` model was supported since `vllm-ascend:v0.11.0rc0`. This docu
 
 ## Supported Features
 
-Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
@@ -19,13 +19,13 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 - `Qwen2.5-Omni-3B`(BF16): [Download model weight](https://huggingface.co/Qwen/Qwen2.5-Omni-3B)
 - `Qwen2.5-Omni-7B`(BF16): [Download model weight](https://huggingface.co/Qwen/Qwen2.5-Omni-7B)
 
-Following examples use the 7B version deafultly.
+Following examples use the 7B version by default.
 
 ### Installation
 
-You can using our official docker image to run `Qwen2.5-Omni` directly.
+You can use our official docker image to run `Qwen2.5-Omni` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
 ```{code-block} bash
    :substitutions:
@@ -97,7 +97,7 @@ VLLM_TARGET_DEVICE=empty pip install -v ".[audio]"
 
 `--allowed-local-media-path` is optional, only set it if you need infer model with local media file
 
-`--gpu-memory-utilization` should not be set manually only if yous know what this parameter aims to.
+`--gpu-memory-utilization` should not be set manually only if you know what this parameter aims to.
 
 #### Multiple NPU (Qwen2.5-Omni-7B)
 
@@ -174,7 +174,7 @@ Qwen2.5-Omni on vllm-ascend has been test on AISBench.
 
 ### Using AISBench
 
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result, here is the result of `Qwen2.5-Omni-7B` with `vllm-ascend:0.11.0rc0` for reference only.
 
@@ -187,7 +187,7 @@ Qwen2.5-Omni on vllm-ascend has been test on AISBench.
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
 
@@ -195,7 +195,7 @@ Run performance evaluation of `Qwen2.5-Omni-7B` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.

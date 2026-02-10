@@ -8,9 +8,9 @@ This document will show the main verification steps of the model, including supp
 
 ## Supported Features
 
-Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
@@ -24,7 +24,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 `Qwen3-Coder` is first supported in `vllm-ascend:v0.10.0rc1`, please run this model using a later version.
 
-You can using our official docker image to run `Qwen3-Coder-30B-A3B-Instruct` directly.
+You can use our official docker image to run `Qwen3-Coder-30B-A3B-Instruct` directly.
 
 ```{code-block} bash
    :substitutions:
@@ -52,7 +52,7 @@ docker run --rm \
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
 ## Deployment
 
@@ -90,7 +90,7 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
 
 ### Using AISBench
 
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result, here is the result of `Qwen3-Coder-30B-A3B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
 
@@ -102,4 +102,4 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.

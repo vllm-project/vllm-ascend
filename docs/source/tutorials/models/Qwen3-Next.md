@@ -10,9 +10,9 @@ The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1`.
 
 ## Supported Features
 
-Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Weight Preparation
 
@@ -134,7 +134,7 @@ Prompt: 'Who are you?', Generated text: ' What do you know about me?\n\nHello! I
 
 ### Using AISBench
 
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result, here is the result of `Qwen3-Next-80B-A3B-Instruct` in `vllm-ascend:0.13.0rc1` for reference only.
 
@@ -146,7 +146,7 @@ Prompt: 'Who are you?', Generated text: ' What do you know about me?\n\nHello! I
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
 
@@ -154,7 +154,7 @@ Run performance evaluation of `Qwen3-Next` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.

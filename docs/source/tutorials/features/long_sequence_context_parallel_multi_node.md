@@ -20,13 +20,13 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### Verify Multi-node Communication
 
-Refer to [verify multi-node communication environment](../installation.md#verify-multi-node-communication) to verify multi-node communication.
+Refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) to verify multi-node communication.
 
 ### Installation
 
-You can using our official docker image to run `DeepSeek-V3.1` directly.
+You can use our official docker image to run `DeepSeek-V3.1` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
 ```{code-block} bash
    :substitutions:
@@ -331,7 +331,7 @@ Here are two accuracy evaluation methods.
 
 ### Using AISBench
 
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result, here is the result of `DeepSeek-V3.1-w8a8` for reference only.
 
@@ -343,7 +343,7 @@ Here are two accuracy evaluation methods.
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
 
@@ -351,7 +351,7 @@ Run performance evaluation of `DeepSeek-V3.1-w8a8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.

@@ -16,9 +16,9 @@ This document will show the main verification steps of the model, including supp
 
 ## Supported Features
 
-Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
@@ -34,13 +34,13 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### Verify Multi-node Communication(Optional)
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
 ### Installation
 
-You can using our official docker image to run `DeepSeek-V3.1` directly.
+You can use our official docker image to run `DeepSeek-V3.1` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
 ```{code-block} bash
    :substitutions:
@@ -96,7 +96,7 @@ nic_name="xxxx"
 local_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 # AIV
@@ -158,7 +158,7 @@ local_ip="xxxx"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -210,7 +210,7 @@ local_ip="xxx"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -252,7 +252,7 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 
 ### Prefill-Decode Disaggregation
 
-We recommend using Mooncake for deployment: [Mooncake](./pd_disaggregation_mooncake_multi_node.md).
+We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
 
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
 
@@ -275,7 +275,7 @@ local_ip="141.xx.xx.1"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -352,7 +352,7 @@ local_ip="141.xx.xx.2"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -429,7 +429,7 @@ local_ip="141.xx.xx.3"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -505,7 +505,7 @@ local_ip="141.xx.xx.4"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -672,7 +672,7 @@ Here are two accuracy evaluation methods.
 
 ### Using AISBench
 
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result, here is the result of `DeepSeek-V3.1-w8a8-mtp-QuaRot` in `vllm-ascend:0.11.0rc1` for reference only.
 
@@ -689,7 +689,7 @@ Not test yet.
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 The performance result is:  
 
@@ -707,7 +707,7 @@ Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.

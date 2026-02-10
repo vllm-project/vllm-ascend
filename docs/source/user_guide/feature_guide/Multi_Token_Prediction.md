@@ -109,7 +109,7 @@ if self.speculative_config:
         got {self.decode_threshold}"
 ```
 
-## Limitation
+## Limitations
 
 - Due to the fact that only a single layer of weights is exposed in DeepSeek's MTP, the accuracy and performance are not effectively guaranteed in scenarios where MTP > 1 (especially MTP ≥ 3). Moreover, due to current operator limitations, MTP supports a maximum of 15.
 - In the fullgraph mode with MTP > 1, the capture size of each aclgraph must be an integer multiple of (num_speculative_tokens + 1).

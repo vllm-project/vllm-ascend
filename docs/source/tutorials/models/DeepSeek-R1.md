@@ -3,13 +3,13 @@
 ## Introduction
 
 DeepSeek-R1 is a high-performance Mixture-of-Experts (MoE) large language model developed by DeepSeek Company. It excels in complex logical reasoning, mathematical problem-solving, and code generation. By dynamically activating its expert networks, it delivers exceptional performance while maintaining computational efficiency. Building upon R1, DeepSeek-R1-W8A8 is a fully quantized version of the model. It employs 8-bit integer (INT8) quantization for both weights and activations, which significantly reduces the model's memory footprint and computational requirements, enabling more efficient deployment and application in resource-constrained environments.
-This article takes the deepseek- R1-W8A8 version as an example to introduce the deployment of the R1 series models.
+This article takes the `DeepSeek-R1-W8A8` version as an example to introduce the deployment of the R1 series models.
 
 ## Supported Features
 
-Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
@@ -21,13 +21,13 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### Verify Multi-node Communication(Optional)
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
 ### Installation
 
-You can using our official docker image to run `DeepSeek-R1-W8A8` directly.
+You can use our official docker image to run `DeepSeek-R1-W8A8` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
 ```{code-block} bash
    :substitutions:
@@ -254,7 +254,7 @@ Here are two accuracy evaluation methods.
 
 ### Using AISBench
 
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result, here is the result of `DeepSeek-R1-W8A8` in `vllm-ascend:0.11.0rc2` for reference only.
 
@@ -267,7 +267,7 @@ Here are two accuracy evaluation methods.
 
 As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-R1-W8A8` in online mode.
 
-1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
+1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
 
 2. Run `lm_eval` to execute the accuracy evaluation.
 
@@ -285,7 +285,7 @@ lm_eval \
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
 
@@ -293,7 +293,7 @@ Run performance evaluation of `DeepSeek-R1-W8A8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.

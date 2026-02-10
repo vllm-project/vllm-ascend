@@ -8,8 +8,8 @@ This document will show the main verification steps of the `Qwen3-VL-30B-A3B-Ins
 
 ## Supported Features
 
-- Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
-- Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+- Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+- Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
