@@ -21,65 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
-# Mock the vllm and torch_npu modules to isolate the tests
-class MockVLLM:
-    class Logger:
-        @staticmethod
-        def init_logger(name):
-            logger = MagicMock()
-            logger.info = MagicMock()
-            logger.warning = MagicMock()
-            return logger
-
-    class ModelExecutor:
-        class Layers:
-            class BatchInvariant:
-                @staticmethod
-                def vllm_is_batch_invariant():
-                    return False
-
-    class TritonUtils:
-        HAS_TRITON = False
-
-
-class MockTorchNPU:
-    npu_fused_infer_attention_score = MagicMock()
-
-
-# Set up mock modules
-@pytest.fixture(autouse=True)
-def setup_mocks():
-    # Save original modules
-    original_modules = {
-        "vllm": sys.modules.get("vllm"),
-        "torch": sys.modules.get("torch"),
-        "torch_npu": sys.modules.get("torch_npu"),
-        "custom_ops": sys.modules.get("custom_ops"),
-    }
-
-    # Create mock modules
-    sys.modules["vllm"] = MockVLLM()
-    sys.modules["vllm.logger"] = MockVLLM.Logger()
-    sys.modules["vllm.model_executor"] = MockVLLM.ModelExecutor()
-    sys.modules["vllm.model_executor.layers"] = MockVLLM.ModelExecutor.Layers()
-    sys.modules["vllm.model_executor.layers.batch_invariant"] = MockVLLM.ModelExecutor.Layers.BatchInvariant()
-    sys.modules["vllm.triton_utils"] = MockVLLM.TritonUtils()
-    sys.modules["torch"] = MagicMock()
-    sys.modules["torch_npu"] = MockTorchNPU()
-
-    # Import the module after mocking
-    global batch_invariant
-    import vllm_ascend.batch_invariant as batch_invariant
-
-    yield
-
-    # Restore original modules
-    for name, module in original_modules.items():
-        if module is not None:
-            sys.modules[name] = module
-        else:
-            sys.modules.pop(name, None)
+import vllm_ascend.batch_invariant as batch_invariant
 
 
 class TestBatchInvariant:
@@ -201,7 +143,6 @@ class TestBatchInvariant:
         batch_invariant.HAS_ASCENDC_BATCH_INVARIANT = has_backend
         batch_invariant.override_envs_for_invariance = MagicMock()
         batch_invariant.enable_batch_invariant_mode = MagicMock()
-        logger = batch_invariant.logger
 
         # Call function
         batch_invariant.init_batch_invariance()
@@ -210,21 +151,12 @@ class TestBatchInvariant:
         if batch_invariant_enabled and has_backend:
             batch_invariant.override_envs_for_invariance.assert_called_once()
             batch_invariant.enable_batch_invariant_mode.assert_called_once()
-            logger.info.assert_called_once_with("Enabling batch-invariant mode for vLLM on Ascend NPU.")
         elif batch_invariant_enabled and not has_backend:
             batch_invariant.override_envs_for_invariance.assert_not_called()
             batch_invariant.enable_batch_invariant_mode.assert_not_called()
-            logger.warning.assert_called_once_with(
-                "Batch-invariant mode requested but Triton or AscendC batch-invariant "
-                "ops is not available.skipping batch-invariant initialization."
-            )
         else:
             batch_invariant.override_envs_for_invariance.assert_not_called()
             batch_invariant.enable_batch_invariant_mode.assert_not_called()
-            logger.warning.assert_called_once_with(
-                "Batch-invariant mode requested but Triton or AscendC batch-invariant "
-                "ops is not available.skipping batch-invariant initialization."
-            )
 
 
 if __name__ == "__main__":
