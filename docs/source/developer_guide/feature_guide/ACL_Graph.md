@@ -96,7 +96,7 @@ There are some other rules about ACL Graph and stream. Currently, we use func `u
 
 We will expand the stream resource limitation in the future.
 
-## Limitation
+## Limitations
 
 1. `FULL` and `FULL_AND_PIECEWISE` are not supported now;
 2. When use ACL Graph and MTP and `num_speculative_tokens > 1`, as vLLM don't support this case in v0.11.0, we need to set `cudagraph_capture_sizes` explicitly.

@@ -19,11 +19,11 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 - `Qwen2.5-Omni-3B`(BF16): [Download model weight](https://huggingface.co/Qwen/Qwen2.5-Omni-3B)
 - `Qwen2.5-Omni-7B`(BF16): [Download model weight](https://huggingface.co/Qwen/Qwen2.5-Omni-7B)
 
-Following examples use the 7B version deafultly.
+Following examples use the 7B version by default.
 
 ### Installation
 
-You can using our official docker image to run `Qwen2.5-Omni` directly.
+You can use our official docker image to run `Qwen2.5-Omni` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -97,7 +97,7 @@ VLLM_TARGET_DEVICE=empty pip install -v ".[audio]"
 
 `--allowed-local-media-path` is optional, only set it if you need infer model with local media file
 
-`--gpu-memory-utilization` should not be set manually only if yous know what this parameter aims to.
+`--gpu-memory-utilization` should not be set manually only if you know what this parameter aims to.
 
 #### Multiple NPU (Qwen2.5-Omni-7B)
 
@@ -195,7 +195,7 @@ Run performance evaluation of `Qwen2.5-Omni-7B` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
