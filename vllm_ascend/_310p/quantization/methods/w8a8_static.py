@@ -26,7 +26,7 @@ from .registry import register_scheme
 
 
 @register_scheme("W8A8", "linear")
-class AscendW8A8LinearMethod310P(AscendLinearScheme):
+class AscendW8A8LinearMethod310(AscendLinearScheme):
     """310P-only W8A8 static linear scheme.
 
     Notes:
@@ -50,13 +50,7 @@ class AscendW8A8LinearMethod310P(AscendLinearScheme):
     def get_perchannel_param(self, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params: dict[str, Any] = {}
         params["quant_bias"] = torch.empty(output_size, dtype=torch.int32)
-
-        # NOTE: keep identical to your current working behavior.
-        if params_dtype == torch.bfloat16:
-            params["deq_scale"] = torch.empty(output_size, dtype=torch.float32)
-        else:
-            params["deq_scale"] = torch.empty(output_size, dtype=torch.int64)
-
+        params["deq_scale"] = torch.empty(output_size, dtype=torch.int64)
         params["weight_scale"] = torch.empty(output_size, 1, dtype=params_dtype)
         params["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
         return params

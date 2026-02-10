@@ -75,13 +75,12 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [d7e17aaacd5ed1b4b4be6bcfef3a1b7cbc84fc9a, v0.15.0]
+        vllm_version: [13397841ab469cecf1ed425c3f52a9ffc38139b5, v0.15.0]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.e2e_tracker == true }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      runner: linux-aarch64-a2b3
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
       contains_310: false
       type: full

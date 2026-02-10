@@ -58,7 +58,6 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         num_expert_group: int | None = None,
         custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
@@ -67,7 +66,6 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
-        assert routed_scaling_factor == 1.0
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -195,44 +193,36 @@ class AscendFusedMoE310(FusedMoE):
 
         method = quant_method.quant_method
         quant_type = getattr(method, "quant_type", QuantType.NONE)
-        if quant_type != QuantType.NONE:
-            # TODO: w8a8 quantization will be supported soon, and only reject w4a8 here.
-            raise RuntimeError("W8A8 is not supported currently.")
-        return QuantType.NONE
+        if quant_type not in [QuantType.NONE, QuantType.W8A8]:
+            raise RuntimeError("Only Unquant and W8A8 is supported.")
+        return quant_type
 
     def forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
     ) -> torch.Tensor:
         assert self.quant_method is not None
+        assert self.routed_scaling_factor == 1.0, "routed_scaling_factor != 1.0 is not supported."
         forward_context = get_forward_context()
 
         hidden_states, router_logits, _, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states, router_logits=router_logits, quant_type=self.quant_type
         )
 
-        if isinstance(hidden_states, tuple):
-            hidden_states, pertoken_scale = hidden_states
-        else:
-            pertoken_scale = None
-
         # Matrix multiply.
         fused_experts_results: FusedExpertsResult = self.quant_method.apply(
             layer=self,
             x=hidden_states,
-            router_logits=router_logits,
-            pertoken_scale=pertoken_scale,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
-            expert_map=self.local_expert_map,
+            top_k=self.top_k,
+            router_logits=router_logits,
+            renormalize=self.renormalize,
             topk_group=self.topk_group,
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.e_score_correction_bias,
-            activation=self.activation,
+            global_num_experts=self.global_num_experts,
+            expert_map=self.local_expert_map,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
         )
 
@@ -251,9 +241,11 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         shared_experts: torch.nn.Module,
         gate: torch.nn.Module | None = None,
         use_overlapped: bool = True,
+        routed_input_transform: torch.nn.Module | None = None,
         **kwargs,
     ):
         AscendFusedMoE310.__init__(self, **kwargs)
+        self._routed_input_transform = routed_input_transform
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None

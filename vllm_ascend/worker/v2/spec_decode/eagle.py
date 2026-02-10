@@ -30,7 +30,6 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
 
 class AscendEagleSpeculator(EagleSpeculator):
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         """Override GPU EagleSpeculator.__init__ for Ascend NPUs.
         attnention metadata building in Ascend backend needs more information,
