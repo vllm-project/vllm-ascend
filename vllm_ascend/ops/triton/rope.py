@@ -205,7 +205,7 @@ def rope_forward_triton(
 
     if cos_sin_cache is not None and positions is not None:
         assert positions.shape[0] == num_tokens
-        _triton_rope[(n_row,)](
+        _triton_rope[(n_row, )](
             q,
             q.stride(0),
             k,
@@ -237,7 +237,7 @@ def rope_forward_triton(
             # If rope_dim is not specified, we assume that input cos/sin is not
             # duplicated to rope_dim, which means rope_dim == cos.shape[-1] * 2
             rope_dim = cos.shape[-1] * 2
-        _triton_rope[(n_row,)](
+        _triton_rope[(n_row, )](
             q,
             q.stride(0),
             k,
@@ -266,6 +266,5 @@ def rope_forward_triton(
             "Currently, rope_forward_triton supports passing:\n"
             "1. positions and original cos_sin_cache.\n"
             "2. cos and sin which are already selected by positions\n"
-            "Please check whether you call rope_forward_triton correctly."
-        )
+            "Please check whether you call rope_forward_triton correctly.")
     return q, k

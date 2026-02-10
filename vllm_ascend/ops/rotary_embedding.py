@@ -33,6 +33,7 @@ from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+
     from vllm_ascend.ops.triton.rope import rope_forward_triton
 
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
@@ -279,9 +280,10 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        return torch.ops.vllm.rope_forward_oot(
-            positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
-        )
+        return torch.ops.vllm.rope_forward_oot(positions, query, key,
+                                               self.cos_sin_cache,
+                                               self.head_size, self.rotary_dim,
+                                               is_neox_style)
 
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
@@ -523,9 +525,11 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
             b, h_k, d = key.shape
             key = key.view(b, h_k, d // 2, 2).transpose(3,
                                                         2).reshape(b, h_k, d)
-        q_pe, k_pe = torch.ops.vllm.rope_forward_oot(
-            positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
-        )
+        q_pe, k_pe = torch.ops.vllm.rope_forward_oot(positions, query, key,
+                                                     self.cos_sin_cache,
+                                                     self.head_size,
+                                                     self.rotary_dim,
+                                                     is_neox_style)
         return q_pe, k_pe
 
 

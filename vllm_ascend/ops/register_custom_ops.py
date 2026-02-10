@@ -390,9 +390,8 @@ direct_register_custom_op(op_name="quantize",
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
-direct_register_custom_op(
-    op_name="rope_forward_oot",
-    op_func=rope_forward_oot,
-    fake_impl=_rope_forward_oot_impl_fake,
-    mutates_args=[],
-    dispatch_key="PrivateUse1")
+direct_register_custom_op(op_name="rope_forward_oot",
+                          op_func=rope_forward_oot,
+                          fake_impl=_rope_forward_oot_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
