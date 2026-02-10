@@ -1,7 +1,9 @@
-# Tutorials
+# Model Tutorials
+
+This section provides tutorials for different models of vLLM Ascend.
 
 :::{toctree}
-:caption: Models
+:caption: Model Tutorials
 :maxdepth: 1
 Qwen2.5-Omni.md
 Qwen2.5-7B.md
@@ -26,22 +28,4 @@ DeepSeek-R1.md
 GLM4.x.md
 Kimi-K2-Thinking.md
 PaddleOCR-VL.md
-:::
-
-:::{toctree}
-:caption: Features
-:maxdepth: 1
-pd_colocated_mooncake_multi_instance.md
-pd_disaggregation_mooncake_single_node.md
-pd_disaggregation_mooncake_multi_node.md
-long_sequence_context_parallel_single_node.md
-long_sequence_context_parallel_multi_node.md
-suffix_speculative_decoding.md
-ray
-:::
-
-:::{toctree}
-:caption: Hardware
-:maxdepth: 1
-310p.md
 :::
