@@ -41,7 +41,6 @@ class AscendSiluAndMul(SiluAndMul):
 
 
 class AscendSwigluOAIAndMul:
-
     def swiglu_oai_forward(x: torch.Tensor, alpha: float = 1.702, limit: float = 7.0) -> torch.Tensor:
         class MinimalSwigluOAIAndMul:
             def __init__(self):
