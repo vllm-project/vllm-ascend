@@ -6,7 +6,7 @@ The Qwen3 Reranker model series is the latest proprietary model of the Qwen fami
 
 ## Supported Features
 
-Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 ## Environment Preparation
 
@@ -22,11 +22,11 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run `Qwen3-Reranker` series models.
 
-- Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+- Start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
 if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
 ## Deployment
 

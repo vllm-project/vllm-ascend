@@ -16,9 +16,9 @@ This example requires version **v0.11.0rc2**. Earlier versions may lack certain 
 
 ## Supported Features
 
-Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
@@ -38,7 +38,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### Verify Multi-node Communication(Optional)
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
 ### Installation
 
@@ -97,7 +97,7 @@ In the [Run docker container](./Qwen3-Dense.md#run-docker-container), detailed e
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -269,7 +269,7 @@ Here is one accuracy evaluation methods.
 
 ### Using AISBench
 
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result, here is the result of `Qwen3-32B-W8A8` in `vllm-ascend:0.11.0rc2` for reference only.
 
@@ -283,7 +283,7 @@ Here is one accuracy evaluation methods.
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
 

@@ -155,8 +155,6 @@ python -m vllm.entrypoints.api_server \
     --quantization ascend
 ```
 
-The above commands are for reference only. For more details, consult the [official guide](../../tutorials/index.md).
-
 ## References
 
 - [ModelSlim Documentation](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)
