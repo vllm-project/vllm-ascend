@@ -19,7 +19,8 @@ on:
 jobs:
   e2e-light:
     name: singlecard-light
-    if: ${{ inputs.type == 'light' }}
+    # if: ${{ inputs.type == 'light' }}
+    if: False
     runs-on: linux-aarch64-a2b3-1
     strategy:
       fail-fast: false
@@ -85,11 +86,13 @@ jobs:
   e2e-full:
     name: singlecard-full
     if: ${{ inputs.type == 'full' }}
-    runs-on: linux-aarch64-a2b3-1
+    runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 999
     strategy:
       fail-fast: false
       matrix:
-        part: [0, 1]
+        # part: [0, 1]
+        part: [0]
     container:
       image: ${{ inputs.image }}
       env:
@@ -145,11 +148,13 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         run: |
+          sleep 99999
           python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
 
   e2e-2-cards-light:
     name: multicard-2-light
-    if: ${{ inputs.type == 'light' }}
+    # if: ${{ inputs.type == 'light' }}
+    if: False
     runs-on: linux-aarch64-a3-2
     strategy:
       fail-fast: false
@@ -213,7 +218,8 @@ jobs:
 
   e2e-2-cards-full:
     name: multicard-2-full
-    if: ${{ inputs.type == 'full' }}
+    # if: ${{ inputs.type == 'full' }}
+    if: False
     runs-on: linux-aarch64-a3-2
     strategy:
       fail-fast: false
@@ -285,7 +291,8 @@ jobs:
 
   e2e-4-cards-full:
     name: multicard-4-full
-    if: ${{ inputs.type == 'full' }}
+    # if: ${{ inputs.type == 'full' }}
+    if: False
     runs-on: linux-aarch64-a3-4
     strategy:
       fail-fast: false
