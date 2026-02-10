@@ -75,9 +75,7 @@ class AisbenchRunner:
         self.task_type = aisbench_config["case_type"]
         self.request_conf = aisbench_config["request_conf"]
         self.dataset_conf = aisbench_config.get("dataset_conf")
-        self.num_prompts = aisbench_config.get("num_prompts")
         self.max_out_len = aisbench_config["max_out_len"]
-        self.batch_size = aisbench_config["batch_size"]
         self.request_rate = aisbench_config.get("request_rate", 0)
         self.trust_remote_code = aisbench_config.get("trust_remote_code", False)
         self.temperature = aisbench_config.get("temperature")
@@ -88,10 +86,18 @@ class AisbenchRunner:
         self.exp_folder = None
         self.result_line = None
         self._init_dataset_conf()
-        self._init_request_conf()
-        self._run_aisbench_task()
-        self._wait_for_task()
-        if verify:
+        self.all_results = []
+        batch_size = aisbench_config["batch_size"]
+        bs_list = batch_size if isinstance(batch_size, list) else [batch_size]
+        for bs in bs_list:
+            self.batch_size = bs
+            self.num_prompts = aisbench_config.get("num_prompts", str(self.batch_size * 4))
+            self._init_request_conf()
+            self._run_aisbench_task()
+            self._wait_for_task()
+            self.all_results.append(self.result)
+            if not verify:
+                continue
             self.baseline = aisbench_config.get("baseline", 1)
             if self.task_type == "accuracy":
                 self.threshold = aisbench_config.get("threshold", 1)
@@ -99,6 +105,8 @@ class AisbenchRunner:
             if self.task_type == "performance":
                 self.threshold = aisbench_config.get("threshold", 0.97)
                 self._performance_verify()
+        if not isinstance(batch_size, list):
+            self.all_results = self.result
 
     def _init_dataset_conf(self):
         if self.task_type == "accuracy":
@@ -231,7 +239,7 @@ def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="loc
             continue
         try:
             with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
-                aisbench_results.append(aisbench.result)
+                aisbench_results.append(aisbench.all_results)
         except Exception as e:
             aisbench_results.append("")
             aisbench_errors.append([aisbench_case, e])
