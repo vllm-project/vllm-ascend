@@ -89,9 +89,9 @@ class QKNormRopeFusionPattern:
             q_flat = q_norm_out.view(q.shape)
 
             k_flat = k_norm_out.view(k.shape)
-            q_rope, k_rope = torch.ops.vllm.rope_forward_triton_with_positions(
-                positions, q_flat, k_flat, cos_sin_cache, self.head_dim,
-                self.head_dim, True)
+            q_rope, k_rope = torch.ops.vllm.rope_forward_oot(
+                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
+            )
 
             return q_rope, k_rope, v
 
@@ -192,9 +192,9 @@ class QKNormRopeFusionPatternWithBias:
             q_flat = q_normed.view(q.shape)
 
             k_flat = k_normed.view(k.shape)
-            q_rope, k_rope = torch.ops.vllm.rope_forward_triton_with_positions(
-                positions, q_flat, k_flat, cos_sin_cache, self.head_dim,
-                self.head_dim, True)
+            q_rope, k_rope = torch.ops.vllm.rope_forward_oot(
+                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
+            )
 
             return q_rope, k_rope, v
 
