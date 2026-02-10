@@ -27,7 +27,7 @@ RUN apt-get update -y && \
 
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # For lint purpose, actually we need make a main2main matching.
-ARG VLLM_COMMIT=d7e17aaacd5ed1b4b4be6bcfef3a1b7cbc84fc9a
+ARG VLLM_COMMIT=13397841ab469cecf1ed425c3f52a9ffc38139b5
 RUN git clone $VLLM_REPO /vllm-workspace/vllm && \
     cd /vllm-workspace/vllm && \
     git checkout $VLLM_COMMIT
