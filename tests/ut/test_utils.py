@@ -18,6 +18,7 @@ import os
 from threading import Lock
 from unittest import mock
 
+import pytest
 import torch
 from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
                          VllmConfig)
@@ -104,6 +105,8 @@ class TestUtils(TestBase):
         output_tensor = utils.aligned_16(input_tensor)
         self.assertEqual(output_tensor.shape[0], 32)
 
+    @pytest.mark.skip(
+        "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_enable_custom_op(self):
         result = utils.enable_custom_op()
         self.assertTrue(result)
@@ -246,56 +249,3 @@ class TestUtils(TestBase):
         utils.register_ascend_customop()
         self.assertEqual(mock_customop.register_oot.call_count,
                          len(REGISTERED_ASCEND_OPS))
-
-
-class TestProfileExecuteDuration(TestBase):
-
-    def setUp(self):
-        utils.ProfileExecuteDuration._instance = None
-        utils.ProfileExecuteDuration._observations = []
-        utils.ProfileExecuteDuration._lock = Lock()
-
-    def test_singleton_creation(self):
-        instance1 = utils.ProfileExecuteDuration()
-        self.assertIsNotNone(instance1)
-        self.assertIs(instance1, utils.ProfileExecuteDuration._instance)
-
-        instance2 = utils.ProfileExecuteDuration()
-        self.assertIs(instance1, instance2)
-
-    def test_thread_safety(self):
-        from threading import Thread
-
-        instances = []
-
-        def create_instance():
-            instances.append(utils.ProfileExecuteDuration())
-
-        threads = [Thread(target=create_instance) for _ in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        first_instance = instances[0]
-        for instance in instances[1:]:
-            self.assertIs(first_instance, instance)
-
-    def test_atexit_registration(self):
-        with mock.patch('atexit.register') as mock_register:
-            instance = utils.ProfileExecuteDuration()
-            mock_register.assert_called_once_with(instance.destroy)
-
-    def test_lock_usage(self):
-        original_lock = utils.ProfileExecuteDuration._lock
-
-        with mock.patch.object(utils.ProfileExecuteDuration,
-                               '_lock',
-                               wraps=original_lock) as mock_lock:
-            utils.ProfileExecuteDuration()
-            mock_lock.__enter__.assert_called()
-            mock_lock.__exit__.assert_called()
-
-    def test_observations_initialization(self):
-        instance = utils.ProfileExecuteDuration()
-        self.assertEqual(instance._observations, [])

@@ -73,9 +73,12 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
         query_lens) - input_batch.num_computed_tokens_cpu
 
     query_lens = torch.tensor(query_lens)
-    result = pcp_manager.generate_pcp_metadata(total_tokens, query_lens,
+    result, _ = pcp_manager.generate_pcp_metadata(total_tokens, query_lens,
                                                input_batch,
-                                               num_scheduled_tokens)
+                                               num_scheduled_tokens,
+                                               torch.tensor([]),
+                                               num_reqs_padded=num_reqs,
+                                               num_reqs=num_reqs)
 
     if not expect_not_none:
         assert result is None, f"Expected to return None, but got {type(result)}"
@@ -123,6 +126,7 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
     vllm_config.speculative_config.num_speculative_tokens = 0
+    vllm_config.scheduler_config.max_num_seqs = 1000
 
     pcp_manager = PCPManager(pcp_world_size=pcp_size,
                              pcp_rank=0,
@@ -140,8 +144,10 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
                                                    dtype=np.int32)
     input_batch.num_prompt_tokens = np.array(num_prompt_tokens, dtype=np.int32)
     arange_np = np.arange(10000)
+    num_scheduled_tokens = np.array(tokens)
+    pcp_manager.init_batch_info(num_scheduled_tokens, num_reqs)
     pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(
-        np.array(tokens), arange_np, num_reqs, 1)
+        num_scheduled_tokens, arange_np)
 
     assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), \
         f"Expected pcp_tokens: {expected_pcp_tokens}, got: {pcp_tokens_result}"
@@ -304,8 +310,8 @@ def test_generate_pcp_mtp_input(
     for i, token_ids_tensor in enumerate(token_ids_tensor_list):
         token_ids_cpu_tensor[i][:token_ids_tensor.size(0)] = token_ids_tensor
 
-    pcp_manager.generate_pcp_mtp_input(num_reqs, total_num_scheduled_tokens,
-                                       num_scheduled_tokens, False,
+    pcp_manager.init_batch_info(np.array(list(num_scheduled_tokens.values())), num_reqs)
+    pcp_manager.generate_pcp_mtp_input(total_num_scheduled_tokens, num_scheduled_tokens, False,
                                        input_batch, arange_np)
     assert torch.equal(
         pcp_manager.input_ids_pcp_full.cpu[:total_num_scheduled_tokens],

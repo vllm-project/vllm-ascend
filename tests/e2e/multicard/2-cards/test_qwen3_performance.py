@@ -42,6 +42,7 @@ vllm_bench_cases = {
     "random_input_len": 128,
     "max_concurrency": 40,
     "random_output_len": 100,
+    "temperature": 0.0,
 }
 
 # NOTE: Any changes for the baseline throughput should be approved by team members.
@@ -56,7 +57,6 @@ async def test_models(model: str) -> None:
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
         "HCCL_OP_EXPANSION_MODE": "AIV",
-        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1",
     }
     server_args = [
         "--async-scheduling",
@@ -73,7 +73,7 @@ async def test_models(model: str) -> None:
         "--compilation-config",
         '{"cudagraph_mode": "FULL_DECODE_ONLY"}',
         "--additional-config",
-        '{"pa_shape_list":[48,64,72,80]}',
+        '{"pa_shape_list":[48,64,72,80],"weight_prefetch_config":{"enabled":true}}',
         "--block-size",
         "128",
         "--trust-remote-code",

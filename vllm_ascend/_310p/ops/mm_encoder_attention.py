@@ -15,14 +15,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import einops
 import torch
 import torch_npu
 
-from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention as _Base
+from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
 
 
-class AscendMMEncoderAttention310(_Base):
+class AscendMMEncoderAttention310(AscendMMEncoderAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -37,31 +36,26 @@ class AscendMMEncoderAttention310(_Base):
     ):
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
-
-        q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
+        query = query.view(bsz * q_len, self.num_heads, self.head_size)
+        key = key.view(bsz * kv_len, self.num_kv_heads, self.head_size)
+        value = value.view(bsz * kv_len, self.num_kv_heads, self.head_size)
 
         if cu_seqlens is None:
-            cu_seqlens = torch.arange(
-                0,
-                (bsz + 1) * q_len,
-                step=q_len,
-                dtype=torch.int32,
-                device=query.device,
-            )
+            seq_len = torch.tensor([q_len] * bsz, device="cpu", dtype=torch.int32)
+        else:
+            seq_len = torch.diff(cu_seqlens.to("cpu", dtype=torch.int32))
 
-        seq_len = torch.diff(cu_seqlens).to("cpu", dtype=torch.int32)
-
-        context_layer = torch.empty_like(q)
+        output = torch.empty_like(query)
         torch_npu._npu_flash_attention_unpad(
-            query=q,
-            key=k,
-            value=v,
+            query=query,
+            key=key,
+            value=value,
             seq_len=seq_len,
             scale_value=self.head_size**-0.5,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
-            out=context_layer,
+            out=output,
         )
 
-        context_layer = einops.rearrange(context_layer, "(b s) h d -> b s h d", b=bsz).contiguous()
-        return context_layer
+        output = output.view(bsz, -1, self.num_heads, self.head_size)
+        return output

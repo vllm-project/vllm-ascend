@@ -13,24 +13,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
+# from collections.abc import Iterable
 
-import torch
-from vllm.model_executor.models.minicpm import MiniCPMAttention
+from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
 
-
-def forward(
-    self,
-    positions: torch.Tensor,
-    hidden_states: torch.Tensor,
-) -> torch.Tensor:
-    qkv, _ = self.qkv_proj(hidden_states)
-    q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-    q, k = self.rotary_emb(positions, q, k)
-    attn_output = self.attn(q, k, v)
-    output, _ = self.o_proj(attn_output)
-    return output
+_original_call = HunYuanVLProcessor.__call__
 
 
-# The type conversion in the forward function is deleted to support the rope operator.
-MiniCPMAttention.forward = forward
+def _patched_call(self, images=None, text=None, videos=None, **kwargs):
+    """Remove add_special_tokens requirement."""
+    kwargs.pop("add_special_tokens", None)
+    return _original_call(self, images=images, text=text, videos=videos, **kwargs)
+
+
+HunYuanVLProcessor.__call__ = _patched_call

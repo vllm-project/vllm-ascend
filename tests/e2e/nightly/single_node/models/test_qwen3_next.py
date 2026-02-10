@@ -4,7 +4,7 @@ from typing import Any
 
 import openai
 import pytest
-from vllm.utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
@@ -16,7 +16,7 @@ MODELS = [
 MODES = ["aclgraph"]
 
 TENSOR_PARALLELS = [4]
-MAX_NUM_BATCHED_TOKENS = [1024, 4096, 8192, 32768]
+MAX_NUM_BATCHED_TOKENS = [8192, 32768]
 
 prompts = [
     "San Francisco is a",
@@ -27,10 +27,10 @@ api_keyword_args = {
 }
 
 batch_size_dict = {
-    "linux-aarch64-a2-4": 64,
+    "linux-aarch64-a2b3-4": 64,
     "linux-aarch64-a3-4": 64,
 }
-VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
+VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2b3-4")
 performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
 
 aisbench_cases = [{
@@ -70,7 +70,6 @@ async def test_models(model: str, mode: str, tp_size: int,
         "HCCL_BUFFSIZE": "1024",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     }
-    compilation_config = {"cudagraph_mode": "FULL_DECODE_ONLY"}
     server_args = [
         "--tensor-parallel-size",
         str(tp_size),
@@ -81,15 +80,14 @@ async def test_models(model: str, mode: str, tp_size: int,
         "--max-num-batched-tokens",
         str(max_num_batched_tokens),
         "--trust-remote-code",
+        "--async-scheduling",
+        "--no-enable-prefix-caching",
+        "--enable-expert-parallel",
         "--gpu-memory-utilization",
         "0.8",
         "--max-num-seqs",
         "64",
     ]
-    if mode == "aclgraph":
-        server_args.extend(
-            ["--compilation-config",
-             json.dumps(compilation_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }

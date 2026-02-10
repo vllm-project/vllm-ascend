@@ -79,7 +79,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         fast_build: bool = False,
     ) -> AscendMLAMetadata:
         metadata_cls = super().build(common_prefix_len, common_attn_metadata)
-        if self.num_prefills == 0 and self.pcp_size > 1:
+        if self.pcp_size > 1:
             self.slot_mapping[: self.num_decode_tokens] = self.slot_mapping[
                 : self.num_decode_tokens * self.pcp_size : self.pcp_size
             ]
@@ -292,6 +292,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         vllm_config=None,
         speculative_config=None,
         num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
     ):
         if forward_context.is_draft_model:
             graph_params = get_draft_graph_params()

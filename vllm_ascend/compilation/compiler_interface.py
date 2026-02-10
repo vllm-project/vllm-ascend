@@ -90,10 +90,10 @@ def npugraph_ex_compile(
         # affecting program execution.
         num_spec_tokens = vllm_config.speculative_config.num_speculative_token if vllm_config.speculative_config else 0
         uniform_decode_query_len = num_spec_tokens + 1
-        max_num_tokens = vllm_config.scheduler_config.max_num_seq * uniform_decode_query_len
+        max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
         decode_cudagraph_batch_sizes = [
             x
-            for x in vllm_config.compilation_config.cudagraph_capture_size
+            for x in vllm_config.compilation_config.cudagraph_capture_sizes
             if max_num_tokens >= x >= uniform_decode_query_len
         ]
         config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
