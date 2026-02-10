@@ -26,7 +26,8 @@ from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
-from vllm.v1.worker.gpu.cudagraph_utils import prepare_inputs_to_capture as prepare_inputs_to_capture_gpu
+from vllm.v1.worker.gpu.cudagraph_utils import \
+    prepare_inputs_to_capture as prepare_inputs_to_capture_gpu
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper

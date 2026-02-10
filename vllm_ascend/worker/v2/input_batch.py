@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from vllm.v1.worker.gpu.input_batch import InputBuffers, InputBatch
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 
 class AscendInputBuffers(InputBuffers):
@@ -56,7 +56,7 @@ class AscendInputBatch(InputBatch):
     # Create seq_lens_np.
     # npu's attention backend still needs seq_lens on CPU side.
     seq_lens_np: np.ndarray
-    
+
     @classmethod
     def make_dummy(
         cls,

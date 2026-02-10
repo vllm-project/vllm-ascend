@@ -22,20 +22,20 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.input_batch import (
-    InputBatch,
-    combine_sampled_and_draft_tokens,
-    prepare_pos_seq_lens,
-    prepare_prefill_inputs,
-    expand_idx_mapping,
-)
+from vllm.v1.worker.gpu.input_batch import (InputBatch,
+                                            combine_sampled_and_draft_tokens,
+                                            expand_idx_mapping,
+                                            prepare_pos_seq_lens,
+                                            prepare_prefill_inputs)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_state
-from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm_ascend.worker.v2.input_batch import AscendInputBuffers, AscendInputBatch
+from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
+                                              build_attn_state)
+from vllm_ascend.worker.v2.input_batch import (AscendInputBatch,
+                                               AscendInputBuffers)
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator

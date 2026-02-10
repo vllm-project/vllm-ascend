@@ -16,14 +16,14 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from typing import Callable, Set, Union, Tuple, Sequence
+from typing import Callable, Sequence, Set, Tuple, Union
+
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
 
 
-def get_row_indices_from_key(key: Union[int, slice, Tuple],
-                             dim_size: int) -> Set[int]:
+def get_row_indices_from_key(key: Union[int, slice, Tuple], dim_size: int) -> Set[int]:
     """get the set of row indices involved in the given key."""
     if isinstance(key, int):
         # parse index such as np[1]
@@ -55,7 +55,7 @@ class MonitoredNumPyArray:
 
     def __setitem__(self, key, value):
         self._array[key] = value
-        dim_size = self._array.shape[0] 
+        dim_size = self._array.shape[0]
         row_indices = get_row_indices_from_key(key, dim_size)
         for row in row_indices:
             self._callback(row)
@@ -93,10 +93,7 @@ class UvaBufferWrapper:
     that provides CPU and NPU views of a UVA tensor."""
 
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
-        self._cpu: torch.Tensor = torch.zeros(size,
-                                              dtype=dtype,
-                                              device="cpu",
-                                              pin_memory=True)
+        self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self._np = self._cpu.numpy()
         self._uva: torch.Tensor = torch.zeros_like(self._cpu, device="npu")
         self._modified_indices: Set[int] = set()
@@ -120,8 +117,7 @@ class UvaBufferWrapper:
             dirty_rows = sorted(self._modified_indices)
             # can't use copy_ method, because copy_ for index tensor
             #  will malloc new memory.
-            self._uva[dirty_rows] = self._cpu[dirty_rows].to(device="npu",
-                                                             non_blocking=True)
+            self._uva[dirty_rows] = self._cpu[dirty_rows].to(device="npu", non_blocking=True)
             self._modified_indices.clear()
         return self._uva
 

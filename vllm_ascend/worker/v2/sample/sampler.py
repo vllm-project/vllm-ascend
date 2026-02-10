@@ -17,11 +17,11 @@
 import numpy as np
 import torch
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
-from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
 
 
 class AscendSampler(Sampler):

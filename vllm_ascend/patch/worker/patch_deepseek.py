@@ -2,7 +2,8 @@ from itertools import islice
 
 import torch
 from vllm.distributed import get_pp_group
-from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model, _get_llama_4_scaling
+from vllm.model_executor.models.deepseek_v2 import (DeepseekV2Model,
+                                                    _get_llama_4_scaling)
 from vllm.sequence import IntermediateTensors
 
 

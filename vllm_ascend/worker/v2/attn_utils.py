@@ -28,7 +28,8 @@ from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendPrefillContextParallelMetadata
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         AscendPrefillContextParallelMetadata)
 
 _ATTENTION_MASK_BUILDER = None
 
