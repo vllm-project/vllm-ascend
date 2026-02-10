@@ -214,7 +214,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
                 # Create KV event
                 if self.enable_kv_event:
-                    token_ids = req_meta.token_ids[start:start+req_meta.original_block_size]
+                    token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
                     stored_event = BlockStored(
                         block_hashes=new_block_hashes[index],
                         parent_block_hash=prev_key,
@@ -227,7 +227,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     stored_events.append(stored_event)
                     prev_key = new_block_hashes[index]
                     logger.debug(f"Added kv cache event '{stored_event}' to kv cache events queue")
-
 
             if self.kv_role == "kv_consumer":
                 keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
@@ -350,7 +349,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             )
             addr_list.append(addr)
             size_list.append(size)
-
 
         if current_event is not None:
             current_event.synchronize()

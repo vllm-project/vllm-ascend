@@ -150,9 +150,7 @@ class KVPoolWorker:
         )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
-        self.kv_events: list[BlockStored] = None
         if kv_event_config and kv_event_config.enable_kv_cache_events:
-            self.kv_events = []
             self.enable_kv_events = True
 
         self.kv_send_thread: KVTransferThread | None = None
@@ -653,7 +651,7 @@ class KVPoolWorker:
             return -1
 
     def get_kv_events(self) -> list[BlockStored]:
-        if self.enable_kv_events:
+        if self.enable_kv_events and self.kv_send_thread is not None:
             # collect store kv events form sending thread
             events = self.kv_send_thread.get_kv_events()
             return events

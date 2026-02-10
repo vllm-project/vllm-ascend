@@ -322,7 +322,8 @@ class ReqMeta:
 
         Args:
             tracker (RequestTracker): the request tracker.
-            block_size (int): the block size in vLLM scheduler and AscendConnector. block_size = block_size * pcp_size * dcp_size
+            block_size (int): the block size in vLLM scheduler and AscendConnector.
+                If context parallelism is enabled, block_size = block_size * pcp_size * dcp_size.
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
             skip_save (bool): whether to skip the save operation.
             discard_partial_chunks (bool): whether to discard partial chunks.
