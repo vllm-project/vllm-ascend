@@ -93,7 +93,7 @@ jobs:
           uv pip install --system -v -e .
           end_time2=$(date +%s)
           duration=$((end_time2 - end_time1))
-          echo "==========build总耗时：$duration 秒（$((duration/60)) 分 $((duration%60)) 秒）"
+          echo "==========build总耗时 ：$duration 秒（$((duration/60)) 分 $((duration%60)) 秒）"
 
 #      - name: Run vllm-project/vllm-ascend test
 #        env:
