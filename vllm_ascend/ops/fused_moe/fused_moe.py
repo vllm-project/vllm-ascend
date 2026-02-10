@@ -94,8 +94,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
-            activation: str = "silu",
-            enable_force_load_balance: bool = False,
+        activation: str = "silu",
+        enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -239,22 +239,13 @@ class AscendFusedMoE(FusedMoE):
         self.quant_type = self._get_quant_type()
 
     def _get_quant_type(self) -> QuantType:
-        quant_method = self.quant_method
-        if not hasattr(quant_method, "quant_method") or quant_method.quant_method is None:
-            return QuantType.NONE
+        quant_type = QuantType.NONE
+        method = getattr(self.quant_method, "quant_method", None)
 
-        method = quant_method.quant_method
+        if method is not None:
+            quant_type = getattr(method, "quant_type", QuantType.NONE)
 
-        if hasattr(method, "quant_type"):
-            from vllm_ascend.quantization.methods.base import QuantType as SchemeQuantType
-
-            scheme_quant_type = method.quant_type
-            if scheme_quant_type == SchemeQuantType.W8A8:
-                return QuantType.W8A8
-            elif scheme_quant_type == SchemeQuantType.W4A8:
-                return QuantType.W4A8
-
-        return QuantType.NONE
+        return quant_type
 
     def update_expert_map(self, new_expert_map):
         self._expert_map = new_expert_map

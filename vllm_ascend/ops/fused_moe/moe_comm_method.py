@@ -30,7 +30,6 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAll2All,
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
-    QuantType,
 )
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     MoETokenDispatcher,
@@ -38,6 +37,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
 )
+from vllm_ascend.quantization.methods.base import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
@@ -110,9 +110,9 @@ class MoECommMethod(ABC):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str = "silu",
-            w1_bias: Optional[torch.Tensor] = None,
-            w2_bias: Optional[torch.Tensor] = None,
-            apply_router_weight_on_input: bool = False,
+        w1_bias: Optional[torch.Tensor] = None,
+        w2_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
         use_int8_w8a8: bool = False,
         use_int4_w4a8: bool = False,
         use_int4_w4a16: bool = False,
