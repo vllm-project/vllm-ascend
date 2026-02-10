@@ -19,7 +19,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 - `Qwen2.5-Omni-3B`(BF16): [Download model weight](https://huggingface.co/Qwen/Qwen2.5-Omni-3B)
 - `Qwen2.5-Omni-7B`(BF16): [Download model weight](https://huggingface.co/Qwen/Qwen2.5-Omni-7B)
 
-Following examples use the 7B version deafultly.
+Following examples use the 7B version by default.
 
 ### Installation
 
@@ -97,7 +97,7 @@ VLLM_TARGET_DEVICE=empty pip install -v ".[audio]"
 
 `--allowed-local-media-path` is optional, only set it if you need infer model with local media file
 
-`--gpu-memory-utilization` should not be set manually only if yous know what this parameter aims to.
+`--gpu-memory-utilization` should not be set manually only if you know what this parameter aims to.
 
 #### Multiple NPU (Qwen2.5-Omni-7B)
 
