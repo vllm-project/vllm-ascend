@@ -637,17 +637,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             _detect_quantization_and_get_params(layer)
         # TODO(yxj):move to p2p
         # hidden_states是dispatch之后的，shape第一维是group_list[-1],self.max_num_token*8*2
-        print(f"ttg afd_m2n_ffn_compute hidden_states.dtype: {hidden_states.dtype}", flush=True)
-        print(f"ttg afd_m2n_ffn_compute hidden_states: {hidden_states}", flush=True)
         if hidden_states.dtype == torch.int8 and dynamic_scale is not None:
             # 适配camm2n quant_mode:1时，A侧输出结果为量化后的结果
-            print(f"ttg afd_m2n_ffn_compute hidden_states.dtype: {hidden_states.dtype}, "
-                  f"dynamic_scale.dtype: {dynamic_scale.dtype}", flush=True)
             forward_context = get_forward_context()
             forward_context.afd_dynamic_scale = dynamic_scale
 
         shared_out = self._shared_experts(hidden_states)
-        print(f"ttg afd_m2n_ffn_compute shared_out: {shared_out}", flush=True)
 
         if connector_name == "camp2pconnector":
             w1 = layer.w13_weight.to(torch.int8)
@@ -675,8 +670,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 
         permuted_hidden_states, expert_tokens = hidden_states, group_list
-        print(f"ttg afd_m2n_ffn_compute use_int4_w4a8: {use_int4_w4a8}, use_int8_w8a8:{use_int8_w8a8}", flush=True)
-        print(f"ttg type(layer.w13_weight): {type(layer.w13_weight)}")
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
                                        w1=layer.w13_weight,
                                        w1_scale=w1_scale,

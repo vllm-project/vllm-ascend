@@ -430,10 +430,6 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     num_of_stages=1
                 )
 
-                print(f"ttg recv_attn_output success: {layer_idx}, "
-                      f"hidden_states: {hidden_states}, hidden_states.shape : {hidden_states.shape}, "
-                      f"group_list: {group_list}", flush=True)
-
                 with set_ascend_forward_context(
                             attn_metadata=None,
                             vllm_config=self.vllm_config,
