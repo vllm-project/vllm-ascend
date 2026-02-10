@@ -221,10 +221,6 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         if metadata.connector_data:
             get_forward_context().cam_afdconnector_data = metadata.connector_data
 
-        print(f"ttg send_attn_output layer_idx: {metadata.layer_idx}, "
-              f"hidden_states: {hidden_states}, "
-              f"hidden_states.shape : {hidden_states.shape}", flush=True)
-
         return torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
                                                    self.hccl_comm_name,
                                                    self.hccl_comm_name2,

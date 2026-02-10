@@ -83,11 +83,10 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                     fusion: bool = False,
                     dynamic_eplb: bool = False) -> torch.Tensor:
     if w1_offset is not None:
-        print(f"ttg quant_apply_mlp: w1_offset is not None", flush=True)
         unquantized_hidden_states = hidden_states
         quantized_hidden_states = None
+        pertoken_scale = None
     elif dynamic_scale is None:
-        print(f"ttg quant_apply_mlp: dynamic_scale is None", flush=True)
         unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
             hidden_states)
@@ -95,7 +94,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         # to save npu memory because they're no longer used.
         dispose_tensor(unquantized_hidden_states)
         quantized_hidden_states = None
-        print(f"ttg quant_apply_mlp hidden_states_1: {hidden_states}", flush=True)
     else:
         unquantized_hidden_states = None
         pertoken_scale = dynamic_scale
@@ -110,7 +108,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             hidden_states)
     is_mc2 = get_forward_context().moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and w1_offset is None and is_mc2:
-        print(f"ttg quant_apply_mlp branch A", flush=True)
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = (
@@ -174,7 +171,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_list=group_list,
             output_dtype=w2_scale[0].dtype)[0]
     elif w1_offset is not None:
-        print(f"ttg quant_apply_mlp branch B", flush=True)
         # gmm1: gate_up_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[unquantized_hidden_states],
@@ -201,7 +197,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
     else:
-        print(f"ttg quant_apply_mlp branch C", flush=True)
         if w1_scale_bias is not None:
             if group_list_type == 0:
                 group_list = torch.cat(
@@ -251,7 +246,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 group_type=0,
                 group_list=group_list,
                 output_dtype=_output_dtype)[0]
-            print(f"ttg quant_apply_mlp hidden_states_2: {hidden_states}", flush=True)
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
@@ -266,7 +260,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
                     hidden_states)
-                print(f"ttg quant_apply_mlp hidden_states_3: {hidden_states}", flush=True)
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -279,7 +272,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
-        print(f"ttg quant_apply_mlp hidden_states_4: {hidden_states}", flush=True)
     return hidden_states
 
 
@@ -351,11 +343,6 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
             w2_scale = [w2_scale]
 
         assert w1_scale is not None and w2_scale is not None
-        # 一行代码快速检查
-        print(f"ttg unified_apply_mlp w1: type={type(w1)}, is_list={isinstance(w1, list)}, "
-              f"dtype={w1[0].dtype if isinstance(w1, list) else w1.dtype if isinstance(w1, torch.Tensor) else 'N/A'}")
-        print(f"ttg unified_apply_mlp w1_scale: is_none={w1_scale is None}, "
-              f"type={type(w1_scale) if w1_scale is not None else 'N/A'}")
         return quant_apply_mlp(hidden_states=hidden_states,
                                w1=w1,
                                w1_scale=w1_scale,
