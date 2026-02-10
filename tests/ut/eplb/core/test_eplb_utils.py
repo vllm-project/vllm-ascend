@@ -45,6 +45,7 @@ class TestAscendConfig(unittest.TestCase):
         self.vllm_config = vllm_config
         self.moe_config = moe_config
         self.mock_npu = patch("torch.Tensor.npu", new=lambda self: self).start()
+        os.environ["DYNAMIC_EPLB"] = "true"
 
     def test_init_eplb_config_with_eplb(self):
         eplb_config = init_ascend_config(self.vllm_config).eplb_config
@@ -71,6 +72,6 @@ class TestAscendConfig(unittest.TestCase):
         eplb_config = init_ascend_config(self.vllm_config).eplb_config
         _, expert_map, log2phy, redundant_experts = init_eplb_config(eplb_config, 0, self.moe_config)
         gt_expert_map = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3])
-        print(expert_map, log2phy, redundant_experts)
+        self.assertIsNone(log2phy)
         self.assertTrue(torch.equal(expert_map, gt_expert_map))
         self.assertEqual(redundant_experts, 0)
