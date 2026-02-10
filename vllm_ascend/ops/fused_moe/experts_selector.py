@@ -59,8 +59,7 @@ def select_experts(
     """
     # prefetch w1_w3_proj.weight preprocess
     weight_prefetch_method = get_weight_prefetch_method()
-    if weight_prefetch_method:
-        weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
+    weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
     is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
         hidden_states=hidden_states,
         top_k=top_k,
