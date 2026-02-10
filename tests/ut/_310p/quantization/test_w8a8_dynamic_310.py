@@ -26,7 +26,7 @@ class TestAscendW8A8FusedMoEMethod310(TestBase):
     hidden_size = 128
     intermediate_size = 128
 
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ep_group")
+    @patch("vllm_ascend._310p.quantization.methods.w8a8_dynamic.get_ep_group")
     def setUp(self, mock_get_ep_group):
         with patch(
             "vllm_ascend._310p.quantization.methods.w8a8_dynamic.get_current_vllm_config"
