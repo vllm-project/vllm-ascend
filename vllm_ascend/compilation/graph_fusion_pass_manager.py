@@ -17,11 +17,6 @@
 #
 
 from torch import fx as fx
-<<<<<<< HEAD
-=======
-from vllm.compilation.passes.inductor_pass import get_pass_context
-from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
->>>>>>> 568f5b05 (main2main)
 from vllm.config import VllmConfig
 
 from vllm_ascend.utils import vllm_version_is
