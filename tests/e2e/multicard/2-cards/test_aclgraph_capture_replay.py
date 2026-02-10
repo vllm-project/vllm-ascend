@@ -132,7 +132,6 @@ def _run_worker_process(
         torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.skip(reason="fix me")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4, 36])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
