@@ -10,9 +10,9 @@ The `Qwen2.5-7B-Instruct` model was supported since `vllm-ascend:v0.9.0`.
 
 ## Supported Features
 
-Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
@@ -138,7 +138,7 @@ A valid response (e.g., `"Beijing is a vibrant and historic capital city"`) indi
 
 ### Using AISBench
 
-Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 Results and logs are saved to `benchmark/outputs/default/`. A sample accuracy report is shown below:
 
@@ -150,7 +150,7 @@ Results and logs are saved to `benchmark/outputs/default/`. A sample accuracy re
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
 

@@ -26,7 +26,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run Qwen3-Omni-30B-A3B-Thinking directly
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
 ```{code-block} bash
   :substitutions:
@@ -63,7 +63,7 @@ docker run --rm \
 
 You can build all from source.
 
-- Install `vllm-ascend`, refer to [set up using python](../installation.md#set-up-using-python).
+- Install `vllm-ascend`, refer to [set up using python](../../installation.md#set-up-using-python).
 
 ::::
 :::::

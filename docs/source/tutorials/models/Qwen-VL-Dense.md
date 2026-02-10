@@ -10,9 +10,9 @@ This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, sh
 
 ## Supported Features
 
-Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
@@ -484,7 +484,7 @@ You can refer to the [monitoring configuration](https://github.com/vllm-project/
 
 As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode.
 
-1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
+1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
 
 ```shell
 pip install lm_eval
@@ -515,7 +515,7 @@ lm_eval \
 
 As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen2.5-VL-32B-Instruct` in offline mode.
 
-1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
+1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
 
 ```shell
 pip install lm_eval
