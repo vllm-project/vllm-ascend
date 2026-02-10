@@ -68,7 +68,7 @@ class EplbWorker:
 
         update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
-        logger.info("EPLB Process compute complete")
+        logger.debug("EPLB Process compute complete")
 
         packed_update_info = self.pack_update_info(update_info)
 
@@ -274,6 +274,10 @@ class EplbProcess:
         Subprocess entry: bind to specified NPU, loop waiting for planner_q to wake up,
         call do_update, then notify main process update is complete.
         """
+        if self.policy_type == 3:
+            from vllm_ascend.eplb.core.policy.policy_flashlb import warm_up
+
+            warm_up()
         while True:
             try:
                 planner_q.get()
