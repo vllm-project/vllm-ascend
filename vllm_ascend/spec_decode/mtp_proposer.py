@@ -36,7 +36,8 @@ class MtpProposer(EagleProposer):
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
     ) -> None:
-        if self.pcp_size * self.dcp_size == 1 and not self.speculative_config.disable_padded_drafter_batch:
+        if self.vllm_config.model_config.hf_config.model_type not in ["glm_moe_dsa"] and \
+            self.pcp_size * self.dcp_size == 1 and not self.speculative_config.disable_padded_drafter_batch:
             super().dummy_run(
                 num_tokens,
                 with_prefill,
@@ -166,7 +167,8 @@ class MtpProposer(EagleProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
     ) -> torch.Tensor:
-        if self.pcp_size * self.dcp_size == 1 and not self.speculative_config.disable_padded_drafter_batch:
+        if self.vllm_config.model_config.hf_config.model_type not in ["glm_moe_dsa"] and \
+            self.pcp_size * self.dcp_size == 1 and not self.speculative_config.disable_padded_drafter_batch:
             draft_token_ids = super()._propose(
                 target_token_ids,
                 target_positions,
