@@ -173,8 +173,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         # gmm1: gate_up_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[unquantized_hidden_states],
-            weight=[w1],
-            antiquant_scale=[w1_scale],
+            weight=w1,
+            antiquant_scale=w1_scale,
             antiquant_offset=[w1_offset],
             split_item=2,
             group_list_type=group_list_type,
@@ -187,8 +187,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[w2],
-            antiquant_scale=[w2_scale],
+            weight=w2,
+            antiquant_scale=w2_scale,
             antiquant_offset=[w2_offset],
             split_item=2,
             group_list_type=group_list_type,
@@ -264,7 +264,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             x=[hidden_states],
             weight=w2,
             scale=w2_scale,
-            bias=[bias.to(torch.int32) for bias in bias2],
+            bias=bias2,
             per_token_scale=[swiglu_out_scale],
             split_item=2,
             group_list_type=group_list_type,
@@ -332,6 +332,15 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                       need_trans: bool = True,
                       dynamic_eplb: bool = False) -> torch.Tensor:
     if with_quant:
+        if isinstance(w1, (torch.Tensor, torch.nn.Parameter)):
+            w1 = [w1]
+        if isinstance(w2, (torch.Tensor, torch.nn.Parameter)):
+            w2 = [w2]
+        if isinstance(w1_scale, (torch.Tensor, torch.nn.Parameter)):
+            w1_scale = [w1_scale]
+        if isinstance(w2_scale, (torch.Tensor, torch.nn.Parameter)):
+            w2_scale = [w2_scale]
+
         assert w1_scale is not None and w2_scale is not None
         return quant_apply_mlp(hidden_states=hidden_states,
                                w1=w1,
