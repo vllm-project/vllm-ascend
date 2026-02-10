@@ -47,19 +47,33 @@ class NpuGraphEXPassManager:
         self.passes.append(pass_)
 
     def configure(self, config: VllmConfig):
+        import os
+        
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+        from vllm.triton_utils import HAS_TRITON
+        
         # By default, we enable the graph fusion and quantization fusion pass.
         self.npugraph_ex_config: dict = config.additional_config.get("npugraph_ex_config", {})
-        if self.npugraph_ex_config.get("fuse_norm_quant", True):
+        
+        # Check if batch-invariant mode is enabled
+        is_batch_invariant = vllm_is_batch_invariant()
+        
+        # Add batch-invariant FX pass if enabled and triton is available
+        if is_batch_invariant and HAS_TRITON:
+            from .passes.batch_invariant_fx_pass import BatchInvariantFXPass
+            self.passes.append(BatchInvariantFXPass(config))
+        
+        if self.npugraph_ex_config.get("fuse_norm_quant", True) and not is_batch_invariant:
             from .npugraph_ex_passes.graphex_norm_quant_fusion_pass import GraphEXAddRMSNormFusionPass
 
             self.passes.append(GraphEXAddRMSNormFusionPass(config))
 
-        if self.npugraph_ex_config.get("fuse_qknorm_rope", True):
+        if self.npugraph_ex_config.get("fuse_qknorm_rope", True) and not is_batch_invariant:
             from .npugraph_ex_passes.graphex_qknorm_rope_fusion_pass import GraphEXQKNormRopeFusionPass
 
             self.passes.append(GraphEXQKNormRopeFusionPass(config))
 
-        if self.npugraph_ex_config.get("fuse_allreduce_rms", True):
+        if self.npugraph_ex_config.get("fuse_allreduce_rms", True) and not is_batch_invariant:
             from .npugraph_ex_passes.graphex_allreduce_rmsnorm_fusion_pass import GraphEXMatmulAllReduceAddRMSNormPass
 
             self.passes.append(GraphEXMatmulAllReduceAddRMSNormPass(config))

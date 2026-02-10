@@ -303,7 +303,13 @@ class NpugraphExConfig:
         except ValueError:
             is_batch_invariant = False
         if is_batch_invariant:
-            self.enable = False
+            # When batch-invariant mode is enabled, we keep npugraph_ex enabled
+            # but disable fusion passes that may conflict with batch-invariant.
+            # The batch-invariant FX pass will be applied in compiler_interface.py
+            # to replace aten ops with batch-invariant implementations.
+            self.fuse_norm_quant = False
+            self.fuse_qknorm_rope = False
+            self.fuse_allreduce_rms = False
 
 
 class XliteGraphConfig:

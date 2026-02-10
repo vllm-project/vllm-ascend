@@ -75,6 +75,14 @@ def npugraph_ex_compile(
     key: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
     import torchair
+    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
+    # Apply batch-invariant FX pass if enabled
+    if vllm_is_batch_invariant():
+        from vllm_ascend.compilation.passes.batch_invariant_fx_pass import (
+            apply_batch_invariant_to_fx_graph,
+        )
+        graph = apply_batch_invariant_to_fx_graph(graph)
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()
