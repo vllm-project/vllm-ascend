@@ -105,9 +105,9 @@ class KVTransferThread(threading.Thread):
             return 0
         return len(keys)
 
-    def update_kv_event(self, event: BlockStored):
+    def update_kv_event(self, event: list[BlockStored]):
         with self.kv_event_lock:
-            self.kv_events.append(event)
+            self.kv_events.extend(event)
 
     def get_kv_events(self) -> list[BlockStored]:
         with self.kv_event_lock:
@@ -204,7 +204,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             """
             addrs = []
             sizes = []
-            stored_events = []
+            stored_events: list[BlockStored] = []
             prev_key = None
             new_block_hashes = [maybe_convert_block_hash(bh) for bh in req_meta.block_hashes[skip_block_num:]]
             for index, start in enumerate(starts):
@@ -216,7 +216,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 if self.enable_kv_event:
                     token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
                     stored_event = BlockStored(
-                        block_hashes=new_block_hashes[index],
+                        block_hashes=[new_block_hashes[index]],
                         parent_block_hash=prev_key,
                         token_ids=token_ids,
                         block_size=req_meta.original_block_size,
