@@ -20,7 +20,6 @@ import torch_npu
 from torch.nn.functional import pad
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
-from typing import Optional
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
@@ -274,7 +273,7 @@ def unquant_apply_mlp(
     group_list: torch.Tensor,
     w1_bias: torch.Tensor = None,
     w2_bias: torch.Tensor = None,
-    activation: Optional[str] = None,
+    activation: str | None = None,
     group_list_type: int = 1,
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
@@ -321,7 +320,7 @@ def unified_apply_mlp(
     group_list: torch.Tensor,
     w1_scale: list[torch.Tensor] | None = None,
     w2_scale: list[torch.Tensor] | None = None,
-    activation: Optional[str] = None,
+    activation: str | None = None,
     w1_bias: torch.Tensor = None,
     w2_bias: torch.Tensor = None,
     dynamic_scale: torch.Tensor = None,
