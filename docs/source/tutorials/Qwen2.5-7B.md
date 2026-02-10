@@ -24,7 +24,7 @@ It is recommended to download the model weights to a local directory (e.g., `./Q
 
 ### Installation
 
-You can using our official docker image and install extra operator for supporting `Qwen2.5-7B-Instruct`.
+You can use our official docker image and install extra operator for supporting `Qwen2.5-7B-Instruct`.
 
 :::::{tab-set}
 :sync-group: install
@@ -158,7 +158,7 @@ Run performance evaluation of `Qwen2.5-7B-Instruct` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.

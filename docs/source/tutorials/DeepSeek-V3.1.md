@@ -38,7 +38,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-You can using our official docker image to run `DeepSeek-V3.1` directly.
+You can use our official docker image to run `DeepSeek-V3.1` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -96,7 +96,7 @@ nic_name="xxxx"
 local_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 # AIV
@@ -158,7 +158,7 @@ local_ip="xxxx"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -210,7 +210,7 @@ local_ip="xxx"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -275,7 +275,7 @@ local_ip="141.xx.xx.1"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -352,7 +352,7 @@ local_ip="141.xx.xx.2"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -429,7 +429,7 @@ local_ip="141.xx.xx.3"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -505,7 +505,7 @@ local_ip="141.xx.xx.4"
 node0_ip="xxxx"
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 export HCCL_IF_IP=$local_ip
@@ -707,7 +707,7 @@ Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.

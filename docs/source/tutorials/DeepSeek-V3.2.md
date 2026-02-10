@@ -29,7 +29,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-You can using our official docker image to run `DeepSeek-V3.2` directly..
+You can use our official docker image to run `DeepSeek-V3.2` directly.
 
 :::::{tab-set}
 :sync-group: install
@@ -456,11 +456,11 @@ Before you start, please
     dp_rpc_port = args.dp_rpc_port
     vllm_start_port = args.vllm_start_port
 
-    def run_command(visiable_devices, dp_rank, vllm_engine_port):
+    def run_command(visible_devices, dp_rank, vllm_engine_port):
         command = [
             "bash",
             "./run_dp_template.sh",
-            visiable_devices,
+            visible_devices,
             str(vllm_engine_port),
             str(dp_size),
             str(dp_rank),
@@ -481,9 +481,9 @@ Before you start, please
         for i in range(dp_size_local):
             dp_rank = dp_rank_start + i
             vllm_engine_port = vllm_start_port + i
-            visiable_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+            visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
             process = multiprocessing.Process(target=run_command,
-                                            args=(visiable_devices, dp_rank,
+                                            args=(visible_devices, dp_rank,
                                                     vllm_engine_port))
             processes.append(process)
             process.start()
@@ -895,7 +895,7 @@ Run performance evaluation of `DeepSeek-V3.2-W8A8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.

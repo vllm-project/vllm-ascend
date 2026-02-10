@@ -84,7 +84,7 @@ The KV Connector methods that need to be implemented can be categorized into sch
 1. When looking up a key in KV Pool, if we cannot find the key, there is no Cache Hit for this specific block; we return no hit for this block and do not look up further blocks for current request.
 2. Similarly, when we are trying to put a block into KV Pool and failed, we do not put further blocks (subject to change).
 
-## Limitation
+## Limitations
 
 1. Currently, Mooncake Store for vLLM-Ascend only supports DRAM as the storage for KV Cache pool.
 

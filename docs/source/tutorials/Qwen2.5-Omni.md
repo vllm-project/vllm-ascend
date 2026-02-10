@@ -23,7 +23,7 @@ Following examples use the 7B version by default.
 
 ### Installation
 
-You can using our official docker image to run `Qwen2.5-Omni` directly.
+You can use our official docker image to run `Qwen2.5-Omni` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -195,7 +195,7 @@ Run performance evaluation of `Qwen2.5-Omni-7B` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.

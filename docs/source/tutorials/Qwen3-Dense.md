@@ -42,7 +42,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-You can using our official docker image for supporting Qwen3 Dense models.
+You can use our official docker image for supporting Qwen3 Dense models.
 Currently, we provide the all-in-one images.[Download images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)
 
 #### Docker Pull (by tag)
@@ -161,7 +161,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export TASK_QUEUE_ENABLE=1
 
 # [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is install on your machine, you can turn it on.
+# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
 # if os is Ubuntu
 # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 # if os is openEuler
@@ -291,7 +291,7 @@ Run performance evaluation of `Qwen3-32B-W8A8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
