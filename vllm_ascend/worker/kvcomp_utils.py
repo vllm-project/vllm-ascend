@@ -1,7 +1,5 @@
 from collections import defaultdict
-from vllm.model_executor.models.utils import extract_layer_index
 import torch
-from vllm.attention.layer import Attention
 import json
 from dataclasses import asdict, dataclass, field
 from typing import List, Optional
@@ -10,6 +8,10 @@ from pathlib import Path
 import numpy as np
 import logging
 logger = logging.getLogger(__name__)
+
+from vllm.utils.math_utils import cdiv
+from vllm.model_executor.models.utils import extract_layer_index
+from vllm.attention.layer import Attention
 
 def get_kvcomp_config_path_for_model(vllm_config) -> str:
     model = vllm_config.model_config.model.lower()
@@ -571,8 +573,6 @@ class HashEncoder:
 
         return unpacked_bits
 
-
-
 @dataclass
 class KVCompMetaData:
     # for both GQA and MLA
@@ -592,3 +592,207 @@ class KVCompMetaData:
     hash_encoder_rope: Optional[HashEncoder] = None
     hashk_cache_nope: Optional[list[torch.Tensor]] = None
     hashk_cache_rope: Optional[list[torch.Tensor]] = None
+
+def build_kvcomp_metadata(
+    max_num_reqs: int,
+    block_size: int,
+    device: torch.device,
+    vllm_config,
+    parallel_config,
+    dtype: torch.dtype
+) -> KVCompMetaData:
+    """
+    构建KVCompMetaData对象的封装函数
+    
+    参数说明（均为原self的属性）:
+    - max_num_reqs: 最大请求数
+    - block_size: 块大小
+    - device: 计算设备（如cuda:0、ascend等）
+    - vllm_config: vllm核心配置对象（包含model_config等子配置）
+    - dtype: 数据类型（如torch.float16）
+    
+    返回值:
+    - KVCompMetaData: 构建完成的KVComp元数据对象
+    """
+    # 打印KVComp启用状态
+    print(f"KVComp is enabled")
+
+    # 自动检测KVComp配置文件
+    kvcomp_config_path = get_kvcomp_config_path_for_model(vllm_config)
+    if kvcomp_config_path is not None:
+        kvcomp_config = KVCompConfig.from_json(kvcomp_config_path)
+    else:
+        raise RuntimeError("KVComp config file not found")
+
+    # 初始化各类tensor（替换self.xxx为入参）
+    chunk_sizes_for_hamming_full = torch.full(
+        [max_num_reqs], 
+        fill_value=block_size, 
+        dtype=torch.int32, 
+        device=device
+    )
+    topk_for_hamming_full = torch.full(
+        [max_num_reqs], 
+        fill_value=kvcomp_config.vllm_hash_attention_topk // block_size, 
+        dtype=torch.int32, 
+        device=device
+    )
+    topk_for_hamming_full_cpu = torch.full(
+        [max_num_reqs], 
+        fill_value=kvcomp_config.vllm_hash_attention_topk // block_size, 
+        dtype=torch.int32, 
+        device="cpu"
+    )
+    seq_lens_for_hamming = torch.zeros(
+        [max_num_reqs], 
+        dtype=torch.int32, 
+        device=device
+    )
+    hamming_output = torch.zeros([max_num_reqs, vllm_config.model_config.get_num_kv_heads(parallel_config), 
+        cdiv(vllm_config.model_config.max_model_len, block_size)] , dtype=torch.int32, device=device)
+
+
+    # 根据MLA配置初始化HashEncoder（替换self.xxx为入参）
+    if vllm_config.model_config.use_mla:
+        hash_encoder_nope = HashEncoder(
+            kvcomp_config.kv_lora_rank, 
+            kvcomp_config.hash_bits_kv_lora, 
+            dtype, 
+            device
+        )
+        hash_encoder_rope = HashEncoder(
+            kvcomp_config.qk_rope_head_dim, 
+            kvcomp_config.hash_bits_qk_rope, 
+            dtype, 
+            device
+        )
+        hashk_cache_nope = []
+        hashk_cache_rope = []
+        hash_encoder = None
+        hashk_caches = None
+    else:  # GQA模式
+        hash_encoder = HashEncoder(
+            kvcomp_config.head_dim, 
+            kvcomp_config.hash_bits, 
+            dtype, 
+            device
+        )
+        hashk_caches = []
+        hash_encoder_nope = None
+        hash_encoder_rope = None
+        hashk_cache_nope = None
+        hashk_cache_rope = None
+
+    # 构建并返回KVCompMetaData对象
+    kvcomp_meta_data = KVCompMetaData(
+        kvcomp_config=kvcomp_config,
+        chunk_sizes_for_hamming_full=chunk_sizes_for_hamming_full,
+        topk_for_hamming_full=topk_for_hamming_full,
+        topk_for_hamming_full_cpu=topk_for_hamming_full_cpu,
+        seq_lens_for_hamming=seq_lens_for_hamming,
+        hamming_output=hamming_output,
+        hash_encoder=hash_encoder,
+        hashk_caches=hashk_caches,
+        hash_encoder_nope=hash_encoder_nope,
+        hash_encoder_rope=hash_encoder_rope,
+        hashk_cache_nope=hashk_cache_nope,
+        hashk_cache_rope=hashk_cache_rope,
+    )
+
+    return kvcomp_meta_data
+
+import torch
+from vllm_ascend.worker.kvcomp_utils import bind_hashk_cache, bind_hashk_cache_nope, bind_hashk_cache_rope
+from vllm.model_executor.models.utils import extract_layer_index
+
+def init_and_bind_hashk_cache(
+    kv_caches: dict,
+    num_attn_module: int,
+    vllm_config,
+    device: torch.device,
+    compilation_config,
+    kvcomp_meta_data
+) -> None:
+    """
+    初始化hashk cache并绑定到前向上下文和模型运行器的封装函数
+    
+    参数说明（均为原self的属性或外部传入参数）:
+    - kv_caches: kv缓存字典，key为layer_name，value为对应的kv缓存tensor
+    - num_attn_module: attention模块数量
+    - vllm_config: vllm核心配置对象（包含model_config.use_mla）
+    - device: 计算设备（如cuda:0、ascend等）
+    - compilation_config: 编译配置对象（包含static_forward_context）
+    - kvcomp_meta_data: 之前构建的KVCompMetaData对象
+    """
+    # 初始化hashk cache字典（区分MLA/GQA模式）
+    if vllm_config.model_config.use_mla:
+        hashk_caches_nope = {}
+        hashk_caches_rope = {}
+    else:
+        hashk_caches = {}
+
+    # 遍历所有layer的kv cache，初始化对应hashk cache
+    for layer_name, kv_cache in kv_caches.items():
+        # 提取层索引，判断是否为回滚/跳过层
+        layer_index = extract_layer_index(layer_name, num_attn_module)
+        is_rollback_layer = layer_index in kvcomp_meta_data.kvcomp_config.vllm_hash_attention_rollback_layers
+        is_skip_layer = layer_index in kvcomp_meta_data.kvcomp_config.vllm_hash_attention_skip_layers
+
+        # 回滚/跳过层直接赋值为None
+        if is_rollback_layer or is_skip_layer:
+            if vllm_config.model_config.use_mla:
+                hashk_caches_nope[layer_name] = None
+                hashk_caches_rope[layer_name] = None
+            else:
+                hashk_caches[layer_name] = None
+        # 计算hamming的层，初始化对应的hashk cache tensor
+        else:
+            if vllm_config.model_config.use_mla:
+                # MLA模式：分别处理nope和rope的hashk cache
+                num_blocks_nope, block_size_nope, num_kv_heads_nope, head_size_nope = kv_cache[0].shape
+                num_blocks_rope, block_size_rope, num_kv_heads_rope, head_size_rope = kv_cache[1].shape
+                
+                hashk_cache_nope = torch.zeros(
+                    (num_blocks_nope, num_kv_heads_nope, block_size_nope, head_size_nope // 8),
+                    dtype=torch.uint8,
+                    device=device
+                )
+                hashk_cache_rope = torch.zeros(
+                    (num_blocks_rope, num_kv_heads_rope, block_size_rope, head_size_rope // 8 * 2),
+                    dtype=torch.uint8,
+                    device=device
+                )
+                
+                hashk_caches_nope[layer_name] = hashk_cache_nope
+                hashk_caches_rope[layer_name] = hashk_cache_rope
+            else:
+                # GQA模式：初始化普通hashk cache
+                num_blocks, block_size, num_kv_heads, head_size = kv_cache[0].shape
+                hashk_cache = torch.zeros(
+                    (num_blocks, num_kv_heads, block_size, head_size // 8),
+                    dtype=torch.uint8,
+                    device=device
+                )
+                hashk_caches[layer_name] = hashk_cache
+
+    # 将hashk cache绑定到前向上下文和模型运行器
+    if vllm_config.model_config.use_mla:
+        bind_hashk_cache_nope(
+            hashk_caches_nope,
+            compilation_config.static_forward_context,
+            kvcomp_meta_data.hashk_cache_nope,
+            num_attn_module
+        )
+        bind_hashk_cache_rope(
+            hashk_caches_rope,
+            compilation_config.static_forward_context,
+            kvcomp_meta_data.hashk_cache_rope,
+            num_attn_module
+        )
+    else:
+        bind_hashk_cache(
+            hashk_caches,
+            compilation_config.static_forward_context,
+            kvcomp_meta_data.hashk_caches,
+            num_attn_module
+        )
