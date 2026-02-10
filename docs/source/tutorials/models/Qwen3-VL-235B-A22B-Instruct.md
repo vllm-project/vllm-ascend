@@ -10,9 +10,9 @@ This tutorial uses the vLLM-Ascend `v0.11.0rc2` version for demonstration, sho
 
 ## Supported Features
 
-Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
@@ -24,7 +24,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### Verify Multi-node Communication(Optional)
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
 ### Installation
 
@@ -33,7 +33,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 For example, using images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
 ```{code-block} bash
   :substitutions:
@@ -76,7 +76,7 @@ Select an image based on your machine type and start the docker image on your no
 
 You can build all from source.
 
-- Install `vllm-ascend`, refer to [set up using python](../installation.md#set-up-using-python).
+- Install `vllm-ascend`, refer to [set up using python](../../installation.md#set-up-using-python).
 
 ::::
 :::::
@@ -209,11 +209,11 @@ INFO:     Application startup complete.
 
 ### Multi-node Deployment with Ray
 
-- refer to [Ray Distributed (Qwen/Qwen3-235B-A22B)](./ray.md).
+- refer to [Ray Distributed (Qwen/Qwen3-235B-A22B)](../features/ray.md).
 
 ### Prefill-Decode Disaggregation
 
-- refer to [Prefill-Decode Disaggregation Mooncake Verification](./pd_disaggregation_mooncake_multi_node.md)
+- refer to [Prefill-Decode Disaggregation Mooncake Verification](../features/pd_disaggregation_mooncake_multi_node.md)
 
 ## Functional Verification
 
@@ -240,7 +240,7 @@ Here are two accuracy evaluation methods.
 
 ### Using AISBench
 
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result, here is the result of `Qwen3-VL-235B-A22B-Instruct` in `vllm-ascend:0.11.0rc2` for reference only.
 
@@ -252,7 +252,7 @@ Here are two accuracy evaluation methods.
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
 
