@@ -209,9 +209,7 @@ make -j
 make install
 ```
 
-Set environment variables
-
-**Note:**
+## Set environment variables
 
 - Adjust the Python path according to your specific Python installation
 - Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
