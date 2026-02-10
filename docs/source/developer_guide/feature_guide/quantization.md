@@ -26,7 +26,7 @@ The `create_weights` method is used for weight initialization; the `process_weig
 
 We need to implement the `create_weights`, `process_weights_after_loading`, and `apply` methods for different **layers** (**attention**, **mlp**, **moe**).
 
-**Supplemnet**: When loading the model, the quantized model's description file **quant_model_description.json** needs to be read. This file describes the quantization configuration and parameters for each part of the model weights, for example:
+**Supplement**: When loading the model, the quantized model's description file **quant_model_description.json** needs to be read. This file describes the quantization configuration and parameters for each part of the model weights, for example:
 
 ```json
 {

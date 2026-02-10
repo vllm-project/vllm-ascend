@@ -22,7 +22,7 @@ It is recommended to download the model weights to a local directory (e.g., `./P
 
 ### Installation
 
-You can using our official docker image to run `PaddleOCR-VL` directly.
+You can use our official docker image to run `PaddleOCR-VL` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
