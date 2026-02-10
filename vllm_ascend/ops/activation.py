@@ -39,6 +39,7 @@ class AscendSiluAndMul(SiluAndMul):
         weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out
 
+
 class AscendSwigluOAIAndMul:
 
     def swiglu_oai_forward(x: torch.Tensor, alpha: float = 1.702, limit: float = 7.0) -> torch.Tensor:
