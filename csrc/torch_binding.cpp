@@ -1379,7 +1379,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                      Tensor? block_table=None, str layout_query='BSND', str layout_key='BSND',"
         "                      int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
-    ops.impl("npu_lightning_indexer_vllm", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer);
+    ops.impl("npu_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer);
 
     ops.def(
         "npu_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"
