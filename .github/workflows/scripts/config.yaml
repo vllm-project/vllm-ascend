@@ -95,6 +95,8 @@ e2e-multicard-2-cards:
     estimated_time: 400
   - name: tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
     estimated_time: 60
+  - name: tests/e2e/multicard/2-cards/test_llama32_lora_tp2.py
+    estimated_time: 223
   # Run the test in a separate step to avoid oom
   - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
     estimated_time: 100
