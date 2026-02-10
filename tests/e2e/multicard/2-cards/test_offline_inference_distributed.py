@@ -300,7 +300,7 @@ def test_gpt_oss_distributed_tp2(model):
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download(model),
+            model,
             tensor_parallel_size=2,
             enforce_eager=True,
     ) as vllm_model:
