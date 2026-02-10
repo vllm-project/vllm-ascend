@@ -181,8 +181,8 @@ def rope_forward_oot(
     query: torch.Tensor,
     key: torch.Tensor,
     cos_sin_cache: torch.Tensor,
-    head_size: torch.Tensor,
-    rotary_dim: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
     is_neox_style: bool,
     offsets: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
