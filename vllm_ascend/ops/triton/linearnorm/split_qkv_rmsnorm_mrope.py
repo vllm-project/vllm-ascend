@@ -357,8 +357,10 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     return q_output, k_output, v_output
 
 
-direct_register_custom_op(op_name="triton_split_qkv_rmsnorm_mrope",
-                          op_func=triton_split_qkv_rmsnorm_mrope,
-                          fake_impl=triton_split_qkv_rmsnorm_mrope_fake,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
+direct_register_custom_op(
+    op_name="triton_split_qkv_rmsnorm_mrope",
+    op_func=triton_split_qkv_rmsnorm_mrope,
+    fake_impl=triton_split_qkv_rmsnorm_mrope_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1"
+)
