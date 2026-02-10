@@ -4,16 +4,16 @@ from transformers import PretrainedConfig
 from vllm.config import LoRAConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithLoRA,
-    MergedQKVParallelLinearWithLoRA,
-    QKVParallelLinearWithLoRA,
-    RowParallelLinearWithLoRA,
-    VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
+    MergedQKVParallelLinearWithLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
+    QKVParallelLinearWithLoRA,
     QKVParallelLinearWithShardedLoRA,
-    RowParallelLinearWithShardedLoRA
+    RowParallelLinearWithLoRA,
+    RowParallelLinearWithShardedLoRA,
+    VocabParallelEmbeddingWithLoRA,
 )
 from vllm.lora.layers.utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
