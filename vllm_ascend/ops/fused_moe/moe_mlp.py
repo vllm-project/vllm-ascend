@@ -94,11 +94,9 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         dispose_tensor(unquantized_hidden_states)
         quantized_hidden_states = None
     else:
-        unquantized_hidden_states = hidden_states
-        hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
-            hidden_states)
-        dispose_tensor(unquantized_hidden_states)
-        quantized_hidden_states = None
+        unquantized_hidden_states = None
+        pertoken_scale = dynamic_scale
+        quantized_hidden_states = hidden_states
 
     bias1, bias2 = None, None
     _output_dtype = w2_scale[0].dtype
