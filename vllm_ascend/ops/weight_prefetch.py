@@ -47,6 +47,7 @@ class WeightPrefetchMethod:
 
     def __init__(self, weight_prefetch_config: WeightPrefetchConfig) -> None:
         self.is_moe = is_moe_model(get_current_vllm_config())
+        self.mla_sfa_prefetch_enable = weight_prefetch_config.enabled
 
         self.attn = ModuleWeightPrefetchConfig(
             module_name="attn",
@@ -94,6 +95,9 @@ class WeightPrefetchMethod:
         if not self.moe.is_active_this_forward:
             return
         forward_context = get_forward_context()
+        if not forward_context or forward_context.model_instance is None:
+            return
+
         # layer_idx is subtracted by 1 because layer_idx was incremented by 1 at layernorm.
         weight = forward_context.model_instance.model.layers[forward_context.layer_idx - 1].mlp.experts.w13_weight
         weight_size = weight.data.element_size() * weight.data.numel() * self.moe.prefetch_ratio.get(prefix, 0)
@@ -183,6 +187,33 @@ class WeightPrefetchMethod:
             torch.ops.vllm.prefetch_postprocess(stop_flag)
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
+
+    def maybe_prefetch_mla_or_sla_weight_in_current_stream(
+        self,
+        inputs: torch.Tensor,
+        dependency: torch.Tensor,
+        max_size: int = 0,
+        linear_layer: torch.nn.Module | None = None,
+    ) -> None:
+        if not self.mla_sfa_prefetch_enable:
+            return
+
+        # The prefetching of the weights of the o_proj matrix in the W8A8
+        # scene is already performed once in AscendW8A8LinearMethod, so it
+        # is not needed here.
+        if linear_layer is not None:
+            from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
+
+            if isinstance(
+                getattr(linear_layer.quant_method, "quant_method", None),
+                AscendW8A8LinearMethod,
+            ):
+                return
+
+        input_size = inputs.element_size() * inputs.numel()
+        if max_size <= 0 or max_size > input_size:
+            max_size = input_size
+        torch.ops.vllm.prefetch_preprocess(weight=inputs, start_flag=dependency, max_weight_size=int(max_size))
 
 
 def maybe_npu_prefetch(

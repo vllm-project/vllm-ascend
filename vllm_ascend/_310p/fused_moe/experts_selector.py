@@ -57,8 +57,7 @@ def select_experts(
     """
     # prefetch w1_w3_proj.weight preprocess
     weight_prefetch_method = get_weight_prefetch_method()
-    if weight_prefetch_method:
-        weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
+    weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
     topk_weights, topk_ids = _native_select_experts(
         hidden_states=hidden_states,
         router_logits=router_logits,
