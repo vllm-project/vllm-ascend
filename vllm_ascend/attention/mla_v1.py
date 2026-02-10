@@ -43,9 +43,13 @@ from vllm_ascend.ops.layer_shard_linear import (
     register_all_layers_to_shard_weight_series,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, maybe_trans_nz, weak_ref_tensors
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_ND,
+    get_weight_prefetch_method,
+    maybe_trans_nz,
+    weak_ref_tensors,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -703,7 +707,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-        self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
         self.enable_kv_nz = ascend_config.enable_kv_nz
 
         self.ring_mla_mask_size = 512
@@ -1412,8 +1415,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         if self.fused_qkv_a_proj is not None:
-            maybe_npu_prefetch(
-                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states, enabled=self.enable_prefetch
+            weight_prefetch_method = get_weight_prefetch_method()
+            weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
+                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
             )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
@@ -1545,14 +1549,13 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         # O proj
-        MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
-        maybe_npu_prefetch(
+        weight_prefetch_method = get_weight_prefetch_method()
+        weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
             inputs=self.o_proj.weight,
             dependency=o_proj_input,
             max_size=MAX_O_PROJ_PREFETCH_SIZE,
-            enabled=self.enable_prefetch,
+            linear_layer=self.o_proj,
         )
-
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 
         del o_proj_input
