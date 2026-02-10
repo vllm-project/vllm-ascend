@@ -34,9 +34,7 @@ class AscendSiluAndMul(SiluAndMul):
         import torch_npu
 
         weight_prefetch_method = get_weight_prefetch_method()
-        if weight_prefetch_method:
-            weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_DOWN, x)
+        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_DOWN, x)
         out = torch_npu.npu_swiglu(x)
-        if weight_prefetch_method:
-            weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
+        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out

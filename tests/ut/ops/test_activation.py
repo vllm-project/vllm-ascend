@@ -53,9 +53,12 @@ def test_QuickGELU_forward(mock_gelu, dummy_tensor, default_vllm_config):
 
 
 @pytest.mark.skipif(is_310p_hw(), reason="non_310P device unittest case.")
+@patch("vllm_ascend.ops.activation.get_weight_prefetch_method",
+       return_value=MagicMock())
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
 def test_SiluAndMul_forward(
     mock_swiglu,
+    mock_get_weight_prefetch_method,
     dummy_tensor,
     default_vllm_config,
 ):
