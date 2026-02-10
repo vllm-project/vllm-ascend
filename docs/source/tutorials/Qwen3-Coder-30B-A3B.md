@@ -24,7 +24,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 `Qwen3-Coder` is first supported in `vllm-ascend:v0.10.0rc1`, please run this model using a later version.
 
-You can using our official docker image to run `Qwen3-Coder-30B-A3B-Instruct` directly.
+You can use our official docker image to run `Qwen3-Coder-30B-A3B-Instruct` directly.
 
 ```{code-block} bash
    :substitutions:

@@ -3,7 +3,7 @@
 ## Introduction
 
 DeepSeek-R1 is a high-performance Mixture-of-Experts (MoE) large language model developed by DeepSeek Company. It excels in complex logical reasoning, mathematical problem-solving, and code generation. By dynamically activating its expert networks, it delivers exceptional performance while maintaining computational efficiency. Building upon R1, DeepSeek-R1-W8A8 is a fully quantized version of the model. It employs 8-bit integer (INT8) quantization for both weights and activations, which significantly reduces the model's memory footprint and computational requirements, enabling more efficient deployment and application in resource-constrained environments.
-This article takes the deepseek- R1-W8A8 version as an example to introduce the deployment of the R1 series models.
+This article takes the `DeepSeek-R1-W8A8` version as an example to introduce the deployment of the R1 series models.
 
 ## Supported Features
 
@@ -25,7 +25,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-You can using our official docker image to run `DeepSeek-R1-W8A8` directly.
+You can use our official docker image to run `DeepSeek-R1-W8A8` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -293,7 +293,7 @@ Run performance evaluation of `DeepSeek-R1-W8A8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
-There are three `vllm bench` subcommand:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
