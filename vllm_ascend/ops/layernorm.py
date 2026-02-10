@@ -66,8 +66,7 @@ class AscendRMSNorm(RMSNorm):
             x.add_(self.bias)
 
         weight_prefetch_method = get_weight_prefetch_method()
-        if weight_prefetch_method:
-            weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(x)
+        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(x)
         return x
 
 
