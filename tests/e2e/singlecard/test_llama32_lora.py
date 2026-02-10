@@ -123,7 +123,6 @@ def generate_and_test(llm,
     print("removing lora")
 
 
-@pytest.mark.skip(reason="fix me")
 @patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
 def test_llama_lora(llama32_lora_files):
     vllm_model = VllmRunner(
