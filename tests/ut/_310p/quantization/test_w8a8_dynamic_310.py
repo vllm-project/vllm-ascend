@@ -26,11 +26,10 @@ class TestAscendW8A8FusedMoEMethod310(TestBase):
     hidden_size = 128
     intermediate_size = 128
 
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ep_group")
-    def setUp(self, mock_get_ep_group, mock_get_ascend_config):
+    def setUp(self, mock_get_ep_group):
         with patch(
-            "vllm_ascend.quantization.methods.w8a8_dynamic.get_current_vllm_config"
+            "vllm_ascend._310p.quantization.methods.w8a8_dynamic.get_current_vllm_config"
         ) as mock_get_current_vllm_config:
             mock_vllm_config = Mock()
             mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0})
@@ -43,7 +42,6 @@ class TestAscendW8A8FusedMoEMethod310(TestBase):
             mock_ascend_config = Mock()
 
             mock_ascend_config.enable_chunked_prefill = False
-            mock_get_ascend_config.return_value = mock_ascend_config
 
             self.quant_method = AscendW8A8DynamicFusedMoEMethod310()
 

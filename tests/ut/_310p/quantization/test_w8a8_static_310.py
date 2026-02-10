@@ -31,19 +31,19 @@ class TestAscendW8A8LinearMethod310(TestBase):
         self.assertEqual(weight["weight"].shape, (20, 10))
 
     def test_get_pertensor_param_310(self):
-        params = self.method.get_pertensor_param(torch.bfloat16)
-        self.assertEqual(params["input_scale"].dtype, torch.bfloat16)
+        params = self.method.get_pertensor_param(torch.float16)
+        self.assertEqual(params["input_scale"].dtype, torch.float16)
         self.assertEqual(params["input_offset"].dtype, torch.int8)
         self.assertEqual(params["input_scale"].shape, (1,))
         self.assertEqual(params["input_offset"].shape, (1,))
 
     def test_get_perchannel_param_310(self):
-        params = self.method.get_perchannel_param(10, torch.bfloat16)
+        params = self.method.get_perchannel_param(10, torch.float16)
 
         self.assertEqual(params["quant_bias"].dtype, torch.int32)
-        self.assertEqual(params["deq_scale"].dtype, torch.float32)
-        self.assertEqual(params["weight_scale"].dtype, torch.bfloat16)
-        self.assertEqual(params["weight_offset"].dtype, torch.bfloat16)
+        self.assertEqual(params["deq_scale"].dtype, torch.int64)
+        self.assertEqual(params["weight_scale"].dtype, torch.float16)
+        self.assertEqual(params["weight_offset"].dtype, torch.float16)
         self.assertEqual(params["quant_bias"].shape, (10,))
         self.assertEqual(params["deq_scale"].shape, (10,))
         self.assertEqual(params["weight_scale"].shape, (10, 1))
