@@ -1,0 +1,201 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Bisect vLLM
+
+on:
+  workflow_dispatch:
+    inputs:
+      good_commit:
+        description: 'Known good vllm commit (leave empty to auto-detect from main branch)'
+        required: false
+        default: ''
+      bad_commit:
+        description: 'Known bad vllm commit (leave empty to auto-detect from current branch)'
+        required: false
+        default: ''
+      test_cmd:
+        description: 'The failing pytest command (e.g. pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py)'
+        required: true
+        default: 'pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py'
+      fetch_depth:
+        description: 'vllm git fetch depth (default 500, increase if commits not reachable)'
+        required: false
+        default: '500'
+      step_timeout:
+        description: 'Per-step timeout in seconds (default 600)'
+        required: false
+        default: '600'
+      total_timeout:
+        description: 'Total timeout in seconds (default 7200)'
+        required: false
+        default: '7200'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  detect-env:
+    name: Detect runner and image
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.detect.outputs.runner }}
+      image: ${{ steps.detect.outputs.image }}
+      test_type: ${{ steps.detect.outputs.test_type }}
+    steps:
+      - name: Checkout vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Detect environment from test command
+        id: detect
+        run: |
+          python3 tools/bisect_helper.py detect-env \
+            --test-cmd "${{ inputs.test_cmd }}" \
+            --output-format github
+
+  bisect:
+    name: Bisect vLLM
+    needs: detect-env
+    runs-on: ${{ needs.detect-env.outputs.runner }}
+    timeout-minutes: 180
+    container:
+      image: ${{ needs.detect-env.outputs.image }}
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HF_HUB_OFFLINE: 1
+    steps:
+      # ================================================================
+      # E2E steps: mirrors + system deps (with clang)
+      # ================================================================
+      - name: Config mirrors (e2e)
+        if: ${{ needs.detect-env.outputs.test_type == 'e2e' }}
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list || true
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple || true
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local || true
+          apt-get update -y
+          apt install git -y
+
+      - name: Install system dependencies (e2e)
+        if: ${{ needs.detect-env.outputs.test_type == 'e2e' }}
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15 || true
+
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 || true
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 || true
+
+      # ================================================================
+      # UT steps: mirrors + system deps (matching _unit_test.yaml)
+      # ================================================================
+      - name: Install packages (ut)
+        if: ${{ needs.detect-env.outputs.test_type == 'ut' }}
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list || true
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple || true
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local || true
+          apt-get update -y
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+
+      # ================================================================
+      # Common: checkout repos
+      # ================================================================
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+          fetch-depth: ${{ inputs.fetch_depth }}
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+        with:
+          path: ./vllm-ascend
+          fetch-depth: 0
+
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info || echo "npu-smi not available (expected on CPU runners)"
+          if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
+            cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          fi
+
+      # ================================================================
+      # E2E: install vllm (editable) + vllm-ascend (editable)
+      # ================================================================
+      - name: Install vllm from source (e2e)
+        if: ${{ needs.detect-env.outputs.test_type == 'e2e' }}
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-ascend (e2e)
+        if: ${{ needs.detect-env.outputs.test_type == 'e2e' }}
+        working-directory: ./vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      # ================================================================
+      # UT: install vllm (non-editable, pytorch cpu index) + uninstall triton
+      #     install vllm-ascend (non-editable, pytorch cpu index)
+      # ================================================================
+      - name: Install vllm from source (ut)
+        if: ${{ needs.detect-env.outputs.test_type == 'ut' }}
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty python3 -m pip install . --extra-index https://download.pytorch.org/whl/cpu/
+          python3 -m pip uninstall -y triton
+
+      - name: Install vllm-ascend (ut)
+        if: ${{ needs.detect-env.outputs.test_type == 'ut' }}
+        working-directory: ./vllm-ascend
+        run: |
+          export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          python3 -m pip install -v . --extra-index https://download.pytorch.org/whl/cpu/
+          python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
+
+      # ================================================================
+      # Common: run bisect
+      # ================================================================
+      - name: Run bisect
+        working-directory: ./vllm-ascend
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          TORCH_DEVICE_BACKEND_AUTOLOAD: ${{ needs.detect-env.outputs.test_type == 'ut' && '0' || '' }}
+          LD_LIBRARY_PATH: ${{ needs.detect-env.outputs.test_type == 'ut' && '/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib' || '' }}
+        run: |
+          chmod +x tools/bisect_vllm.sh
+          tools/bisect_vllm.sh \
+            --vllm-repo ../vllm-empty \
+            --ascend-repo . \
+            --fetch-depth ${{ inputs.fetch_depth }} \
+            --step-timeout ${{ inputs.step_timeout }} \
+            --total-timeout ${{ inputs.total_timeout }} \
+            --test-cmd "${{ inputs.test_cmd }}" \
+            ${{ inputs.good_commit && format('--good {0}', inputs.good_commit) || '' }} \
+            ${{ inputs.bad_commit && format('--bad {0}', inputs.bad_commit) || '' }}
