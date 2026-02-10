@@ -1,3 +1,18 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -16,19 +31,19 @@ class TestAscendW8A8LinearMethod310(TestBase):
         self.assertEqual(weight["weight"].shape, (20, 10))
 
     def test_get_pertensor_param_310(self):
-        params = self.method.get_pertensor_param(torch.bfloat16)
-        self.assertEqual(params["input_scale"].dtype, torch.bfloat16)
+        params = self.method.get_pertensor_param(torch.float16)
+        self.assertEqual(params["input_scale"].dtype, torch.float16)
         self.assertEqual(params["input_offset"].dtype, torch.int8)
         self.assertEqual(params["input_scale"].shape, (1,))
         self.assertEqual(params["input_offset"].shape, (1,))
 
     def test_get_perchannel_param_310(self):
-        params = self.method.get_perchannel_param(10, torch.bfloat16)
+        params = self.method.get_perchannel_param(10, torch.float16)
 
         self.assertEqual(params["quant_bias"].dtype, torch.int32)
-        self.assertEqual(params["deq_scale"].dtype, torch.float32)
-        self.assertEqual(params["weight_scale"].dtype, torch.bfloat16)
-        self.assertEqual(params["weight_offset"].dtype, torch.bfloat16)
+        self.assertEqual(params["deq_scale"].dtype, torch.int64)
+        self.assertEqual(params["weight_scale"].dtype, torch.float16)
+        self.assertEqual(params["weight_offset"].dtype, torch.float16)
         self.assertEqual(params["quant_bias"].shape, (10,))
         self.assertEqual(params["deq_scale"].shape, (10,))
         self.assertEqual(params["weight_scale"].shape, (10, 1))
