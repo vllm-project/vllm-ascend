@@ -282,7 +282,7 @@ msgstr "11. 如何运行 w8a8 DeepSeek 模型？"
 
 #: ../../faqs.md:87
 msgid ""
-"Please following the [inferencing tutorail](https://vllm-"
+"Please following the [inferencing tutorial](https://vllm-"
 "ascend.readthedocs.io/en/latest/tutorials/multi_node.html) and replace model"
 " to DeepSeek."
 msgstr ""
@@ -459,7 +459,7 @@ msgstr ""
 "install` 进行安装，或者使用 `python setup.py clean` 清除缓存。"
 
 #: ../../faqs.md:130
-msgid "18. How to generate determinitic results when using vllm-ascend?"
+msgid "18. How to generate deterministic results when using vllm-ascend?"
 msgstr "18. 使用 vllm-ascend 时如何生成确定性结果？"
 
 #: ../../faqs.md:131
@@ -475,5 +475,5 @@ msgstr ""
 "sample）**，例如："
 
 #: ../../faqs.md:158
-msgid "Set the following enveriments parameters:"
+msgid "Set the following environment parameters:"
 msgstr "设置以下环境参数："

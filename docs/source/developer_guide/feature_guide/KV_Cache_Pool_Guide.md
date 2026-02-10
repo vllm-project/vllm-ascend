@@ -12,7 +12,7 @@ vLLM Ascend currently supports [MooncakeStore](https://github.com/kvcache-ai/Moo
 
 While one can utilize mooncake store in vLLM V1 engine by setting it as a remote backend of LMCache with GPU (see [Tutorial](https://github.com/LMCache/LMCache/blob/dev/examples/kv_cache_reuse/remote_backends/mooncakestore/README.md)), we find it would be better to integrate a connector that directly supports mooncake store and can utilize the data transfer strategy to one that is best fit to Huawei NPU hardware.
 
-Hence, we propose to integrate Mooncake Store with a brand new **MooncakeStoreConnectorV1**, which is indeed largly inspired by **LMCacheConnectorV1** (see the `How is MooncakestoreConnectorV1 Implemented?` section).
+Hence, we propose to integrate Mooncake Store with a brand new **MooncakeStoreConnectorV1**, which is indeed largely inspired by **LMCacheConnectorV1** (see the `How is MooncakeStoreConnectorV1 Implemented?` section).
 
 ## Usage
 
@@ -47,7 +47,7 @@ By introducing KV Connector V1, users can seamlessly combine HBM-based Prefix Ca
 
 When used together with Mooncake PD (Prefill-Decode) Disaggregation, the KV Cache Pool can further decouple prefill and decode stages across devices or nodes.
 
-Currently, we only perform put and get operation of KV Pool for **Prefiil Nodes**, and Decode Nodes get their KV Cache from Mooncake P2P KV Connector, i.e. MooncakeConnector.
+Currently, we only perform put and get operation of KV Pool for **Prefill Nodes**, and Decode Nodes get their KV Cache from Mooncake P2P KV Connector, i.e. MooncakeConnector.
 
  The key benefit of doing this is that we can keep the gain in performance by computing less with Prefix Caching from HBM and KV Pool for Prefill Nodes while not sacrificing the data transfer efficiency between Prefill and Decode nodes with P2P KV Connector that transfer KV Caches between NPU devices directly.
 
@@ -55,11 +55,11 @@ To Enable this feature, we need to setup both Mooncake Connector and Mooncake St
 
 For details, please also refer to the Mooncake Connector Store Deployment Guide.
 
-## How is MooncakestoreConnectorV1 Implemented?
+## How is MooncakeStoreConnectorV1 Implemented?
 
-**MooncakestoreConnectorV1** inhereits the KV Connector V1 class in vLLM V1: through implementing the required methods defined in the KV connector V1 base class, one can integrate a thrid-party KV cache transfer/storage backend into the vLLM framework.
+**MooncakeStoreConnectorV1** inherits the KV Connector V1 class in vLLM V1: through implementing the required methods defined in the KV connector V1 base class, one can integrate a third-party KV cache transfer/storage backend into the vLLM framework.
 
-MooncakeStoreConnectorV1 is also largly inspried by LMCacheConnectorV1 in term of the `Lookup Engine`/`Lookup Client` design for looking up KV cache keys, and the `ChunkedTokenDatabase` class for processing tokens into prefix-aware hashes as well as other hashing related designs. On top of this, we have also added our own design including `KVTransferThread` that allows async `get` and `put` of KV caches with multi-threading, and NPU-related data transfer optimization such as removing the `LocalBuffer` in LMCache to remove redundant data transfer.
+MooncakeStoreConnectorV1 is also largely inspired by LMCacheConnectorV1 in terms of the `Lookup Engine`/`Lookup Client` design for looking up KV cache keys, and the `ChunkedTokenDatabase` class for processing tokens into prefix-aware hashes as well as other hashing related designs. On top of this, we have also added our own design including `KVTransferThread` that allows async `get` and `put` of KV caches with multi-threading, and NPU-related data transfer optimization such as removing the `LocalBuffer` in LMCache to remove redundant data transfer.
 
 The KV Connector methods that need to be implemented can be categorized into scheduler-side methods that are called in V1 scheduler and worker-side methods that are called in V1 worker, namely:
 
@@ -77,14 +77,14 @@ The KV Connector methods that need to be implemented can be categorized into sch
 `wait_for_layer_load`: Optional; Wait for layer load in layerwise + async KV load scenario.  
 `save_kv_layer`: Optional Do layerwise KV cache put into KV Pool.  
 `wait_for_save`: Wait for KV Save to finish if async KV cache save/put.  
-`get_finished` Get request that finished KV transfer, `done_sending` if `put` finished, `done_reciving` if `get` finished.
+`get_finished` Get request that finished KV transfer, `done_sending` if `put` finished, `done_receiving` if `get` finished.
 
 ## DFX
 
 1. When looking up a key in KV Pool, if we cannot find the key, there is no Cache Hit for this specific block; we return no hit for this block and do not look up further blocks for current request.
-2. Similaly, when we are trying to put a block into KV Pool and failed, we do not put further blocks (subject to change).
+2. Similarly, when we are trying to put a block into KV Pool and failed, we do not put further blocks (subject to change).
 
-## Limitation
+## Limitations
 
 1. Currently, Mooncake Store for vLLM-Ascend only supports DRAM as the storage for KV Cache pool.
 

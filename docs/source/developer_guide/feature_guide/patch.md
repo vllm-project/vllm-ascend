@@ -70,7 +70,7 @@ Before writing a patch, following the principle above, we should patch the least
 
 7. Add the Unit Test and E2E Test. Any newly added code in vLLM Ascend should contain the Unit Test and E2E Test as well. You can find more details in [test guide](../contribution/testing.md)
 
-## Limitation
+## Limitations
 
 1. In V1 Engine, vLLM starts three kinds of process: Main process, EngineCore process and Worker process. Now vLLM Ascend only can patch the code in Main process and Worker process by default. If you want to patch the code running in EngineCore process, you should patch EngineCore process entirely during setup. Find the entire code in `vllm.v1.engine.core`. Please override `EngineCoreProc` and `DPEngineCoreProc` entirely.
 2. If you are running edited vLLM code, the version of vLLM may be changed automatically. For example, if you run the edited vLLM based on v0.9.n, the version of vLLM may be changed to v0.9.nxxx. In this case, the patch for v0.9.n in vLLM Ascend would not work as expected, because vLLM Ascend can't distinguish the version of the vLLM you're using. In this case, you can set the environment variable `VLLM_VERSION` to specify the version of the vLLM you're using, and then the patch for v0.10.0 should work.
