@@ -52,6 +52,9 @@ REGISTERED_ASCEND_OPS = {}
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
+# computation-communication tiling block is 512
+ALLREDUCE_NORM_FUSE_THREHOLD = 512
+
 _CUSTOM_OP_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
@@ -724,13 +727,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
-        _ENABLE_SP = (
-            vllm_config.compilation_config.pass_config.enable_sp
-            or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
-            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
-        )
+        _ENABLE_SP = vllm_config.compilation_config.pass_config.enable_sp or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True

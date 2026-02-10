@@ -24,8 +24,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 
-# computation-communication tiling block is 512
-ALLREDUCE_NORM_FUSE_THREHOLD = 512
+from vllm_ascend.utils import ALLREDUCE_NORM_FUSE_THREHOLD
 
 
 class MiddleLayerMatmulAllReduceAddRMSNormPattern:

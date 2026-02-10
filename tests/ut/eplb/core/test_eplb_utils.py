@@ -14,7 +14,7 @@ from vllm_ascend.utils import vllm_version_is
 
 
 class TestAscendConfig(unittest.TestCase):
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform._fix_incompatible_config")
     def setUp(self, mock_fix_incompatible_config):
         vllm_config = VllmConfig()
         vllm_config.additional_config = {

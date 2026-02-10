@@ -167,7 +167,7 @@ class TestNPUPlatform(TestBase):
             importlib.reload(platform)
             self.platform = platform.NPUPlatform()
 
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+            with patch.object(platform, "_fix_incompatible_config"):
                 self.platform.check_and_update_config(vllm_config)
 
         self.assertTrue("Model config is missing" in cm.output[0])
@@ -191,7 +191,7 @@ class TestNPUPlatform(TestBase):
             importlib.reload(platform)
             self.platform = platform.NPUPlatform()
 
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+            with patch.object(platform, "_fix_incompatible_config"):
                 self.platform.check_and_update_config(vllm_config)
 
         self.assertTrue("Compilation disabled, using eager mode by default" in cm.output[0])
@@ -229,7 +229,7 @@ class TestNPUPlatform(TestBase):
             importlib.reload(platform)
             self.platform = platform.NPUPlatform()
 
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+            with patch.object(platform, "_fix_incompatible_config"):
                 self.platform.check_and_update_config(vllm_config)
 
             self.assertTrue("NPU does not support" in cm.output[0])

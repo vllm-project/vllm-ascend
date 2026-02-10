@@ -27,9 +27,7 @@ from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check im
     check_and_register_fusion_pass,
     extra_stream_scope_check,
 )
-
-# computation-communication tiling block is 512
-ALLREDUCE_NORM_FUSE_THREHOLD = 512
+from vllm_ascend.utils import ALLREDUCE_NORM_FUSE_THREHOLD
 
 
 def extra_check_for_allreduce_rmsnorm_fusion_pass(match: Match) -> bool:
