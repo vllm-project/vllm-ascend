@@ -810,12 +810,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                             if attn_metadata.prefill.pcp_metadata
                             else None
                         )
-                        # 恢复完整序列多batch的顺序
+                        # restore index of multi-batch full sequence
                         actual_qkv = torch.index_select(all_qkv, 0, pcp_enter_fa_restore_idx)
                         qkv_fa_padding_workspace = query.new_empty(
                             (num_actual_tokens_pcp_padded, (self.num_heads + 2 * self.num_kv_heads) * self.head_size)
                         )
-                        
+
                         qkv_fa_padding_workspace[: attn_metadata.num_decode_tokens * self.pcp_size] = actual_qkv[
                             : attn_metadata.num_decode_tokens * self.pcp_size
                         ]
@@ -823,19 +823,19 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                         qkv_fa_padding_workspace[attn_metadata.num_decode_tokens * self.pcp_size :][pcp_unpad_mask] = (
                             actual_qkv[attn_metadata.num_decode_tokens * self.pcp_size :]
                         )
-                        
+
                         query, key, value = qkv_fa_padding_workspace.split(
                             [
                                 self.num_heads * self.head_size,
                                 self.num_kv_heads * self.head_size,
-                                self.num_kv_heads * self.head_size
-                            ]
-                            , dim=-1
+                                self.num_kv_heads * self.head_size,
+                            ],
+                            dim=-1,
                         )
                         query = query.reshape(-1, self.num_heads, self.head_size)
                         key = key.reshape(-1, self.num_kv_heads, self.head_size)
                         value = value.reshape(-1, self.num_kv_heads, self.head_size)
-                        
+
                         output_local_padded_tokens_fa = num_actual_tokens_pcp_padded // self.pcp_size - num_tokens
                         if output_local_padded_tokens_fa > 0:
                             output_padded = F.pad(

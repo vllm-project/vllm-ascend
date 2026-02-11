@@ -145,13 +145,13 @@ def chunk_gated_delta_rule_fwd_kernel_hupdate_blockdim64(
         hupd_next = h_update + (boh + i_t + i_n + 1) * H * K * K + i_h * K * K
         p_hupd_11 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (0, 0), (64, 64), (1, 0))
         tl.store(p_hupd_11, b_hupd11_new.to(p_hupd_11.dtype.element_ty), boundary_check=(0, 1))
-        
+
         p_hupd_21 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (64, 0), (64, 64), (1, 0))
         tl.store(p_hupd_21, b_hupd21_new.to(p_hupd_21.dtype.element_ty), boundary_check=(0, 1))
-        
+
         p_hupd_12 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (0, 64), (64, 64), (1, 0))
         tl.store(p_hupd_12, b_hupd12_new.to(p_hupd_12.dtype.element_ty), boundary_check=(0, 1))
-        
+
         p_hupd_22 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (64, 64), (64, 64), (1, 0))
         tl.store(p_hupd_22, b_hupd22_new.to(p_hupd_22.dtype.element_ty), boundary_check=(0, 1))
 

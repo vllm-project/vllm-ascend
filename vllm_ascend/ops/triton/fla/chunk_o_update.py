@@ -18,7 +18,7 @@ from .utils import prepare_chunk_offsets
 
 @triton.heuristics(
     {
-        'IS_VARLEN': lambda args: args["cu_seqlens"] is not None,
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
 @triton.jit(do_not_specialize=["T"])
@@ -90,7 +90,6 @@ def chunk_fwd_o_update(
     H = v.shape[-2]
     BT = chunk_size
 
-    o = torch.empty_like(v)
     if cu_seqlens is None:
         N, chunk_offsets = B, None
     else:

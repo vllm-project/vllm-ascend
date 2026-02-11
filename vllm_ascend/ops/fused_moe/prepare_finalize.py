@@ -383,10 +383,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             self.num_tokens_pcp = hidden_states.shape[0]
             pad_size = max_tokens_across_pcp - self.num_tokens_pcp
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states,
-                                                  (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits,
-                                                  (0, 0, 0, pad_size))
+                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
