@@ -424,9 +424,10 @@ def unified_apply_mlp(
     weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)
     scale_type = kwargs.get("scale_type")
     per_token_scale_type = kwargs.get("per_token_scale_type")
-    adaptor = DeviceOperator.get_device_adaptor()
-    assert adaptor is not None, "Device adaptor is not initialized."
-    return adaptor.quant_apply_mlp(
+    adaptor_cls = DeviceOperator
+    if adaptor_cls is None:
+        raise RuntimeError("Device adaptor is not initialized.")
+    return adaptor_cls.quant_apply_mlp(
         hidden_states=hidden_states,
         w1=w1,
         w1_scale=w1_scale,
