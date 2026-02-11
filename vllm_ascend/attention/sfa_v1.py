@@ -1043,6 +1043,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             key = self.gather_kv_cross_cp(key, attn_metadata.sfa_cp_metadata.valid_block_ids)
             block_table = attn_metadata.sfa_cp_metadata.block_table_cp
 
+        # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer. 
+        # So two branches are maintained temporarily. 
+        # Later, torch.ops._C_ascend.npu_lightning_indexer_vllm needs to be removed.
         if self.use_torch_npu_lightning_indexer:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
                 query=q,
