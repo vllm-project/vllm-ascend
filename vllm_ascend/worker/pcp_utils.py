@@ -167,7 +167,7 @@ class PCPManager:
         self,
         num_scheduled_tokens: np.ndarray,
         arange_np: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, int]:
         """
         Update token counts and positions for Prefill Context Parallelism (PCP).
 
@@ -197,12 +197,17 @@ class PCPManager:
                        efficient batched arange operations.
 
         Returns:
-            Tuple (pcp_tokens, pcp_positions):
+            Tuple (pcp_tokens, pcp_positions, pcp_tokens_padded, max_num_tokens_across_pcp):
             - pcp_tokens: number of tokens per request that this PCP rank will
                           actually process (after splitting / replication).
+                          For hybrid-attention model: number of unpadded tokens
+                          per requests
             - pcp_positions: flattened positions for those tokens on this rank,
                              used to build the positions buffer for the model.
-
+            - tokens_padded: specifically used in hybrid-attention model, number of
+                             padded tokens per request
+            - max_num_tokens_across_pcp: max number of scheduled padded tokens 
+                                         across all pcp ranks
         Example:
         >>> Assume tokens = [1, 5, 8], pcp_world_size = 2. After _update_tokens_for_pcp.
         >>> pcp_rank = 0 get ([1, 4, 4], [0, 0, 1, 6, 7, 0, 1, 6, 7])
@@ -431,7 +436,7 @@ class PCPManager:
             else:
                 self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_reqs].sum()
 
-            return num_padded_scheduled_tokens, pcp_tokens[: self.num_reqs], max_scheduled_tokens, positions_linear
+            return num_padded_scheduled_tokens, positions_linear, pcp_tokens[: self.num_reqs], max_scheduled_tokens
         else:
             # Build the restore index used after allgather.
             all_positions_lst = [
@@ -443,7 +448,7 @@ class PCPManager:
 
             self.pcp_tokens[: self.num_reqs] = pcp_tokens[: self.num_reqs]
             self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_reqs].sum()
-            return pcp_tokens[: self.num_reqs], None, sum(pcp_tokens), positions
+            return pcp_tokens[: self.num_reqs], positions, None, 0
 
     def get_logits_indices(self, cu_num_tokens: np.ndarray):
         return torch.from_numpy(cu_num_tokens) * self.pcp_world_size - self.num_pcp_pads_cpu_tensor[: self.num_reqs] - 1
