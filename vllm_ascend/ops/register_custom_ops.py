@@ -265,7 +265,7 @@ direct_register_custom_op(
 )
 
 direct_register_custom_op(
-    op_name="rope_forward_oot",
+    op_name="npu_rotary_embedding",
     op_func=rope_forward_oot,
     fake_impl=_rope_forward_oot_impl_fake,
     mutates_args=[],

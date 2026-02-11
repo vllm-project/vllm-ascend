@@ -85,7 +85,7 @@ class ModelQKNormRopeWithoutBias(nn.Module):
         k_flat = k_norm_out.view(k.shape)
 
         # Apply RoPE
-        q_rope, k_rope = torch.ops.vllm.rope_forward_oot(
+        q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
             positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
         )
 
@@ -134,7 +134,7 @@ class ModelQKNormRopeWithBias(nn.Module):
         k_flat = k_normed.view(k.shape)
 
         # Apply RoPE
-        q_rope, k_rope = torch.ops.vllm.rope_forward_oot(
+        q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
             positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
         )
 
@@ -145,7 +145,7 @@ def assert_qknorm_rope_fusion(after_gm, expect_fused=True, use_bias=False):
     check_rules = [
         (torch.ops.vllm.qkv_rmsnorm_rope.default, expect_fused),
         (torch.ops.npu.npu_rms_norm.default, not expect_fused),
-        (torch.ops.vllm.rope_forward_oot.default, not expect_fused),
+        (torch.ops.vllm.npu_rotary_embedding.default, not expect_fused),
     ]
     if use_bias:
         check_rules.append((torch.ops.aten.add.Tensor, not expect_fused))

@@ -234,7 +234,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        return torch.ops.vllm.rope_forward_oot(
+        return torch.ops.vllm.npu_rotary_embedding(
             positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )
 
@@ -445,7 +445,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
             query = query.view(b, h_q, d // 2, 2).transpose(3, 2).reshape(b, h_q, d)
             b, h_k, d = key.shape
             key = key.view(b, h_k, d // 2, 2).transpose(3, 2).reshape(b, h_k, d)
-        q_pe, k_pe = torch.ops.vllm.rope_forward_oot(
+        q_pe, k_pe = torch.ops.vllm.npu_rotary_embedding(
             positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )
         return q_pe, k_pe
