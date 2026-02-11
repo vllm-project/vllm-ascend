@@ -28,8 +28,8 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
-                               get_ascend_device_type, has_rope, is_vl_model)
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
+                               has_rope, is_vl_model)
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
@@ -171,11 +171,6 @@ def get_cos_and_sin_slice():
     return _cos_slice, _sin_slice
 
 
-def _custom_rotary_embedding_enabled(query, neox_style, head_size):
-    return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and enable_custom_op(
-    )
-
-
 def rope_forward_oot(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -187,19 +182,6 @@ def rope_forward_oot(
     offsets: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     query_shape, key_shape = query.shape, key.shape
-    # adopt custom kernel path for rotary_embedding
-    if _custom_rotary_embedding_enabled(
-            query, is_neox_style,
-            head_size) and get_ascend_device_type() != AscendDeviceType._310P:
-        query, key = torch.ops._C_ascend.rotary_embedding(
-            positions,
-            query,
-            key,
-            head_size,
-            cos_sin_cache,
-            is_neox_style,
-        )
-        return query.view(query_shape), key.view(key_shape)
     if offsets is not None:
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
