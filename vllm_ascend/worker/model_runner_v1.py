@@ -374,6 +374,7 @@ class NPUModelRunner(GPUModelRunner):
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
+        self.cpu_slot_mapping = None
 
     @property
     def use_cp(self) -> bool:
