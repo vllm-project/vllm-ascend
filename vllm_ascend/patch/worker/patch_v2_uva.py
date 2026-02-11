@@ -16,15 +16,14 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from collections.abc import Sequence
-from typing import Callable, Union
+from collections.abc import Callable, Sequence
 
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
 
 
-def get_row_indices_from_key(key: Union[int, slice, tuple], dim_size: int) -> set[int]:
+def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int]:
     """get the set of row indices involved in the given key."""
     if isinstance(key, int):
         # parse index such as np[1]

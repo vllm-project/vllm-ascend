@@ -165,6 +165,7 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
             expanded_idx_mapping = idx_mapping
+            expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
             num_draft_tokens = np.array(
                 [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
@@ -199,6 +200,7 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np = query_start_loc_np[: num_reqs + 1]
         query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        max_query_len = num_scheduled_tokens.max().item()
 
         # Get prefill tokens.
         prepare_prefill_inputs(
@@ -258,14 +260,17 @@ class NPUModelRunner(GPUModelRunner):
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
-            query_start_loc=query_start_loc,
+            query_start_loc_gpu=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
             seq_lens=self.input_buffers.seq_lens,
-            seq_lens_np=self.input_buffers.seq_lens_np,
-            num_computed_tokens_cpu=self.req_states.num_computed_tokens_cpu[idx_mapping_cpu],
+            max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            # extra attributes for ascend npus.
+            seq_lens_np=self.input_buffers.seq_lens_np,
+            num_computed_tokens_cpu=self.req_states.num_computed_tokens_cpu[idx_mapping_cpu],
             attn_state=attn_state,
         )
 
