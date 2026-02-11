@@ -741,7 +741,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             atten_mask = attn_metadata.sliding_mask
         else:
             block_table = attn_metadata.block_tables
-            max_model_len = block_table.shape[-2] * block_table.shape[-1]
+            max_model_len = block_table.shape[-1] * block_size
             atten_mask = create_sliding_window_attention(attn_metadata.seq_lens, max_model_len)
             attn_metadata.sliding_mask = atten_mask
 

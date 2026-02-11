@@ -16,13 +16,13 @@
 
 
 import torch
-import torch.nn.functional as F
 import torch_npu
 from torch.nn.functional import pad
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.activation import swiglustep_and_mul
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
@@ -267,21 +267,19 @@ def quant_apply_mlp(
     return hidden_states
 
 
-def swiglustep_and_mul_out(
-    x: torch.Tensor,
-    limit: float = 7.0,
+def apply_moe_activation(
+    activation: str,
+    gate_up_out: torch.Tensor,
 ) -> torch.Tensor:
-    """Out-variant of swiglustep activation.
+    if activation == "silu":
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
-    Writes into `out`:
-      silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
-    """
-    gate, up = x.chunk(2, dim=-1)
-    gate = F.silu(gate)
-    gate = gate.clamp(max=limit)
-    up = up.clamp(min=-limit, max=limit)
-    out = gate * up
-    return out
+    elif activation == "swiglustep":
+        gate_up_out = swiglustep_and_mul(gate_up_out, limit=7.0)
+
+    else:
+        raise ValueError(f"Unsupported FusedMoE activation: {activation}")
+    return gate_up_out
 
 
 def unquant_apply_mlp(
@@ -307,11 +305,7 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    if activation == "swiglustep":
-        gate_up_out = swiglustep_and_mul_out(gate_up_out)
-
-    else:
-        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+    gate_up_out = apply_moe_activation(activation, gate_up_out)
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
