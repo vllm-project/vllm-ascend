@@ -687,7 +687,7 @@ ge::graphStatus TilingForLightningIndexer(gert::TilingContext *context)
     return liTiling.DoTiling(&liInfo);
 }
 
-IMPL_OP_OPTILING(LightningIndexer)
+IMPL_OP_OPTILING(LightningIndexerVllm)
     .Tiling(TilingForLightningIndexer)
     .TilingParse<LICompileInfo>(TilingPrepareForLightningIndexer);
 

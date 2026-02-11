@@ -13,8 +13,8 @@
  * \brief
  */
 
-#ifndef LIGHTNING_INDEXER_VLLM_TILING_H_
-#define LIGHTNING_INDEXER_VLLM_TILING_H_
+#ifndef LIGHTNING_INDEXER_TILING_H_
+#define LIGHTNING_INDEXER_TILING_H_
 
 #include "exe_graph/runtime/tiling_context.h"
 #include "tiling/platform/platform_ascendc.h"
@@ -80,7 +80,7 @@ TILING_DATA_FIELD_DEF(uint32_t, blockSize)
 TILING_DATA_FIELD_DEF(uint32_t, maxBlockNumPerBatch)
 TILING_DATA_FIELD_DEF(uint32_t, sparseMode)
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(LightningIndexer, LITilingData)
+REGISTER_TILING_DATA_CLASS(LightningIndexerVllm, LITilingData)
 
 struct LICompileInfo {};
 
@@ -212,4 +212,4 @@ private:
 };
 
 } // namespace optiling
-#endif // LIGHTNING_INDEXER_VLLM_TILING_H_
+#endif // LIGHTNING_INDEXER_TILING_H_

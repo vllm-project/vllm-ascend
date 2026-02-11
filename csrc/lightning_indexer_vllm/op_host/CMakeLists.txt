@@ -16,7 +16,7 @@ add_ops_compile_options(
                 --op_relocatable_kernel_binary=true
 )
 
-set(lightning_indexer_depends transformer/attention/lightning_indexer_vllm PARENT_SCOPE)
+set(lightning_indexer_vllm_depends transformer/attention/lightning_indexer_vllm PARENT_SCOPE)
 
 target_sources(op_host_aclnn PRIVATE
         lightning_indexer_vllm_def.cpp
