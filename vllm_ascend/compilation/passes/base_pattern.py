@@ -9,7 +9,6 @@ from vllm.config import VllmConfig
 
 from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
-
 # Global set to track registered patterns and prevent duplicates
 _registered_patterns: set[str] = set()
 
