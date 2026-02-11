@@ -603,8 +603,8 @@ class NPUModelRunner(GPUModelRunner):
         if self.pcp_size > 1:
             num_scheduled_tokens[:num_reqs], tokens_padded, max_num_tokens_across_pcp, position_pcp = (
                 self.pcp_manager.update_tokens_for_pcp(
-                                     num_scheduled_tokens[:num_reqs],
-                                     self.arange_np,
+                    num_scheduled_tokens[:num_reqs],
+                    self.arange_np,
                 )
             )
             if self.pcp_manager.pcp_use_hybrid_attn and tokens_padded is not None:
@@ -1208,7 +1208,9 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded = self._pad_query_start_loc_for_fia(num_tokens_padded, num_reqs_padded, num_reqs)
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
-                    num_tokens=num_tokens_unpadded if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn) else total_num_scheduled_tokens,
+                    num_tokens=num_tokens_unpadded
+                    if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
+                    else total_num_scheduled_tokens,
                     num_tokens_padded=num_tokens_padded,
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded,

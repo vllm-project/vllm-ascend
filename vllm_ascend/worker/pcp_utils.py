@@ -98,18 +98,15 @@ class PCPManager:
             )
         )
         if self.speculative_config and self.pcp_world_size * self.dcp_world_size > 1:
-            self.input_ids_pcp_full = CpuGpuBuffer(self.max_num_tokens,
-                                                   dtype=torch.int32,
-                                                   device=device,
-                                                   pin_memory=pin_memory)
-            self.query_start_loc_pcp_full = CpuGpuBuffer(self.max_num_reqs + 1,
-                                                         dtype=torch.int32,
-                                                         device=device,
-                                                         pin_memory=pin_memory)
-            self.positions_pcp_full = torch.zeros(self.max_num_tokens,
-                                                  dtype=torch.int64,
-                                                  device="cpu",
-                                                  pin_memory=pin_memory)
+            self.input_ids_pcp_full = CpuGpuBuffer(
+                self.max_num_tokens, dtype=torch.int32, device=device, pin_memory=pin_memory
+            )
+            self.query_start_loc_pcp_full = CpuGpuBuffer(
+                self.max_num_reqs + 1, dtype=torch.int32, device=device, pin_memory=pin_memory
+            )
+            self.positions_pcp_full = torch.zeros(
+                self.max_num_tokens, dtype=torch.int64, device="cpu", pin_memory=pin_memory
+            )
             self.positions_pcp_full_np = self.positions_pcp_full.numpy()
             self.query_lens_pcp_full = CpuGpuBuffer(
                 self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=pin_memory
@@ -310,7 +307,7 @@ class PCPManager:
             self.total_pcp_padding_tokens_fla = 0
             # have prefills
             if self.num_reqs - self.num_decode_reqs > 0:
-                prefill_tokens_tensor = torch.Tensor(num_scheduled_tokens[self.num_decode_tokens:])
+                prefill_tokens_tensor = torch.Tensor(num_scheduled_tokens[self.num_decode_tokens :])
                 # [num_prefill_reqs, pcp_world_size, 1] [[3,2]] [[2,2,2,1],[2,1,1,1]]
                 num_prefill_tokens_allranks = (
                     self._get_cp_local_seq_lens(prefill_tokens_tensor, self.pcp_world_size, 1, 1).long().numpy()
@@ -339,7 +336,7 @@ class PCPManager:
                     max_scheduled_prefill_tokens * self.pcp_world_size - num_prefill_tokens
                 )
                 self.pcp_padded_tokens_fla += max_scheduled_prefill_tokens - sum(num_prefill_scheduled_tokens_linear)
-            
+
             max_scheduled_tokens = max_scheduled_prefill_tokens + self.num_decode_tokens
             enter_fa_prefill_restore_idx = None
             if self.num_reqs - self.num_decode_reqs > 0:
@@ -393,7 +390,7 @@ class PCPManager:
 
             elif enter_fa_prefill_restore_idx is not None:
                 pcp_enter_fa_restore_idx = torch.from_numpy(enter_fa_prefill_restore_idx)
-            self.pcp_enter_fa_restore_idx[:pcp_enter_fa_restore_idx.shape[0]].copy_(
+            self.pcp_enter_fa_restore_idx[: pcp_enter_fa_restore_idx.shape[0]].copy_(
                 pcp_enter_fa_restore_idx.long(), non_blocking=True
             )
             padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
@@ -692,13 +689,12 @@ class PCPManager:
     ):
         from vllm_ascend.attention.utils import AscendPrefillContextParallelMetadata
 
-        query_lens_new =(
+        query_lens_new = (
             self.query_lens_pcp_full.cpu[:num_reqs]
             if self.pcp_world_size > 1 and self.speculative_config
             else query_lens
         )
         num_decodes = (query_lens_new <= self.decode_threshold).sum().item()
-        num_prefills = num_reqs - num_decodes
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_world_size
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
         long_seq_metadata = None
@@ -883,7 +879,7 @@ class PCPManager:
                     ]
                 else:
                     long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
-                        :sum(num_scheduled_tokens) - num_decodes
+                        : sum(num_scheduled_tokens) - num_decodes
                     ]
                 long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[
                     : num_actual_tokens_pcp_padded // self.pcp_world_size - num_decodes
