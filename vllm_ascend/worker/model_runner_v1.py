@@ -87,7 +87,15 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    AscendLightningIndexerMetadata,
+    get_index_of_skipped_queries_numpy,
+    get_sfa_skip_indices,
+    hidden_states_reorder,
+    maybe_pad_and_reorder_inputs,
+    using_paged_attention,
+)
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -112,6 +120,7 @@ from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import MedusaProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (
+    enable_lightning_indexer_skip,
     enable_sp,
     is_drafter_moe_model,
     is_moe_model,
@@ -373,6 +382,8 @@ class NPUModelRunner(GPUModelRunner):
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
+
+        self.lightning_indexer_metadata: AscendLightningIndexerMetadata | None = None
 
     @property
     def use_cp(self) -> bool:
@@ -1165,6 +1176,36 @@ class NPUModelRunner(GPUModelRunner):
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
+            if enable_lightning_indexer_skip():
+                li_reorder_indices, li_cum_query_lens, li_seq_lens, li_skiped_query_mask = get_sfa_skip_indices(
+                    self.input_batch.num_computed_tokens_cpu, num_scheduled_tokens
+                )
+
+                if li_reorder_indices is not None:
+                    top_k_indices_of_skipped_queries_numpy = get_index_of_skipped_queries_numpy(
+                        li_cum_query_lens, li_seq_lens, num_reqs, 2048
+                    )
+                    # make lighting skip metadata
+                    self.lightning_indexer_metadata = AscendLightningIndexerMetadata(
+                        li_reorder_indices=torch.from_numpy(li_reorder_indices)
+                        .pin_memory()
+                        .to(dtype=torch.int32, device=self.device, non_blocking=True),
+                        li_cum_query_lens=torch.from_numpy(li_cum_query_lens)
+                        .pin_memory()
+                        .to(dtype=torch.int32, device=self.device, non_blocking=True),
+                        li_seq_lens=torch.from_numpy(li_seq_lens)
+                        .pin_memory()
+                        .to(dtype=torch.int32, device=self.device, non_blocking=True),
+                        li_skip_request_mask=torch.from_numpy(li_skiped_query_mask)
+                        .pin_memory()
+                        .to(dtype=torch.bool, device=self.device, non_blocking=True),
+                        top_k_indices_of_skipped_queries=torch.from_numpy(top_k_indices_of_skipped_queries_numpy)
+                        .pin_memory()
+                        .to(dtype=torch.int32, device=self.device, non_blocking=True),
+                    )
+                else:
+                    self.lightning_indexer_metadata = None
+
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
                     or (enable_sp() and not self.model_config.use_mla)
@@ -1244,9 +1285,18 @@ class NPUModelRunner(GPUModelRunner):
             ),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
+            if enable_lightning_indexer_skip() and self.lightning_indexer_metadata is not None:
+                input_ids, positions = maybe_pad_and_reorder_inputs(
+                    input_ids, positions, self.lightning_indexer_metadata.li_reorder_indices
+                )
+
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+
+            if enable_lightning_indexer_skip() and self.lightning_indexer_metadata is not None:
+                hidden_states = hidden_states_reorder(hidden_states, self.lightning_indexer_metadata.li_reorder_indices)
+
         with record_function_or_nullcontext("post process"):
             if self.pcp_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
@@ -1920,6 +1970,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
+            lightning_indexer_metadata=self.lightning_indexer_metadata,
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
