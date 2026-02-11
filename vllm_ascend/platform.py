@@ -524,7 +524,7 @@ class NPUPlatform(Platform):
         vllm_config: VllmConfig,
         dp_metadata,
         virtual_engine: int = 0,
-        num_tokens: int | None = None,
+        num_tokens: int = 0,
         num_tokens_across_dp: torch.Tensor | None = None,
         cudagraph_runtime_mode=None,
         batch_descriptor=None,
