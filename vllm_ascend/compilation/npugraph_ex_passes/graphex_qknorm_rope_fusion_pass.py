@@ -47,17 +47,21 @@ class GraphEXQKNormRopeFusionPattern:
 
     def get_inputs(self):
         T = 5
+        max_position_embeddings = 16384
         qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
         q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        cos = torch.empty(1, T, 1, self.head_dim, dtype=torch.bfloat16, device="npu")
-        sin = torch.empty(1, T, 1, self.head_dim, dtype=torch.bfloat16, device="npu")
-        return [qkv, q_weight, k_weight, cos, sin]
+        cos_sin_cache = torch.empty(max_position_embeddings, self.head_dim, dtype=torch.bfloat16, device="npu")
+        positions = torch.ones(T, dtype=torch.int64, device="npu")
+        return [qkv, q_weight, k_weight, cos_sin_cache, positions]
 
-    # The replacement registered here will be actually executed after AOT.
     def register(self):
         def pattern(
-            qkv: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            positions: torch.Tensor,
         ):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -68,17 +72,19 @@ class GraphEXQKNormRopeFusionPattern:
             k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight, self.eps)
 
             q_flat = q_norm_out.view(q.shape)
-            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1, self.head_dim)
-
             k_flat = k_norm_out.view(k.shape)
-            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1, self.head_dim)
-
-            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
+            q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
+                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
+            )
 
             return q_rope, k_rope, v
 
         def replacement(
-            qkv: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            positions: torch.Tensor,
         ):
             results = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=qkv,
@@ -90,8 +96,8 @@ class GraphEXQKNormRopeFusionPattern:
                 eps=self.eps,
                 q_bias=None,
                 k_bias=None,
-                sin=sin,
-                cos=cos,
+                cos_sin_cache=cos_sin_cache,
+                positions=positions,
             )
 
             return results
@@ -117,16 +123,17 @@ class GraphEXQKNormRopeFusionPatternWithBias:
 
     def get_inputs(self):
         T = 5
+        max_position_embeddings = 16384
         qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
         q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         q_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        cos = torch.empty(1, T, 1, self.head_dim, dtype=torch.bfloat16, device="npu")
-        sin = torch.empty(1, T, 1, self.head_dim, dtype=torch.bfloat16, device="npu")
-        return [qkv, q_weight, k_weight, q_bias, k_bias, cos, sin]
+        cos_sin_cache = torch.empty(max_position_embeddings, self.head_dim, dtype=torch.bfloat16, device="npu")
+        positions = torch.ones(T, dtype=torch.int64, device="npu")
 
-    # The replacement registered here will be actually executed after AOT.
+        return [qkv, q_weight, k_weight, q_bias, k_bias, cos_sin_cache, positions]
+
     def register(self):
         def pattern(
             qkv: torch.Tensor,
@@ -134,8 +141,8 @@ class GraphEXQKNormRopeFusionPatternWithBias:
             k_weight: torch.Tensor,
             q_bias: torch.Tensor,
             k_bias: torch.Tensor,
-            cos: torch.Tensor,
-            sin: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            positions: torch.Tensor,
         ):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -148,12 +155,10 @@ class GraphEXQKNormRopeFusionPatternWithBias:
             k_normed = k_norm_out + k_bias
 
             q_flat = q_normed.view(q.shape)
-            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1, self.head_dim)
-
             k_flat = k_normed.view(k.shape)
-            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1, self.head_dim)
-
-            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
+            q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
+                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
+            )
 
             return q_rope, k_rope, v
 
@@ -163,8 +168,8 @@ class GraphEXQKNormRopeFusionPatternWithBias:
             k_weight: torch.Tensor,
             q_bias: torch.Tensor,
             k_bias: torch.Tensor,
-            cos: torch.Tensor,
-            sin: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            positions: torch.Tensor,
         ):
             results = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=qkv,
@@ -176,10 +181,9 @@ class GraphEXQKNormRopeFusionPatternWithBias:
                 eps=self.eps,
                 q_bias=q_bias,
                 k_bias=k_bias,
-                sin=sin,
-                cos=cos,
+                cos_sin_cache=cos_sin_cache,
+                positions=positions,
             )
-
             return results
 
         torchair.register_replacement(
@@ -197,7 +201,7 @@ class GraphEXQKNormRopeFusionPass:
 
     def __init__(self, vllm_config: VllmConfig):
         dtype = vllm_config.model_config.dtype
-        if dtype not in (torch.bfloat16, torch.float16):
+        if dtype not in (torch.bfloat16,):
             logger.debug("QKNorm and Rope fusion not enabled: unsupported dtype %s", dtype)
             return
         # use one attn layer to get meta (such as head_dim) for QKNormRopeFusionPattern
