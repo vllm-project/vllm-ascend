@@ -36,7 +36,11 @@ class MtpProposer(EagleProposer):
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
     ) -> None:
-        if self.pcp_size * self.dcp_size == 1 and not self.speculative_config.disable_padded_drafter_batch:
+        # Currently, both GLM and DS encounter issues when enabling the fullgraph mode and running on EagleProposer. 
+        # Therefore, we temporarily bypass this problem by adding a conditional check for fullgraph.
+        # TODO: this conditional check should be removed after bug fixing.
+        if self.pcp_size * self.dcp_size == 1 and not self.speculative_config.disable_padded_drafter_batch and \
+            not self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             super().dummy_run(
                 num_tokens,
                 with_prefill,
@@ -166,7 +170,11 @@ class MtpProposer(EagleProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
     ) -> torch.Tensor:
-        if self.pcp_size * self.dcp_size == 1 and not self.speculative_config.disable_padded_drafter_batch:
+        # Currently, both GLM and DS encounter issues when enabling the fullgraph mode and running on EagleProposer. 
+        # Therefore, we temporarily bypass this problem by adding a conditional check for fullgraph.
+        # TODO: this conditional check should be removed after bug fixing.
+        if self.pcp_size * self.dcp_size == 1 and not self.speculative_config.disable_padded_drafter_batch and \
+            not self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             draft_token_ids = super()._propose(
                 target_token_ids,
                 target_positions,
