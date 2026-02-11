@@ -571,7 +571,7 @@ class NPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
-    
+
     def check_health(self) -> None:
         import subprocess
 
