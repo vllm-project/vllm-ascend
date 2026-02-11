@@ -1,4 +1,6 @@
 import asyncio
+import os
+from unittest.mock import patch
 
 from tests.ut.base import TestBase
 from vllm import SamplingParams
@@ -65,7 +67,7 @@ class TestRoutingReplay(TestBase):
             # Cleanup
             async_llm.shutdown()
 
-    def test_routing_replay(self, monkeypatch):
-        monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    @patch.dict(os.environ, {"OMP_NUM_THREADS": "1"})
+    def test_routing_replay(self):
 
         asyncio.run(self.qwen3_tp8_concurrent())
