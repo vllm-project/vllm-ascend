@@ -38,9 +38,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
 )
-
-
-from vllm_ascend.quantization.quant_parser import parse_a5_quant_params
+from vllm_ascend.quantization.quant_parser import parse_mxfp_quant_params
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
@@ -130,7 +128,7 @@ class MoECommMethod(ABC):
         dynamic_eplb: bool = False,
         mc2_mask: torch.Tensor = None,
         pertoken_scale: torch.Tensor | None = None,
-        **kwargs
+        **kwargs,
     ):
         # Check constraints
         assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16, torch.int8]
@@ -142,13 +140,14 @@ class MoECommMethod(ABC):
         # Apply log2phy if needed
         if log2phy is not None:
             topk_ids = log2phy[topk_ids]
-        use_A5_quant = kwargs.get("use_A5_quant", False)
+        use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
         use_fp8_comm = kwargs.get("use_fp8_comm", False)
         # FIXME(linfeng): currently MC2 op with fp8 communication enconters accuracy issue,
         # so we force disable it here.
         use_fp8_comm = False
-        act_quant_type, weight_quant_type, \
-            scale_type, per_token_scale_type, round_mode = parse_a5_quant_params(**kwargs)
+        act_quant_type, weight_quant_type, scale_type, per_token_scale_type, round_mode = parse_mxfp_quant_params(
+            **kwargs
+        )
         assert moe_comm_method is not None, "Missing communication context"
         if isinstance(self.token_dispatcher, TokenDispatcherWithMC2) and use_fp8_comm:
             dispatch_results = self.token_dispatcher.token_dispatch_with_A5_quant(
@@ -156,29 +155,25 @@ class MoECommMethod(ABC):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 expert_map=expert_map,
-                global_redundant_expert_num=self.moe_config.
-                global_redundant_expert_num,
-                # shared_experts=shared_experts,
-                # quantized_x_for_share=quantized_x_for_share,
-                # dynamic_scale_for_share=dynamic_scale_for_share,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_redundant_expert_num=self.moe_config.global_redundant_expert_num,
                 with_quant=use_fp8_comm,
                 dynamic_eplb=dynamic_eplb,
                 comm_quant_mode=kwargs.get("comm_quant_mode", 2),
-                y_dtype=act_quant_type if use_fp8_comm else None)
+                y_dtype=act_quant_type if use_fp8_comm else None,
+            )
         else:
             dispatch_results = self.token_dispatcher.token_dispatch(
                 hidden_states=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 expert_map=expert_map,
-                global_redundant_expert_num=self.moe_config.
-                global_redundant_expert_num,
+                global_redundant_expert_num=self.moe_config.global_redundant_expert_num,
                 mc2_mask=mc2_mask,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 with_quant=use_int8_w8a8 or use_int4_w4a8,
                 dynamic_eplb=dynamic_eplb,
-                pertoken_scale=pertoken_scale)
+                pertoken_scale=pertoken_scale,
+            )
 
         mlp_output = unified_apply_mlp(
             hidden_states=dispatch_results.hidden_states,
@@ -194,11 +189,11 @@ class MoECommMethod(ABC):
             w1_offset=w1_offset,
             w2_offset=w2_offset,
             topk_scales=dispatch_results.topk_scales,
-            with_quant=use_int8_w8a8 or use_int4_w4a8 or use_int4_w4a16 or use_A5_quant,
+            with_quant=use_int8_w8a8 or use_int4_w4a8 or use_int4_w4a16 or use_mxfp_quant,
             fusion=use_int8_w8a8 and self.use_fusion_ops,
             need_trans=need_trans,
             dynamic_eplb=dynamic_eplb,
-            use_A5_quant=use_A5_quant,
+            use_mxfp_quant=use_mxfp_quant,
             use_fp8_comm=use_fp8_comm,
             act_quant_type=act_quant_type,
             weight_quant_type=weight_quant_type,
@@ -206,19 +201,21 @@ class MoECommMethod(ABC):
             per_token_scale_type=per_token_scale_type,
             round_mode=round_mode,
             use_bf16=(hidden_states.dtype == torch.bfloat16),
-            rollback_quant_config=kwargs.get("rollback_quant_config"))
+            rollback_quant_config=kwargs.get("rollback_quant_config"),
+        )
 
         before_combine_evt = torch.npu.current_stream().record_event()
         combine_results = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output,
-            context_metadata=dispatch_results.context_metadata)
+            hidden_states=mlp_output, context_metadata=dispatch_results.context_metadata
+        )
 
         return FusedExpertsResult(
             routed_out=combine_results.routed_out,
             before_dispatch_evt=before_dispatch_evt,
             before_combine_evt=before_combine_evt,
             group_list_type=dispatch_results.group_list_type,
-            expert_tokens=dispatch_results.group_list)
+            expert_tokens=dispatch_results.group_list,
+        )
 
     @abstractmethod
     def _get_token_dispatcher(self) -> MoETokenDispatcher:
@@ -338,6 +335,7 @@ class FusedMC2CommImpl(MoECommMethod):
         dynamic_eplb: bool = False,
         mc2_mask: torch.Tensor = None,
         pertoken_scale: torch.Tensor | None = None,
+        **kwargs,
     ):
         assert not (w1_scale is None or w2_scale is None), "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
 

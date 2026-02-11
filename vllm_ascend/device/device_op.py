@@ -27,9 +27,11 @@ class BaseDeviceAdaptor:
         torch_npu._npu_reshape_and_cache(
             key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
         )
+
     @staticmethod
     def quant_apply_mlp(**kwargs):
         from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp as _impl
+
         return _impl(**kwargs)
 
 
@@ -39,10 +41,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         torch_npu.npu_scatter_pa_kv_cache(
             key=key, value=value.contiguous(), key_cache=key_cache, value_cache=value_cache, slot_mapping=slot_mapping
         )
+
     @staticmethod
     def quant_apply_mlp(**kwargs):
-        from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp_A5 as _impl
+        from vllm_ascend.ops.fused_moe.moe_mlp import mxfp_quant_apply_mlp as _impl
+
         return _impl(**kwargs)
+
 
 def get_device_adaptor():
     ascend_device_type = get_ascend_device_type()
