@@ -22,16 +22,27 @@ from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-
+from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 from vllm_ascend.utils import vllm_version_is
+from torch._inductor.pattern_matcher import Match
 
 if vllm_version_is("0.15.0"):
     from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
+    from vllm.compilation.inductor_pass import get_pass_context  # type: ignore
 else:
     from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
+    from vllm.compilation.passes.inductor_pass import get_pass_context
 
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THREHOLD = 512
+
+
+def get_compile_range_and_extra_stream_check():
+    def check_func(match: Match) -> bool:
+        compile_range = get_pass_context().compile_range
+        return extra_stream_scope_check(match) and compile_range.start > ALLREDUCE_NORM_FUSE_THREHOLD
+
+    return check_func
 
 
 class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
@@ -88,6 +99,9 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
 
         return replacement
 
+    def get_extra_stream_scope_check(self):
+        return get_compile_range_and_extra_stream_check()
+
 
 class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
     def __init__(self, vllm_config, eps=1e-6):
@@ -133,6 +147,9 @@ class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
             )
 
         return replacement
+
+    def get_extra_stream_scope_check(self):
+        return get_compile_range_and_extra_stream_check()
 
 
 class MatmulAllReduceAddRMSNormPass(VllmInductorPass):

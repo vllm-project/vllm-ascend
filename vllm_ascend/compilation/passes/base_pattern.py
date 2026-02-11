@@ -5,6 +5,7 @@ import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.config import VllmConfig
+
 from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
 
@@ -26,6 +27,9 @@ class BasePattern(ABC):
     def get_replacement(self) -> Callable:
         pass
 
+    def get_extra_stream_scope_check(self):
+        return extra_stream_scope_check
+
     def register(self, pm_pass: PatternMatcherPass) -> None:
         pattern_fn = self.get_pattern()
         replacement_fn = self.get_replacement()
@@ -37,5 +41,5 @@ class BasePattern(ABC):
             search_fn=pattern_fn,
             replace_fn=replacement_fn,
             example_inputs=example_inputs,
-            extra_check=extra_stream_scope_check,
+            extra_check=self.get_extra_stream_scope_check(),
         )
