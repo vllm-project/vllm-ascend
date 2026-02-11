@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+
 import torch
 import torch._inductor.pattern_matcher as pm
 import torchair

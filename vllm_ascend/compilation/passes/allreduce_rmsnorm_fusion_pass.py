@@ -21,6 +21,7 @@ from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
+
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 from vllm_ascend.utils import vllm_version_is
