@@ -16,14 +16,15 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from typing import Callable, Sequence, Set, Tuple, Union
+from collections.abc import Sequence
+from typing import Callable, Union
 
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
 
 
-def get_row_indices_from_key(key: Union[int, slice, Tuple], dim_size: int) -> Set[int]:
+def get_row_indices_from_key(key: Union[int, slice, tuple], dim_size: int) -> set[int]:
     """get the set of row indices involved in the given key."""
     if isinstance(key, int):
         # parse index such as np[1]
@@ -96,7 +97,7 @@ class UvaBufferWrapper:
         self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self._np = self._cpu.numpy()
         self._uva: torch.Tensor = torch.zeros_like(self._cpu, device="npu")
-        self._modified_indices: Set[int] = set()
+        self._modified_indices: set[int] = set()
 
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)

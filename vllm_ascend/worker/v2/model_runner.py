@@ -180,7 +180,9 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
             max_expand_len = self.num_speculative_steps + 1
-            expanded_idx_mapping = expand_idx_mapping(idx_mapping, total_num_logits, cu_num_logits, max_expand_len)
+            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
+                idx_mapping, total_num_logits, cu_num_logits, max_expand_len
+            )
 
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
@@ -279,6 +281,7 @@ class NPUModelRunner(GPUModelRunner):
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
