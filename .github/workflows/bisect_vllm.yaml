@@ -39,18 +39,6 @@ on:
         description: 'The failing pytest command (e.g. pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py)'
         required: true
         default: 'pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py'
-      fetch_depth:
-        description: 'vllm git fetch depth (default 500, increase if commits not reachable)'
-        required: false
-        default: '500'
-      step_timeout:
-        description: 'Per-step timeout in seconds (default 600)'
-        required: false
-        default: '600'
-      total_timeout:
-        description: 'Total timeout in seconds (default 7200)'
-        required: false
-        default: '7200'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -72,9 +60,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       test_cmd: ${{ steps.resolve.outputs.test_cmd }}
-      fetch_depth: ${{ steps.resolve.outputs.fetch_depth }}
-      step_timeout: ${{ steps.resolve.outputs.step_timeout }}
-      total_timeout: ${{ steps.resolve.outputs.total_timeout }}
       good_commit: ${{ steps.resolve.outputs.good_commit }}
       bad_commit: ${{ steps.resolve.outputs.bad_commit }}
     steps:
@@ -83,32 +68,20 @@ jobs:
         run: |
           # ---- PR-trigger defaults (edit here) ----
           DEFAULT_TEST_CMD="pytest -sv tests/e2e/singlecard/test_llama32_lora.py"
-          DEFAULT_FETCH_DEPTH="500"
-          DEFAULT_STEP_TIMEOUT="600"
-          DEFAULT_TOTAL_TIMEOUT="7200"
+          # good_commit / bad_commit: leave empty to let bisect_vllm.sh auto-detect
+          # from pr_test_light.yaml (good from origin/main, bad from current branch).
+          # Only set these if you want to override auto-detection for PR triggers.
           DEFAULT_GOOD_COMMIT="d7e17aaacd5ed1b4b4be6bcfef3a1b7cbc84fc9a"
           DEFAULT_BAD_COMMIT="18e7cbbb158a86bdc76585e64ada795bf1c0d435"
           # ---- end defaults ----
 
           echo "test_cmd=${{ inputs.test_cmd || '' }}" >> "$GITHUB_OUTPUT"
-          echo "fetch_depth=${{ inputs.fetch_depth || '' }}" >> "$GITHUB_OUTPUT"
-          echo "step_timeout=${{ inputs.step_timeout || '' }}" >> "$GITHUB_OUTPUT"
-          echo "total_timeout=${{ inputs.total_timeout || '' }}" >> "$GITHUB_OUTPUT"
           echo "good_commit=${{ inputs.good_commit || '' }}" >> "$GITHUB_OUTPUT"
           echo "bad_commit=${{ inputs.bad_commit || '' }}" >> "$GITHUB_OUTPUT"
 
           # Apply defaults for empty values (pull_request trigger)
           if [ -z "${{ inputs.test_cmd }}" ]; then
             echo "test_cmd=${DEFAULT_TEST_CMD}" >> "$GITHUB_OUTPUT"
-          fi
-          if [ -z "${{ inputs.fetch_depth }}" ]; then
-            echo "fetch_depth=${DEFAULT_FETCH_DEPTH}" >> "$GITHUB_OUTPUT"
-          fi
-          if [ -z "${{ inputs.step_timeout }}" ]; then
-            echo "step_timeout=${DEFAULT_STEP_TIMEOUT}" >> "$GITHUB_OUTPUT"
-          fi
-          if [ -z "${{ inputs.total_timeout }}" ]; then
-            echo "total_timeout=${DEFAULT_TOTAL_TIMEOUT}" >> "$GITHUB_OUTPUT"
           fi
           if [ -z "${{ inputs.good_commit }}" ]; then
             echo "good_commit=${DEFAULT_GOOD_COMMIT}" >> "$GITHUB_OUTPUT"
@@ -140,7 +113,7 @@ jobs:
     name: Bisect vLLM
     needs: [set-params, detect-env]
     runs-on: ${{ needs.detect-env.outputs.runner }}
-    timeout-minutes: 180
+    timeout-minutes: 360
     container:
       image: ${{ needs.detect-env.outputs.image }}
       env:
@@ -183,7 +156,7 @@ jobs:
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
-          fetch-depth: ${{ needs.set-params.outputs.fetch_depth }}
+          fetch-depth: 500
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -248,9 +221,9 @@ jobs:
           tools/bisect_vllm.sh \
             --vllm-repo ../vllm-empty \
             --ascend-repo . \
-            --fetch-depth ${{ needs.set-params.outputs.fetch_depth }} \
-            --step-timeout ${{ needs.set-params.outputs.step_timeout }} \
-            --total-timeout ${{ needs.set-params.outputs.total_timeout }} \
+            --fetch-depth 500 \
+            --step-timeout 1200 \
+            --total-timeout 20400 \
             --test-cmd "${{ needs.set-params.outputs.test_cmd }}" \
-            --good ${{ needs.set-params.outputs.good_commit }} \
-            --bad ${{ needs.set-params.outputs.bad_commit }}
+            ${{ needs.set-params.outputs.good_commit && format('--good {0}', needs.set-params.outputs.good_commit) || '' }} \
+            ${{ needs.set-params.outputs.bad_commit && format('--bad {0}', needs.set-params.outputs.bad_commit) || '' }}

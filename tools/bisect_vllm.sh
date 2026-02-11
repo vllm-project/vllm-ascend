@@ -476,17 +476,18 @@ run_bisect() {
         echo ""
         log_info "Step ${step}: commit ${short_commit} → ${result}"
 
-        # Feed result back to git bisect
+        # Feed result back to git bisect and capture exit code
         local bisect_output
+        local bisect_rc=0
         case "${result}" in
             good)
-                bisect_output=$(git -C "${VLLM_REPO}" bisect good 2>&1) || true
+                bisect_output=$(git -C "${VLLM_REPO}" bisect good 2>&1) || bisect_rc=$?
                 ;;
             bad)
-                bisect_output=$(git -C "${VLLM_REPO}" bisect bad 2>&1) || true
+                bisect_output=$(git -C "${VLLM_REPO}" bisect bad 2>&1) || bisect_rc=$?
                 ;;
             skip)
-                bisect_output=$(git -C "${VLLM_REPO}" bisect skip 2>&1) || true
+                bisect_output=$(git -C "${VLLM_REPO}" bisect skip 2>&1) || bisect_rc=$?
                 skipped_commits="${skipped_commits:+${skipped_commits},}${short_commit}"
                 ;;
             *)
@@ -516,9 +517,9 @@ run_bisect() {
             return 0
         fi
 
-        # Check for bisect errors (e.g. "no more commits to test")
-        if echo "${bisect_output}" | grep -qi "error\|fatal"; then
-            log_error "git bisect returned an error:"
+        # Check for bisect errors via exit code (avoids false positives from commit messages)
+        if [[ ${bisect_rc} -ne 0 ]]; then
+            log_error "git bisect ${result} failed with exit code ${bisect_rc}:"
             echo "${bisect_output}"
             git -C "${VLLM_REPO}" bisect reset --quiet 2>/dev/null || true
             return 1
