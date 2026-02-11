@@ -1,6 +1,5 @@
 #!/bin/bash
-# 开启 -x 可以打印执行的每一行指令，定位报错行号的神器
-set -euxo pipefail 
+set -euo pipefail
 
 # Color definitions
 GREEN="\033[0;32m"
@@ -9,160 +8,172 @@ YELLOW="\033[0;33m"
 RED="\033[0;31m"
 NC="\033[0m" # No Color
 
-# 错误捕获：如果脚本意外退出，打印退出码和行号
-trap 'echo -e "${RED}[DEBUG] Script exited with status $? at line $LINENO${NC}"' ERR
-
-echo "[DEBUG] Starting script execution at $(date)"
-echo "[DEBUG] Current user: $(whoami)"
-echo "[DEBUG] WORKSPACE is set to: ${WORKSPACE:-UNDEFINED}"
-
 # Configuration
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-
 # cann and atb environment setup
-set +ue
-echo "[INFO] Sourcing ascend-toolkit set_env.sh..."
-if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    echo "[DEBUG] ascend-toolkit sourced successfully."
-else
-    echo "[ERROR] ascend-toolkit set_env.sh NOT FOUND!"
-fi
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/cann-8.5.0/share/info/ascendnpu-ir/bin/set_env.sh
 
-# 检查 CANN 路径是否存在
-CANN_IR_ENV="/usr/local/Ascend/cann-8.5.0/share/info/ascendnpu-ir/bin/set_env.sh"
-echo "[INFO] Checking $CANN_IR_ENV"
-if [ -f "$CANN_IR_ENV" ]; then
-    source "$CANN_IR_ENV"
-else
-    echo "[ERROR] CANN IR env file missing: $CANN_IR_ENV"
-fi
-
-echo "[INFO] Sourcing atb set_env.sh..."
-if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
-    source /usr/local/Ascend/nnal/atb/set_env.sh
-else
-    echo "[ERROR] ATB set_env.sh NOT FOUND!"
-fi
-set -ue
+set +eu
+source /usr/local/Ascend/nnal/atb/set_env.sh
+set -eu
 
 # Home path for aisbench
 export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
-echo "[DEBUG] BENCHMARK_HOME set to: $BENCHMARK_HOME"
 
 # Logging configurations
 export VLLM_LOGGING_LEVEL="INFO"
+# Reduce glog verbosity for mooncake
 export GLOG_minloglevel=1
+# Set transformers to offline mode to avoid downloading models during tests
 export HF_HUB_OFFLINE="1"
 
-show_vllm_info() {
-    echo -e "\n${BLUE}=== SHOW VLLM INFO ===${NC}"
-    echo "[DEBUG] Current Directory: $(pwd)"
-    pip list | grep vllm || echo "[WARN] No vllm packages found in pip list."
+# Function to print section headers
+print_section() {
+    echo -e "\n${BLUE}=== $1 ===${NC}"
+}
 
-    for repo in "vllm" "vllm-ascend"; do
-        echo "Checking $repo git info..."
-        if [ -d "$WORKSPACE/$repo/.git" ]; then
-            cd "$WORKSPACE/$repo"
-            echo "[DEBUG] Git status for $repo:"
-            git log -1 --pretty=format:"%h - %an, %ar : %s"
-            echo ""
-        else
-            echo "[WARN] $WORKSPACE/$repo/.git does not exist!"
-        fi
-    done
+print_failure() {
+    echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: $1${NC}"
+    exit 1
+}
+
+# Function to print success messages
+print_success() {
+    echo -e "${GREEN}✓ $1${NC}"
+}
+
+# Function to print error messages and exit
+print_error() {
+    echo -e "${RED}✗ ERROR: $1${NC}"
+    exit 1
+}
+
+show_vllm_info() {
+    cd "$WORKSPACE"
+    echo "Installed vLLM-related Python packages:"
+    pip list | grep vllm || echo "No vllm packages found."
+
+    echo ""
+    echo "============================"
+    echo "vLLM Git information"
+    echo "============================"
+    cd vllm
+    if [ -d .git ]; then
+    echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+    echo "Commit hash: $(git rev-parse HEAD)"
+    echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+    echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+    echo "Message:     $(git log -1 --pretty=format:'%s')"
+    echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+    echo "Remote:      $(git remote -v | head -n1)"
+    echo ""
+    else
+    echo "No .git directory found in vllm"
+    fi
+    cd ..
+
+    echo ""
+    echo "============================"
+    echo "vLLM-Ascend Git information"
+    echo "============================"
+    cd vllm-ascend
+    if [ -d .git ]; then
+    echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+    echo "Commit hash: $(git rev-parse HEAD)"
+    echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+    echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+    echo "Message:     $(git log -1 --pretty=format:'%s')"
+    echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+    echo "Remote:      $(git remote -v | head -n1)"
+    echo ""
+    else
+    echo "No .git directory found in vllm-ascend"
+    fi
+    cd ..
 }
 
 check_npu_info() {
-    echo -e "\n${BLUE}=== NPU INFO ===${NC}"
-    npu-smi info || echo "[ERROR] npu-smi failed!"
-    INFO_FILE="/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/ascend_toolkit_install.info"
-    if [ -f "$INFO_FILE" ]; then
-        cat "$INFO_FILE"
-    else
-        echo "[ERROR] Toolkit info file missing at $INFO_FILE"
-    fi
+    echo "====> Check NPU info"
+    npu-smi info
+    cat "/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/ascend_toolkit_install.info"
 }
 
-upgrade_vllm_ascend_scr() {
-    echo -e "\n${BLUE}=== UPGRADE VLLM-ASCEND (PR 5853) ===${NC}"
-    TARGET_DIR="$WORKSPACE/vllm-ascend"
-    
-    if [ ! -d "$TARGET_DIR" ]; then
-        echo "[ERROR] Target directory $TARGET_DIR does not exist. Cannot upgrade."
-        exit 1
-    fi
-
-    cd "$TARGET_DIR"
-    echo "[DEBUG] Current Dir: $(pwd)"
-    
-    echo "[DEBUG] Fetching PR 5853..."
-    git fetch origin pull/5853/head:pr-5853 || { echo "[ERROR] Git fetch failed"; exit 1; }
-    
-    echo "[DEBUG] Checking out pr-5853..."
-    git checkout pr-5853 || { echo "[ERROR] Git checkout failed"; exit 1; }
-    
-    echo "[DEBUG] Final Git Commit Head:"
-    git rev-parse HEAD
+check_and_config() {
+    echo "====> Configure mirrors and git proxy"
+    # Fix me(Potabk): Currently, there have some issues with accessing GitHub via https://gh-proxy.test.osinfra.cn in certain regions.
+    # We should switch to a more stable proxy for now until the network proxy is stable enough.
+    git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+    export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 }
 
 install_extra_components() {
-    echo -e "\n${BLUE}=== INSTALL EXTRA COMPONENTS ===${NC}"
-    TEMP_DIR=$(mktemp -d)
-    cd "$TEMP_DIR"
-    echo "[DEBUG] Downloading components to temporary dir: $TEMP_DIR"
+    echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
     
-    # 使用 -v 显示下载进度/详细错误
-    wget -v https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
+        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
+        return 1
+    fi
     chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
     ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
     
-    wget -v https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
+        echo "Failed to download custom_ops wheel"
+        return 1
+    fi
     pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
     
-    rm -rf "$TEMP_DIR"
+    export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
+    export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    
+    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
+          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+    echo "====> Extra components installation completed"
+}
+
+
+show_triton_ascend_info() {
+    echo "====> Check triton ascend info"
+    clang -v
+    which bishengir-compile
+    pip show triton-ascend
+}
+
+kill_npu_processes() {
+  pgrep python3 | xargs -r kill -9
+  pgrep VLLM | xargs -r kill -9
+
+  sleep 4
 }
 
 run_tests_with_log() {
-    echo -e "\n${BLUE}=== RUNNING TESTS ===${NC}"
     set +e
-    pgrep python3 | xargs -r kill -9
-    pgrep VLLM | xargs -r kill -9
-    sleep 2
-    
-    echo "[DEBUG] Starting PyTest..."
-    # 确保在正确的目录下运行 pytest
-    cd "$WORKSPACE/vllm-ascend"
+    kill_npu_processes
     pytest -sv --show-capture=no tests/e2e/nightly/multi_node/scripts/test_multi_node.py
     ret=$?
     set -e
-    
-    if [ $ret -eq 0 ]; then
-        echo -e "${GREEN}✓ All tests passed!${NC}"
-    else
-        echo -e "${RED}✗ Pytest failed with exit code $ret${NC}"
-        exit $ret
+    if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
+        if [ $ret -eq 0 ]; then
+            print_success "All tests passed!"
+        else
+            print_failure "Some tests failed, please check the error stack above for details. \
+If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
+        fi
     fi
 }
 
 main() {
-    echo "[DEBUG] Main sequence initiated."
     check_npu_info
-    
-    # 强制进入工作目录前检查
-    if [ -z "${WORKSPACE:-}" ]; then
-        echo "[ERROR] WORKSPACE variable is not set!"
-        exit 1
-    fi
-
+    check_and_config
+    show_vllm_info
+    show_triton_ascend_info
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
     fi
-
-    upgrade_vllm_ascend_scr
-    show_vllm_info
-    
+    cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }
 
