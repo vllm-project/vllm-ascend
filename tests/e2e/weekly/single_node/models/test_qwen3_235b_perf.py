@@ -104,7 +104,9 @@ async def test_models(model: str, mode: str) -> None:
         assert choices[0].text, "empty response"
         print(choices)
         # aisbench test
-        run_aisbench_cases(model,
+        results = run_aisbench_cases(model,
                            port,
                            aisbench_cases,
                            server_args=server_args)
+        print("results are:")
+        print(results[0])

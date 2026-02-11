@@ -85,6 +85,7 @@ class AisbenchRunner:
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
         self.exp_folder = None
         self.result_line = None
+        self.verify = verify
         self._init_dataset_conf()
         self.all_results = []
         batch_size = aisbench_config["batch_size"]
@@ -95,16 +96,16 @@ class AisbenchRunner:
             self._init_request_conf()
             self._run_aisbench_task()
             self._wait_for_task()
-            self.all_results.append(self.result)
-            if not verify:
-                continue
             self.baseline = aisbench_config.get("baseline", 1)
             if self.task_type == "accuracy":
+                self._get_result_accuracy()
                 self.threshold = aisbench_config.get("threshold", 1)
                 self._accuracy_verify()
             if self.task_type == "performance":
+                self._get_result_performance()
                 self.threshold = aisbench_config.get("threshold", 0.97)
                 self._performance_verify()
+            self.all_results.append(self.result)
         if not isinstance(batch_size, list):
             self.all_results = self.result
 
@@ -213,7 +214,8 @@ class AisbenchRunner:
         self.result = float(df.loc[0][-1])
 
     def _performance_verify(self):
-        self._get_result_performance()
+        if not self.verify:
+            return
         output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
         assert float(output_throughput) >= self.threshold * self.baseline, (
             "Performance verification failed. "
@@ -222,7 +224,8 @@ class AisbenchRunner:
         )
 
     def _accuracy_verify(self):
-        self._get_result_accuracy()
+        if not self.verify:
+            return
         acc_value = self.result
         assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, (
             "Accuracy verification failed. "
