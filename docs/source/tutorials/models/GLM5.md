@@ -48,6 +48,14 @@ docker run --rm \
 --device /dev/davinci5 \
 --device /dev/davinci6 \
 --device /dev/davinci7 \
+--device /dev/davinci8 \
+--device /dev/davinci9 \
+--device /dev/davinci10 \
+--device /dev/davinci11 \
+--device /dev/davinci12 \
+--device /dev/davinci13 \
+--device /dev/davinci14 \
+--device /dev/davinci15 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
 --device /dev/hisi_hdc \
@@ -181,7 +189,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --data-parallel-address $node0_ip \
 --data-parallel-rpc-port 12890 \
 --tensor-parallel-size 16 \
---quantization ascend \
 --seed 1024 \
 --served-model-name glm-5 \
 --enable-expert-parallel \
@@ -228,7 +235,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --data-parallel-address $node0_ip \
 --data-parallel-rpc-port 12890 \
 --tensor-parallel-size 16 \
---quantization ascend \
 --seed 1024 \
 --served-model-name glm-5 \
 --enable-expert-parallel \
