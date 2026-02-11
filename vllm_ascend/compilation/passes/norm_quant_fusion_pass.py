@@ -18,12 +18,16 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.logger import logger
 
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, vllm_version_is
+
+if vllm_version_is("0.15.0"):
+    from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
+else:
+    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 
 
 class AddRMSNormQuantPattern:
