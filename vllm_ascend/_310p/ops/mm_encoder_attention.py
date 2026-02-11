@@ -16,6 +16,7 @@
 #
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 
 from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
@@ -34,16 +35,36 @@ class AscendMMEncoderAttention310(AscendMMEncoderAttention):
         max_seqlen: int | None = None,
         **kwargs,
     ):
+        def _align_up(x: int, a: int = 16) -> int:
+            return ((x + a - 1) // a) * a
+
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
-        query = query.view(bsz * q_len, self.num_heads, self.head_size)
-        key = key.view(bsz * kv_len, self.num_kv_heads, self.head_size)
-        value = value.view(bsz * kv_len, self.num_kv_heads, self.head_size)
+        head_size_real = int(query.shape[-1])
+
+        query = query.view(bsz * q_len, self.num_heads, head_size_real)
+        key = key.view(bsz * kv_len, self.num_kv_heads, head_size_real)
+        value = value.view(bsz * kv_len, self.num_kv_heads, head_size_real)
+
+        head_size_pad = _align_up(head_size_real, 16)
+        if head_size_pad > head_size_real:
+            pad = head_size_pad - head_size_real
+            query = F.pad(query, (0, pad))
+            key = F.pad(key, (0, pad))
+            value = F.pad(value, (0, pad))
 
         if cu_seqlens is None:
             seq_len = torch.tensor([q_len] * bsz, device="cpu", dtype=torch.int32)
         else:
             seq_len = torch.diff(cu_seqlens.to("cpu", dtype=torch.int32))
+
+        scale = getattr(self, "scale", None)
+        if scale is None:
+            head_size_orig = getattr(self, "head_size_orig", None)
+            if head_size_orig is not None:
+                scale = float(head_size_orig) ** -0.5
+            else:
+                scale = float(head_size_real) ** -0.5
 
         output = torch.empty_like(query)
         torch_npu._npu_flash_attention_unpad(
@@ -51,11 +72,13 @@ class AscendMMEncoderAttention310(AscendMMEncoderAttention):
             key=key,
             value=value,
             seq_len=seq_len,
-            scale_value=self.head_size**-0.5,
+            scale_value=scale,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             out=output,
         )
 
-        output = output.view(bsz, -1, self.num_heads, self.head_size)
+        if head_size_pad > head_size_real:
+            output = output[..., :head_size_real].contiguous()
+        output = output.view(bsz, -1, self.num_heads, head_size_real)
         return output
