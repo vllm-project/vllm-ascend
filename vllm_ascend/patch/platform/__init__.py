@@ -18,6 +18,7 @@ import os
 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
+
 # TODO remove this patch when pr: https://github.com/vllm-project/vllm/pull/34336 is merged
 import vllm_ascend.patch.platform.patch_routed_experts_capturer  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
