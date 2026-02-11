@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 import numpy as np
 import torch
@@ -66,7 +66,7 @@ class AscendInputBatch(InputBatch):
         device: torch.device,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
-        input_batch = super().make_dummy(
+        input_batch = InputBatch.make_dummy(
             num_reqs,
             num_tokens,
             input_buffers,
@@ -79,4 +79,4 @@ class AscendInputBatch(InputBatch):
         input_buffers.seq_lens_np[num_reqs:] = 0
         seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
         input_batch.seq_lens_np = seq_lens_np
-        return input_batch
+        return cls(**asdict(input_batch), seq_lens_np=seq_lens_np)

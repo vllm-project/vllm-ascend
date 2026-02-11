@@ -19,11 +19,9 @@
 import torch
 import vllm
 from torch.distributed import Backend
-from vllm.distributed.parallel_state import (GroupCoordinator,
-                                             _get_unique_name, _register_group)
+from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 
-from vllm_ascend.distributed.device_communicators.npu_communicator import \
-    NPUCommunicator
+from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.utils import create_hccl_pg_options
 
 
@@ -80,8 +78,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 unique_name=self.unique_name,
             )
 
-        from vllm.distributed.device_communicators.shm_broadcast import \
-            MessageQueue
+        from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
         self.mq_broadcaster: MessageQueue | None = None
         if use_message_queue_broadcaster and self.world_size > 1:

@@ -17,8 +17,7 @@
 
 import torch
 import torch.nn as nn
-from vllm.model_executor.layers.rotary_embedding.base import \
-    RotaryEmbeddingBase
+from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbeddingBase
 
 
 class AscendRotaryEmbeddingBase(nn.Module):
