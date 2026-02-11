@@ -242,6 +242,14 @@
 #
 # ** 13. File: worker/patch_v2_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.utils.default_unquantized_gemm`
+#    Why:
+#       unquantized_gemm in vLLM not is a customop, which will make MatmulAllReduceAddRMSNorm fusion failure.
+#    How：
+#       make unquantized_gemm as a customop.
+#    Future Plan:
+#       Remove this patch when vLLM support the operator as customop.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.states.UvaBuffer`
 #    Why:
 #       ASCEND NPUs do not support UVA yet, so we need to wrap it in vLLM.
@@ -251,11 +259,3 @@
 #       Remove this patch when NPU support UVA.
 #
 # ** 12. File: worker/patch_unquantized_gemm.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.utils.default_unquantized_gemm`
-#    Why:
-#       unquantized_gemm in vLLM not is a customop, which will make MatmulAllReduceAddRMSNorm fusion failure.
-#    How：
-#       make unquantized_gemm as a customop.
-#    Future Plan:
-#       Remove this patch when vLLM support the operator as customop.

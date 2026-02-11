@@ -37,7 +37,7 @@ def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int
         start, stop, step = key.indices(dim_size)
         return set(range(start, stop, step))
     elif isinstance(key, tuple):
-        # pasre row slice such as np[1,:100]
+        # parse row slice such as np[1,:100]
         if len(key) == 0:
             return set(range(dim_size))
         return get_row_indices_from_key(key[0], dim_size)
