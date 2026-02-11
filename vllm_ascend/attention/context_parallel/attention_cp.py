@@ -798,8 +798,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                         output_local_padded_tokens_fa = num_actual_tokens_pcp_padded // self.pcp_size - num_tokens
                         if output_local_padded_tokens_fa > 0:
                             output_padded = F.pad(
-                                output, pad=(0, 0, 0, 0, 0, output_local_padded_tokens_fa),
-                                mode="constant", value=0
+                                output, pad=(0, 0, 0, 0, 0, output_local_padded_tokens_fa), mode="constant", value=0
                             )
 
                 prefill_key = key[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded]
@@ -819,7 +818,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
     def _gather_and_restore_pcp_qkv(self, query, key, value, attn_metadata):
         """
-        Gathers QKV chunks from all GPUs in the PCP group and restores the original 
+        Gathers QKV chunks from all GPUs in the PCP group and restores the original
         sequence order for Context Parallelism (CP).
         """
         num_tokens = query.shape[0]
@@ -837,8 +836,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         # Restore the original sequence order using pre-computed indices
         pcp_enter_fa_restore_idx = (
-            attn_metadata.prefill.pcp_metadata.pcp_enter_fa_restore_idx
-            if attn_metadata.prefill.pcp_metadata else None
+            attn_metadata.prefill.pcp_metadata.pcp_enter_fa_restore_idx if attn_metadata.prefill.pcp_metadata else None
         )
         actual_qkv = torch.index_select(all_qkv, 0, pcp_enter_fa_restore_idx)
         qkv_fa_padding_workspace = query.new_empty(
@@ -859,11 +857,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             ],
             dim=-1,
         )
-        
+
         return (
             q.reshape(-1, self.num_heads, self.head_size),
             k.reshape(-1, self.num_kv_heads, self.head_size),
-            v.reshape(-1, self.num_kv_heads, self.head_size)
+            v.reshape(-1, self.num_kv_heads, self.head_size),
         )
 
     def _gather_global_context_output(self, local_context_attn_output):
