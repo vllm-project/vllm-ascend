@@ -35,6 +35,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The build type of the package. It can be one of the following values:
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE": lambda: os.getenv("CMAKE_BUILD_TYPE"),
+    # Whether to compile custom kernels. If not set, the default value is True.
+    # If set to False, the custom kernels will not be compiled.
+    # This configuration option should only be set to False when running UT
+    # scenarios in an environment without an NPU. Do not set it to False in
+    # other scenarios.
+    "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
@@ -52,7 +58,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
     # The path for HCCL library, it's used by pyhccl communicator backend. If
     # not set, the default value is libhccl.so.
-    "HCCL_SO_PATH": lambda: os.environ.get("HCCL_SO_PATH", None),
+    "HCCL_SO_PATH": lambda: os.getenv("HCCL_SO_PATH", None),
     # The version of vllm is installed. This value is used for developers who
     # installed vllm from source locally. In this case, the version of vllm is
     # usually changed. For example, if the version of vllm is "0.9.0", but when
@@ -60,15 +66,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to enable the model execute time observe profile. Disable it when
-    # running vllm ascend in production environment.
-    "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", "0"))
-    ),
-    # Some models are optimized by vllm ascend. While in some case, e.g. rlhf
-    # training, the optimized model may not be suitable. In this case, set this
-    # value to False to disable the optimized model.
-    "USE_OPTIMIZED_MODEL": lambda: bool(int(os.getenv("USE_OPTIMIZED_MODEL", "1"))),
     # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))),
@@ -116,6 +113,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
     # Whether to anbale balance scheduling
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
+    # use fused op transpose_kv_cache_by_block, default is True
+    "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
+    ),
 }
 
 # end-env-vars-definition

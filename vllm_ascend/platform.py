@@ -150,7 +150,10 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
-        from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendModelSlimConfig  # noqa: F401
+        if not is_310p():
+            from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendModelSlimConfig  # noqa: F401
+        else:
+            from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
 
         config_deprecated_logging()
 
@@ -375,16 +378,31 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.enable_chunked_prefill = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
+        cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         if (
             vllm_config.kv_transfer_config is not None
             and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
-            and parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size > 1
+            and cp_size > 1
         ):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
                 f"and block_size({cache_config.block_size}) "
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
+
+        use_sparse = (
+            model_config is not None
+            and model_config.hf_text_config is not None
+            and hasattr(model_config.hf_text_config, "index_topk")
+        )
+        if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+            logger.warning_once(
+                "The current SFA's PCP&DCP implementation requires"
+                f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
+                f" == block_size({cache_config.block_size}). "
+                f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
+            )
+            vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
 
         if is_vl_model(vllm_config):
             if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0"))) or bool(
@@ -658,20 +676,8 @@ class NPUPlatform(Platform):
                 )
                 model_config.disable_cascade_attn = False
 
-        # ==================== 2. Parallel Config ====================
-        if vllm_config.parallel_config:
-            # Only allow the default all2all backend; others like deepep are not supported
-            default_backend = "allgather_reducescatter"
-            current_backend = getattr(vllm_config.parallel_config, "all2all_backend", default_backend)
-            if current_backend != default_backend:
-                logger.warning(
-                    "Parameter '--all2all-backend' is set to '%s', which may be "
-                    "incompatible with Ascend. Using internal plugin mechanisms.",
-                    current_backend,
-                )
-                vllm_config.parallel_config.all2all_backend = default_backend
-
-            # ==================== 3. Cache Config ====================
+        # ==================== 2. Cache Config ====================
+        if vllm_config.cache_config:
             # Check and reset cpu_kvcache_space_bytes
             if getattr(vllm_config.cache_config, "cpu_kvcache_space_bytes", False):
                 logger.warning(
@@ -679,7 +685,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.cache_config.cpu_kvcache_space_bytes = None
 
-        # ==================== 4. MultiModal Config ====================
+        # ==================== 3. MultiModal Config ====================
         multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
         if multimodal_config:
             # Ascend uses a different mechanism for Multi-Modal attention
@@ -690,7 +696,7 @@ class NPUPlatform(Platform):
                 )
                 multimodal_config.mm_encoder_attn_backend = None
 
-        # ==================== 5. Observability Config ====================
+        # ==================== 4. Observability Config ====================
         if vllm_config.observability_config:
             # NVTX tracing is NVIDIA specific
             if getattr(vllm_config.observability_config, "enable_layerwise_nvtx_tracing", False):
@@ -700,7 +706,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.observability_config.enable_layerwise_nvtx_tracing = False
 
-        # ==================== 6. Scheduler Config ====================
+        # ==================== 5. Scheduler Config ====================
         if vllm_config.scheduler_config:
             # Partial prefills are specific to ROCm optimization
             if getattr(vllm_config.scheduler_config, "max_num_partial_prefills", 1) != 1:
@@ -709,7 +715,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.scheduler_config.max_num_partial_prefills = 1
 
-        # ==================== 7. Speculative Config ====================
+        # ==================== 6. Speculative Config ====================
         if vllm_config.speculative_config:
             # Ascend automatically inherits main model quantization
             if getattr(vllm_config.speculative_config, "quantization", None) is not None:
@@ -719,7 +725,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.speculative_config.quantization = None
 
-        # ==================== 8. KV Transfer Config ====================
+        # ==================== 7. KV Transfer Config ====================
         if vllm_config.kv_transfer_config:
             # Buffer size is primarily tied to NCCL (GPU) backends
             current_buffer_size = getattr(vllm_config.kv_transfer_config, "kv_buffer_size", 1e9)
@@ -739,7 +745,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.kv_transfer_config.enable_permute_local_kv = False
 
-        # ==================== 9. Attention Config ====================
+        # ==================== 8. Attention Config ====================
         if vllm_config.attention_config:
             att_config = vllm_config.attention_config
 

@@ -1,0 +1,186 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# This workflow related to the resources atlas 800 A2
+# We will not limit the concurrency of jobs on A2
+name: Nightly-A2
+
+on:
+  schedule:
+      # Run test at 24:00 Beijing time (UTC+8)
+      - cron: "0 16 * * *"
+  workflow_dispatch:
+  pull_request: 
+    branches:
+      - 'main'
+    types: [ labeled ]
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+concurrency:
+  group: ascend-nightly-${{ github.ref }}-a2
+  cancel-in-progress: true
+
+jobs:
+  single-node-tests:
+    name: single-node
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          - name: qwen3-next
+            os: linux-aarch64-a2b3-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
+          - name: qwen3-32b
+            os: linux-aarch64-a2b3-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_32b.py
+          - name: qwen3-32b-in8-a2
+            os: linux-aarch64-a2b3-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_32b_int8.py
+          - name: test_custom_op
+            os: linux-aarch64-a2b3-1
+            tests: tests/e2e/nightly/single_node/ops/singlecard_ops
+          - name: test_custom_op_multi_card
+            os: linux-aarch64-a2b3-4
+            tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+
+  multi-node-tests:
+    name: multi-node
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: single-node-tests
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config:
+          - name: multi-node-deepseek-dp
+            config_file_path: DeepSeek-R1-W8A8-A2.yaml
+            size: 2
+          - name: multi-node-qwen3-235b-dp
+            config_file_path: Qwen3-235B-A22B-A2.yaml
+            size: 2
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: a2
+      runner: linux-amd64-cpu-8-hk
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+      replicas: 1
+      size: ${{ matrix.test_config.size }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
+
+  single-node-accuracy-tests:
+    if: >-
+      ${{
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        contains(github.event.pull_request.labels.*.name, 'accuracy-test')
+      }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          - os: linux-aarch64-a2b3-1
+            model_list:
+              - Qwen3-8B
+              - Qwen2-Audio-7B-Instruct
+              - Qwen3-8B-W8A8
+              - Qwen3-VL-8B-Instruct
+              - Qwen2.5-Omni-7B
+          - os: linux-aarch64-a2b3-1
+            model_list:
+              - ERNIE-4.5-21B-A3B-PT
+              - InternVL3_5-8B-hf
+              - Molmo-7B-D-0924
+              - Llama-3.2-3B-Instruct
+              - llava-onevision-qwen2-0.5b-ov-hf
+          - os: linux-aarch64-a2b3-2
+            model_list:
+              - Qwen3-30B-A3B
+              - Qwen3-VL-30B-A3B-Instruct
+              - Qwen3-30B-A3B-W8A8
+          - os: linux-aarch64-a2b3-4
+            model_list:
+              - Qwen3-Next-80B-A3B-Instruct
+              - Qwen3-Omni-30B-A3B-Instruct
+    uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
+    with:
+      vllm: v0.15.0
+      runner: ${{ matrix.test_config.os }}
+      model_list: ${{ toJson(matrix.test_config.model_list) }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11'
+      upload: false
+
+  doc-test:
+    name: doc-test
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    strategy:
+      # Each version should be tested
+      fail-fast: false
+      matrix:
+        vllm_verison: [releases-v0.13.0, releases-v0.13.0-openeuler, main, main-openeuler]
+    runs-on: linux-aarch64-a2b3-1
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_verison }}
+    steps:
+      - name: Check NPU/CANN and git info
+        run: |
+          echo "====> Print NPU/CANN info"
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+          echo "====> Print vllm-ascend git info"
+          cd /vllm-workspace/vllm-ascend
+          git --no-pager log -1 || true
+          echo "====> Print vllm git info"
+          cd /vllm-workspace/vllm
+          git --no-pager log -1 || true
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Run vllm-ascend/tests/e2e/run_doctests.sh
+        run: |
+          # PWD: /__w/vllm-ascend/vllm-ascend
+          # Make sure e2e tests are latest
+          echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
+          rm -rf /vllm-workspace/vllm-ascend/tests/e2e
+          mkdir -p /vllm-workspace/vllm-ascend/tests
+          # Overwrite e2e and examples
+          cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
+          cp -r examples /vllm-workspace/vllm-ascend/
+
+          # Simulate container to enter directory
+          cd /workspace
+
+          # Run real test
+          echo "Test:"
+          /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh

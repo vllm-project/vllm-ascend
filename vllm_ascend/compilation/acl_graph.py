@@ -196,7 +196,7 @@ class ACLGraphWrapper:
             else False
         )
         if self.runtime_mode != CUDAGraphMode.FULL or not forward_context.is_draft_model or not use_eagle:
-            torch.npu.synchronize()
+            torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output
 
@@ -218,6 +218,7 @@ def update_full_graph_params(
     vllm_config,
     speculative_config=None,
     num_dcp_pcp_tokens=None,
+    draft_attn_metadatas=None,
 ):
     impl_cls = attn_backend.get_impl_cls()
     impl_cls.update_graph_params(
@@ -227,6 +228,7 @@ def update_full_graph_params(
         vllm_config,
         speculative_config,
         num_dcp_pcp_tokens,
+        draft_attn_metadatas,
     )
 
 

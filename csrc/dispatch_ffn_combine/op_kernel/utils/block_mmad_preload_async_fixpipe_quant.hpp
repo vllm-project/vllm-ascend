@@ -151,9 +151,11 @@ public:
         L1TileShape::K, L1TileShape::N);
 
     CATLASS_DEVICE
-    BlockMmad(Arch::Resource<ArchTag> &resource, uint32_t l1BufAddrStart = 0)
+    BlockMmad(Arch::Resource<ArchTag> &resource, __gm__ int32_t* flagPtr = nullptr, int32_t expertPerRank = 0, uint32_t l1BufAddrStart = 0)
     {
         syncGroupIdx = 0;
+        ptrSoftFlagBase_ = flagPtr;
+        expertPerRank_ = expertPerRank;
         InitL1(resource, l1BufAddrStart);
         InitL0A(resource);
         InitL0B(resource);
@@ -270,9 +272,21 @@ public:
     CATLASS_DEVICE
     void Finalize(int32_t target, int32_t flag = 0)
     {
-        for(;syncGroupIdx <= target; syncGroupIdx++) {
-            int32_t flagId = syncGroupIdx / 8 + flag;
-            AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(flagId);
+        if (ptrSoftFlagBase_ != nullptr) {
+            if (target < 0) {
+                return;
+            }
+            AscendC::SetFlag<AscendC::HardEvent::FIX_MTE3>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::FIX_MTE3>(EVENT_ID0);
+            AscendC::GlobalTensor<int32_t> flagGlobal;
+            flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(ptrSoftFlagBase_) + (expertPerRank_ + AscendC::GetBlockIdx()) * FLAGSTRIDE);
+            AscendC::DataCopy(flagGlobal, l1FTensor[target * 16], FLAGSTRIDE);
+        }
+        else {
+            for(;syncGroupIdx <= target; syncGroupIdx++) {
+                int32_t flagId = syncGroupIdx / 15 + flag;
+                AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(flagId);
+            }
         }
     }
 private:
@@ -289,7 +303,6 @@ private:
         layout::VectorLayout layoutScale;
         int32_t syncLoopIdx;
         int32_t flag;
-        
         CATLASS_DEVICE
         L1TileMmadParams() = default;
     };
@@ -308,10 +321,23 @@ private:
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[i]);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[i]);
         }
+        uint32_t l1SOffset = l1BOffset + L1B_TILE_SIZE * L1_STAGES;
         if constexpr (std::is_same_v<ElementA, int8_t>) {
-            uint32_t l1SOffset = l1BOffset + L1B_TILE_SIZE * L1_STAGES;
             l1STensor = resource.l1Buf.template GetBufferByByte<uint64_t>(l1SOffset);
             AscendC::SetFlag<AscendC::HardEvent::FIX_MTE2>(0);
+        }
+        if (ptrSoftFlagBase_ != nullptr) {
+            // Initialize the flag matrix (structure as below):
+            // 1 0 0 0 0 0 0 0
+            // 2 0 0 0 0 0 0 0
+            // ...
+            // 16 0 0 0 0 0 0 0
+            // Then move it to L1
+            uint32_t l1FOffset = l1SOffset + L1S_TILE_SIZE;
+            l1FTensor = resource.l1Buf.template GetBufferByByte<int32_t>(l1FOffset);
+            AscendC::GlobalTensor<int32_t> flagBase;
+            flagBase.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(ptrSoftFlagBase_));
+            AscendC::DataCopy(l1FTensor, flagBase, expertPerRank_ * FLAGSTRIDE);
         }
     }
 
@@ -461,12 +487,20 @@ private:
             if constexpr (std::is_same_v<ElementA, int8_t>) {
                 AscendC::SetFlag<AscendC::HardEvent::FIX_MTE2>(0);
             }
+            #ifdef __TILE_SYNC__
+            if (params.flag > 0) {
+                int32_t flagId = params.flag + params.syncLoopIdx / 8;
+                AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(flagId);
+            }
+            #else
             Finalize(params.syncLoopIdx, params.flag);
+            #endif
         }
     }
     AscendC::LocalTensor<ElementA> l1ATensorList[L1_STAGES];
     AscendC::LocalTensor<ElementB> l1BTensorList[L1_STAGES];
     AscendC::LocalTensor<uint64_t> l1STensor;
+    AscendC::LocalTensor<int32_t> l1FTensor;
     int32_t syncGroupIdx;
     int32_t l1AEventList[L1_STAGES];
     int32_t l1BEventList[L1_STAGES];
@@ -495,6 +529,9 @@ private:
     CopyL1ToL0A copyL1ToL0A;
     CopyL1ToL0B copyL1ToL0B;
     CopyL0CToGm copyL0CToGm;
+
+    __gm__ int32_t* ptrSoftFlagBase_ = nullptr;
+    int32_t expertPerRank_;
 };
 
 }  // namespace Catlass::Gemm::Block

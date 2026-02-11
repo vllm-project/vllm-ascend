@@ -55,7 +55,7 @@ class DispatchFFNCombine {
 public:
     __aicore__ inline DispatchFFNCombine() {};
     __aicore__ inline void Init(GM_ADDR xGM, GM_ADDR weight1GM, GM_ADDR weight2GM, GM_ADDR expertIdGM, GM_ADDR scale1GM, GM_ADDR scale2GM,
-                                GM_ADDR probs, GM_ADDR outGM, GM_ADDR workspaceGM, GM_ADDR tilingGM);
+                                GM_ADDR probs, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM);
     __aicore__ inline void Process();
 
 
@@ -68,6 +68,7 @@ private:
     GM_ADDR scale2GM_;
     GM_ADDR probs_;
     GM_ADDR outGM_;
+    GM_ADDR gmExpertTokenNums_;
     GM_ADDR workspaceGM_;
 
     GM_ADDR moeInitRoutingQuantV2Scale = nullptr;
@@ -112,7 +113,7 @@ private:
 
 template <TemplateMMA2AClass>
 __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM, GM_ADDR weight1GM, GM_ADDR weight2GM, GM_ADDR expertIdGM, GM_ADDR scale1GM, GM_ADDR scale2GM,
-                                                                    GM_ADDR probs, GM_ADDR outGM, GM_ADDR workspaceGM, GM_ADDR tilingGM)
+                                                                    GM_ADDR probs, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM)
 {
     REGISTER_TILING_DEFAULT(DispatchFFNCombineTilingData);
     auto tiling = (__gm__ DispatchFFNCombineTilingData*)tilingGM;
@@ -127,6 +128,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     probs_ = probs;
 
     outGM_ = outGM;
+    gmExpertTokenNums_ = expertTokenNums;
 
     workspaceGM_ = workspaceGM;
 
@@ -232,7 +234,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
     using BlockEpilogue1 = Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy1, CType, PerTokenScaleType,
         D1Type, TileElemWiseMuls, TileCopy1>;
 
-    using EpilogueDispatchPolicy2 = Epilogue::EpilogueAtlasA2PerTokenDequant<ubStages>;
+    using EpilogueDispatchPolicy2 = Epilogue::EpilogueAtlasA2PerTokenDequantV2<ubStages>;
     using TileCopy2 = Epilogue::Tile::TileCopy<ArchTag, CType, ScaleType, PerTokenScaleType, D2Type>;
     using BlockEpilogue2 = Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy2, CType,PerTokenScaleType,
         D2Type, TileCopy2>;
@@ -268,7 +270,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
         outGM_, layoutD1, layoutD2,
         expertIdGM_, moeInitRoutingQuantV2Scale, moeInitRoutingQuantV2Offset,
         expertTokensBeforeCapacity, probs_,
-        workspaceGM_, ubMoveNum, moeInitRoutingQuantV2TilingData};
+        workspaceGM_, gmExpertTokenNums_, ubMoveNum, moeInitRoutingQuantV2TilingData};
     //Call kernel
     MatmulKernel kernel(params);
     kernel(params);
