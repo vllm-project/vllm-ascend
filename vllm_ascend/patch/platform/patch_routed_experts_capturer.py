@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -10,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     _create_or_attach_shared_memory,
     logger,
 )
+
 
 def init_buffer(
     self,
