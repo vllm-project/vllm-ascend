@@ -195,12 +195,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask"),
             use_mxfp_quant=True,
-            use_fp8_comm=True,
             act_quant_type=torch.float8_e4m3fn,
             weight_quant_type=torch.float8_e4m3fn,
             scale_type=torch_npu.float8_e8m0fnu,
             per_token_scale_type=torch_npu.float8_e8m0fnu,
-            comm_quant_mode=4,
         )
 
     def process_weights_after_loading(self, layer):

@@ -136,8 +136,16 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         expert_map: torch.Tensor,
         mc2_mask: torch.Tensor,
         global_redundant_expert_num: int = 0,
+        **kwargs,
     ):
-        quant_mode = 2 if self.with_quant else 0
+        # NOTE: quant_mode differs by device runtime:
+        # - A3 uses dynamic communication quantization with quant_mode=2.
+        # - A5 MXFP8 communication requires quant_mode=4.
+        default_quant_mode = 4 if self.a5_need_extra_args else 2
+        if self.with_quant:
+            quant_mode = default_quant_mode if quant_mode is None else quant_mode
+        else:
+            quant_mode = 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
         kwargs_mc2 = {
             "x": hidden_states,
@@ -145,9 +153,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.moe_expert_num,
-            "global_bs": self.global_bs,
+            "global_bs": 0 if self.a5_need_extra_args else self.global_bs,
             "expert_token_nums_type": 0,
         }
+        if self.a5_need_extra_args:
+            kwargs_mc2["comm_alg"] = "ccu"
 
         stage1_kwargs = {
             "scales": None,
@@ -164,59 +174,17 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                     "tp_rank_id": 0,
                 }
             )
-        if self.need_expert_scale:
+        if self.a5_need_extra_args:
+            y_dtype = kwargs.get("y_dtype")
+            if self.with_quant:
+                y_dtype = torch.float8_e4m3fn if y_dtype is None else y_dtype
+            stage1_kwargs.update({"tp_world_size": 1, "tp_rank_id": 0, "y_dtype": y_dtype})
+        if self.need_expert_scale or self.a5_need_extra_args:
             stage1_kwargs.update(
                 {
                     "expert_scales": topk_weights.to(torch.float32),
                 }
             )
-
-        kwargs_mc2.update(stage1_kwargs)
-        return kwargs_mc2
-
-    def get_dispatch_mc2_kwargs_A5(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        expert_map: torch.Tensor,
-        mc2_mask: torch.Tensor | None = None,
-        global_redundant_expert_num: int = 0,
-        **kwargs,
-    ):
-        self.moe_expert_num = len(expert_map) + global_redundant_expert_num
-        if self.with_quant:
-            quant_mode = kwargs.get("comm_quant_mode", 2)
-            moe_expert_num = self.moe_expert_num
-            y_dtype = kwargs.get("y_dtype", torch.float8_e4m3fn)
-        else:
-            quant_mode = 0
-            moe_expert_num = self.moe_expert_num
-            y_dtype = None
-        kwargs_mc2 = {
-            "x": hidden_states,
-            "expert_ids": topk_ids,
-            "expert_shard_type": 0,
-            "shared_expert_rank_num": 0,
-            "moe_expert_num": moe_expert_num,
-            "global_bs": 0,
-            "expert_token_nums_type": 0,
-            "comm_alg": "ccu",
-        }
-        stage1_kwargs = {
-            "scales": None,
-            "quant_mode": quant_mode,
-            "group_ep": self.moe_all_to_all_group_name,
-            "ep_world_size": self.ep_world_size,
-            "ep_rank_id": self.ep_rank_id,
-        }
-        stage1_kwargs.update({"tp_world_size": 1, "tp_rank_id": 0, "y_dtype": y_dtype})
-
-        stage1_kwargs.update(
-            {
-                "expert_scales": topk_weights.to(torch.float32),
-            }
-        )
 
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
@@ -236,24 +204,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         **kwargs,
     ):
         self.with_quant = with_quant
-        # FIXME(linfeng): there is hard coding in token_dispatch (e.g., comm_quant_mode and returned
-        # dynamic_scale). The reason is to support unquantized MC2Dispatch with A5. These hard coding
-        # and branching would be elimindated and merged after fp8 communication is fully supported.
-        if self.a5_need_extra_args:
-            kwargs_mc2 = self.get_dispatch_mc2_kwargs_A5(
-                hidden_states,
-                topk_weights,
-                topk_ids,
-                expert_map,
-                mc2_mask,
-                global_redundant_expert_num,
-                comm_quant_mode=4,
-                y_dtype=kwargs.get("y_dtype", torch.float8_e4m3fn),
-            )
-        else:
-            kwargs_mc2 = self.get_dispatch_mc2_kwargs(
-                hidden_states, topk_weights, topk_ids, expert_map, mc2_mask, global_redundant_expert_num
-            )
+        kwargs_mc2 = self.get_dispatch_mc2_kwargs(
+            hidden_states, topk_weights, topk_ids, expert_map, mc2_mask, global_redundant_expert_num, **kwargs
+        )
         output = (
             torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
             if self.enable_dispatch_v2
@@ -281,73 +234,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         }
 
         group_list_type = 0
-        return TokenDispatchResult(
-            hidden_states=expand_x,
-            dynamic_scale=dynamic_scale,
-            group_list=expert_token_nums,
-            group_list_type=group_list_type,
-            context_metadata=context_metadata,
-        )
-
-    def token_dispatch_with_A5_quant(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        expert_map: torch.Tensor | None = None,
-        global_redundant_expert_num: int = 0,
-        mc2_mask: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        with_quant: bool = False,
-        dynamic_eplb: bool = False,
-        pertoken_scale: torch.Tensor | None = None,
-        **kwargs,
-    ):
-        self.with_quant = with_quant
-        self.expert_map = expert_map
-        self.topk_ids = topk_ids
-        self.topk_weights = topk_weights
-        # self.shared_experts = shared_experts
-        self.mc2_mask = mc2_mask
-
-        kwargs_mc2 = self.get_dispatch_mc2_kwargs_A5(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            expert_map,
-            mc2_mask,
-            global_redundant_expert_num,
-            comm_quant_mode=kwargs.get("comm_quant_mode", 2),
-            y_dtype=kwargs.get("y_dtype", torch.float8_e4m3fn),
-        )
-
-        output = (
-            torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
-            if self.enable_dispatch_v2
-            else torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
-        )
-        (
-            expand_x,
-            dynamic_scale,
-            assist_info_for_combine,
-            expert_token_nums,
-            ep_recv_counts,
-            tp_recv_counts,
-            expand_scales,
-        ) = output[0:7]
-
-        context_metadata = {
-            "topk_ids": topk_ids,
-            "topk_weights": topk_weights,
-            "expert_map": expert_map,
-            "ep_recv_counts": ep_recv_counts,
-            "tp_recv_counts": tp_recv_counts,
-            "assist_info_for_combine": assist_info_for_combine,
-            "expand_scales": expand_scales,
-        }
-
-        group_list_type = 0
-
         return TokenDispatchResult(
             hidden_states=expand_x,
             dynamic_scale=dynamic_scale,

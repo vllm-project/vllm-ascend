@@ -141,25 +141,25 @@ class MoECommMethod(ABC):
         if log2phy is not None:
             topk_ids = log2phy[topk_ids]
         use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
-        use_fp8_comm = kwargs.get("use_fp8_comm", False)
-        # FIXME(linfeng): currently MC2 op with fp8 communication enconters accuracy issue,
-        # so we force disable it here.
-        use_fp8_comm = False
+        dispatch_with_quant = use_int8_w8a8 or use_int4_w4a8 or use_mxfp_quant
         act_quant_type, weight_quant_type, scale_type, per_token_scale_type, round_mode = parse_mxfp_quant_params(
             **kwargs
         )
-        assert moe_comm_method is not None, "Missing communication context"
-        if isinstance(self.token_dispatcher, TokenDispatcherWithMC2) and use_fp8_comm:
-            dispatch_results = self.token_dispatcher.token_dispatch_with_A5_quant(
+
+        if isinstance(self.token_dispatcher, TokenDispatcherWithMC2):
+            dispatch_results = self.token_dispatcher.token_dispatch(
                 hidden_states=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 expert_map=expert_map,
                 global_redundant_expert_num=self.moe_config.global_redundant_expert_num,
-                with_quant=use_fp8_comm,
+                mc2_mask=mc2_mask,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                with_quant=dispatch_with_quant,
                 dynamic_eplb=dynamic_eplb,
-                comm_quant_mode=kwargs.get("comm_quant_mode", 2),
-                y_dtype=act_quant_type if use_fp8_comm else None,
+                pertoken_scale=pertoken_scale,
+                comm_quant_mode=kwargs.get("comm_quant_mode"),
+                y_dtype=act_quant_type if use_mxfp_quant else None,
             )
         else:
             dispatch_results = self.token_dispatcher.token_dispatch(
@@ -194,7 +194,6 @@ class MoECommMethod(ABC):
             need_trans=need_trans,
             dynamic_eplb=dynamic_eplb,
             use_mxfp_quant=use_mxfp_quant,
-            use_fp8_comm=use_fp8_comm,
             act_quant_type=act_quant_type,
             weight_quant_type=weight_quant_type,
             scale_type=scale_type,
