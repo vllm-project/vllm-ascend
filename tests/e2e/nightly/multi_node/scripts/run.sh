@@ -21,7 +21,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
 # cann and atb environment setup
-set +u
+set +ue
 echo "[INFO] Sourcing ascend-toolkit set_env.sh..."
 if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -45,7 +45,7 @@ if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
 else
     echo "[ERROR] ATB set_env.sh NOT FOUND!"
 fi
-set -u
+set -ue
 
 # Home path for aisbench
 export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
