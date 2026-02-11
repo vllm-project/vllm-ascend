@@ -206,7 +206,7 @@ class PCPManager:
                              used to build the positions buffer for the model.
             - tokens_padded: specifically used in hybrid-attention model, number of
                              padded tokens per request
-            - max_num_tokens_across_pcp: max number of scheduled padded tokens 
+            - max_num_tokens_across_pcp: max number of scheduled padded tokens
                                          across all pcp ranks
         Example:
         >>> Assume tokens = [1, 5, 8], pcp_world_size = 2. After _update_tokens_for_pcp.
