@@ -341,7 +341,7 @@ This is the first release candidate of v0.12.0 for vLLM Ascend. We landed lots o
 - [Experimental] [KV cache pool](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/feature_guide/KV_Cache_Pool_Guide.html) feature is added
 - [Experimental] A new graph mode `xlite` is introduced. It performs good with some models. Following the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html#using-xlitegraph) to start using it.
 - LLMdatadist kv connector is removed. Please use mooncake connector instead.
-- Ascend scheduler is removed. `--additional-config {"ascend_scheudler": {"enabled": true}` doesn't work anymore.
+- Ascend scheduler is removed. `--additional-config {"ascend_scheduler": {"enabled": true}` doesn't work anymore.
 - Torchair graph mode is removed. `--additional-config {"torchair_graph_config": {"enabled": true}}` doesn't work anymore. Please use aclgraph instead.
 - `VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION` env is removed. This feature is stable enough. We enable it by default now.
 - speculative decode method `Ngram` is back now.
@@ -637,7 +637,7 @@ This is the 3rd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 - Fix header include issue in rope [#2398](https://github.com/vllm-project/vllm-ascend/pull/2398)
 - Fix mtp config bug [#2412](https://github.com/vllm-project/vllm-ascend/pull/2412)
 - Fix error info and adapt `attn_metedata` refactor [#2402](https://github.com/vllm-project/vllm-ascend/pull/2402)
-- Fix torchair runtime error caused by configuration mismtaches and `.kv_cache_bytes` file missing [#2312](https://github.com/vllm-project/vllm-ascend/pull/2312)
+- Fix torchair runtime error caused by configuration mismatches and `.kv_cache_bytes` file missing [#2312](https://github.com/vllm-project/vllm-ascend/pull/2312)
 - Move `with_prefill` allreduce from cpu to npu [#2230](https://github.com/vllm-project/vllm-ascend/pull/2230)
 
 ### Docs

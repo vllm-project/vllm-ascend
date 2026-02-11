@@ -29,7 +29,7 @@ However, this may not be the optimal configuration for your scenario. For higher
 Notices:
 
 1) Weight prefetch of MLP `down` project prefetch dependence sequence parallel, if you want open for mlp `down` please also enable sequence parallel.
-2) Due to the current size of the L2 cache, the maximum prefetch cannot exceed 18MB. If `prefetch_ration * lineaer_layer_weight_size >= 18 * 1024 * 1024` bytes, the backend will only prefetch 18MB.
+2) Due to the current size of the L2 cache, the maximum prefetch cannot exceed 18MB. If `prefetch_ratio * linear_layer_weight_size >= 18 * 1024 * 1024` bytes, the backend will only prefetch 18MB.
 
 ## Example
 
