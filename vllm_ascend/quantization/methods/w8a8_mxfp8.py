@@ -27,7 +27,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 
-from .base import AscendLinearScheme, AscendMoEScheme
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
 
 
@@ -94,6 +94,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoe method for Ascend W8A8_DYNAMIC."""
 
     model_dtype = None
+    quant_type: QuantType = QuantType.MXFP8
 
     def __init__(self):
         self.ep_group = get_ep_group()
