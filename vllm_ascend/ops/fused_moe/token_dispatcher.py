@@ -180,17 +180,18 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         expert_map: torch.Tensor,
-        mc2_mask: torch.Tensor,
+        mc2_mask: torch.Tensor | None = None,
         global_redundant_expert_num: int = 0,
         **kwargs,
     ):
+        self.moe_expert_num = len(expert_map) + global_redundant_expert_num
         if self.with_quant:
             quant_mode = kwargs.get("comm_quant_mode", 2)
-            moe_expert_num = len(expert_map)
+            moe_expert_num = self.moe_expert_num
             y_dtype = kwargs.get("y_dtype", torch.float8_e4m3fn)
         else:
             quant_mode = 0
-            moe_expert_num = len(expert_map)
+            moe_expert_num = self.moe_expert_num
             y_dtype = None
         kwargs_mc2 = {
             "x": hidden_states,
@@ -244,6 +245,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                 topk_weights,
                 topk_ids,
                 expert_map,
+                mc2_mask,
                 global_redundant_expert_num,
                 comm_quant_mode=4,
                 y_dtype=kwargs.get("y_dtype", torch.float8_e4m3fn),
@@ -313,6 +315,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             topk_weights,
             topk_ids,
             expert_map,
+            mc2_mask,
             global_redundant_expert_num,
             comm_quant_mode=kwargs.get("comm_quant_mode", 2),
             y_dtype=kwargs.get("y_dtype", torch.float8_e4m3fn),
@@ -407,6 +410,20 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             )
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
+
+    def token_combine(self, hidden_states, context_metadata, bias=None):
+        assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
+
+        kwargs_mc2 = self.get_combine_mc_kwargs(hidden_states, context_metadata)
+        combined_output = (
+            torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2)
+            if self.enable_dispatch_v2
+            else torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
+        )
+
+        return TokenCombineResult(
+            routed_out=combined_output,
+        )
 
 
 class TokenDispatcherWithAllGather(MoETokenDispatcher):

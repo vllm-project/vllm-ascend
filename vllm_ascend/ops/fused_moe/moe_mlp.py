@@ -161,6 +161,7 @@ def quant_apply_mlp(
     w2_offset: torch.Tensor | None = None,
     fusion: bool = False,
     dynamic_eplb: bool = False,
+    **kwargs,
 ) -> torch.Tensor:
     if w1_offset is not None:
         unquantized_hidden_states = hidden_states
