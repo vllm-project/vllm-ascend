@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 import torch
-from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
+from torch._inductor.pattern_matcher import Match, PatternMatcherPass, PatternPrettyPrinter
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
@@ -24,14 +24,13 @@ from vllm.logger import logger
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 from vllm_ascend.utils import vllm_version_is
-from torch._inductor.pattern_matcher import Match
 
 if vllm_version_is("0.15.0"):
-    from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
     from vllm.compilation.inductor_pass import get_pass_context  # type: ignore
+    from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
 else:
-    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
     from vllm.compilation.passes.inductor_pass import get_pass_context
+    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THREHOLD = 512
@@ -60,7 +59,7 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
         self.tp_group_name = backend.get_hccl_comm_name(self.local_rank)
         self.tp_size = get_tensor_model_parallel_world_size()
 
-    def get_example_inputs(self):
+    def get_inputs(self):
         batch_size, seq_len = 2, 4
         hidden_size = 4096
         x = torch.randn(batch_size, seq_len, hidden_size, device="npu")
@@ -112,7 +111,7 @@ class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
         self.tp_group_name = backend.get_hccl_comm_name(self.local_rank)
         self.tp_size = get_tensor_model_parallel_world_size()
 
-    def get_example_inputs(self):
+    def get_inputs(self):
         batch_size, seq_len = 2, 4
         hidden_size = 4096
         x = torch.randn(batch_size, seq_len, hidden_size, device="npu")

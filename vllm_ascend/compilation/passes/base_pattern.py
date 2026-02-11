@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import List, Callable, Optional
-import torchair
+from collections.abc import Callable
 import torch
+import torchair
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.config import VllmConfig
@@ -16,7 +16,7 @@ class BasePattern(ABC):
         self.eps = eps
 
     @abstractmethod
-    def get_example_inputs(self) -> List[torch.Tensor]:
+    def get_inputs(self) -> list[torch.Tensor]:
         pass
 
     @abstractmethod
@@ -33,7 +33,7 @@ class BasePattern(ABC):
     def register(self, pm_pass: PatternMatcherPass) -> None:
         pattern_fn = self.get_pattern()
         replacement_fn = self.get_replacement()
-        example_inputs = self.get_example_inputs()
+        example_inputs = self.get_inputs()
 
         pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
 

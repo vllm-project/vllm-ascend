@@ -21,8 +21,8 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.logger import logger
 
-from vllm_ascend.utils import enable_custom_op, vllm_version_is
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
+from vllm_ascend.utils import enable_custom_op, vllm_version_is
 
 if vllm_version_is("0.15.0"):
     from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
@@ -34,7 +34,7 @@ class AddRMSNormQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
 
-    def get_example_inputs(self):
+    def get_inputs(self):
         """
         Generate example inputs for the AddRMSNormQuant fusion pattern.
         """
@@ -94,7 +94,7 @@ class AddRMSNormQuantPatternWithBias(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
 
-    def get_example_inputs(self):
+    def get_inputs(self):
         """
         Generate example inputs for the AddRMSNormQuant fusion pattern.
         """
@@ -157,7 +157,7 @@ class AddRMSNormQuantSPPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
 
-    def get_example_inputs(self):
+    def get_inputs(self):
         """
         Generate example inputs for the AddRMSNormQuant fusion pattern.
         """
@@ -219,7 +219,7 @@ class AddRMSNormQuantSPPatternWithBias(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
 
-    def get_example_inputs(self):
+    def get_inputs(self):
         """
         Generate example inputs for the AddRMSNormQuant fusion pattern.
         """

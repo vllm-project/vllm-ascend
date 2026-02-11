@@ -42,7 +42,7 @@ class QKNormRopeFusionPattern(BasePattern):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.device = vllm_config.device_config.device if vllm_config.device_config else None
 
-    def get_example_inputs(self):
+    def get_inputs(self):
         T = 5
         max_position_embeddings = 16384
         qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
@@ -115,7 +115,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.device = vllm_config.device_config.device if vllm_config.device_config else None
 
-    def get_example_inputs(self):
+    def get_inputs(self):
         T = 5
         max_position_embeddings = 16384
         qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
@@ -228,7 +228,11 @@ class QKNormRopeFusionPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
+        print("before qknorm and rope fusion:")
+        print(graph.graph)
         self.matched_count = self.pattern_match_passes.apply(graph)
+        print("after qknorm and rope fusion:")
+        print(graph.graph)
         logger.debug("Fused %s QKNorm and Rope patterns", self.matched_count)
         logger.debug("Patterns registered for replacement:")
         pattern_idx = 0
