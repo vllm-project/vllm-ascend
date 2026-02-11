@@ -210,7 +210,7 @@ class NPUPlatform(Platform):
                     "{new_compile_ranges_split_points} for matmul and allreduce fusion"
                 )
 
-        elif model_config and hasattr(model_config.hf_text_config, "index_topk"):
+        if model_config and hasattr(model_config.hf_text_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
