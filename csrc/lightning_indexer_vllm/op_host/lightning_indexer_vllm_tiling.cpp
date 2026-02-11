@@ -13,7 +13,7 @@
  * \brief
  */
 
-#include "lightning_indexer_tiling.h"
+#include "lightning_indexer_vllm_tiling.h"
 #include "../op_kernel/lightning_indexer_template_tiling_key.h"
 
 using namespace ge;
@@ -687,7 +687,7 @@ ge::graphStatus TilingForLightningIndexer(gert::TilingContext *context)
     return liTiling.DoTiling(&liInfo);
 }
 
-IMPL_OP_OPTILING(LightningIndexer)
+IMPL_OP_OPTILING(LightningIndexerVllm)
     .Tiling(TilingForLightningIndexer)
     .TilingParse<LICompileInfo>(TilingPrepareForLightningIndexer);
 
