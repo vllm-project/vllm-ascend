@@ -17,7 +17,14 @@
 
 name: Bisect vLLM
 
-on:
+on:  
+  pull_request:
+    branches:
+      - 'main'
+    paths:
+      - '.github/workflows/bisect_vllm.yaml'
+      - 'tools/bisect_vllm.sh'
+      - 'tools/bisect_helper.py'
   workflow_dispatch:
     inputs:
       good_commit:
@@ -53,8 +60,66 @@ defaults:
     shell: bash -el {0}
 
 jobs:
+  # ================================================================
+  # Centralized parameter resolution:
+  # - workflow_dispatch: uses user-provided inputs
+  # - pull_request: falls back to defaults defined here
+  #
+  # To change PR-triggered defaults, edit ONLY this job.
+  # ================================================================
+  set-params:
+    name: Set parameters
+    runs-on: ubuntu-latest
+    outputs:
+      test_cmd: ${{ steps.resolve.outputs.test_cmd }}
+      fetch_depth: ${{ steps.resolve.outputs.fetch_depth }}
+      step_timeout: ${{ steps.resolve.outputs.step_timeout }}
+      total_timeout: ${{ steps.resolve.outputs.total_timeout }}
+      good_commit: ${{ steps.resolve.outputs.good_commit }}
+      bad_commit: ${{ steps.resolve.outputs.bad_commit }}
+    steps:
+      - name: Resolve parameters
+        id: resolve
+        run: |
+          # ---- PR-trigger defaults (edit here) ----
+          DEFAULT_TEST_CMD="pytest -sv tests/e2e/singlecard/test_llama32_lora.py"
+          DEFAULT_FETCH_DEPTH="500"
+          DEFAULT_STEP_TIMEOUT="600"
+          DEFAULT_TOTAL_TIMEOUT="7200"
+          DEFAULT_GOOD_COMMIT="d7e17aaacd5ed1b4b4be6bcfef3a1b7cbc84fc9a"
+          DEFAULT_BAD_COMMIT="18e7cbbb158a86bdc76585e64ada795bf1c0d435"
+          # ---- end defaults ----
+
+          echo "test_cmd=${{ inputs.test_cmd || '' }}" >> "$GITHUB_OUTPUT"
+          echo "fetch_depth=${{ inputs.fetch_depth || '' }}" >> "$GITHUB_OUTPUT"
+          echo "step_timeout=${{ inputs.step_timeout || '' }}" >> "$GITHUB_OUTPUT"
+          echo "total_timeout=${{ inputs.total_timeout || '' }}" >> "$GITHUB_OUTPUT"
+          echo "good_commit=${{ inputs.good_commit || '' }}" >> "$GITHUB_OUTPUT"
+          echo "bad_commit=${{ inputs.bad_commit || '' }}" >> "$GITHUB_OUTPUT"
+
+          # Apply defaults for empty values (pull_request trigger)
+          if [ -z "${{ inputs.test_cmd }}" ]; then
+            echo "test_cmd=${DEFAULT_TEST_CMD}" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -z "${{ inputs.fetch_depth }}" ]; then
+            echo "fetch_depth=${DEFAULT_FETCH_DEPTH}" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -z "${{ inputs.step_timeout }}" ]; then
+            echo "step_timeout=${DEFAULT_STEP_TIMEOUT}" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -z "${{ inputs.total_timeout }}" ]; then
+            echo "total_timeout=${DEFAULT_TOTAL_TIMEOUT}" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -z "${{ inputs.good_commit }}" ]; then
+            echo "good_commit=${DEFAULT_GOOD_COMMIT}" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -z "${{ inputs.bad_commit }}" ]; then
+            echo "bad_commit=${DEFAULT_BAD_COMMIT}" >> "$GITHUB_OUTPUT"
+          fi
+
   detect-env:
     name: Detect runner and image
+    needs: set-params
     runs-on: ubuntu-latest
     outputs:
       runner: ${{ steps.detect.outputs.runner }}
@@ -68,12 +133,12 @@ jobs:
         id: detect
         run: |
           python3 tools/bisect_helper.py detect-env \
-            --test-cmd "${{ inputs.test_cmd }}" \
+            --test-cmd "${{ needs.set-params.outputs.test_cmd }}" \
             --output-format github
 
   bisect:
     name: Bisect vLLM
-    needs: detect-env
+    needs: [set-params, detect-env]
     runs-on: ${{ needs.detect-env.outputs.runner }}
     timeout-minutes: 180
     container:
@@ -84,36 +149,30 @@ jobs:
         HF_HUB_OFFLINE: 1
     steps:
       # ================================================================
-      # E2E steps: mirrors + system deps (with clang)
+      # Common: config mirrors (shared by both e2e and ut)
       # ================================================================
-      - name: Config mirrors (e2e)
-        if: ${{ needs.detect-env.outputs.test_type == 'e2e' }}
+      - name: Config mirrors
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list || true
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple || true
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local || true
           apt-get update -y
-          apt install git -y
 
+      # ================================================================
+      # Install system dependencies (diverges by test_type)
+      # ================================================================
       - name: Install system dependencies (e2e)
         if: ${{ needs.detect-env.outputs.test_type == 'e2e' }}
         run: |
+          apt install git -y
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev clang-15 || true
-
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 || true
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 || true
 
-      # ================================================================
-      # UT steps: mirrors + system deps (matching _unit_test.yaml)
-      # ================================================================
-      - name: Install packages (ut)
+      - name: Install system dependencies (ut)
         if: ${{ needs.detect-env.outputs.test_type == 'ut' }}
         run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list || true
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple || true
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local || true
-          apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       # ================================================================
@@ -124,7 +183,7 @@ jobs:
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
-          fetch-depth: ${{ inputs.fetch_depth }}
+          fetch-depth: ${{ needs.set-params.outputs.fetch_depth }}
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -140,7 +199,7 @@ jobs:
           fi
 
       # ================================================================
-      # E2E: install vllm (editable) + vllm-ascend (editable)
+      # Install vllm + vllm-ascend (diverges by test_type)
       # ================================================================
       - name: Install vllm from source (e2e)
         if: ${{ needs.detect-env.outputs.test_type == 'e2e' }}
@@ -157,10 +216,6 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      # ================================================================
-      # UT: install vllm (non-editable, pytorch cpu index) + uninstall triton
-      #     install vllm-ascend (non-editable, pytorch cpu index)
-      # ================================================================
       - name: Install vllm from source (ut)
         if: ${{ needs.detect-env.outputs.test_type == 'ut' }}
         working-directory: ./vllm-empty
@@ -193,9 +248,9 @@ jobs:
           tools/bisect_vllm.sh \
             --vllm-repo ../vllm-empty \
             --ascend-repo . \
-            --fetch-depth ${{ inputs.fetch_depth }} \
-            --step-timeout ${{ inputs.step_timeout }} \
-            --total-timeout ${{ inputs.total_timeout }} \
-            --test-cmd "${{ inputs.test_cmd }}" \
-            ${{ inputs.good_commit && format('--good {0}', inputs.good_commit) || '' }} \
-            ${{ inputs.bad_commit && format('--bad {0}', inputs.bad_commit) || '' }}
+            --fetch-depth ${{ needs.set-params.outputs.fetch_depth }} \
+            --step-timeout ${{ needs.set-params.outputs.step_timeout }} \
+            --total-timeout ${{ needs.set-params.outputs.total_timeout }} \
+            --test-cmd "${{ needs.set-params.outputs.test_cmd }}" \
+            --good ${{ needs.set-params.outputs.good_commit }} \
+            --bad ${{ needs.set-params.outputs.bad_commit }}
