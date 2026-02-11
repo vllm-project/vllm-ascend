@@ -18,6 +18,7 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
+from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import Range
 from vllm.logger import logger
@@ -26,9 +27,7 @@ from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("v0.15.0"):
     from vllm.attention.layer import Attention  # type: ignore
-    from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
 else:
-    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
     from vllm.model_executor.layers.attention import Attention
 
 

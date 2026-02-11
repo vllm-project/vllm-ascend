@@ -25,8 +25,8 @@ import pytest
 import torch
 from vllm.utils.network_utils import get_open_port
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from tests.e2e.conftest import wait_until_npu_memory_free
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MODELS = [
     # Offline data parallel mode will be not supported/useful for dense models
@@ -85,8 +85,7 @@ def _run_worker_process(
 
     # Import vLLM only after environment setup
     from vllm import LLM, SamplingParams
-    from vllm.distributed.parallel_state import (
-        destroy_distributed_environment, destroy_model_parallel)
+    from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
 
     # Apply hooks and run inference
     with _install_spies(counters):
@@ -132,7 +131,7 @@ def _run_worker_process(
         torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.skip(reason="fix me")
+# @patch.dict(os.environ, clear=["HCCL_OP_EXPANSION_MODE","VLLM_WORKER_MULTIPROC_METHOD"])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4, 36])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
@@ -229,7 +228,7 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     expected_dummy_run = (warmup_runs + padding_runs) * dp_size
 
     assert (
-        num_dummy_run == expected_dummy_run
+        expected_dummy_run == num_dummy_run
     ), f"Dummy run count mismatch. Expected: {expected_dummy_run}, Got: {num_dummy_run}"
 
     # Metric 4: Graph Replay (Inference Execution)
