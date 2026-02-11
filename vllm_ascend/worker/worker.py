@@ -571,3 +571,36 @@ class NPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
+    
+    def check_health(self) -> None:
+        import subprocess
+        logger.info("check_health Start!")
+        try:
+            result = subprocess.run(
+                ['npu-smi', 'info', '-i', str(self.local_rank), '-t', 'health'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                parse_text_output(result.stdout)
+                logger.info("check_health succsess!")                
+            else:
+                logger.info(f"query NPU card {self.local_rank} fail: {result.stderr}")    
+        except subprocess.TimeoutExpired:
+            logger.info(f"query NPU card  {self.local_rank} timeout.")
+        except FileNotFoundError:
+            logger.info("npu-smi tool not found.")
+        except Exception as e:
+            logger.info(f"query NPU card {self.local_rank} fail: {e}")
+        return     
+    
+def parse_text_output(output) -> None:    
+    lines = output.strip().split('\n')
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if 'Health' in line:
+            if line.split(':')[-1].strip() != "OK":
+                raise RuntimeError("NPU card health status is not OK")
+    return
