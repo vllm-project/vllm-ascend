@@ -16,9 +16,9 @@
 #include "register/op_def_registry.h"
 
 namespace ops {
-class LightningIndexer : public OpDef {
+class LightningIndexerVllm : public OpDef {
 public:
-    explicit LightningIndexer(const char *name) : OpDef(name)
+    explicit LightningIndexerVllm(const char *name) : OpDef(name)
     {
         this->Input("query")
             .ParamType(REQUIRED)
@@ -68,5 +68,5 @@ public:
         this->AICore().AddConfig("ascend910_93", aicore_config);
     }
 };
-OP_ADD(LightningIndexer);
+OP_ADD(LightningIndexerVllm);
 } // namespace ops
