@@ -1057,7 +1057,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 sparse_mode=3,
             )
         else:
-            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+            topk_indices = torch.ops._C_ascend.npu_lightning_indexer_vllm(
                 query=q,
                 key=key,
                 weights=weights,
