@@ -17,11 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from contextlib import contextmanager
-
 import torch
-import vllm
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.states import RequestState
 
 

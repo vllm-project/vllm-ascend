@@ -24,18 +24,17 @@ from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.input_batch import (InputBatch,
-                                            combine_sampled_and_draft_tokens,
-                                            expand_idx_mapping,
-                                            prepare_pos_seq_lens,
-                                            prepare_prefill_inputs)
+from vllm.v1.worker.gpu.input_batch import (
+    combine_sampled_and_draft_tokens,
+    expand_idx_mapping,
+    prepare_pos_seq_lens,
+    prepare_prefill_inputs,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
-from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
-                                              build_attn_state)
-from vllm_ascend.worker.v2.input_batch import (AscendInputBatch,
-                                               AscendInputBuffers)
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_state
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
@@ -98,6 +97,7 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
             logprobs_mode=self.model_config.logprobs_mode,
+            num_speculative_tokens=self.num_speculative_steps + 1,
         )
 
         # we need to copy num_computed_tokens back to cpu to help

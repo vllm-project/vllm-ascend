@@ -31,6 +31,8 @@ class AscendSampler(Sampler):
         idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Override sample method because we need to override triton operators
         called in the method.
@@ -42,7 +44,14 @@ class AscendSampler(Sampler):
         self.logit_bias_state.apply_logit_bias(logits, idx_mapping, idx_mapping_np, pos)
 
         # Apply penalties in place.
-        self.penalties_state.apply_penalties(logits, idx_mapping, idx_mapping_np)
+        self.penalties_state.apply_penalties(
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            input_ids,
+            expanded_local_pos,
+            self.num_speculative_tokens,
+        )
 
         # Apply temperature in place.
         apply_temperature(logits, idx_mapping, self.sampling_states.temperature.gpu)
