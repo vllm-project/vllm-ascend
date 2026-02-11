@@ -80,7 +80,7 @@ TILING_DATA_FIELD_DEF(uint32_t, blockSize)
 TILING_DATA_FIELD_DEF(uint32_t, maxBlockNumPerBatch)
 TILING_DATA_FIELD_DEF(uint32_t, sparseMode)
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(LightningIndexer, LITilingData)
+REGISTER_TILING_DATA_CLASS(LightningIndexerVllm, LITilingData)
 
 struct LICompileInfo {};
 
