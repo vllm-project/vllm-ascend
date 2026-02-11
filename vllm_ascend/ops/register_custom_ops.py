@@ -14,7 +14,7 @@ from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.triton.rope import rope_forward_triton
+from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
@@ -188,15 +188,16 @@ def _quantize_impl_fake(
     return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal, input_offset, torch.qint8, -1, False)
 
 
-def _rope_forward_triton_fake(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    rope_dim: int = -1,
+def _rope_forward_oot_impl_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_dim: int,
+    rotary_dim: int,
     is_neox_style: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(q), torch.empty_like(k)
+    return query, key
 
 
 direct_register_custom_op(
@@ -262,10 +263,11 @@ direct_register_custom_op(
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
+
 direct_register_custom_op(
-    op_name="rope_forward_triton",
-    op_func=rope_forward_triton,
-    fake_impl=_rope_forward_triton_fake,
+    op_name="npu_rotary_embedding",
+    op_func=rope_forward_oot,
+    fake_impl=_rope_forward_oot_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

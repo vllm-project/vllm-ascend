@@ -14,7 +14,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
 import torch
 from vllm.triton_utils import tl, triton
 
@@ -30,10 +29,13 @@ def _triton_rope(
     q_row_stride,
     k_ptr,
     k_row_stride,
-    cos,
+    cos_ptr,
     cos_row_stride,
-    sin,
+    sin_ptr,
     sin_row_stride,
+    cos_sin_ptr,
+    cos_sin_row_stride,
+    pos_ptr,
     num_tokens,
     n_qh: tl.constexpr,
     n_kh: tl.constexpr,
@@ -44,6 +46,7 @@ def _triton_rope(
     pad_rope_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     IS_NEOX_STYLE: tl.constexpr,
+    USE_COS_SIN: tl.constexpr,
 ):
     """
     This triton kernel applies rotary embedding on q and k.
@@ -84,13 +87,19 @@ def _triton_rope(
         # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
         # m of this program instance
         # ####################################################################
-        cos_start_ptr = cos + row_idx * cos_row_stride
-        sin_start_ptr = sin + row_idx * sin_row_stride
-
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
+        sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
         cos_mask = cos_offsets < (rope_dim // 2)
-        cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
-        sin_row = tl.load(sin_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+        if USE_COS_SIN:
+            pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
+            cos_start_ptr = cos_sin_ptr + pos_idx * cos_sin_row_stride
+            cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+            sin_row = tl.load(cos_start_ptr + sin_offsets, mask=cos_mask, other=0).to(tl.float32)
+        else:
+            cos_start_ptr = cos_ptr + row_idx * cos_row_stride
+            sin_start_ptr = sin_ptr + row_idx * sin_row_stride
+            cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+            sin_row = tl.load(sin_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
 
         # ####################################################################
         # Load the left and right half of q and k for the current
@@ -140,8 +149,10 @@ def _triton_rope(
 def rope_forward_triton(
     q: torch.Tensor,
     k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
+    cos: torch.Tensor = None,
+    sin: torch.Tensor = None,
+    cos_sin_cache: torch.Tensor = None,
+    positions: torch.Tensor = None,
     rope_dim: int = -1,
     is_neox_style: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -152,12 +163,6 @@ def rope_forward_triton(
 
     num_tokens, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[1]
-    cos = cos.view(num_tokens, -1)
-    sin = sin.view(num_tokens, -1)
-    if rope_dim == -1:
-        # If rope_dim is not specified, we assume that input cos/sin is not
-        # duplicated to rope_dim, which means rope_dim == cos.shape[-1] * 2
-        rope_dim = cos.shape[-1] * 2
     assert rope_dim <= head_dim
     pad_rope_dim = triton.next_power_of_2(rope_dim)
     pad_n_q_head = triton.next_power_of_2(n_q_head)
@@ -166,24 +171,69 @@ def rope_forward_triton(
     num_vectorcore = get_vectorcore_num()
     n_row = min(num_tokens, num_vectorcore)
 
-    _triton_rope[(n_row,)](
-        q,
-        q.stride(0),
-        k,
-        k.stride(0),
-        cos,
-        cos.stride(0),
-        sin,
-        sin.stride(0),
-        num_tokens,
-        n_q_head,
-        n_kv_head,
-        head_dim,
-        rope_dim,
-        pad_n_q_head,
-        pad_n_kv_head,
-        pad_rope_dim,
-        BLOCK_SIZE=BLOCK_SIZE,
-        IS_NEOX_STYLE=is_neox_style,
-    )
+    if cos_sin_cache is not None and positions is not None:
+        assert positions.shape[0] == num_tokens
+        _triton_rope[(n_row,)](
+            q,
+            q.stride(0),
+            k,
+            k.stride(0),
+            None,
+            None,
+            None,
+            None,
+            cos_sin_cache,
+            cos_sin_cache.stride(0),
+            positions,
+            num_tokens,
+            n_q_head,
+            n_kv_head,
+            head_dim,
+            rope_dim,
+            pad_n_q_head,
+            pad_n_kv_head,
+            pad_rope_dim,
+            BLOCK_SIZE=BLOCK_SIZE,
+            IS_NEOX_STYLE=is_neox_style,
+            USE_COS_SIN=True,
+        )
+    elif cos is not None and sin is not None:
+        assert cos.shape[0] == num_tokens and sin.shape[0] == num_tokens
+        cos = cos.view(num_tokens, -1)
+        sin = sin.view(num_tokens, -1)
+        if rope_dim == -1:
+            # If rope_dim is not specified, we assume that input cos/sin is not
+            # duplicated to rope_dim, which means rope_dim == cos.shape[-1] * 2
+            rope_dim = cos.shape[-1] * 2
+        _triton_rope[(n_row,)](
+            q,
+            q.stride(0),
+            k,
+            k.stride(0),
+            cos,
+            cos.stride(0),
+            sin,
+            sin.stride(0),
+            None,
+            None,
+            None,
+            num_tokens,
+            n_q_head,
+            n_kv_head,
+            head_dim,
+            rope_dim,
+            pad_n_q_head,
+            pad_n_kv_head,
+            pad_rope_dim,
+            BLOCK_SIZE=BLOCK_SIZE,
+            IS_NEOX_STYLE=is_neox_style,
+            USE_COS_SIN=False,
+        )
+    else:
+        raise ValueError(
+            "Currently, rope_forward_triton supports passing:\n"
+            "1. positions and original cos_sin_cache.\n"
+            "2. cos and sin which are already selected by positions\n"
+            "Please check whether you call rope_forward_triton correctly."
+        )
     return q, k
