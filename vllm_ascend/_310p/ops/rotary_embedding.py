@@ -18,6 +18,7 @@
 
 import torch
 import torch_npu
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 
 from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_sin_slice
 
@@ -97,3 +98,13 @@ class AscendRotaryEmbedding310(AscendRotaryEmbedding):
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
         return _rope_forward_oot(self, positions, query, key, is_neox_style, offsets)
+
+
+class AscendMRotaryEmbedding310(MRotaryEmbedding):
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ):
+        return super().forward_oot(positions, query, key)
