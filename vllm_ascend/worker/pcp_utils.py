@@ -457,12 +457,11 @@ class PCPManager:
     def get_padded_slot_mapping(self, num_tokens: int, num_tokens_padded: int, slot_mapping: torch.Tensor):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
-        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
-
+        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size] if not self.pcp_use_hybrid_attn else self.pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size]
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[: num_tokens * self.pcp_world_size]
         pcp_padded_slot_mapping.fill_(-1)
         pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping
-        return pcp_padded_slot_mapping
+        return pcp_padded_slot_mapping.clone()
 
     def get_restore_hidden_states(
         self,
