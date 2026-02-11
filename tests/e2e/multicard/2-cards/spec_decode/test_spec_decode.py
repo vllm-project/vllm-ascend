@@ -41,7 +41,7 @@ MODELS = {
 # NOTE: golden may change (eagle_proposer only runs in eager mode currently),
 # thus please update it if ci fails but you have better acceptance
 BASELINES_SP = {
-    "eagle3": [0.68, 0.40, 0.18],
+    "eagle3": [0.7477477477477478, 0.4294294294294294, 0.21621621621621623],
 }
 
 

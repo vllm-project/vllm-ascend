@@ -27,8 +27,8 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 @triton.jit
 def split_qkv_rmsnorm_rope_kernel(
     input_ptr,
-    sin_ptr,
-    cos_ptr,
+    cos_sin_ptr,
+    pos_ptr,
     q_ptr,
     k_ptr,
     v_ptr,
@@ -78,9 +78,11 @@ def split_qkv_rmsnorm_rope_kernel(
             normalized_values = (normalized_values * weight_values).to(
                 tl.bfloat16)
 
-        sc_offsets = row_idx * HEAD_DIM + tl.arange(0, HEAD_DIM)
-        sin = (tl.load(sin_ptr + sc_offsets)).reshape(1, HEAD_DIM)
-        cos = (tl.load(cos_ptr + sc_offsets)).reshape(1, HEAD_DIM)
+        pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
+        cos_offsets = pos_idx * HEAD_DIM + tl.arange(0, HALF_HEAD_DIM)
+        sin_offsets = pos_idx * HEAD_DIM + tl.arange(HALF_HEAD_DIM, HEAD_DIM)
+        cos = (tl.load(cos_sin_ptr + cos_offsets)).reshape(1, HALF_HEAD_DIM)
+        sin = (tl.load(cos_sin_ptr + sin_offsets)).reshape(1, HALF_HEAD_DIM)
         x1 = tl.extract_slice(
             normalized_values,
             offsets=(0, 0),
@@ -93,23 +95,25 @@ def split_qkv_rmsnorm_rope_kernel(
             sizes=(Q_BLOCK_SIZE // HEAD_DIM, HALF_HEAD_DIM),
             strides=(1, 1),
         )
-        cat_x = tl.zeros((Q_BLOCK_SIZE // HEAD_DIM, HEAD_DIM),
-                         dtype=tl.bfloat16)
-        cat_x = tl.insert_slice(
-            cat_x,
-            -x2,
+        roped_q1 = x1 * cos - x2 * sin
+        roped_q2 = x2 * cos + x1 * sin
+
+        roped_q = tl.zeros((Q_BLOCK_SIZE // HEAD_DIM, HEAD_DIM),
+                           dtype=tl.bfloat16)
+        roped_q = tl.insert_slice(
+            roped_q,
+            roped_q1,
             offsets=(0, 0),
             sizes=(Q_BLOCK_SIZE // HEAD_DIM, HALF_HEAD_DIM),
             strides=(1, 1),
         )
-        cat_x = tl.insert_slice(
-            cat_x,
-            x1,
+        roped_q = tl.insert_slice(
+            roped_q,
+            roped_q2,
             offsets=(0, HALF_HEAD_DIM),
             sizes=(Q_BLOCK_SIZE // HEAD_DIM, HALF_HEAD_DIM),
             strides=(1, 1),
         )
-        roped_q = cat_x * sin + normalized_values * cos
         tl.store(
             q_ptr + output_offset + col_indices,
             roped_q.reshape(Q_BLOCK_SIZE).to(q_ptr.dtype.element_ty),
@@ -143,9 +147,12 @@ def split_qkv_rmsnorm_rope_kernel(
         else:
             normalized_values = (normalized_values * weight_values).to(
                 tl.bfloat16)
-        sc_offsets = row_idx * HEAD_DIM + tl.arange(0, HEAD_DIM)
-        sin = (tl.load(sin_ptr + sc_offsets)).reshape(1, HEAD_DIM)
-        cos = (tl.load(cos_ptr + sc_offsets)).reshape(1, HEAD_DIM)
+
+        pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
+        cos_offsets = pos_idx * HEAD_DIM + tl.arange(0, HALF_HEAD_DIM)
+        sin_offsets = pos_idx * HEAD_DIM + tl.arange(HALF_HEAD_DIM, HEAD_DIM)
+        cos = (tl.load(cos_sin_ptr + cos_offsets)).reshape(1, HALF_HEAD_DIM)
+        sin = (tl.load(cos_sin_ptr + sin_offsets)).reshape(1, HALF_HEAD_DIM)
         x1 = tl.extract_slice(
             normalized_values,
             offsets=(0, 0),
@@ -158,23 +165,25 @@ def split_qkv_rmsnorm_rope_kernel(
             sizes=(KV_BLOCK_SIZE // HEAD_DIM, HALF_HEAD_DIM),
             strides=(1, 1),
         )
-        cat_x = tl.zeros((KV_BLOCK_SIZE // HEAD_DIM, HEAD_DIM),
-                         dtype=tl.bfloat16)
-        cat_x = tl.insert_slice(
-            cat_x,
-            -x2,
+        roped_k1 = x1 * cos - x2 * sin
+        roped_k2 = x2 * cos + x1 * sin
+
+        roped_k = tl.zeros((KV_BLOCK_SIZE // HEAD_DIM, HEAD_DIM),
+                           dtype=tl.bfloat16)
+        roped_k = tl.insert_slice(
+            roped_k,
+            roped_k1,
             offsets=(0, 0),
             sizes=(KV_BLOCK_SIZE // HEAD_DIM, HALF_HEAD_DIM),
             strides=(1, 1),
         )
-        cat_x = tl.insert_slice(
-            cat_x,
-            x1,
+        roped_k = tl.insert_slice(
+            roped_k,
+            roped_k2,
             offsets=(0, HALF_HEAD_DIM),
             sizes=(KV_BLOCK_SIZE // HEAD_DIM, HALF_HEAD_DIM),
             strides=(1, 1),
         )
-        roped_k = cat_x * sin + normalized_values * cos
 
         tl.store(
             k_ptr + output_offset + col_indices,
@@ -201,8 +210,8 @@ def split_qkv_rmsnorm_rope_kernel(
 
 def split_qkv_rmsnorm_rope_impl(
     input: torch.Tensor,
-    sin: torch.Tensor,
-    cos: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
     q_hidden_size: int,
@@ -238,8 +247,8 @@ def split_qkv_rmsnorm_rope_impl(
 
     split_qkv_rmsnorm_rope_kernel[(n_rows, n_cols, 1)](
         input,
-        sin,
-        cos,
+        cos_sin_cache,
+        positions,
         q_output,
         k_output,
         v_output,
@@ -263,8 +272,8 @@ def split_qkv_rmsnorm_rope_impl(
 
 def split_qkv_rmsnorm_rope_impl_fake(
     input: torch.Tensor,
-    sin: torch.Tensor,
-    cos: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
     q_hidden_size: int,

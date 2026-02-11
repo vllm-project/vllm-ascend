@@ -24,10 +24,10 @@ CASE_QWEN_ACLGRAPH = LLMTestCase(
     model="Qwen/Qwen3-0.6B",
     prompts=PROMPTS_SHORT,
     golden_answers=[
-        " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I want to know if there are any",
+        " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I'm looking for a job in the",
         ' the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
         ' Paris. The capital of France is also the capital of the Republic of France. The capital of France is also the capital of the European Union. The capital of',
-        ' not just a technological frontier but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and'
+        ' not just a technological challenge but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and'
     ],
 )
 
@@ -48,8 +48,8 @@ CASE_QWEN_FULL_DECODE_ONLY = LLMTestCase(
     prompts=PROMPTS_LONG,
     golden_answers=[
         ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
-        " \n\nTo solve this problem, we can use the following approach: Let $P$ be the perimeter of the square. Then, the expected value of the area",
-        ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations $x^2 +'
+        " \n\nTo solve this problem, we can use the fact that the expected value of the area of a triangle with vertices on a square can be calculated by integrating over",
+        ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
     ])
 
 CASE_DS_FULL_DECODE_ONLY = LLMTestCase(

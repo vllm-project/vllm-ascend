@@ -40,7 +40,6 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
-from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.utils import \
     prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -325,8 +324,6 @@ class EagleProposer(VllmEagleProposer):
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None,
                   is_profile=False):
-        # update global cos, sin
-        update_cos_sin(self.positions[:num_tokens])
 
         multi_steps_attn_metadata = []
         if not self.use_cuda_graph:
@@ -506,9 +503,6 @@ class EagleProposer(VllmEagleProposer):
         attn_metadata = builder.build(0, common_attn_metadata,
                                       self.runner.get_model())
 
-        # update global cos, sin
-        update_cos_sin(self.positions[:num_input_tokens])
-
         used_update_positions = target_positions[last_token_indices]
         per_layer_attn_metadata = dict()
         # The first step of speculative.
@@ -653,9 +647,6 @@ class EagleProposer(VllmEagleProposer):
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
-
-            # update global cos, sin
-            update_cos_sin(self.positions[:input_batch_size])
 
             # Run the model.
 
