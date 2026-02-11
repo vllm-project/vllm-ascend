@@ -11,11 +11,11 @@ from vllm.distributed import ensure_model_parallel_initialized, init_distributed
 from vllm.utils.system_utils import update_environment_variables
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.compilation.npugraph_ex_passes.graphex_norm_quant_fusion_pass import (
-    GraphEXAddRMSNormQuantPattern,
-    GraphEXAddRMSNormQuantPatternWithBias,
-    GraphEXAddRMSNormQuantSPPattern,
-    GraphEXAddRMSNormQuantSPPatternWithBias,
+from vllm_ascend.compilation.passes.norm_quant_fusion_pass import (
+    AddRMSNormQuantPattern,
+    AddRMSNormQuantPatternWithBias,
+    AddRMSNormQuantSPPattern,
+    AddRMSNormQuantSPPatternWithBias,
 )
 
 
@@ -212,7 +212,10 @@ def register_pattern_safe(pattern_class, vllm_config, eps, pattern_key):
 
     pattern = pattern_class(vllm_config=vllm_config, eps=eps)
     try:
-        pattern.register()
+        # Import the required pass class
+        from torch._inductor.pattern_matcher import PatternMatcherPass
+        pm_pass = PatternMatcherPass()
+        pattern.register(pm_pass)
         _registered_patterns.add(pattern_key)
         print(f"Successfully registered pattern: {pattern_key}")
     except RuntimeError as e:
@@ -257,22 +260,22 @@ def test_rmsnorm_quant_fusion(
             if sp_enable:
                 model = ModelSPWithBias(hidden_size, dtype, eps, device="npu")
                 register_pattern_safe(
-                    GraphEXAddRMSNormQuantSPPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantSPPatternWithBias"
+                    AddRMSNormQuantSPPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantSPPatternWithBias"
                 )
             else:
                 model = ModelWithBias(hidden_size, dtype, eps, device="npu")
                 register_pattern_safe(
-                    GraphEXAddRMSNormQuantPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantPatternWithBias"
+                    AddRMSNormQuantPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantPatternWithBias"
                 )
         else:
             if sp_enable:
                 model = ModelSPWithoutBias(hidden_size, dtype, eps, device="npu")
                 register_pattern_safe(
-                    GraphEXAddRMSNormQuantSPPattern, vllm_config, eps, "GraphEXAddRMSNormQuantSPPattern"
+                    AddRMSNormQuantSPPattern, vllm_config, eps, "GraphEXAddRMSNormQuantSPPattern"
                 )
             else:
                 model = ModelWithoutBias(hidden_size, dtype, eps, device="npu")
-                register_pattern_safe(GraphEXAddRMSNormQuantPattern, vllm_config, eps, "GraphEXAddRMSNormQuantPattern")
+                register_pattern_safe(AddRMSNormQuantPattern, vllm_config, eps, "GraphEXAddRMSNormQuantPattern")
 
         model = model.to("npu")
         x = torch.randn(num_tokens, hidden_size, device="npu", dtype=dtype, requires_grad=False)
