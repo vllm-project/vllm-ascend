@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 import torch
-import torchair
 import torch._inductor.pattern_matcher as pm
+import torchair
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.config import VllmConfig
 

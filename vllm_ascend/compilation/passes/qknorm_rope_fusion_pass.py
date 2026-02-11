@@ -20,8 +20,8 @@ from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPri
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import Range
 from vllm.logger import logger
-from vllm_ascend.compilation.passes.base_pattern import BasePattern
 
+from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("v0.15.0"):
@@ -228,11 +228,7 @@ class QKNormRopeFusionPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        print("before qknorm and rope fusion:")
-        print(graph.graph)
         self.matched_count = self.pattern_match_passes.apply(graph)
-        print("after qknorm and rope fusion:")
-        print(graph.graph)
         logger.debug("Fused %s QKNorm and Rope patterns", self.matched_count)
         logger.debug("Patterns registered for replacement:")
         pattern_idx = 0
