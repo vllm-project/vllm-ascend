@@ -5,7 +5,7 @@ import pytest
 import torch
 from vllm.config import (CacheConfig, CompilationConfig, CUDAGraphMode,
                          ModelConfig, SchedulerConfig, SpeculativeConfig,
-                         VllmConfig, set_current_vllm_config)
+                         VllmConfig)
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -20,8 +20,7 @@ class TestMtpProposer:
     @pytest.fixture(autouse=True)
     def patch_supports_multimodal_inputs(self):
         with patch(
-                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs",
-                return_value=False
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
         ):
             yield
 
@@ -39,21 +38,16 @@ class TestMtpProposer:
         config.speculative_config.speculative_token_tree = str([
             (i + 1) * (0, ) for i in range(2)
         ])
-        config.speculative_config.disable_padded_drafter_batch = False
 
         config.model_config = MagicMock(spec=ModelConfig)
         config.model_config.dtype = torch.float16
         config.model_config.max_model_len = 2048
         config.model_config.uses_mrope = False
         config.model_config.uses_xdrope_dim = 0
-        config.model_config.hf_text_config = MagicMock(spec=[])  # Empty spec to prevent hasattr from returning True
-        config.model_config.hf_text_config.to_dict = MagicMock(return_value={})
+        config.model_config.hf_text_config = None
         config.model_config.hf_config = None
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.data_parallel_size = 1
-        config.parallel_config.prefill_context_parallel_size = 1
-        config.parallel_config.enable_expert_parallel = False
         config.speculative_config.draft_tensor_parallel_size = 1
 
         config.load_config = None
@@ -68,8 +62,6 @@ class TestMtpProposer:
         config.compilation_config = MagicMock(spec=CompilationConfig)
         config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
         config.compilation_config.static_forward_context = dict()
-        config.compilation_config.pass_config = MagicMock()
-        config.compilation_config.pass_config.enable_sp = False
 
         config.device_config = MagicMock()
         config.device_config.device = torch.device("cpu")
@@ -95,19 +87,18 @@ class TestMtpProposer:
         mock_cpu_gpu_buffer.return_value = mock_buffer_instance
 
         # Test basic initialization
-        with set_current_vllm_config(vllm_config):
-            proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
+        proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
 
-            assert proposer.vllm_config == vllm_config
-            assert proposer.device == torch.device("cpu")
-            assert proposer.dtype == torch.float16
-            assert proposer.num_speculative_tokens == 2
-            assert proposer.hidden_size == 4096
+        assert proposer.vllm_config == vllm_config
+        assert proposer.device == torch.device("cpu")
+        assert proposer.dtype == torch.float16
+        assert proposer.num_speculative_tokens == 2
+        assert proposer.hidden_size == 4096
 
-            # Test with mrope enabled
-            assert hasattr(proposer, "positions")
-            assert not hasattr(proposer, "mrope_positions")
-            assert proposer.use_sparse is False
+        # Test with mrope enabled
+        assert hasattr(proposer, "positions")
+        assert not hasattr(proposer, "mrope_positions")
+        assert proposer.use_sparse is False
 
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
     def test_init_with_aclgraph(self, mock_cpu_gpu_buffer, vllm_config,
@@ -117,75 +108,64 @@ class TestMtpProposer:
         runner._use_aclgraph.return_value = True
         vllm_config.scheduler_config.async_scheduling = False
         vllm_config.speculative_config.enforce_eager = False
-        with set_current_vllm_config(vllm_config):
-            proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
+        proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
 
-            assert proposer.use_cuda_graph is True
+        assert proposer.use_cuda_graph is True
 
-    @patch("vllm_ascend.ascend_forward_context.get_dp_group")
-    @patch("vllm_ascend.ascend_forward_context.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
     def test_dummy_run(self, mock_cpu_gpu_buffer, mock_set_context,
-                       mock_get_forward_context, mock_tp_world_size, mock_dp_group, vllm_config, runner):
+                       mock_get_forward_context, vllm_config, runner):
         mock_buffer_instance = MagicMock()
         mock_cpu_gpu_buffer.return_value = mock_buffer_instance
-        mock_dp_group.return_value.world_size = 1
-        with set_current_vllm_config(vllm_config):
-            proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
+        proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
+        proposer.model = MagicMock()
+        proposer.enable_shared_expert_dp = False
+        runner._sync_metadata_across_dp.return_value = (8, 8, False)
 
-            # Mock _runnable to prevent actual execution
-            proposer._runnable = MagicMock()
-            proposer.enable_shared_expert_dp = False
-            runner._sync_metadata_across_dp.return_value = (8, 8, False)
+        mock_get_forward_context = MagicMock()
+        mock_get_forward_context.cudagraph_runtime_mode = None
+        mock_get_forward_context.capturing = True
+        # Execute
+        proposer.dummy_run(8)
 
-            mock_get_forward_context = MagicMock()
-            mock_get_forward_context.cudagraph_runtime_mode = None
-            mock_get_forward_context.capturing = True
-            # Execute
-            proposer.dummy_run(8)
+        # Verify
+        runner._sync_metadata_across_dp.assert_called_once()
+        mock_set_context.assert_called()
 
-            # Verify
-            runner._sync_metadata_across_dp.assert_called_once()
+        # Check that model was called correct number of times
+        assert proposer.model.call_count == vllm_config.speculative_config.num_speculative_tokens
 
-            # Check that _runnable was called
-            assert proposer._runnable.call_count == 1
-
-    @patch("vllm_ascend.ascend_forward_context.get_dp_group")
-    @patch("vllm_ascend.ascend_forward_context.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
     def test_dummy_run_full_graph(self, mock_cpu_gpu_buffer, mock_set_context,
-                                  mock_get_forward_context, mock_tp_world_size, mock_dp_group, vllm_config,
+                                  mock_get_forward_context, vllm_config,
                                   runner):
         # Setup
         mock_buffer_instance = MagicMock()
         mock_cpu_gpu_buffer.return_value = mock_buffer_instance
-        mock_dp_group.return_value.world_size = 1
-        with set_current_vllm_config(vllm_config):
-            proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
+        proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
+        proposer.enable_shared_expert_dp = False
+        proposer.model = MagicMock()
+        runner._sync_metadata_across_dp.return_value = (8, 8, False)
+        runner.attn_groups = []
 
-            # Mock _runnable to prevent actual execution
-            proposer._runnable = MagicMock()
-            proposer.enable_shared_expert_dp = False
-            runner._sync_metadata_across_dp.return_value = (8, 8, False)
-            runner.attn_groups = []
+        mock_get_forward_context = MagicMock()
+        mock_get_forward_context.cudagraph_runtime_mode = None
+        mock_get_forward_context.capturing = True
+        # Execute
+        proposer.dummy_run(num_tokens=8,
+                           num_reqs=5,
+                           aclgraph_runtime_mode=CUDAGraphMode.FULL)
 
-            mock_get_forward_context = MagicMock()
-            mock_get_forward_context.cudagraph_runtime_mode = None
-            mock_get_forward_context.capturing = True
-            # Execute
-            proposer.dummy_run(num_tokens=8,
-                               num_reqs=5,
-                               aclgraph_runtime_mode=CUDAGraphMode.FULL)
+        # Verify
+        runner._sync_metadata_across_dp.assert_called_once()
+        mock_set_context.assert_called()
 
-            # Verify
-            runner._sync_metadata_across_dp.assert_called_once()
-
-            # Check that _runnable was called
-            assert proposer._runnable.call_count == 1
+        # Check that model was called correct number of times
+        assert proposer.model.call_count == vllm_config.speculative_config.num_speculative_tokens
 
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
     def test_prepare_next_token_ids_cpu(self, mock_cpu_gpu_buffer):

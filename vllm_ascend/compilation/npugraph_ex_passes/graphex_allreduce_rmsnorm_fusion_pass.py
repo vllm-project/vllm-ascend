@@ -17,6 +17,7 @@
 import torch
 import torchair
 from torch._inductor.pattern_matcher import Match
+from vllm.compilation.inductor_pass import get_pass_context
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
@@ -26,12 +27,6 @@ from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check im
     check_and_register_fusion_pass,
     extra_stream_scope_check,
 )
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.15.0"):
-    from vllm.compilation.inductor_pass import get_pass_context  # type: ignore
-else:
-    from vllm.compilation.passes.inductor_pass import get_pass_context
 
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THREHOLD = 512

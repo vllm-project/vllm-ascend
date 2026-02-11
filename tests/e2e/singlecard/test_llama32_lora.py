@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import patch
-
 import vllm
 import vllm.config
 from vllm.lora.request import LoRARequest
@@ -123,7 +121,6 @@ def generate_and_test(llm,
     print("removing lora")
 
 
-@pytest.mark.skip(reason="fix me")
 @patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
 def test_llama_lora(llama32_lora_files):
     vllm_model = VllmRunner(
