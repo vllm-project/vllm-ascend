@@ -432,8 +432,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.k_norm = self.indexer.k_norm
         self.cp_size = 1
         self.is_rope_neox_style = True
+        self.use_torch_npu_lightning_indexer = False
         if self.vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]:
             self.is_rope_neox_style = False
+            self.use_torch_npu_lightning_indexer = True
+
         self.enable_dsa_cp = enable_dsa_cp()
         self.enable_dsa_cp_prefill_only = enable_dsa_cp_with_layer_shard()
         if self.enable_dsa_cp:
@@ -1040,19 +1043,32 @@ class AscendSFAImpl(MLAAttentionImpl):
             key = self.gather_kv_cross_cp(key, attn_metadata.sfa_cp_metadata.valid_block_ids)
             block_table = attn_metadata.sfa_cp_metadata.block_table_cp
 
-        # topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
-        topk_indices, _ = torch_npu.npu_lightning_indexer(
-            query=q,
-            key=key,
-            weights=weights,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_key=actual_seq_lengths_key,
-            block_table=block_table,
-            layout_query="TND",
-            layout_key="PA_BSND",
-            sparse_count=2048,
-            sparse_mode=3,
-        )
+        if self.use_torch_npu_lightning_indexer:
+            topk_indices, _ = torch_npu.npu_lightning_indexer(
+                query=q,
+                key=key,
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        else:
+            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+                query=q,
+                key=key,
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
         return topk_indices
 
     def _init_o_proj_tp_full_params(self):
