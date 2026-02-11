@@ -408,8 +408,6 @@ def unified_apply_mlp(
     Unified MoE MLP entry.
     Quant path is dispatched by DeviceOperator (A5 vs non-A5).
     """
-
-    # 非量化路径保持不变
     if not with_quant:
         return unquant_apply_mlp(
             hidden_states=hidden_states,
@@ -421,14 +419,14 @@ def unified_apply_mlp(
             need_trans=need_trans,
         )
 
-    # 量化路径：统一走 adaptor
     assert w1_scale is not None and w2_scale is not None
     act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
     weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)
     scale_type = kwargs.get("scale_type")
     per_token_scale_type = kwargs.get("per_token_scale_type")
-
-    return DeviceOperator.quant_apply_mlp(
+    adaptor = DeviceOperator.get_device_adaptor()
+    assert adaptor is not None, "Device adaptor is not initialized."
+    return adaptor.quant_apply_mlp(
         hidden_states=hidden_states,
         w1=w1,
         w1_scale=w1_scale,
