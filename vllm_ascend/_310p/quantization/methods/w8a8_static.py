@@ -81,7 +81,7 @@ class AscendW8A8LinearMethod310(AscendLinearScheme):
         #   once that op is enabled on 310P.
         return torch_npu.npu_quant_matmul(
             x,
-            layer.weight.data.transpose(1, 0),
+            layer.weight.data,
             layer.deq_scale,
             bias=quant_bias,
             output_dtype=layer.params_dtype,
@@ -105,7 +105,7 @@ class AscendW8A8LinearMethod310(AscendLinearScheme):
         ).to(layer.aclnn_input_scale.dtype)
 
         # ---- matmul stage tensor ----
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ).transpose(0, 1)
 
         # ---- dequant stage tensors ----
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
