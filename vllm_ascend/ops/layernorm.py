@@ -94,8 +94,8 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
                     x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
-        x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
-                                      self.variance_epsilon)
+        x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(
+            x, self.weight, self.variance_epsilon)
         return x
 
 class LayerNormFn(torch.autograd.Function):
