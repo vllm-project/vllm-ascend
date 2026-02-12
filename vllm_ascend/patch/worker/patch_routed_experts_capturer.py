@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     _create_or_attach_shared_memory,
     logger,
 )
+from vllm.platforms import current_platform
 
 
 def init_buffer(
@@ -37,7 +38,7 @@ def init_buffer(
     self._device_buffer = torch.zeros(
         (max_num_batched_tokens, num_layers, num_experts_per_tok),
         dtype=torch.int32,
-        device="npu",
+        device=current_platform.device_name,
     )
     self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 

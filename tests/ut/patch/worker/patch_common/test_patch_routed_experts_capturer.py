@@ -8,6 +8,7 @@ from vllm_ascend.patch.worker.patch_routed_experts_capturer import RoutedExperts
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
 from transformers import PretrainedConfig
+from vllm.platforms import current_platform
 
 
 class MockVllmConfig:
@@ -49,7 +50,7 @@ class TestPatchRoutedExpertsCapturer(TestBase):
                 )
             )
             self.assertEqual(self.capturer._device_buffer.dtype, torch.int32)
-            self.assertEqual(self.capturer._device_buffer.device, torch.device(type="npu", index=0))
+            self.assertEqual(self.capturer._device_buffer.device.type, current_platform.device_name)
 
     def tearDown(self):
         self.capturer.clear_buffer()
