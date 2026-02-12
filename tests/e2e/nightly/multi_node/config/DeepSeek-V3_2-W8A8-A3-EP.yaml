@@ -132,7 +132,7 @@ deployment:
           --data-parallel-rpc-port 13389
           --tensor-parallel-size 4
           --enable-expert-parallel
-        --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
+          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
           --max-model-len 68000 
