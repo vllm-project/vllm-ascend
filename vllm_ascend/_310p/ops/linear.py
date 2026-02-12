@@ -1,3 +1,18 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import torch.nn as nn
@@ -37,7 +52,7 @@ class AscendLinearBase310(LinearBase):
         self.input_size = int(input_size)
         self.output_size = int(output_size)
         self.skip_bias_add = skip_bias_add
-        self.params_dtype = params_dtype or __import__("torch").get_default_dtype()
+        self.params_dtype = torch.float16
         self.quant_config = quant_config
         self.prefix = prefix
         self.return_bias = return_bias
@@ -47,9 +62,3 @@ class AscendLinearBase310(LinearBase):
             self.quant_method: QuantizeMethodBase | None = AscendUnquantizedLinearMethod310()
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
-
-
-__all__ = [
-    "AscendUnquantizedLinearMethod310",
-    "AscendLinearBase310",
-]
