@@ -96,6 +96,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | MiniCPM-V                      | ✅            |                                                                      | A2/A3 |
 | Mistral3                       | ✅            |                                                                      | A2/A3 |
 | Phi-3-Vision/Phi-3.5-Vision    | ✅            |                                                                      | A2/A3 |
+| Phi-4-multimodal               | ✅            |                                                                      | A2/A3 |
 | Gemma3                         | ✅            |                                                                      | A2/A3 |
 | Llama3.2                       | ✅            |                                                                      | A2/A3 |
 | PaddleOCR-VL                   | ✅            |                                                                      | A2/A3 |
