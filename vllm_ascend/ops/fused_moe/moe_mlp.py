@@ -22,6 +22,7 @@ from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
@@ -270,6 +271,9 @@ def unquant_apply_mlp(
     w1: torch.Tensor,
     w2: torch.Tensor,
     group_list: torch.Tensor,
+    w1_bias: torch.Tensor = None,
+    w2_bias: torch.Tensor = None,
+    activation: str | None = None,
     group_list_type: int = 1,
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
@@ -281,12 +285,18 @@ def unquant_apply_mlp(
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],
+        bias=[w1_bias.to(dtype=torch.float32)] if w1_bias is not None else None,
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
         group_list=group_list,
     )[0]
-    gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+
+    if activation == "swigluoai":
+        num_experts, _, hidden_size = w1.shape
+        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
+    else:
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
@@ -294,6 +304,7 @@ def unquant_apply_mlp(
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[gate_up_out],
         weight=[w2],
+        bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
@@ -309,6 +320,9 @@ def unified_apply_mlp(
     group_list: torch.Tensor,
     w1_scale: list[torch.Tensor] | None = None,
     w2_scale: list[torch.Tensor] | None = None,
+    activation: str | None = None,
+    w1_bias: torch.Tensor = None,
+    w2_bias: torch.Tensor = None,
     dynamic_scale: torch.Tensor = None,
     group_list_type: int = 1,
     w1_scale_bias: torch.Tensor = None,
@@ -344,6 +358,9 @@ def unified_apply_mlp(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            activation=activation,
             group_list=group_list,
             group_list_type=group_list_type,
             topk_scales=topk_scales,
