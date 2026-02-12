@@ -7,6 +7,7 @@ from collections import defaultdict
 
 import psutil
 from vllm.logger import logger
+
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 ALLOWED_CPUS_PATH = "/proc/self/status"
