@@ -18,7 +18,6 @@
 
 import torch
 import torch_npu
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 
 from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_sin_slice
 
