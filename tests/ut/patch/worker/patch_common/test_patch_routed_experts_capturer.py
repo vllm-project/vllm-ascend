@@ -12,7 +12,7 @@ from transformers import PretrainedConfig
 
 class TestPatchRoutedExpertsCapturer(TestBase):
 
-    def setup(self):
+    def setUp(self):
         RoutedExpertsCapturer.create()
         self.capturer = RoutedExpertsCapturer.get_instance()
         hf_config = PretrainedConfig()
