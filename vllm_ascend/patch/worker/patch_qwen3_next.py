@@ -327,17 +327,18 @@ class AscendQwen3NextAttention(nn.Module):
             if cos_sin.dtype != qkv.dtype:
                 cos_sin = cos_sin.to(qkv.dtype)
 
-            q, k, v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(qkv=qkv,
-                                                                    q_weight=self.q_norm.weight,
-                                                                    k_weight=self.k_norm.weight,
-                                                                    cos_sin=cos_sin,
-                                                                    num_q_heads=self.num_heads,
-                                                                    num_kv_heads=self.num_kv_heads,
-                                                                    head_size=self.head_dim,
-                                                                    eps=self.config.rms_norm_eps,
-                                                                    mrope_section=self.rotary_emb.rms_norm_mrope_section,
-                                                                    is_interleaved=self.rotary_emb.mrope_interleaved,
-                                                                    rope_dim=self.rotary_emb.rotary_dim,)
+            q, k, v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+                qkv=qkv,
+                q_weight=self.q_norm.weight,
+                k_weight=self.k_norm.weight,
+                cos_sin=cos_sin,
+                num_q_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_dim,
+                eps=self.config.rms_norm_eps,
+                mrope_section=self.rotary_emb.mrope_section,
+                is_interleaved=self.rotary_emb.mrope_interleaved,
+                rope_dim=self.rotary_emb.rotary_dim, )
         else:
             if self.attn_output_gate:
                 q_gate, k, v = qkv.split(
