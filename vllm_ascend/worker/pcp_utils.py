@@ -295,6 +295,9 @@ class PCPManager:
             return positions
 
         positions = get_current_rank_positions(0, self.pcp_world_rank)
+        padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
+        padded_pos_start_loc[0] = 0
+
         # Decode tokens are duplicated only after AG. But their positions are
         # same without prefill context parallel.
         if self.num_decode_reqs > 0:
@@ -398,8 +401,7 @@ class PCPManager:
             self.pcp_enter_fa_restore_idx[: pcp_enter_fa_restore_idx.shape[0]].copy_(
                 pcp_enter_fa_restore_idx.long(), non_blocking=True
             )
-            padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
-            padded_pos_start_loc[0] = 0
+
             if self.num_reqs > self.num_decode_reqs:
                 all_positions_prefill = [
                     get_current_rank_positions(padded_pos_start_loc, rank_i)[self.num_decode_tokens :]
