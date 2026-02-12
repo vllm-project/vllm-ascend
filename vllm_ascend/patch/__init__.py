@@ -263,3 +263,12 @@
 #       https://gitcode.com/Ascend/torchair/pull/2575
 #    Future Plan:
 #       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
+# ** 14. File: worker/patch_v2_uva.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.states.UvaBuffer`
+#    Why:
+#       ASCEND NPUs do not support UVA yet, so we need to wrap it in vLLM.
+#    How：
+#       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
+#    Future Plan:
+#       Remove this patch when NPU support UVA.

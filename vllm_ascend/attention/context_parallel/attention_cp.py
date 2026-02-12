@@ -765,6 +765,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         output_padded = output
 
         if len(kv_cache) > 1:
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
@@ -810,7 +812,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     value_cache=self.value_cache,
                     slot_indices=slot_mapping,
                 )
-
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event.record()
         return query, key, value, output_padded
 
     def _gather_and_restore_pcp_qkv(
