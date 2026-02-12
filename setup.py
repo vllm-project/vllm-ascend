@@ -512,6 +512,7 @@ setup(
             "ascend_kv_connector = vllm_ascend:register_connector",
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
+            "jiuwen_vllm_affinity_kv_cache_plugin = vllm_ascend:register_jiuwen_vllm_affinity_kv_cache_plugin",
         ],
     },
 )
