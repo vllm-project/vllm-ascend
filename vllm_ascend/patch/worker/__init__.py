@@ -33,3 +33,5 @@ import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
 import vllm_ascend.patch.worker.patch_v2_egale  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
+# TODO remove this patch when pr: https://github.com/vllm-project/vllm/pull/34336 is merged
+import vllm_ascend.patch.worker.patch_routed_experts_capturer  # noqa
