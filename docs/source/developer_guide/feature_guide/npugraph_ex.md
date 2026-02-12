@@ -94,7 +94,7 @@ with fake_mode:
     )
 ```
 
-The default fusion pass in npugraph_ex is also implemented based on this API. You can see more examples of using this API in the vllm-ascned and nugraph_ex code repositories.
+The default fusion pass in npugraph_ex is also implemented based on this API. You can see more examples of using this API in the vllm-ascend and npugraph_ex code repositories.
 
 ### DFX
 

@@ -19,6 +19,7 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
+    vllm_version_is,
 )
 
 
@@ -152,6 +153,9 @@ def set_ascend_forward_context(
                 mc2_mask[num_actual_tokens:] = False
                 forward_context.mc2_mask = mc2_mask
 
+        if is_draft_model and vllm_version_is("0.15.0"):
+            forward_context.remaining_moe_layers = None
+
         try:
             yield
         finally:
@@ -160,8 +164,6 @@ def set_ascend_forward_context(
 
 _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
-_sin: torch.Tensor | None = None
-_cos: torch.Tensor | None = None
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):

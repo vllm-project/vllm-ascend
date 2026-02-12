@@ -39,7 +39,6 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
-from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
@@ -299,9 +298,6 @@ class EagleProposer(VllmEagleProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
 
-        # update global cos, sin
-        update_cos_sin(self._get_positions(num_tokens))
-
         multi_steps_attn_metadata = []
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
@@ -471,9 +467,6 @@ class EagleProposer(VllmEagleProposer):
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
 
-        # update global cos, sin
-        update_cos_sin(self._get_positions(num_input_tokens))
-
         if self.uses_mrope:
             used_update_positions = target_positions[:, last_token_indices]
         else:
@@ -552,17 +545,6 @@ class EagleProposer(VllmEagleProposer):
         model_hidden_states = self.hidden_states[:num_input_tokens]
 
         model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
-
-        # Expend the remaining moe layers for suiting vllm.
-        forward_context = get_forward_context()
-        if forward_context and hasattr(forward_context, "remaining_moe_layers"):
-            if self.num_speculative_tokens > 1:
-                moe_layers_needed = len(forward_context.remaining_moe_layers) * self.num_speculative_tokens
-                if len(forward_context.remaining_moe_layers) < moe_layers_needed:
-                    original_layers = list(forward_context.remaining_moe_layers)
-                    repeat_count = (moe_layers_needed + len(original_layers) - 1) // len(original_layers)
-                    expanded_layers = original_layers * repeat_count
-                    forward_context.remaining_moe_layers = expanded_layers
 
         ret_hidden_states = self.model(
             input_ids=model_input_ids,
@@ -661,9 +643,6 @@ class EagleProposer(VllmEagleProposer):
             else:
                 input_ids = self.input_ids[:input_batch_size]
                 inputs_embeds = None
-
-            # update global cos, sin
-            update_cos_sin(self._get_positions(input_batch_size))
 
             # Run the model.
 
