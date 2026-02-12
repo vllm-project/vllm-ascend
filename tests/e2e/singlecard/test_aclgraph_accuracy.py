@@ -147,6 +147,11 @@ def test_full_decode_only_res_consistency(cur_case: LLMTestCase, monkeypatch):
             "cudagraph_mode": "FULL_DECODE_ONLY"
         },
         "quantization": cur_case.quantization,
+        "additional_config": {
+            "npugraph_ex_config": {
+                "enable": False
+            }
+        },
     }
     gen_and_valid(runner_kwargs=runner_kwargs,
                   prompts=cur_case.prompts,
