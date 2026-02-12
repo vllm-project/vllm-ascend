@@ -123,7 +123,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded if long_seq_metadata else None
         pcp_unpad_mask = (
-            long_seq_metadata.pcp_unpad_mask.to(self.device, non_blocking=True) if long_seq_metadata else None
+            long_seq_metadata.pcp_unpad_mask.pin_memory().to(self.device, non_blocking=True)
+            if long_seq_metadata else None
         )
         use_hybrid_attn = long_seq_metadata.pcp_use_hybrid_attn if long_seq_metadata else False
         if num_actual_tokens_pcp_padded is None:
@@ -827,6 +828,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         """
         num_tokens = query.shape[0]
         num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded
+        assert attn_metadata.prefill is not None and attn_metadata.prefill.pcp_metadata is not None
         pcp_padded_tokens_fla = attn_metadata.prefill.pcp_metadata.pcp_padded_tokens_fla
         num_tokens_pcp_padded_fla = num_tokens + pcp_padded_tokens_fla
 
@@ -938,6 +940,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             key = key[self.pcp_size * num_decode_tokens :].contiguous()
             value = value[self.pcp_size * num_decode_tokens :].contiguous()
             if attn_metadata.use_hybrid_attn:
+                assert attn_metadata.prefill.pcp_metadata is not None
                 fa_query_idx = attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx
                 prefill_query = torch.index_select(query[self.pcp_size * num_decode_tokens :], 0, fa_query_idx)
             else:
