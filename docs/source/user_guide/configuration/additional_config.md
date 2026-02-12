@@ -41,7 +41,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `recompute_scheduler_enable`        | bool | `False` | Whether to enable recompute scheduler.                                                                    |
 | `enable_cpu_binding`                | bool | `False` | Whether to enable CPU Binding.                                                                            |
 | `SLO_limits_for_dynamic_batch`      | int  | `-1`    | SLO limits for dynamic batch. This is new scheduler to support dynamic batch feature                            |
-| `enable_npugraph_ex`                | bool | `False` | Whether to enable Npugraph_ex graph mode.                                                                 |
+| `enable_npugraph_ex`                | bool | `False` | Whether to enable npugraph_ex graph mode.                                                                 |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
 | `layer_sharding` | dict | `{}` | Configuration options for Layer Sharding Linear |
@@ -66,7 +66,7 @@ The details of each configuration option are as follows:
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of LM Head.    |
+| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of lm_head.    |
 | `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of o_proj.     |
 | `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of embedding. |
 | `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of mlp.       |

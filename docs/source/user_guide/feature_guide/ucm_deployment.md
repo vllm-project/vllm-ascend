@@ -17,7 +17,7 @@ Unified Cache Management (UCM) provides an external KV-cache storage layer desig
 
 ## Configure UCM for Prefix Caching
 
-Modify the UCM configuration file to specify which UCM connector to use and where KV blocks should be stored. 
+Modify the UCM configuration file to specify which UCM connector to use and where KV blocks should be stored.
 You may directly edit the example file at:
 
 `unified-cache-management/examples/ucm_config_example.yaml`

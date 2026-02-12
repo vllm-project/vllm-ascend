@@ -467,13 +467,13 @@ In the PD separation scenario, we provide an optimized configuration.
 
 ### Parameters Description
 
-1.'--additional-config' Parameter Introduction:
+1. '--additional-config' Parameter Introduction:
 
 - **"enable_weight_nz_layout"**: Whether to convert quantized weights to NZ format to accelerate matrix multiplication.
 - **"enable_prefill_optimizations"**: Whether to enable DeepSeek models' prefill optimizations.
   <br>
 
-3. Enable MTP
+2. Enable MTP
 Add the following command to your configurations.
 
 ```shell
