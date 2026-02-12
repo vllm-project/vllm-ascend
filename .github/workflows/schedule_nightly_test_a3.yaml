@@ -165,6 +165,9 @@ jobs:
           - name: deepseek3_2-w8a8
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/single_node/models/test_deepseek_v3_2_w8a8.py
+          - name: qwen3-30b-acc
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}

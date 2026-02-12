@@ -74,8 +74,8 @@ class TestModelWithoutBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
-            x, residual, self.rms_norm_weight, self.eps)
+        norm_output, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, None, self.eps)
 
         quantized_output = torch.ops.vllm.quantize(norm_output,
                                                    self.quant_scale,
@@ -87,7 +87,7 @@ class TestModelWithoutBias(nn.Module):
     def ops_in_model_before(self) -> List[OpOverload]:
         """Return the list of expected operators BEFORE fusion."""
         return [
-            torch.ops.npu.npu_add_rms_norm.default,
+            torch.ops._C_ascend.npu_add_rms_norm_bias.default,
             torch.ops.vllm.quantize.default
         ]
 
@@ -187,8 +187,8 @@ class TestModelSPWithoutBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
-            x, residual, self.rms_norm_weight, self.eps)
+        norm_output, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, None, self.eps)
 
         norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             norm_output, True)
@@ -203,7 +203,7 @@ class TestModelSPWithoutBias(nn.Module):
     def ops_in_model_before(self) -> List[OpOverload]:
         """Return the list of expected operators BEFORE fusion."""
         return [
-            torch.ops.npu.npu_add_rms_norm.default,
+            torch.ops._C_ascend.npu_add_rms_norm_bias.default,
             torch.ops.vllm.maybe_all_gather_and_maybe_unpad.default,
             torch.ops.vllm.quantize.default
         ]

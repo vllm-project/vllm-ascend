@@ -1197,8 +1197,10 @@ class NPUModelRunner(GPUModelRunner):
                 model_kwargs,
                 ec_connector_output,
             ) = self._preprocess(scheduler_output, num_tokens_padded, intermediate_tensors)
+
             # update global cos, sin
             update_cos_sin(positions)
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -2308,7 +2310,7 @@ class NPUModelRunner(GPUModelRunner):
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
-                model_register(self.model, self.model_config)
+                model_register(self.model)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 with get_tp_context(self.drafter):

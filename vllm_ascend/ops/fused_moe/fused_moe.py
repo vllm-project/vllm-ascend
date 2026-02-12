@@ -35,7 +35,7 @@ from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
-from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
+from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.utils import (
     enable_sp,
     maybe_trans_nz,
@@ -94,6 +94,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
         enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
         **kwargs,
@@ -137,6 +138,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
+            w1_bias=layer.w13_bias if self.moe.has_bias else None,
+            w2_bias=layer.w2_bias if self.moe.has_bias else None,
+            activation=activation,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
@@ -235,22 +239,13 @@ class AscendFusedMoE(FusedMoE):
         self.quant_type = self._get_quant_type()
 
     def _get_quant_type(self) -> QuantType:
-        quant_method = self.quant_method
-        if not hasattr(quant_method, "quant_method") or quant_method.quant_method is None:
-            return QuantType.NONE
+        quant_type = QuantType.NONE
+        method = getattr(self.quant_method, "quant_method", None)
 
-        method = quant_method.quant_method
+        if method is not None:
+            quant_type = getattr(method, "quant_type", QuantType.NONE)
 
-        if hasattr(method, "quant_type"):
-            from vllm_ascend.quantization.methods.base import QuantType as SchemeQuantType
-
-            scheme_quant_type = method.quant_type
-            if scheme_quant_type == SchemeQuantType.W8A8:
-                return QuantType.W8A8
-            elif scheme_quant_type == SchemeQuantType.W4A8:
-                return QuantType.W4A8
-
-        return QuantType.NONE
+        return quant_type
 
     def update_expert_map(self, new_expert_map):
         self._expert_map = new_expert_map
