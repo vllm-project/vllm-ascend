@@ -228,7 +228,23 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-# ** 11. File: worker/patch_v2_eagle.py**
+# ** 11. File: worker/patch_qwen3_5.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
+#    Why:
+#       Triton ops fused_recurrent_gated_delta_rule and fused_gdn_gating
+#       in vLLM perform not good on NPU.
+#    How:
+#       Add fused triton ops: fused_gdn_gating_patch and
+#       fused_sigmoid_gating_delta_rule_update (for decode-only paths).
+#       Adapted for Qwen3.5 separate input projections (in_proj_qkv,
+#       in_proj_z, in_proj_b, in_proj_a) vs Qwen3-Next single in_proj.
+#    Related PR (if no, explain why):
+#       Based on Qwen3-Next adaptation, extended for Qwen3.5.
+#    Future Plan:
+#       Remove this patch when vLLM support these operators.
+#
+# ** 12. File: worker/patch_v2_eagle.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
 #    Why:
@@ -240,7 +256,7 @@
 #    Future Plan:
 #       Remove this patch when cann fix the gather bug.
 #
-# ** 12. File: worker/patch_unquantized_gemm.py**
+# ** 13. File: worker/patch_unquantized_gemm.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.utils.default_unquantized_gemm`
 #    Why:

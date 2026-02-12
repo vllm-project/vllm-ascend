@@ -202,9 +202,14 @@ class QKNormRopeFusionPass(VllmInductorPass):
             logger.debug("QKNorm and Rope fusion enabled, but no Attention layers were discovered.")
             return
         layer = next(iter(attn_layers.values()))
+        supported_head_dims = {128, 256}
         for epsilon in [1e-6, 1e-5]:
-            if layer.head_size != 128:
-                logger.debug("QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128", layer.head_size)
+            if layer.head_size not in supported_head_dims:
+                logger.debug(
+                    "QKNorm and Rope fusion not enabled: head_dim %d is not in supported set %s",
+                    layer.head_size,
+                    supported_head_dims,
+                )
                 continue
             QKNormRopeFusionPattern(
                 vllm_config=vllm_config,
