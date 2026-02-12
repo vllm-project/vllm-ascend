@@ -130,7 +130,7 @@ vllm-ascend is tested in three aspects, functions, performance, and accuracy.
 
 - **Nightly test**: we'll run full test every night to make sure the code is working.
 
-Finnall, for each release, we'll publish the performance test and accuracy test report in the future.
+Finally, for each release, we'll publish the performance test and accuracy test report in the future.
 
 ### 12. How to fix the error "InvalidVersion" when using vllm-ascend?
 

@@ -21,8 +21,6 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
 
-import vllm_ascend.envs as envs_ascend
-
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
 
@@ -93,7 +91,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         # q, k, v: [b, s, head, head_dim] -> [b * s, head, head_dim]
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
 
-        enable_pad = envs_ascend.USE_OPTIMIZED_MODEL and self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
+        enable_pad = self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
 
         if enable_pad:
             origin_shape = q.shape[-1]
