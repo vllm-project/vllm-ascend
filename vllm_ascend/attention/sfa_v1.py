@@ -431,6 +431,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.weights_proj = self.indexer.weights_proj
         self.k_norm = self.indexer.k_norm
         self.cp_size = 1
+        self.is_rope_neox_style = True
+        self.use_torch_npu_lightning_indexer = False
+        if self.vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]:
+            self.is_rope_neox_style = False
+            self.use_torch_npu_lightning_indexer = True
 
         self.enable_dsa_cp = enable_dsa_cp()
         self.enable_dsa_cp_prefill_only = enable_dsa_cp_with_layer_shard()
@@ -973,7 +978,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
-            q, k = rope_forward_triton(q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=True)
+            q, k = rope_forward_triton(
+                q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+            )
         else:
             k_pe, k_nope = torch.split(k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
 
@@ -1036,18 +1043,35 @@ class AscendSFAImpl(MLAAttentionImpl):
             key = self.gather_kv_cross_cp(key, attn_metadata.sfa_cp_metadata.valid_block_ids)
             block_table = attn_metadata.sfa_cp_metadata.block_table_cp
 
-        topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
-            query=q,
-            key=key,
-            weights=weights,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_key=actual_seq_lengths_key,
-            block_table=block_table,
-            layout_query="TND",
-            layout_key="PA_BSND",
-            sparse_count=2048,
-            sparse_mode=3,
-        )
+        # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
+        # So two branches are maintained temporarily.
+        # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
+        if self.use_torch_npu_lightning_indexer:
+            topk_indices, _ = torch_npu.npu_lightning_indexer(
+                query=q,
+                key=key,
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        else:
+            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+                query=q,
+                key=key,
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
         return topk_indices
 
     def _init_o_proj_tp_full_params(self):
