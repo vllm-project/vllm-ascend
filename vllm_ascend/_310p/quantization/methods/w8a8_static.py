@@ -73,6 +73,12 @@ class AscendW8A8LinearMethod310(AscendLinearScheme):
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
 
+        # NOTE(310P):
+        # - Current torch_npu.npu_quant_matmul on Ascend 310P expects the weight layout in a transposed form
+        #   for correct/efficient execution, so we pass `layer.weight.T` here.
+        # - This is a temporary workaround. The planned replacement quant-matmul op will accept the
+        #   canonical (non-transposed) weight layout directly, so this explicit transpose will be removed
+        #   once that op is enabled on 310P.
         return torch_npu.npu_quant_matmul(
             x,
             layer.weight.data.transpose(1, 0),
@@ -83,6 +89,8 @@ class AscendW8A8LinearMethod310(AscendLinearScheme):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         expanding_factor = layer.weight.data.shape[1]
+
+        # ---- quant stage tensors ----
         layer.aclnn_input_scale = torch.nn.Parameter(
             layer.input_scale.data.repeat(expanding_factor),
             requires_grad=False,
@@ -96,7 +104,9 @@ class AscendW8A8LinearMethod310(AscendLinearScheme):
             requires_grad=False,
         ).to(layer.aclnn_input_scale.dtype)
 
+        # ---- matmul stage tensor ----
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+
+        # ---- dequant stage tensors ----
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
-
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
