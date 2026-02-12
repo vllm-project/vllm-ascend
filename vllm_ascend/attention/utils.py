@@ -69,8 +69,6 @@ class AscendPrefillContextParallelMetadata:
     Contains index tensors and sequence lengths for PCP operations.
     """
 
-    pcp_use_hybrid_attn: bool
-
     pcp_allgather_restore_idx: torch.Tensor = None
 
     num_actual_tokens_pcp_padded: int = 0
@@ -103,12 +101,19 @@ class AscendPrefillContextParallelMetadata:
     # original max_query_len before pcp split
     max_query_len_pcp_full: int = 0
 
+    # the following attributes are specifically used in hybrid-attn models.
+    pcp_use_hybrid_attn: bool
+
     pcp_unpad_mask: torch.Tensor = None
 
+    # to get the right order of query in prefill per rank
     pcp_fa_query_idx: torch.Tensor = None
 
+    # restore the full sequence across all pcp ranks
+    # when entering from linear-attention to attention
     pcp_enter_fa_restore_idx: torch.Tensor = None
 
+    # the number of tokens padded in linear-attn across all ranks
     pcp_padded_tokens_fla: int = 0
 
 

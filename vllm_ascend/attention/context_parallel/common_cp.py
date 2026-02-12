@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.distributed as dist
@@ -25,7 +25,7 @@ class AscendPCPMetadata:
     head_attn_nomask_seqlens: torch.Tensor = None
     tail_attn_nomask_seqlens: torch.Tensor = None
     q_full_idx: torch.Tensor = None
-    pcp_allgather_restore_idx: list[int] | None = None
+    pcp_allgather_restore_idx: list[int] = field(dufault_factory=list)
     pcp_fa_query_idx: torch.Tensor = None
     pcp_padded_tokens_fla: int = 0
     pcp_enter_fa_restore_idx: torch.Tensor = None

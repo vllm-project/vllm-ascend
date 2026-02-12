@@ -124,7 +124,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded if long_seq_metadata else None
         pcp_unpad_mask = (
             long_seq_metadata.pcp_unpad_mask.pin_memory().to(self.device, non_blocking=True)
-            if long_seq_metadata else None
+            if long_seq_metadata
+            else None
         )
         use_hybrid_attn = long_seq_metadata.pcp_use_hybrid_attn if long_seq_metadata else False
         if num_actual_tokens_pcp_padded is None:
