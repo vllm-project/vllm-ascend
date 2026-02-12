@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import uuid
 
 import torch
@@ -10,20 +10,23 @@ from vllm.config.parallel import ParallelConfig
 from transformers import PretrainedConfig
 
 
+class MockVllmConfig:
+
+    def __init__(self):
+        self.model_config = MagicMock()
+        self.model_config.hf_text_config.num_hidden_layers = 1
+        self.model_config.hf_text_config.num_experts_per_tok = 1
+        self.parallel_config = MagicMock()
+        self.parallel_config.data_parallel_rank = 0
+        self.instance_id = uuid.uuid4().hex
+
+
 class TestPatchRoutedExpertsCapturer(TestBase):
 
     def setUp(self):
         RoutedExpertsCapturer.create()
         self.capturer = RoutedExpertsCapturer.get_instance()
-        hf_config = PretrainedConfig()
-        parallel_config = ParallelConfig()
-        model_config = ModelConfig(
-            hf_text_config=hf_config,
-            parallel_config=parallel_config,
-        )
-        model_config.instance_id = uuid.uuid4()
-        model_config.hf_text_config.num_experts_per_tok = 1
-        self.vllm_config = VllmConfig(model_config=model_config)
+        self.vllm_config = MockVllmConfig()
 
     def test_init_buffer(self):
         max_num_batched_tokens = 1
@@ -46,7 +49,7 @@ class TestPatchRoutedExpertsCapturer(TestBase):
                 )
             )
             self.assertEqual(self.capturer._device_buffer.dtype, torch.int32)
-            self.assertEqual(self.capturer._device_buffer.device, torch.device("npu"))
+            self.assertEqual(self.capturer._device_buffer.device, torch.device(type="npu", index=0))
 
     def tearDown(self):
         self.capturer.clear_buffer()
