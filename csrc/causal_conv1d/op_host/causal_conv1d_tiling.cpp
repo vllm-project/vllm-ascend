@@ -51,7 +51,7 @@ struct DimTileChoice {
 static inline DimTileChoice ChooseDimTileSize(gert::TilingContext* context, int64_t batch, int64_t dim, uint32_t coreNum)
 {
 
-    const int64_t candidates[] = {4096, 2048, 1024, 512};
+    const int64_t candidates[] = {4096, 2048, 1024, 512,384};
     DimTileChoice bestOver;
     int64_t bestOverGap = std::numeric_limits<int64_t>::max();
     DimTileChoice bestUnder;
@@ -180,12 +180,7 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext* context, CausalCon
     }
     if(width != 4){
         return ge::GRAPH_FAILED;
-    }
-    if(dim != 1024 && dim != 2048 && dim != 4096 && dim != 8192){
-        return ge::GRAPH_FAILED;
-    }
-    
-                
+    }                
 
     auto sShapePtr = context->GetInputShape(CONV_STATES_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context, sShapePtr);
