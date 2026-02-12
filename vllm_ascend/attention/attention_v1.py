@@ -350,6 +350,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         logits_soft_cap: float | None,
         attn_type: str,
         kv_sharing_target_layer_name: str | None,
+        sinks: torch.Tensor = None,
         **kwargs,
     ) -> None:
         self.vllm_config = get_current_vllm_config()
@@ -372,6 +373,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
+        self.sinks = sinks
 
     @staticmethod
     def update_graph_params(
@@ -766,6 +768,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and self.sliding_window is not None
             and attn_metadata.seq_lens.shape[0] == query.size(0)
+            and self.sinks is None
         ):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
@@ -778,23 +781,52 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = key[:num_tokens]
             value = value[:num_tokens]
         # Get workspace from cache or calculate it if not present.
-        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-            query=query,
-            key=key,
-            value=value,
-            atten_mask=attn_metadata.attn_mask,
-            block_table=block_table,
-            input_layout="TND",
-            block_size=block_size,
-            actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-            actual_seq_lengths_kv=actual_seq_lengths_kv,
-            num_key_value_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale=self.scale,
-            sparse_mode=3,
-        )
+        if self.sinks is not None:
+            actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
+            if self.sliding_window is not None:
+                atten_mask = attn_metadata.swa_mask
+                sparse_mode = 4
+            else:
+                atten_mask = attn_metadata.attn_mask
+                sparse_mode = 3
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                query,
+                key,
+                value,
+                num_query_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="TND",
+                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
+                next_tokens=0,
+                atten_mask=atten_mask,
+                sparse_mode=sparse_mode,
+                softmax_scale=self.scale,
+                block_table=block_table,
+                block_size=block_size,
+                actual_seq_qlen=actual_seq_qlen,
+                actual_seq_kvlen=actual_seq_lengths_kv,
+                learnable_sink=self.sinks,
+            )
+        else:
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                block_table=block_table,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                sparse_mode=3,
+            )
 
-        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+            attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
