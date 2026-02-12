@@ -514,13 +514,6 @@ class NPUPlatform(Platform):
         return torch.npu.max_memory_allocated(device)
 
     @classmethod
-    def get_non_torch_memory_usage(cls, device: torch.types.Device | None = None) -> float:
-        free_memory, total_memory = torch.npu.mem_get_info(device)
-        torch_memory = torch.npu.memory_reserved(device)
-        non_torch_memory = total_memory - free_memory - torch_memory
-        return non_torch_memory
-
-    @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm_ascend.distributed.device_communicators.npu_communicator.NPUCommunicator"
 
