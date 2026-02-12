@@ -1,8 +1,20 @@
 name: Mapping-Gen
 
 on:
-  pull_request:
-  push:
+  workflow_dispatch:
+    inputs:
+      vllm_ref:
+        description: "vllm-project/vllm ref (branch, tag, or commit)"
+        required: false
+        default: "v0.15.0"
+        type: string
+      image:
+        description: "CI container image"
+        required: false
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
+        type: string
+  schedule:
+    - cron: "0 2 * * 1"
 
 defaults:
   run:
