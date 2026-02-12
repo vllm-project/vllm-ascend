@@ -22,8 +22,7 @@ from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.activation import swiglustep_and_mul
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, swiglustep_and_mul
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
@@ -293,7 +292,6 @@ def unquant_apply_mlp(
     group_list_type: int = 1,
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
-    activation: str = "silu",
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
@@ -314,7 +312,6 @@ def unquant_apply_mlp(
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     else:
         gate_up_out = apply_moe_activation(activation, gate_up_out)
-
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
@@ -352,7 +349,6 @@ def unified_apply_mlp(
     fusion: bool = False,
     need_trans: bool = True,
     dynamic_eplb: bool = False,
-    activation: str = "silu",
 ) -> torch.Tensor:
     if with_quant:
         assert w1_scale is not None and w2_scale is not None
@@ -384,5 +380,4 @@ def unified_apply_mlp(
             group_list_type=group_list_type,
             topk_scales=topk_scales,
             need_trans=need_trans,
-            activation=activation,
         )

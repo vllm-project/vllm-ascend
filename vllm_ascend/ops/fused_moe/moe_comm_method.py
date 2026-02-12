@@ -175,7 +175,6 @@ class MoECommMethod(ABC):
             fusion=use_int8_w8a8 and self.use_fusion_ops,
             need_trans=need_trans,
             dynamic_eplb=dynamic_eplb,
-            activation=activation,
         )
 
         before_combine_evt = torch.npu.current_stream().record_event()
