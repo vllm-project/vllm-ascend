@@ -7,7 +7,7 @@ Unified Cache Management (UCM) provides an external KV-cache storage layer desig
 ## Prerequisites
 
 * OS: Linux
-* A hardware with Ascend NPU. It’s usually the Atlas 800 A2 series.
+* Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
 * **vLLM: main branch**
 * **vLLM Ascend: main branch**
 
@@ -17,7 +17,7 @@ Unified Cache Management (UCM) provides an external KV-cache storage layer desig
 
 ## Configure UCM for Prefix Caching
 
-Modify the UCM configuration file to specify which UCM connector to use and where KV blocks should be stored.  
+Modify the UCM configuration file to specify which UCM connector to use and where KV blocks should be stored. 
 You may directly edit the example file at:
 
 `unified-cache-management/examples/ucm_config_example.yaml`
@@ -78,7 +78,7 @@ vllm serve Qwen/Qwen2.5-14B-Instruct \
 
 **⚠️ Make sure to replace `"/vllm-workspace/unified-cache-management/examples/ucm_config_example.yaml"` with your actual config file path.**
 
-If you see log as below:
+If you see the log below:
 
 ```bash
 INFO:     Started server process [1049932]

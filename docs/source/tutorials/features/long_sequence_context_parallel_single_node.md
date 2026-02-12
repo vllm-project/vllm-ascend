@@ -1,16 +1,16 @@
 # Long-Sequence Context Parallel (Qwen3-235B-A22B)
 
-## Getting Start
+## Getting Started
 
 vLLM-Ascend now supports long-sequence context parallel. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Using the `Qwen3-235B-A22B-w8a8`(Quantized version) model as an example, use 1 Atlas 800 A3 (64G × 16) server to deploy the single node "pd co-locate" architecture.
+Using the `Qwen3-235B-A22B-w8a8` (Quantized version) model as an example, use 1 Atlas 800 A3 (64G × 16) server to deploy the single node "pd co-locate" architecture.
 
 ## Environment Preparation
 
 ### Model Weight
 
-- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
+- `Qwen3-235B-A22B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -25,7 +25,7 @@ export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+# Note: If you are running bridge network with Docker, please expose available ports for multiple nodes communication in advance
 docker run --rm \
 --name $NAME \
 --net=host \
@@ -65,7 +65,7 @@ docker run --rm \
 ### Single-node Deployment
 
 `Qwen3-235B-A22B-w8a8` can be deployed on 1 Atlas 800 A3（64G*16）.
-Quantized version need to start with parameter `--quantization ascend`.
+Quantized version needs to start with parameter `--quantization ascend`.
 
 Run the following script to execute online 128k inference.
 
@@ -111,8 +111,8 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 The parameters are explained as follows:
 
 - `--tensor-parallel-size` 8 are common settings for tensor parallelism (TP) sizes.
-- `--prefill-context-parallel-size` 2 are common settings for prefill context parallelism PCP) sizes.
-- `--decode-context-parallel-size` 2 are common settings for decode context parallelism DCP) sizes.
+- `--prefill-context-parallel-size` 2 are common settings for prefill context parallelism (PCP) sizes.
+- `--decode-context-parallel-size` 2 are common settings for decode context parallelism (DCP) sizes.
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
@@ -131,7 +131,7 @@ The parameters are explained as follows:
 **Notice:**
 
 - tp_size needs to be divisible by dcp_size
-- decode context parallel size must less than or equal to max_dcp_size, where max_dcp_size = tensor_parallel_size // total_num_kv_heads.
+- decode context parallel size must be less than or equal to max_dcp_size, where max_dcp_size = tensor_parallel_size // total_num_kv_heads.
 
 ## Accuracy Evaluation
 
@@ -169,7 +169,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input 131072 --num-prompt 1 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input 131072 --num-prompts 1 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
