@@ -462,6 +462,9 @@ class KVPoolWorker:
                     request.is_last_chunk,
                     current_event,
                 )
+                self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
+                    request.req_id
+                )
                 self.kv_send_thread.add_request(  # type: ignore[union-attr, call-arg]
                     req_meta
                 )  # type: ignore[union-attr, call-arg, arg-type]
