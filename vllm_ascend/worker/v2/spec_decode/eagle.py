@@ -42,14 +42,23 @@ class AscendEagleSpeculator(EagleSpeculator):
 
     def propose(
         self,
-        input_batch,
-        sampling_metadata,
-        last_hidden_states,
-        aux_hidden_states,
-        num_sampled,
-        num_rejected,
-        last_sampled,
-        next_prefill_tokens,
+        input_batch: InputBatch,
+        # [num_tokens, hidden_size]
+        last_hidden_states: torch.Tensor,
+        # num_layers x [num_tokens, hidden_size]
+        aux_hidden_states: list[torch.Tensor] | None,
+        # [num_reqs]
+        num_sampled: torch.Tensor,
+        # [num_reqs]
+        num_rejected: torch.Tensor,
+        # [max_num_reqs]
+        last_sampled: torch.Tensor,
+        # [max_num_reqs]
+        next_prefill_tokens: torch.Tensor,
+        # [max_num_reqs]
+        temperature: torch.Tensor,
+        # [max_num_reqs]
+        seeds: torch.Tensor,
     ):
         """Override GPU EagleSpeculator.propose for Ascend NPUs,
         because npu attention metadata needs more information,
@@ -62,19 +71,21 @@ class AscendEagleSpeculator(EagleSpeculator):
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
-                sampling_metadata,
                 last_hidden_states,
                 aux_hidden_states,
                 num_sampled,
                 num_rejected,
                 last_sampled,
                 next_prefill_tokens,
+                temperature,
+                seeds,
             )
 
     def generate_draft(
         self,
         num_reqs: int,
         attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
         num_tokens_across_dp,
     ):
         """Override GPU EagleSpeculator.generate_draft for Ascend NPUs, because
@@ -86,6 +97,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         return super().generate_draft(
             num_reqs,
             attn_metadata,
+            slot_mappings,
             num_tokens_across_dp,
         )
 
@@ -94,6 +106,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         self,
         num_tokens: int,
         attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Override GPU EagleSpeculator.run_model for Ascend NPUs, because
@@ -103,6 +116,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         last_hidden_states, hidden_states = super().run_model(
             num_tokens,
             attn_metadata,
+            slot_mappings,
             num_tokens_across_dp,
         )
 
