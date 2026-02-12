@@ -171,6 +171,10 @@ def split_qkv_rmsnorm_mrope_kernel(
             strides=(1, 1),
         )
         if IS_PARTIAL_ROPE:
+            orig_qk = tl.extract_slice(q_normalized, offsets=(0, 0),
+                                       sizes=(num_q_heads, rope_dim),
+                                       strides=(1, 1))
+        else:
             orig_qk = q_normalized
         roped_q = cat_x * sin_tensor + orig_qk * cos_tensor
         # roped_q = roped_q.to(tl.bfloat16)
