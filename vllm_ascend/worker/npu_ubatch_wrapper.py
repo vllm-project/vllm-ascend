@@ -127,6 +127,7 @@ class UBatchWrapper(GPUUBatchWrapper):
         def _capture_ubatch_thread(results, ubatch_metadata):
             torch.npu.set_device(self.device)
             ubatch_context = ubatch_metadata.context
+            ubatch_context.forward_context.capturing = True
             # NPU特殊逻辑：不需要初始化blas_handle
             with ubatch_context:
                 model_output = model(
@@ -149,6 +150,7 @@ class UBatchWrapper(GPUUBatchWrapper):
 
         # Ubatches will manually manage the forward context, so we override
         # it to None here so we can have it restored correctly later
+        forward_context = get_forward_context()
         with override_forward_context(None):
             ubatch_threads = []
             for metadata in ubatch_metadata:
@@ -171,6 +173,7 @@ class UBatchWrapper(GPUUBatchWrapper):
                 set_graph_pool_id(self.graph_pool)
             else:
                 set_graph_pool_id(current_platform.graph_pool_handle())
+            forward_context.capturing = True
             with torch.npu.graph(aclgraph_metadata.aclgraph,
                                   stream=compute_stream,
                                   pool=self.graph_pool):

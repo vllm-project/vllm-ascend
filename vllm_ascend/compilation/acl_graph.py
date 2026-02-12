@@ -4,8 +4,9 @@
 import dataclasses
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, List, Dict, Tuple
 from unittest.mock import patch
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -303,7 +304,7 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
 def update_attn_params(update_stream, forward_context, runtime_shape,
                        vllm_config):
     if using_paged_attention(runtime_shape, vllm_config):
-        _update_attn_pa_params(update_stream, forward_context, runtime_shape)
+        _update_attn_pa_params(update_stream, forward_context, runtime_shape,is_ubatch)
     else:
         _update_attn_fia_params(update_stream, forward_context, runtime_shape)
 
@@ -312,22 +313,33 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                            speculative_config):
     if forward_context.is_draft_model:
         graph_params = get_draft_graph_params()
+    elif forward_context.afd_metadata:
+        if is_ubatch:
+            graph_params_dict = get_graph_params_dict()
+            # only support nums_ubatch = 2
+            merged_graph_params = interleave_graph_params(graph_params_dict[0], graph_params_dict[1])
+            list_of_attn_metadata = list_of_dicts_to_dict_of_lists(forward_context.attn_metadata)
+            graph_params = merged_graph_params
+        else:
+            return
     else:
         graph_params = get_graph_params()
+        
     # FIXME: Behold! We are using a temporary hack here to update the args
     # for each layer's attention op in the graph.
     with torch.npu.stream(update_stream):
         for key, param, handle, event in zip(
-                forward_context.attn_metadata,
-                graph_params.attn_params[runtime_shape],
-                graph_params.handles[runtime_shape],
-                graph_params.events[runtime_shape],
-        ):
-            (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
-             attn_mask, sparse_mode, scale, block_table, block_size,
-             seq_lens_list, actual_seq_lengths, attn_output,
-             softmax_lse) = param
-            seq_lens_list = forward_context.attn_metadata[
+                    list_of_attn_metadata if is_ubatch else forward_context.attn_metadata,
+                    graph_params.attn_params[runtime_shape],
+                    graph_params.handles[runtime_shape],
+                    graph_params.events[runtime_shape],
+            ):
+                (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
+                attn_mask, sparse_mode, scale, block_table, block_size,
+                seq_lens_list, actual_seq_lengths, attn_output,
+                softmax_lse) = param
+                
+            seq_lens_list = key.decode.seq_lens_list if is_ubatch else forward_context.attn_metadata[
                 key].decode.seq_lens_list
             if speculative_config and speculative_config.method == "mtp" \
                     and not forward_context.is_draft_model:
@@ -351,8 +363,8 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                 seq_lens_list = seq_lens_list + [0] * (
                     len(actual_seq_lengths) - len(seq_lens_list))
             else:
-                seq_lens_list = seq_lens_list + [0] * (runtime_shape -
-                                                       len(seq_lens_list))
+                    seq_lens_list = seq_lens_list + [0] * (runtime_shape -
+                                                        len(seq_lens_list))
             torch.npu.graph_task_update_begin(update_stream, handle)
 
             torch_npu.npu_fused_infer_attention_score.out(
@@ -442,8 +454,7 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
     else:
         graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
-    # for each layer's attention op in the graph.
-    with torch.npu.stream(update_stream):
+    # for each layer's attention op in the graph.        with torch.npu.stream(update_stream):
         for key, param, handle, event in zip(
                 forward_context.attn_metadata,
                 graph_params.attn_params[runtime_shape],
@@ -480,7 +491,7 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
                 actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (
                     runtime_shape - len(actual_seq_lengths_kv))
 
-            torch.npu.graph_task_update_begin(update_stream, handle)
+                torch.npu.graph_task_update_begin(update_stream, handle)
 
             torch_npu.npu_fused_infer_attention_score.out(
                 q_nope,
@@ -506,7 +517,7 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
             )
             torch.npu.graph_task_update_end(update_stream)
 
-            event.record(update_stream)
+                event.record(update_stream)
 
 
 @dataclass
@@ -518,6 +529,7 @@ class GraphParams:
 
 
 _graph_params: Optional[GraphParams] = None
+_graph_params_dict: defaultdict[int, Optional[GraphParams]] = None
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):
@@ -534,6 +546,23 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
         {size: []
          for size in aclgraph_capture_sizes},
     )
+
+def set_graph_params_dict(aclgraph_capture_sizes: set[int],nums_ubatch):
+    global _graph_params_dict
+    if _graph_params_dict is not None:
+        raise ValueError("Graph dict parameters have already been set!")
+    _graph_params_dict = defaultdict(lambda: None)
+    for nb in range(nums_ubatch):
+        _graph_params_dict[nb] = GraphParams(
+            {size: []
+            for size in aclgraph_capture_sizes},
+            {size: None
+            for size in aclgraph_capture_sizes},
+            {size: []
+            for size in aclgraph_capture_sizes},
+            {size: []
+            for size in aclgraph_capture_sizes},
+        )
 
 
 def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
@@ -573,3 +602,83 @@ def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
 
 def get_draft_graph_params():
     return _draft_graph_params
+
+def get_graph_params_dict():
+    return _graph_params_dict
+
+def interleave_lists(list0: List, list1: List) -> List:
+    """
+    Interleave two lists element-wise by index.
+    Example: list0 = [a0, a1], list1 = [b0, b1] → [a0, b0, a1, b1]
+    If lengths differ, remaining elements are appended at the end.
+    """
+    result = []
+    min_len = min(len(list0), len(list1))
+    for i in range(min_len):
+        result.append(list0[i])
+        result.append(list1[i])
+    result.extend(list0[min_len:])
+    result.extend(list1[min_len:])
+    return result
+
+
+def interleave_dict_of_lists(
+    dict0: Dict[int, List],
+    dict1: Dict[int, List]
+) -> Dict[int, List]:
+    """
+    For each key present in either dictionary, interleave the corresponding lists.
+    If a key exists only in one dict, its list is kept as-is.
+    """
+    all_keys = set(dict0.keys()) | set(dict1.keys())
+    new_dict = {}
+    for key in all_keys:
+        list0 = dict0.get(key, [])
+        list1 = dict1.get(key, [])
+        new_dict[key] = interleave_lists(list0, list1)
+    return new_dict
+
+
+def interleave_graph_params(params0: GraphParams, params1: GraphParams) -> GraphParams:
+    """
+    Interleave all Dict[int, List] fields of two GraphParams objects by their inner keys.
+    The workspaces field is Dict[int, Tensor] and does not contain lists;
+    a specific merging policy must be defined. Here we demonstrate:
+    keep workspaces from params0, and add entries from params1 that are missing.
+    Adjust according to your actual requirements.
+    """
+    # Interleave events
+    new_events = interleave_dict_of_lists(params0.events, params1.events)
+    # Interleave handles
+    new_handles = interleave_dict_of_lists(params0.handles, params1.handles)
+    # Interleave attn_params
+    new_attn_params = interleave_dict_of_lists(params0.attn_params, params1.attn_params)
+
+    # workspaces: no merging required – keep params0's workspaces as-is
+    new_workspaces = params0.workspaces.copy()
+
+    return GraphParams(
+        events=new_events,
+        workspaces=new_workspaces,
+        handles=new_handles,
+        attn_params=new_attn_params
+    )
+
+
+def list_of_dicts_to_dict_of_lists(list_of_dicts: List[Dict]):
+    """Convert [{"k1": a, "k2": b}, {"k1": c, "k2": d}] -> {"k1": [a, c], "k2": [b, d]}"""
+    if not list_of_dicts:
+        return {}
+    keys = list_of_dicts[0].keys()
+    
+    result = {k: [] for k in keys}
+    for d in list_of_dicts:
+        for k in keys:
+            result[k].append(d[k])
+    ans = []        
+    for key in keys:
+        for v in result[key]:
+            ans.append(v)  
+    return ans
+
+

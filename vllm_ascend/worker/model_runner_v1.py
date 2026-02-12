@@ -93,7 +93,8 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_attn_dcp_pcp_params,
                                                update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
-                                               update_mla_attn_params)
+                                               update_mla_attn_params,
+                                               set_graph_params_dict)
 # yapf: enable
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
@@ -385,7 +386,7 @@ class NPUModelRunner(GPUModelRunner):
         #         torch_npu.profiler.ProfilerActivity.CPU,
         #         torch_npu.profiler.ProfilerActivity.NPU
         #     ],
-        #     schedule=torch_npu.profiler.schedule(wait=2, warmup=5, active=20, repeat=1, skip_first=20),
+        #     schedule=torch_npu.profiler.schedule(wait=2, warmup=1, active=20, repeat=1, skip_first=120),
         #     # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
         #     experimental_config=experimental_config,
         #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/ttg/prof")
@@ -800,6 +801,7 @@ class NPUModelRunner(GPUModelRunner):
         # support inequal AF,[ffn_size,ffn_size + min_size) send
         if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
             self.afd_connector.send_is_ubatch(should_ubatch)
+            self.is_ubatch = should_ubatch
             logger.info(f'afd_connector.rank in prepare input is {self.afd_connector.rank}, '
                         f'should_ubatch: {should_ubatch}, ubatch_slices: {ubatch_slices_attn}')
 
@@ -1273,9 +1275,10 @@ class NPUModelRunner(GPUModelRunner):
                                                    maybe_padded_num_tokens)
                 else:
                     # FIXME: Try using `auto_dispatch_capture=True`
+                    runtime_shape = positions.shape[0] // self.parallel_config.num_ubatches if self.afd_config else positions.shape[0]
                     update_mla_attn_params(self.update_stream, forward_context,
-                                           maybe_padded_num_tokens,
-                                           self.speculative_config)
+                                           runtime_shape,
+                                           self.speculative_config,self.is_ubatch)
             else:
                 if self.pcp_size * self.dcp_size > 1:
                     update_attn_dcp_pcp_params(self.update_stream,
@@ -2200,6 +2203,8 @@ class NPUModelRunner(GPUModelRunner):
                                    inputs_embeds=inputs_embeds)
         forward_context = get_forward_context()
         assert forward_context is not None
+        print(f'forward_context.cudagraph_runtime_mode in _generate_dummy_run_hidden_states is {forward_context.cudagraph_runtime_mode}',flush=True)
+        print(f'forward_context.capturing in _generate_dummy_run_hidden_states is {forward_context.capturing}',flush=True)
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
             not forward_context.capturing and not self.use_sparse:
             if self.vllm_config.model_config.use_mla:
@@ -2211,13 +2216,14 @@ class NPUModelRunner(GPUModelRunner):
                                                    positions.shape[0])
                 else:
                     # FIXME: Try using `auto_dispatch_capture=True`
+                    runtime_shape = positions.shape[0] // self.parallel_config.num_ubatches if self.afd_config else positions.shape[0]
                     update_mla_attn_params(self.update_stream, forward_context,
-                                           num_tokens, self.speculative_config)
+                                           num_tokens, self.speculative_config,self.is_ubatch)
             else:
                 if self.pcp_size * self.dcp_size > 1:
                     update_attn_dcp_pcp_params(self.update_stream,
                                                forward_context,
-                                               positions.shape[0])
+                                               runtime_shape,self.is_ubatch)
                 else:
                     update_attn_params(self.update_stream, forward_context,
                                        num_tokens, self.vllm_config)
@@ -2409,14 +2415,10 @@ class NPUModelRunner(GPUModelRunner):
         # support inequal AF,[ffn_size,ffn_size + min_size) send
         if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
             logger.info(f'afd_connector.rank in dummy_run is {self.afd_connector.rank}')
+            self.is_ubatch = should_ubatch
             self.afd_connector.send_is_ubatch(should_ubatch)
             logger.info(f'afd_connector.rank in dummy_run is {self.afd_connector.rank}, '
                         f'should_ubatch in dummy_run  is {should_ubatch}')
-
-        # num_tokens_after_padding = num_tokens
-        # if num_tokens_across_dp is not None:
-        #     dp_rank = self.parallel_config.data_parallel_rank
-        #     num_tokens_after_padding = int(num_tokens_across_dp[dp_rank])
 
         if not is_profile and self.dynamic_eplb:
             self.eplb_updator.forward_before()
@@ -2660,6 +2662,8 @@ class NPUModelRunner(GPUModelRunner):
         elif self.parallel_config.use_ubatching:
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                self.update_stream = torch.npu.Stream()
+                set_graph_params_dict([size // self.parallel_config.num_ubatches for size in self.compilation_config.cudagraph_capture_sizes],self.parallel_config.num_ubatches)
                 self.model = UBatchWrapper(self.model, self.vllm_config,
                                            CUDAGraphMode.FULL, self.device)
             else:
