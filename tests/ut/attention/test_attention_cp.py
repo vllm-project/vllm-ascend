@@ -232,15 +232,17 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(value.shape[1], num_heads)
         self.assertEqual(value.shape[2], head_size)
 
+    @patch('torch_npu.Event', create=True)
     @patch('torch_npu._npu_reshape_and_cache')
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_reshape_and_cache(self, mock_npu_reshape_and_cache):
+    def test_reshape_and_cache(self, mock_event_class, mock_npu_reshape_and_cache):
         num_tokens = 4
         block_num = 100
         block_size = 128
         num_heads = 1
         head_size = 128
         self.impl.head_size = head_size
+        self.impl.is_kv_producer = False
 
         kv_cache = (torch.randn(block_num, block_size, num_heads, head_size),
                     torch.randn(block_num, block_size, num_heads, head_size))
