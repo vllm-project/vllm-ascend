@@ -525,9 +525,9 @@ class NPUWorker(WorkerBase):
                 ],
                 with_stack=False,
                 profile_memory=bool(envs_vllm.\
-                    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY) != '0' if envs_vllm.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY is not None else False,
+                    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY != '0') if envs_vllm.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY is not None else False,
                 with_modules=bool(envs_vllm.\
-                    VLLM_TORCH_PROFILER_WITH_STACK) != '0' if envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK is not None else True,
+                    VLLM_TORCH_PROFILER_WITH_STACK != '0') if envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK is not None else True,
                 experimental_config=experimental_config,
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir))
