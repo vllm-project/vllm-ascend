@@ -29,8 +29,18 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
-from vllm.v1.spec_decode.eagle import EagleProposer as VllmEagleProposer
+# from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
+from vllm.v1.spec_decode.utils import (
+    PADDING_SLOT_ID,
+    compute_new_slot_mapping,
+    create_vllm_config_for_draft_model,
+    eagle_prepare_inputs_padded_kernel,
+    eagle_prepare_next_token_padded_kernel,
+    extend_all_queries_by_N,
+)
+
+from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer as VllmSpecDecodeBaseProposer
+# from vllm.v1.spec_decode.eagle import EagleProposer as VllmEagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -80,14 +90,14 @@ def split_inputs_tp_to_sp(hidden_states, out):
     return out[:padded_num_tokens_per_rank]
 
 
-class EagleProposer(VllmEagleProposer):
+class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
-        super().__init__(vllm_config, device, runner)
+    def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
+        super().__init__(vllm_config, device, pass_hidden_states_to_model, runner)
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
-
+        self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 1, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0], device="cpu", dtype=torch.int32)
@@ -136,7 +146,7 @@ class EagleProposer(VllmEagleProposer):
         if not self.use_cuda_graph and enable_sp(vllm_config):
             self.maybe_eager_context = _maybe_eager_context(vllm_config)
 
-        self.last_token_indices = torch.zeros(
+        self.token_indices_to_sample = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32, device=device
         )
         slot_mapping_lens = self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs
@@ -146,57 +156,105 @@ class EagleProposer(VllmEagleProposer):
         ]
 
         self._runnable = self._run_merged_draft
-
-    def load_model(self, model: nn.Module) -> None:
-        target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
-        target_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
-
-        with self.maybe_eager_context:
-            self.model = get_model(
-                vllm_config=self.vllm_config, model_config=self.vllm_config.speculative_config.draft_model_config
+        if self.uses_mrope:
+            self.mrope_positions = torch.zeros(
+                (3, self.max_num_tokens + 1), dtype=torch.int32, device=device
             )
+        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            self.xdrope_positions = torch.zeros(
+                (self.uses_xdrope_dim, self.max_num_tokens + 1),
+                dtype=torch.int32,
+                device=device,
+            )
+        else:
+            # RoPE need (max_num_tokens,)
+            self.positions = torch.zeros(
+                self.max_num_tokens, dtype=torch.int32, device=device
+            )
+    
+    def load_model(self, model: nn.Module) -> None:
+        target_attn_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config,
+                                        AttentionLayerBase).keys())
+        target_indexer_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config,
+                                        DeepseekV32IndexerCache).keys())
 
-        indexer_layers = get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys()
-        draft_attn_layer = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
+        self.model =  self._get_model()
+        # with self.maybe_eager_context:
+        #     self.model = get_model(vllm_config=self.vllm_config,
+        #                            model_config=self.vllm_config.
+        #                            speculative_config.draft_model_config)
+
+        indexer_layers = get_layers_from_vllm_config(
+            self.vllm_config, DeepseekV32IndexerCache).keys()
+        draft_attn_layer = get_layers_from_vllm_config(
+            self.vllm_config, AttentionLayerBase).keys()
 
         draft_attn_layer_names = draft_attn_layer - target_attn_layer_names
         draft_indexer_layer_names = indexer_layers - target_indexer_layer_names
         draft_attn_layer_names = draft_attn_layer_names - draft_indexer_layer_names
-        assert len(draft_attn_layer_names) == 1
+        # assert len(draft_attn_layer_names) == 1
         self.attn_layer_names = list(sorted(draft_attn_layer_names))
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
-            self.piece_all_attn_layer_name.append([name for name in self.attn_layer_names])
+            self.piece_all_attn_layer_name.append([
+                name for name in self.attn_layer_names])
         self.attn_layer_names = list(sorted(draft_attn_layer_names))
 
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
-            self.piece_all_attn_layer_name.append([name for name in self.attn_layer_names])
+            self.piece_all_attn_layer_name.append([
+                name for name in self.attn_layer_names])
 
         if supports_multimodal(model):
             # handle multimodality
             if self.get_model_name(model) in [
-                "Qwen2_5_VLForConditionalGeneration",
-                "Qwen3VLForConditionalGeneration",
-                "Qwen3VLMoeForConditionalGeneration",
+                    "Qwen2_5_VLForConditionalGeneration",
+                    "Qwen3VLForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = model.config.image_token_id
-            elif self.get_model_name(model) == "PixtralForConditionalGeneration":
-                self.model.config.image_token_index = model.config.vision_config.image_token_id
+            elif self.get_model_name(
+                    model) == "PixtralForConditionalGeneration":
+                self.model.config.image_token_index = (
+                    model.config.vision_config.image_token_id)
             else:
-                self.model.config.image_token_index = model.config.image_token_index
+                self.model.config.image_token_index = (
+                    model.config.image_token_index)
             target_language_model = model.get_language_model()
         else:
             target_language_model = model
 
         # share embed_tokens with the target model if needed
+        self._maybe_share_embeddings(target_language_model)
+        self._maybe_share_lm_head(target_language_model)
+
+        if self.parallel_drafting and self.pass_hidden_states_to_model:
+            assert self.parallel_drafting_hidden_state_tensor is not None
+            self.parallel_drafting_hidden_state_tensor.copy_(
+                self.model.combine_hidden_states(
+                    self.model.mask_hidden.view(3 * self.hidden_size)
+                )
+                if self.eagle3_use_aux_hidden_state
+                else self.model.mask_hidden.view(self.hidden_size)
+            )
+
+    def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
+        """
+        Some draft models may not have their own embedding layers, and some may
+        have a duplicate copy of the target model's embedding layers. In these cases,
+        we share the target model's embedding layers with the draft model to save
+        memory.
+        """
         if get_pp_group().world_size == 1:
             if hasattr(target_language_model.model, "embed_tokens"):
                 target_embed_tokens = target_language_model.model.embed_tokens
             elif hasattr(target_language_model.model, "embedding"):
                 target_embed_tokens = target_language_model.model.embedding
             else:
-                raise AttributeError("Target model does not have 'embed_tokens' or 'embedding' attribute")
+                raise AttributeError(
+                    "Target model does not have 'embed_tokens' or 'embedding' attribute"
+                )
             # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
             # check if mtp model use main model's embedding and LMhead
             share_embeddings = False
@@ -233,7 +291,10 @@ class EagleProposer(VllmEagleProposer):
             else:
                 # MTP model
                 share_embeddings = True
-                logger.info("Detected MTP model. Sharing target model embedding weights with the draft model.")
+                logger.info(
+                    "Detected MTP model. "
+                    "Sharing target model embedding weights with the draft model."
+                )
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
@@ -241,10 +302,12 @@ class EagleProposer(VllmEagleProposer):
                 self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
-                "Since PP > 1 or other reasons the model head loaded its own vocab embedding"
+                "Since PP > 1 or other reasons the model head loaded its own vocab embedding" \
                 " weights instead of sharing them with the target model."
             )
-        # share lm_head with the target model if needed
+    
+    # share lm_head with the target model if needed
+    def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
         if self.method == "eagle" and hasattr(model, "lm_head"):
@@ -254,25 +317,24 @@ class EagleProposer(VllmEagleProposer):
             else:
                 self.model.lm_head = model.lm_head
 
-        if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
+        if self.method == "mtp" and \
+            self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
-                if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
+                if torch.equal(layer_module.shared_head.head.weight,
+                               model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
+        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
+        ) and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()
             if self.method == "mtp":
-                self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+                self.model = ACLGraphWrapper(self.model,
+                                             self.vllm_config,
+                                             runtime_mode=CUDAGraphMode.FULL)
             else:
-                self._runnable = ACLGraphWrapper(
-                    self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
-                )
-
-    def get_model(self) -> nn.Module:
-        # get raw model out of the aclgraph wrapper.
-        if isinstance(self.model, ACLGraphWrapper):
-            return self.model.unwrap()
-        return self.model
+                self._runnable = ACLGraphWrapper(self._run_merged_draft,
+                                                 self.vllm_config,
+                                                 runtime_mode=CUDAGraphMode.FULL)
 
     def shallow_copy_metadata(self, attn_metadata):
         # Currently, new objects will be assigned to the lists in attn_metadata
@@ -366,7 +428,7 @@ class EagleProposer(VllmEagleProposer):
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
-                last_token_indices=self.last_token_indices[:batch_size],
+                token_indices_to_sample=self.token_indices_to_sample[:batch_size*self.extra_slots_per_request], 
                 # The target_position's address is same as the model_positions's
                 target_positions=model_positions,
                 inputs_embeds=None,
@@ -387,7 +449,7 @@ class EagleProposer(VllmEagleProposer):
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        last_token_indices: torch.Tensor | None,
+        token_indices_to_sample: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -397,24 +459,30 @@ class EagleProposer(VllmEagleProposer):
         num_decode_reqs=0,
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
+        num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        num_tokens = target_token_ids.shape[0]
-        batch_size = next_token_ids.shape[0]
+        batch_size = common_attn_metadata.batch_size()
 
-        if last_token_indices is None:
-            last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+        if token_indices_to_sample is None:
+            token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
             assert isinstance(self.get_model(), Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        # Shift the input ids by one token.
-        # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
-        self.input_ids[: num_tokens - 1] = target_token_ids[1:]
-        # Replace the last token with the next token.
-        # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-        self.input_ids[last_token_indices] = next_token_ids
+        num_tokens, token_indices_to_sample, common_attn_metadata = (
+            self.set_inputs_first_pass(
+                target_token_ids=target_token_ids,
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                token_indices_to_sample=token_indices_to_sample,
+                cad=common_attn_metadata,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+            )
+        )
+
         if self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[num_tokens]
         else:
@@ -436,8 +504,8 @@ class EagleProposer(VllmEagleProposer):
             batch_descriptor = None
 
         # copy inputs to buffer for cudagraph
-        self._set_positions(num_tokens, target_positions)
-        self.hidden_states[:num_tokens] = target_hidden_states
+        # self._set_positions(num_tokens, target_positions)
+        # self.hidden_states[:num_tokens] = target_hidden_states
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -466,11 +534,13 @@ class EagleProposer(VllmEagleProposer):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
+        attn_metadata.seq_lens = common_attn_metadata.seq_lens
+        attn_metadata.seq_lens_list = common_attn_metadata.seq_lens.tolist()
 
         if self.uses_mrope:
-            used_update_positions = target_positions[:, last_token_indices]
+            used_update_positions = self.mrope_positions[:, token_indices_to_sample]
         else:
-            used_update_positions = target_positions[last_token_indices]
+            used_update_positions = self.positions[token_indices_to_sample]
         per_layer_attn_metadata = dict()
         # The first step of speculative.
         for layer_name in self.attn_layer_names:
@@ -478,23 +548,24 @@ class EagleProposer(VllmEagleProposer):
         multi_steps_attn_metadata = [per_layer_attn_metadata]
 
         # Copy the old attn_metadata and update
-        for draft_step in range(1, self.num_speculative_tokens):
-            common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                draft_step,
-                attn_metadata,
-                common_attn_metadata,
-                batch_size,
-                num_input_tokens,
-                used_update_positions,
-                aclgraph_runtime_mode,
-            )
-            per_layer_attn_metadata = dict()
-            for layer_name in self.attn_layer_names:
-                per_layer_attn_metadata[layer_name] = attn_metadata
-            multi_steps_attn_metadata.append(per_layer_attn_metadata)
+        if not self.parallel_drafting:
+            for draft_step in range(1, self.num_speculative_tokens):
+                common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                    draft_step,
+                    attn_metadata,
+                    common_attn_metadata,
+                    batch_size,
+                    num_input_tokens,
+                    used_update_positions,
+                    aclgraph_runtime_mode,
+                )
+                per_layer_attn_metadata = dict()
+                for layer_name in self.attn_layer_names:
+                    per_layer_attn_metadata[layer_name] = attn_metadata
+                multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
-        last_token_indices_len = last_token_indices.shape[0]
-        self.last_token_indices[:last_token_indices_len].copy_(last_token_indices)
+        token_indices_to_sample_len = token_indices_to_sample.shape[0]
+        self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
@@ -516,7 +587,7 @@ class EagleProposer(VllmEagleProposer):
             draft_token_ids = self._runnable(
                 num_input_tokens=num_input_tokens,
                 batch_size=batch_size,
-                last_token_indices=self.last_token_indices[:last_token_indices_len],
+                token_indices_to_sample=self.token_indices_to_sample[:token_indices_to_sample_len],
                 target_positions=target_positions,
                 inputs_embeds=inputs_embeds,
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
@@ -531,7 +602,7 @@ class EagleProposer(VllmEagleProposer):
         self,
         num_input_tokens,
         batch_size,
-        last_token_indices,
+        token_indices_to_sample,
         target_positions,
         inputs_embeds,
         multi_steps_attn_metadata,
@@ -542,17 +613,20 @@ class EagleProposer(VllmEagleProposer):
         # `model_hidden_states` represent the speculative model inputs.
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
-        model_hidden_states = self.hidden_states[:num_input_tokens]
+        
+        model_kwargs = {
+            "input_ids": model_input_ids,
+            "positions": model_positions,
+            "inputs_embeds": inputs_embeds,
+        }
 
-        model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
+        if self.pass_hidden_states_to_model:
+            model_hidden_states = self.hidden_states[:num_input_tokens]
+            model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
+            model_kwargs["hidden_states"] = model_hidden_states
 
-        ret_hidden_states = self.model(
-            input_ids=model_input_ids,
-            positions=model_positions,
-            hidden_states=model_hidden_states,
-            inputs_embeds=inputs_embeds,
-        )
-        if self.method == "mtp":
+        ret_hidden_states = self.model(**model_kwargs)
+        if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
             hidden_states = last_hidden_states
         else:
@@ -562,26 +636,26 @@ class EagleProposer(VllmEagleProposer):
             last_hidden_states, model_positions, hidden_states
         )
 
-        num_indices = last_token_indices.shape[0]
+        num_indices = token_indices_to_sample.shape[0]
         if lmhead_tp_enable() and not is_dummy:
             max_num_reqs_across_dp = (
                 self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
             )
-            last_token_indices = nn.functional.pad(last_token_indices, (0, max_num_reqs_across_dp - num_indices))
+            token_indices_to_sample = nn.functional.pad(token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices))
 
-        sample_hidden_states = last_hidden_states[last_token_indices]
+        sample_hidden_states = last_hidden_states[token_indices_to_sample]
         logits = self.model.compute_logits(sample_hidden_states)
 
         if lmhead_tp_enable() and num_indices < logits.shape[0] and not is_dummy:
             logits = logits[:num_indices]
-            last_token_indices = last_token_indices[:num_indices]
+            token_indices_to_sample = token_indices_to_sample[:num_indices]
 
         draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1:
+        if self.num_speculative_tokens == 1 or self.parallel_drafting:
             # [batch_size, 1]
-            return draft_token_ids.view(-1, 1)
+            return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         # Generate the remaining draft tokens.
         draft_token_ids_tensor = torch.zeros(
@@ -589,11 +663,11 @@ class EagleProposer(VllmEagleProposer):
         )
         draft_token_ids_tensor[0] = draft_token_ids
         if self.uses_mrope:
-            positions = target_positions[:, last_token_indices]
+            positions = self.mrope_positions[:, token_indices_to_sample]
         else:
-            positions = target_positions[last_token_indices]
-        hidden_states = hidden_states[last_token_indices]
-        last_token_indices = self.arange[:batch_size]
+            positions = self.positions[token_indices_to_sample]
+        hidden_states = hidden_states[token_indices_to_sample]
+        token_indices_to_sample = self.arange[:batch_size]
 
         input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
 
@@ -658,13 +732,17 @@ class EagleProposer(VllmEagleProposer):
             forward_context.attn_metadata = (
                 multi_steps_attn_metadata[draft_step + 1] if multi_steps_attn_metadata else None
             )
-            ret_hidden_states = self.model(
-                input_ids=model_input_ids,
-                positions=model_positions,
-                hidden_states=model_hidden_states,
-                inputs_embeds=inputs_embeds,
-            )
-            if self.method == "mtp":
+
+            model_kwargs = {
+                "input_ids": model_input_ids,
+                "positions": model_positions,
+                "inputs_embeds": inputs_embeds,
+            }
+            if self.pass_hidden_states_to_model:
+                model_kwargs["hidden_states"] = model_hidden_states
+
+            ret_hidden_states = self.model(**model_kwargs)
+            if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
@@ -674,22 +752,22 @@ class EagleProposer(VllmEagleProposer):
                 last_hidden_states, model_positions, hidden_states
             )
 
-            num_indices = last_token_indices.shape[0]
+            num_indices = token_indices_to_sample.shape[0]
             if lmhead_tp_enable() and not is_dummy:
                 max_num_reqs_across_dp = (
                     self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 )
-                last_token_indices = nn.functional.pad(
-                    last_token_indices,
+                token_indices_to_sample = nn.functional.pad(
+                    token_indices_to_sample,
                     (0, max_num_reqs_across_dp - num_indices),
                 )
 
-            sample_hidden_states = last_hidden_states[last_token_indices]
+            sample_hidden_states = last_hidden_states[token_indices_to_sample]
             logits = self.model.compute_logits(sample_hidden_states)
 
             if lmhead_tp_enable() and num_indices < logits.shape[0] and not is_dummy:
                 logits = logits[:num_indices]
-                last_token_indices = last_token_indices[:num_indices]
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
@@ -699,6 +777,132 @@ class EagleProposer(VllmEagleProposer):
         # [batch_size, num_speculative_tokens]
         draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
         return draft_token_ids
+
+    def set_inputs_first_pass(
+        self,
+        target_token_ids: torch.Tensor,
+        next_token_ids: torch.Tensor,
+        target_positions: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+        token_indices_to_sample: torch.Tensor | None,
+        cad: CommonAttentionMetadata,
+        num_rejected_tokens_gpu: torch.Tensor | None,
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        logger.warning("cad seq lens: {}".format(cad.seq_lens))
+        # logger.warning("first++++++++self.positions: {}".format(self.positions))
+        if not self.needs_extra_input_slots:
+            # Default EAGLE pathway: no reshaping of input tensors needed.
+            # Simply rotate the input ids and leave the positions unchanged,
+            # Inserting the next token ids at the last slot in each request.
+            if token_indices_to_sample is None:
+                token_indices_to_sample = cad.query_start_loc[1:] - 1
+
+            num_tokens = target_token_ids.shape[0]
+            # Shift the input ids by one token.
+            # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
+            self.input_ids[: num_tokens - 1] = target_token_ids[1:]
+            # Replace the last token with the next token.
+            # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
+            self.input_ids[token_indices_to_sample] = next_token_ids
+
+            # copy inputs to buffer for cudagraph
+            if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
+                target_positions = target_positions[0]
+            # logger.warning("first2++++++++self.positions: {}".format(self.positions))
+            self._set_positions(num_tokens, target_positions)
+            # logger.warning("first3++++++++self.positions: {}".format(self.positions))
+            self.hidden_states[:num_tokens] = target_hidden_states
+
+            return num_tokens, token_indices_to_sample, cad
+        else:
+            assert self.is_rejected_token_mask is not None
+            assert self.is_masked_token_mask is not None
+            # 1.
+            # Call the CopyAndExpandEagleInputs AscendC operator to copy
+            # input_ids and positions into the correct slots in the
+            # preallocated buffers self.input_ids, self.positions.
+            batch_size = cad.batch_size()
+            total_num_input_tokens = target_token_ids.shape[0]
+            total_num_output_tokens = total_num_input_tokens + (
+                self.net_num_new_slots_per_request * batch_size
+            )
+
+            query_start_loc = cad.query_start_loc
+            query_end_loc = cad.query_start_loc[1:] - 1
+            if num_rejected_tokens_gpu is not None:
+                query_end_loc = query_end_loc - num_rejected_tokens_gpu
+
+            (
+                out_input_ids,
+                out_positions,
+                out_is_rejected_token_mask,
+                out_is_masked_token_mask,
+                token_indices_to_sample,
+                out_hidden_state_mapping,
+            ) = torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs(
+                target_token_ids,
+                target_positions.to(torch.int32),
+                next_token_ids,
+                query_start_loc,
+                query_end_loc,
+                0,  # padding_token_id
+                self.parallel_drafting_token_id,
+                self.extra_slots_per_request,
+                self.pass_hidden_states_to_model,
+                total_num_output_tokens,
+            )
+
+            # Copy returned tensors into pre-allocated buffers
+            self.input_ids[:total_num_output_tokens].copy_(out_input_ids)
+            self.positions[:total_num_output_tokens].copy_(out_positions)
+            self.is_rejected_token_mask[:total_num_output_tokens].copy_(
+                out_is_rejected_token_mask)
+            self.is_masked_token_mask[:total_num_output_tokens].copy_(
+                out_is_masked_token_mask)
+            if self.pass_hidden_states_to_model:
+                assert self.parallel_drafting_hidden_state_tensor is not None
+                self.hidden_states[out_hidden_state_mapping] = target_hidden_states
+                # Use torch.where to avoid DtoH sync from boolean indexing
+                mask = self.is_masked_token_mask[:total_num_output_tokens]
+                torch.where(
+                    mask.unsqueeze(1),
+                    self.parallel_drafting_hidden_state_tensor,
+                    self.hidden_states[:total_num_output_tokens],
+                    out=self.hidden_states[:total_num_output_tokens],
+                )
+
+            # 2.
+            # Recompute the slot mapping based on the new positions and
+            # rejection mask.
+            builder = (
+                self._get_attention_metadata_builder()
+                if self.attn_metadata_builder is None
+                else self.attn_metadata_builder
+            )
+            new_slot_mapping = compute_new_slot_mapping(
+                cad=cad,
+                new_positions=self.positions[:total_num_output_tokens],
+                is_rejected_token_mask=self.is_rejected_token_mask[
+                    :total_num_output_tokens
+                ],
+                block_size=builder.kv_cache_spec.block_size,
+                num_new_tokens=self.net_num_new_slots_per_request,
+                max_model_len=self.max_model_len,
+            )
+
+            # 3. Update the common attention metadata with the new (meta)data
+            new_cad = extend_all_queries_by_N(
+                cad,
+                N=self.net_num_new_slots_per_request,
+                arange=self.arange,
+                new_slot_mapping=new_slot_mapping,
+            )
+            logger.warning("cad seq lens5: {}".format(new_cad.seq_lens))
+            # logger.warning("first5++++++++self.positions: {}".format(self.positions))
+            return total_num_output_tokens, token_indices_to_sample, new_cad
+    
+    def model_returns_tuple(self) -> bool:
+        return self.method not in ("mtp", "draft_model")
 
     def attn_update_stack_num_spec_norm(
         self,
@@ -1002,7 +1206,9 @@ class EagleProposer(VllmEagleProposer):
             device = valid_sampled_tokens_count.device
 
             token_indices_to_sample = torch.empty((num_reqs,), dtype=torch.int32, device=device)
-
+            num_rejected_tokens_gpu = torch.empty(
+            (num_reqs,), dtype=torch.int32, device=device
+            )
             num_blocks_needed = triton.cdiv(num_reqs, _PREPARE_INPUTS_BLOCK_SIZE)
             num_vector_core = get_vectorcore_num()
             grid_size = min(num_blocks_needed, num_vector_core)
@@ -1013,6 +1219,7 @@ class EagleProposer(VllmEagleProposer):
                 valid_sampled_tokens_count,
                 common_attn_metadata.query_start_loc,
                 token_indices_to_sample,
+                num_rejected_tokens_gpu,
                 num_reqs,
                 BLOCK_SIZE=_PREPARE_INPUTS_BLOCK_SIZE,
             )
@@ -1061,7 +1268,7 @@ class EagleProposer(VllmEagleProposer):
             max_seq_len=0,
         )
 
-        return spec_common_attn_metadata, token_indices, token_indices_to_sample
+        return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu
 
     def _split_pcp_input(self, req_scheduled_tokens, input_ids, target_hidden_states):
         """
@@ -1183,3 +1390,18 @@ class EagleProposer(VllmEagleProposer):
                 if hidden_states is not None:
                     hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), True)
         return last_hidden_states, positions, hidden_states
+
+
+class EagleProposer(SpecDecodeBaseProposer):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        runner=None,
+    ):
+        super().__init__(
+            vllm_config,
+            device,
+            pass_hidden_states_to_model=True,
+            runner=runner,
+        )
