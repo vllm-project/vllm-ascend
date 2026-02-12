@@ -36,6 +36,7 @@ class TestPatchRoutedExpertsCapturer(TestBase):
             target="vllm_ascend.patch.worker.patch_routed_experts_capturer.get_tensor_model_parallel_rank",
             return_value=True
         ):
+            current_platform.device_name = "cpu"
             self.capturer.init_buffer(
                 max_num_batched_tokens=max_num_batched_tokens,
                 max_num_kv_tokens=max_num_kv_tokens,
