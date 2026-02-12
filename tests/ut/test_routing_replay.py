@@ -2,7 +2,7 @@ import asyncio
 import os
 from unittest.mock import patch
 
-from tests.ut.base import TestBase
+from unittest import TestBase
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.sampling_params import RequestOutputKind
