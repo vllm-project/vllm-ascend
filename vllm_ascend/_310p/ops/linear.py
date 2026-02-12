@@ -31,7 +31,7 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 class AscendUnquantizedLinearMethod310(UnquantizedLinearMethod):
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        if getattr(layer, "_enable_nz", False) and "conv1d" not in getattr(layer, "prefix", ""):
+        if "conv1d" not in getattr(layer, "prefix", ""):
             layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
 
 
