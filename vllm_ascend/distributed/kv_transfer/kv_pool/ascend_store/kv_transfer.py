@@ -5,7 +5,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import torch
+from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 
@@ -41,6 +43,8 @@ class KVTransferThread(threading.Thread):
         # TODO(jianzs): make this configurable
         self.executor = ThreadPoolExecutor(max_workers=32)
         self.finished_requests: set[str] = set()
+        self.kv_event_lock = threading.Lock()
+        self.kv_events: list[BlockStored] = []
 
     def add_request(
         self,
@@ -101,6 +105,16 @@ class KVTransferThread(threading.Thread):
             return 0
         return len(keys)
 
+    def update_kv_event(self, event: list[BlockStored]):
+        with self.kv_event_lock:
+            self.kv_events.extend(event)
+
+    def get_kv_events(self) -> list[BlockStored]:
+        with self.kv_event_lock:
+            events = self.kv_events.copy()
+            self.kv_events.clear()
+        return events
+
 
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
@@ -113,6 +127,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         put_step: int,
         kv_role: str,
         ready_event: threading.Event,
+        enable_kv_event: bool = False,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -120,6 +135,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.put_step = put_step
         self.kv_role = kv_role
         self.stored_requests = defaultdict[str, int](int)
+        self.enable_kv_event = enable_kv_event
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -188,10 +204,29 @@ class KVCacheStoreSendingThread(KVTransferThread):
             """
             addrs = []
             sizes = []
+            stored_events: list[BlockStored] = []
+            prev_key = None
+            new_block_hashes = [maybe_convert_block_hash(bh) for bh in req_meta.block_hashes[skip_block_num:]]
             for index, start in enumerate(starts):
                 addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids)
                 addrs.append(addr)
                 sizes.append(size)
+
+                # Create KV event
+                if self.enable_kv_event:
+                    token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
+                    stored_event = BlockStored(
+                        block_hashes=[new_block_hashes[index]],
+                        parent_block_hash=prev_key,
+                        token_ids=token_ids,
+                        block_size=req_meta.original_block_size,
+                        lora_id=None,
+                        medium="cpu",
+                        lora_name=None,
+                    )
+                    stored_events.append(stored_event)
+                    prev_key = new_block_hashes[index]
+                    logger.debug(f"Added kv cache event '{stored_event}' to kv cache events queue")
 
             if self.kv_role == "kv_consumer":
                 keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
@@ -199,6 +234,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if current_event is not None:
                 current_event.synchronize()
             self.m_store.put(keys, addrs, sizes)
+
+            # TODO Query specific replica info to update the event
+            if self.enable_kv_event and stored_events is not None:
+                self.update_kv_event(stored_events)
 
         self.dec_stored_request(req_id)
         self.request_queue.task_done()
@@ -253,12 +292,14 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         put_step: int,
         ready_event: threading.Event,
         num_layers: int,
+        enable_kv_event: bool = False,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreLayerSendingThread"
         )
         self.final_layer_id = num_layers - 1
         self.put_step = put_step
+        self.enable_kv_event = enable_kv_event
 
     def add_request(  # type: ignore[override]
         self, req_meta: ReqMeta
