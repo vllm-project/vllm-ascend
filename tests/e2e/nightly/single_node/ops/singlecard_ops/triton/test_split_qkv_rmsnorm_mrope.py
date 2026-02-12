@@ -299,7 +299,6 @@ def test_split_qkv_rmsnorm_mrope(
                                                                  head_size,
                                                                  eps,
                                                                  mrope_section,
-                                                                 is_interleaved,
                                                                  rope_dim)
     else:
         golden_q, golden_k, golden_v = naive_split_qkv_rmsnorm_mrope(qkv.cpu(),
@@ -314,7 +313,6 @@ def test_split_qkv_rmsnorm_mrope(
                                                                     head_size,
                                                                     eps,
                                                                     mrope_section,
-                                                                    is_interleaved,
                                                                     rope_dim)
 
     real_q, real_k, real_v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
