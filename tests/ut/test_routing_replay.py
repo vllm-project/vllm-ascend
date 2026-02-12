@@ -1,15 +1,15 @@
 import asyncio
 import os
 from unittest.mock import patch
+from unittest import TestCase
 
-from unittest import TestBase
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 
 
-class TestRoutingReplay(TestBase):
+class TestRoutingReplay(TestCase):
     # Configure engine args with TP=8
     def setUp(self):
         self.engine_args = AsyncEngineArgs(
