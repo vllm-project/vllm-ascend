@@ -417,8 +417,14 @@ class EagleProposer(VllmEagleProposer):
         self.input_ids[last_token_indices] = next_token_ids
         if self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[num_tokens]
+            # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
+            # should have been done in model runner but not. For example, at prefill stage, target model
+            # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
+            # while draft model is run in graph model, which means we should pad the `query_start_loc`.
+            # Need to be fixed in the future.
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
-                num_input_tokens, common_attn_metadata.num_reqs, common_attn_metadata.num_reqs)
+                num_input_tokens, common_attn_metadata.num_reqs, common_attn_metadata.num_reqs
+            )
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
