@@ -44,6 +44,7 @@ class TestAscendW8A8LinearMethod310(TestBase):
         self.assertEqual(params["deq_scale"].dtype, torch.int64)
         self.assertEqual(params["weight_scale"].dtype, torch.float16)
         self.assertEqual(params["weight_offset"].dtype, torch.float16)
+
         self.assertEqual(params["quant_bias"].shape, (10,))
         self.assertEqual(params["deq_scale"].shape, (10,))
         self.assertEqual(params["weight_scale"].shape, (10, 1))
@@ -71,21 +72,23 @@ class TestAscendW8A8LinearMethod310(TestBase):
         output = self.method.apply(layer, x, tp_rank=0)
 
         mock_quantize.assert_called_with(
-            x, layer.aclnn_input_scale, layer.aclnn_input_scale_reciprocal, layer.aclnn_input_offset
+            x,
+            layer.aclnn_input_scale,
+            layer.aclnn_input_scale_reciprocal,
+            layer.aclnn_input_offset,
         )
         mock_npu_quant_matmul.assert_called_once()
         (args, kwargs) = mock_npu_quant_matmul.call_args
 
         # positional args
         self.assertTrue(torch.equal(args[0], expect_x_output))
-        self.assertTrue(torch.equal(args[1], layer.weight.data.transpose(1, 0)))
+        self.assertTrue(torch.equal(args[1], layer.weight.data))
         self.assertTrue(torch.equal(args[2], layer.deq_scale))
 
         # kwargs
         self.assertTrue(torch.equal(kwargs["bias"], layer.quant_bias))
         self.assertEqual(kwargs["output_dtype"], layer.params_dtype)
 
-        # The bias is added by the linear layer's forward pass, not the quant method.
         self.assertTrue(torch.equal(output, expected_y_output))
 
     @patch("torch.ops.vllm.quantize")
@@ -111,34 +114,36 @@ class TestAscendW8A8LinearMethod310(TestBase):
         (args, kwargs) = mock_npu_quant_matmul.call_args
 
         self.assertTrue(torch.equal(args[0], x))
-        self.assertTrue(torch.equal(args[1], layer.weight.data.transpose(1, 0)))
+        self.assertTrue(torch.equal(args[1], layer.weight.data))
         self.assertTrue(torch.equal(args[2], layer.deq_scale))
 
         self.assertTrue(torch.equal(kwargs["bias"], layer.quant_bias))
         self.assertEqual(kwargs["output_dtype"], layer.params_dtype)
 
-        # The bias is added by the linear layer's forward pass, not the quant method.
         self.assertTrue(torch.equal(output, expected_y_output))
 
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_calls_nz_format_cast_310p(
-        self, mock_npu_format_cast
-    ):
+    def test_process_weights_after_loading_calls_nz_format_cast_310p(self, mock_npu_format_cast):
         mock_npu_format_cast.side_effect = lambda x, fmt: x
 
         layer = MagicMock()
+
+        # Attributes used by process_weights_after_loading()
         layer.weight = MagicMock()
         layer.input_scale = MagicMock()
         layer.input_offset = MagicMock()
         layer.weight_scale = MagicMock()
         layer.weight_offset = MagicMock()
+        layer.w2_weight_offset = MagicMock()
 
         layer.weight.data = torch.randint(-127, 128, (128, 256), dtype=torch.int8)
-        layer.input_scale.data = torch.tensor([0.1])
+        layer.input_scale.data = torch.tensor([0.1], dtype=torch.float16)
         layer.input_offset.data = torch.tensor([0], dtype=torch.int8)
-        layer.deq_scale = torch.tensor([0.5])
+
         layer.weight_scale.data = torch.randn(128, 1, dtype=torch.bfloat16)
         layer.weight_offset.data = torch.randn(128, 1, dtype=torch.bfloat16)
+        # w2_weight_offset is reshaped to (N, -1); any (N, 1) is fine
+        layer.w2_weight_offset.data = torch.randn(128, 1, dtype=torch.bfloat16)
 
         self.method.process_weights_after_loading(layer)
 
