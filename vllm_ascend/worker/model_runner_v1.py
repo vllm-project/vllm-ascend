@@ -1244,6 +1244,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             # update global cos, sin
             update_cos_sin(positions)
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
