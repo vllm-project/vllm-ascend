@@ -16,10 +16,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import numpy as np
 import torch
 import vllm
-from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle import prepare_eagle_decode, prepare_eagle_inputs
@@ -31,7 +30,6 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 def propose(
     self,
     input_batch: InputBatch,
-    sampling_metadata: SamplingMetadata,
     # [num_tokens, hidden_size]
     last_hidden_states: torch.Tensor,
     # num_layers x [num_tokens, hidden_size]
@@ -40,10 +38,14 @@ def propose(
     num_sampled: torch.Tensor,
     # [num_reqs]
     num_rejected: torch.Tensor,
-    # [num_reqs]
+    # [max_num_reqs]
     last_sampled: torch.Tensor,
-    # [num_reqs]
+    # [max_num_reqs]
     next_prefill_tokens: torch.Tensor,
+    # [max_num_reqs]
+    temperature: torch.Tensor,
+    # [max_num_reqs]
+    seeds: torch.Tensor,
 ) -> torch.Tensor:
     # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
     # number of rejected tokens, we maintain the size of eagle's input_ids and
@@ -74,13 +76,13 @@ def propose(
     last_hidden_states, hidden_states = self.run_model(
         num_tokens,
         input_batch.attn_metadata,
+        input_batch.slot_mappings,
         num_tokens_across_dp=None,  # FIXME
     )
     sample_hidden_states = last_hidden_states[last_token_indices]
     logits = self.model.compute_logits(sample_hidden_states)
 
     num_reqs = input_batch.num_reqs
-    cu_num_logits = input_batch.cu_num_logits[:num_reqs]
     # NOTE(woosuk): For draft sampling, we only consider the temperature
     # and ignore the other sampling parameters such as top_k and top_p,
     # for simplicity and performance.
@@ -89,16 +91,23 @@ def propose(
     # NOTE(Ronald1995): torch.gather will pollute the cache such as self.input_buffers.positions
     # the bug is reported to huawei CANN team, but not fixed yet.
     # So we clone the tensors before calling torch.gather to avoid the issue.
-    temperature = self.temperature[:num_reqs].clone()
-    seeds = self.seeds[:num_reqs].clone()
+    idx_mapping = self.idx_mapping[:num_reqs]
+    idx_mapping.copy_(input_batch.idx_mapping)
+    self.temperature.copy_(temperature)
+    self.seeds.copy_(seeds)
     pos = self.input_buffers.positions[:num_reqs].clone()
     # Gather the values and copy them to the pre-allocated buffers.
-    torch.gather(sampling_metadata.temperature, 0, cu_num_logits, out=temperature)
-    torch.gather(sampling_metadata.seeds, 0, cu_num_logits, out=seeds)
     torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
     # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
     # used for draft and target sampling.
-    draft_tokens = gumbel_sample(logits, temperature, seeds, pos + 1, apply_temperature=True)
+    draft_tokens = gumbel_sample(
+        logits,
+        idx_mapping,
+        self.temperature,
+        self.seeds,
+        pos + 1,
+        apply_temperature=True,
+    )
     if self.num_speculative_steps == 1:
         # Early exit.
         return draft_tokens.view(-1, 1)
@@ -117,9 +126,12 @@ def propose(
         self.max_model_len,
         self.max_num_reqs,
     )
-    query_start_loc = self.input_buffers.query_start_loc
-    query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
-    slot_mappings = self.block_tables.compute_slot_mappings(query_start_loc_gpu, pos)
+    query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+    slot_mappings = self.block_tables.compute_slot_mappings(
+        idx_mapping,
+        query_start_loc,
+        pos,
+    )
 
     cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
     if cudagraph_size is not None:
@@ -128,10 +140,8 @@ def propose(
         return self.draft_tokens[:num_reqs]
 
     # Run eager mode.
-    query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1)
-    query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
+    query_start_loc_cpu = torch.arange(num_reqs + 1, dtype=torch.int32, device="cpu")
     # HACK(woosuk)
-    seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
     block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
 
     # FIXME(woosuk): This is UNSAFE!!
@@ -139,16 +149,22 @@ def propose(
         attn_metadata_builders=self.attn_metadata_builders,
         num_reqs=num_reqs,
         num_tokens=num_reqs,
-        query_start_loc_gpu=query_start_loc_gpu,
+        query_start_loc_gpu=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
+        max_query_len=1,
         seq_lens=self.input_buffers.seq_lens[:num_reqs],
-        seq_lens_np=seq_lens_np,
-        num_computed_tokens_cpu=None,  # FIXME
+        max_seq_len=self.max_model_len,
         block_tables=block_tables,
         slot_mappings=slot_mappings,
         kv_cache_config=self.kv_cache_config,
     )
-    self.generate_draft(num_reqs, attn_metadata, num_tokens_across_dp=None)  # FIXME
+    slot_mappings_by_layer = build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config)
+    self.generate_draft(
+        num_reqs,
+        attn_metadata,
+        slot_mappings_by_layer,
+        num_tokens_across_dp=None,
+    )  # FIXME
     return self.draft_tokens[:num_reqs]
 
 
