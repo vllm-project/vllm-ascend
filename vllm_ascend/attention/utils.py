@@ -102,7 +102,7 @@ class AscendPrefillContextParallelMetadata:
     max_query_len_pcp_full: int = 0
 
     # the following attributes are specifically used in hybrid-attn models.
-    pcp_use_hybrid_attn: bool
+    pcp_use_hybrid_attn: bool = False
 
     pcp_unpad_mask: torch.Tensor = None
 
