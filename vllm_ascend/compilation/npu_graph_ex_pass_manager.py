@@ -19,6 +19,7 @@
 from torch import fx as fx
 from vllm.config import VllmConfig
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.15.0"):
@@ -55,18 +56,19 @@ class NpuGraphEXPassManager:
 
     def configure(self, config: VllmConfig):
         # By default, we enable the graph fusion and quantization fusion pass.
-        self.npugraph_ex_config: dict = config.additional_config.get("npugraph_ex_config", {})
-        if self.npugraph_ex_config.get("fuse_norm_quant", True):
+        self.npugraph_ex_config = get_ascend_config().npugraph_ex_config
+
+        if self.npugraph_ex_config.fuse_norm_quant:
             from .npugraph_ex_passes.graphex_norm_quant_fusion_pass import GraphEXAddRMSNormFusionPass
 
             self.passes.append(GraphEXAddRMSNormFusionPass(config))
 
-        if self.npugraph_ex_config.get("fuse_qknorm_rope", True):
+        if self.npugraph_ex_config.fuse_qknorm_rope:
             from .npugraph_ex_passes.graphex_qknorm_rope_fusion_pass import GraphEXQKNormRopeFusionPass
 
             self.passes.append(GraphEXQKNormRopeFusionPass(config))
 
-        if self.npugraph_ex_config.get("fuse_allreduce_rms", True):
+        if self.npugraph_ex_config.fuse_allreduce_rms:
             from .npugraph_ex_passes.graphex_allreduce_rmsnorm_fusion_pass import GraphEXMatmulAllReduceAddRMSNormPass
 
             self.passes.append(GraphEXMatmulAllReduceAddRMSNormPass(config))
