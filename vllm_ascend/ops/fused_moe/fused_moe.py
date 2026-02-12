@@ -712,15 +712,10 @@ def _detect_quantization_and_get_params(layer: torch.nn.Module):
     w1_scale = getattr(layer, 'w13_weight_scale', None) if has_w1_scale else None
     w2_scale = getattr(layer, 'w2_weight_scale', None) if has_w2_scale else None
 
-    # get scale_bias param（INT4)
-    if use_int4_w4a8:
-        w1_scale_bias = getattr(layer, 'w13_weight_offset', None) if \
-            hasattr(layer, 'w13_weight_offset') else None
-        w2_scale_bias = getattr(layer, 'w2_weight_offset', None) if \
-            hasattr(layer, 'w2_weight_offset') else None
-    else:
-        w1_scale_bias = None
-        w2_scale_bias = None
+    w1_scale_bias = getattr(layer, 'w13_weight_offset', None) if \
+        hasattr(layer, 'w13_weight_offset') else None
+    w2_scale_bias = getattr(layer, 'w2_weight_offset', None) if \
+        hasattr(layer, 'w2_weight_offset') else None
 
     w1_offset = None
     w2_offset = None
