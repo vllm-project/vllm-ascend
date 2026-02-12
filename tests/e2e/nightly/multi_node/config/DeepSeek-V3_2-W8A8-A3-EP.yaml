@@ -10,19 +10,19 @@ env_common:
   OMP_NUM_THREADS: 10
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_BUFFSIZE: 1024
-  VLLM_TORCH_PROFILER_DIR: "./vllm_profile"
   VLLM_TORCH_PROFILER_WITH_STACK: 0
   ASCEND_AGGREGATE_ENABLE: 1
   ASCEND_TRANSPORT_PRINT: 1
   ACL_OP_INIT_MODE: 1
   ASCEND_A3_ENABLE: 1
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: 300000
+  VLLM_ENGINE_READY_TIMEOUT_S: 1800
+  HCCL_CONNECT_TIMEOUT: 1200
 
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0, 1]
   decoder_host_index: [2, 3]
-
 
 
 deployment:
@@ -102,7 +102,7 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
-          "engine_id": "1",
+          "engine_id": "0",
           "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                     "prefill": {
@@ -130,7 +130,7 @@ deployment:
           --data-parallel-rpc-port 13389
           --tensor-parallel-size 4
           --enable-expert-parallel
-        --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
+          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
           --max-model-len 68000 
@@ -147,7 +147,7 @@ deployment:
           --kv-transfer-config 
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
-          "kv_port": "30100",
+          "kv_port": "30200",
           "engine_id": "2",
           "kv_connector_extra_config": {
                       "use_ascend_direct": true,
@@ -195,8 +195,8 @@ deployment:
           --kv-transfer-config 
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
-          "kv_port": "30100",
-          "engine_id": "3",
+          "kv_port": "30200",
+          "engine_id": "2",
           "kv_connector_extra_config": {
                       "use_ascend_direct": true,
                       "prefill": {

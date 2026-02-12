@@ -151,39 +151,12 @@ upgrade_vllm_ascend_scr() {
     git checkout pr-6378
     
 }
-install_aisbench() {
-    print_section "Install AISBench benchmark"
-
-    export AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
-    : "${AIS_BENCH_TAG:=v3.0-20250930-master}"  
-
-    BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
-
-    if [ -d "$BENCH_DIR" ]; then
-        echo "Removing existing benchmark directory..."
-        rm -rf "$BENCH_DIR"
-    fi
-
-    git clone -b "${AIS_BENCH_TAG}" --depth 1 \
-        "${AIS_BENCH_URL}" "${BENCH_DIR}"
-
-    cd "$BENCH_DIR"
-    pip install -e . \
-        -r requirements/api.txt \
-        -r requirements/extra.txt
-
-    python3 -m pip cache purge || echo "WARNING: pip cache purge failed, but proceeding..."
-    pip install pytest-asyncio pytest
-
-    print_success "AISBench installed successfully"
-}
 
 main() {
     check_npu_info
     check_and_config
     show_vllm_info
     upgrade_vllm_ascend_scr
-    install_aisbench
     show_triton_ascend_info
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
