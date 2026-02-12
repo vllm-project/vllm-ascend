@@ -19,7 +19,6 @@ import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul, SwigluOAIAndMul
 
-
 from vllm_ascend.utils import get_weight_prefetch_method
 
 
