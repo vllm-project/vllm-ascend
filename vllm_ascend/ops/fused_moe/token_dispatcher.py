@@ -141,9 +141,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         # NOTE: quant_mode differs by device runtime:
         # - A3 uses dynamic communication quantization with quant_mode=2.
         # - A5 MXFP8 communication requires quant_mode=4.
-        default_quant_mode = 4 if self.a5_need_extra_args else 2
         if self.with_quant:
-            quant_mode = default_quant_mode if quant_mode is None else quant_mode
+            quant_mode = 4 if self.a5_need_extra_args else 2
         else:
             quant_mode = 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
