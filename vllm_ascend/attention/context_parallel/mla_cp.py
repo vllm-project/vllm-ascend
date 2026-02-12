@@ -414,9 +414,13 @@ class AscendMlaCPImpl(AscendMLAImpl):
         kv_c_normed, k_pe = prefill_k_c_normed, prefill_k_pe
         prefill_k_c_normed = prefill_k_c_normed.squeeze()
         slot_mapping = attn_metadata.slot_mapping[self.pcp_size * num_decode_tokens :]
+        if self.is_kv_producer:
+            attn_metadata.reshape_cache_event = torch.npu.Event()
         torch_npu._npu_reshape_and_cache(
             key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_indices=slot_mapping
         )
+        if self.is_kv_producer:
+            attn_metadata.reshape_cache_event.record()
         prefill_k_nope, prefill_value = (
             self.kv_b_proj(prefill_k_c_normed)[0]
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
