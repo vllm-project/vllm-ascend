@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -7,8 +7,8 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#ifndef DISPATCH_GMM_COMBINE_DECODE_H
-#define DISPATCH_GMM_COMBINE_DECODE_H
+#ifndef DISPATCH_GMM_COMBINE_DECODE_BF16_FP16_H
+#define DISPATCH_GMM_COMBINE_DECODE_BF16_FP16_H
 
 #include "lib/matmul_intf.h"
 #include <kernel_operator.h>
@@ -20,13 +20,13 @@
 #include "catlass/epilogue/tile/tile_broadcast_one_blk.hpp"
 #include "catlass/epilogue/tile/tile_swizzle.hpp"
 #include "catlass/gemm/block/block_swizzle.hpp"
-#include "dispatch_gmm_combine_decode/gemm/kernel/grouped_matmul_slice_m_per_token_dequant_multistage_workspace.h"
+#include "dispatch_gmm_combine_decode/gemm/kernel/grouped_matmul_slice_m_multistage_workspace_bf16_fp16.h"
 #include "catlass/gemm/gemm_type.hpp"
 #include "dispatch_gmm_combine_decode/epilogue/dispatch_policy.h"
 #include "dispatch_gmm_combine_decode/gemm/dispatch_policy.h"
 #include "dispatch_gmm_combine_decode/epilogue/block/block_epilogue.h"
 #include "dispatch_gmm_combine_decode/gemm/block/block_mmad.h"
-#include "dispatch_gmm_combine_decode/gemm/kernel/grouped_matmul_slice_m_per_token_dequant_swiglu_quant_multistage_workspace.h"
+#include "dispatch_gmm_combine_decode/gemm/kernel/grouped_matmul_slice_m_swiglu_multistage_workspace_bf16_fp16.h"
 
 #include "dispatch_gmm_combine_decode/raw_distributed/cam_moe_distribute_dispatch.h"
 
@@ -34,18 +34,20 @@
 #include "dispatch_gmm_combine_decode_base.h"
 
 using namespace Catlass;
-namespace DispatchGmmCombineDecodeImpl {
+
+namespace DispatchGmmCombineDecodeBf16Fp16Impl {
+
 using MmadAtlasA2Custom =
     Gemm::MmadAtlasA2PreloadAsyncWithCallback<CUSTOM_PRELOAD_STAGES, CUSTOM_L1_STAGES, CUSTOM_L0A_STAGES,
                                               CUSTOM_L0B_STAGES, CUSTOM_L0C_STAGES, CUSTOM_ENABLE_UNIT_FLAG,
                                               CUSTOM_ENABLE_SHUFFLE_K>;
 
-using Gmm1L1TileShape = GemmShape<GMM1_L1M, GMM1_L1N, GMM1_L1K>;
-using Gmm1L0TileShape = GemmShape<GMM1_L1M, GMM1_L1N, GMM1_L0K>;
+using Gmm1L1TileShape = GemmShape<FP16_BF16_L1M, FP16_BF16_L1N, GMM1_L1K>;
+using Gmm1L0TileShape = GemmShape<Gmm1L1TileShape::M, Gmm1L1TileShape::N, GMM1_L0K>;
 using Gmm1EpilogueTileShape = MatrixShape<GMM1_EPIM, Gmm1L1TileShape::N>;
 using Gmm1BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<GMM1_SWIZZLE_OFFSET, GMM1_SWIZZLE_DIRECTION>;
 
-using Gmm2L1TileShape = GemmShape<GMM2_L1M, GMM2_L1N, GMM2_L1K>;
+using Gmm2L1TileShape = GemmShape<FP16_BF16_GMM2_L1M, FP16_BF16_GMM2_L1N, GMM2_L1K>;
 using Gmm2L0TileShape = GemmShape<Gmm2L1TileShape::M, Gmm2L1TileShape::N, GMM2_L0K>;
 using Gmm2EpilogueTileShape = MatrixShape<GMM2_EPIM, Gmm2L1TileShape::N>;
 using Gmm2BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<GMM2_SWIZZLE_OFFSET, GMM2_SWIZZLE_DIRECTION>;
@@ -74,15 +76,15 @@ CATLASS_DEVICE void GmmDeqSwigluQuant(GemmCoord problemShape, uint32_t groupCoun
     using L1TileShape = L1TileShape_;
     using L0TileShape = L0TileShape_;
 
-    using AType = Gemm::GemmType<int8_t, layout::RowMajor>;
+    using AType = Gemm::GemmType<ExpandXType, layout::RowMajor>;
     using LayoutB = typename std::conditional<(EXEC_FLAG & EXEC_FLAG_ND_FORMAT) != 0, layout::RowMajor, layout::zN>::type;
-    using BType = Gemm::GemmType<int8_t, LayoutB>;
-    using CType = Gemm::GemmType<int32_t, layout::RowMajor>;
+    using BType = Gemm::GemmType<WType, LayoutB>;
+    using CType = Gemm::GemmType<float, layout::RowMajor>;
 
     using BlockMmad = Gemm::Block::BlockMmad<DispatchPolicy, L1TileShape, L0TileShape, AType, BType, CType>;
 
     constexpr uint32_t ubStages = 1;
-    using EpilogueDispatchPolicy = Epilogue::EpilogueAtlasA2PerTokenDequantSwiglu<ubStages, 0>;
+    using EpilogueDispatchPolicy = Epilogue::EpilogueAtlasA2Swiglu<ubStages, 0>;
     using ScaleType = Gemm::GemmType<W1ScaleType, layout::VectorLayout>;
     using PerTokenScaleType = Gemm::GemmType<float, layout::VectorLayout>;
     using DType = Gemm::GemmType<float, layout::RowMajor>;
@@ -111,12 +113,12 @@ CATLASS_DEVICE void GmmDeqSwigluQuant(GemmCoord problemShape, uint32_t groupCoun
 
     using GemmKernel = typename std::conditional<
         (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) != 0,
-        Gemm::Kernel::GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspace<
+        Gemm::Kernel::GroupedMatmulSliceMSwigluMultiStageWorkspace<
             TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>,
-        Gemm::Kernel::GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspaceWithShallowDispatch<
+        Gemm::Kernel::GroupedMatmulSliceMSwigluMultiStageWorkspaceWithShallowDispatch<
             TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>>::type;
 
-    if constexpr (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) {
+    if constexpr ((EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) != 0) {
         typename GemmKernel::Params params{problemShape,
                                            groupCount,
                                            gmGroupList,
@@ -193,15 +195,15 @@ CATLASS_DEVICE void GmmDeq(GemmCoord problemShape, uint32_t groupCount, GM_ADDR 
     using L1TileShape = L1TileShape_;
     using L0TileShape = L0TileShape_;
 
-    using AType = Gemm::GemmType<int8_t, layout::RowMajor>;
+    using AType = Gemm::GemmType<ExpandXType, layout::RowMajor>;
     using LayoutB = typename std::conditional<(EXEC_FLAG & EXEC_FLAG_ND_FORMAT) != 0, layout::RowMajor, layout::zN>::type;
-    using BType = Gemm::GemmType<int8_t, LayoutB>;
-    using CType = Gemm::GemmType<int32_t, layout::RowMajor>;
+    using BType = Gemm::GemmType<WType, LayoutB>;
+    using CType = Gemm::GemmType<float, layout::RowMajor>;
 
     using BlockMmad = Gemm::Block::BlockMmad<DispatchPolicy, L1TileShape, L0TileShape, AType, BType, CType>;
 
     constexpr uint32_t ubStages = 1;
-    using EpilogueDispatchPolicy = Epilogue::EpilogueAtlasA2PerTokenDequantCombine<ubStages, EXEC_FLAG>;
+    using EpilogueDispatchPolicy = Epilogue::EpilogueAtlasA2Combine<ubStages, EXEC_FLAG>;
     using ScaleType = Gemm::GemmType<W2ScaleType, layout::VectorLayout>;
     using PerTokenScaleType = Gemm::GemmType<float, layout::VectorLayout>;
     using DType = Gemm::GemmType<ExpandXType, layout::RowMajor>;
@@ -227,7 +229,7 @@ CATLASS_DEVICE void GmmDeq(GemmCoord problemShape, uint32_t groupCount, GM_ADDR 
 
     // kernel level
     using ElementGroupList = int64_t;
-    using GemmKernel = Gemm::Kernel::GroupedMatmulSliceMPerTokenDequantMultiStageWorkspace<
+    using GemmKernel = Gemm::Kernel::GroupedMatmulSliceMMultiStageWorkspace<
         TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>;
 
     typename GemmKernel::Params params{
@@ -240,10 +242,10 @@ CATLASS_DEVICE void GmmDeq(GemmCoord problemShape, uint32_t groupCount, GM_ADDR 
 }
 
 template <TemplateMC2TypeClass>
-class DispatchGmmCombineDecode
+class DispatchGmmCombineDecodeBf16Fp16
 {
 public:
-    __aicore__ inline DispatchGmmCombineDecode(){};
+    __aicore__ inline DispatchGmmCombineDecodeBf16Fp16(){};
     __aicore__ inline void Init(
         // input
         GM_ADDR x, GM_ADDR expert_ids, GM_ADDR gmm1_permuted_weight, GM_ADDR gmm1_permuted_weight_scale,
@@ -295,7 +297,7 @@ private:
 };
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Init(
+__aicore__ inline void DispatchGmmCombineDecodeBf16Fp16<TemplateMC2TypeFunc>::Init(
     // input
     GM_ADDR x, GM_ADDR expert_ids, GM_ADDR gmm1_permuted_weight, GM_ADDR gmm1_permuted_weight_scale,
     GM_ADDR gmm2_weight, GM_ADDR gmm2_weight_scale, GM_ADDR expert_scales, GM_ADDR expert_smooth_scales,
@@ -313,9 +315,9 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Init(
     gmX_ = x;                                // input token
     gmexpertIds_ = expert_ids;
     gmPermuteWeight1_ = gmm1_permuted_weight;
-    gmPermuteScale1_ = gmm1_permuted_weight_scale;
+    gmPermuteScale1_ = nullptr;
     gmWeight2_ = gmm2_weight;
-    gmScale2_ = gmm2_weight_scale;
+    gmScale2_ = nullptr;
     gmOutput_ = output;
     gmExpertTokenNums_ = expertTokenNums;
     workspaceGM_ = workspaceGM;
@@ -348,48 +350,47 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Init(
     gmm2InputDim_ = gmm1OutputDim_ / 2;
 }
 
-template<uint32_t EXEC_FLAG>
+template<uint32_t EXEC_FLAG, typename WType>
 __aicore__ inline auto CreateWeightLayout(uint32_t k, uint32_t n) {
     if constexpr ((EXEC_FLAG & EXEC_FLAG_ND_FORMAT) != 0) {
         MatrixCoord mc{k, n};
-        return layout::RowMajor::template MakeLayoutInUb<int8_t>(mc);
+        return layout::RowMajor::template MakeLayoutInUb<WType>(mc);
     } else {
-        return layout::zN::template MakeLayout<int8_t>(k, n);
+        return layout::zN::template MakeLayout<WType>(k, n);
     }
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Process()
+__aicore__ inline void DispatchGmmCombineDecodeBf16Fp16<TemplateMC2TypeFunc>::Process()
 {
+    using LayoutB = typename std::conditional<(EXEC_FLAG & EXEC_FLAG_ND_FORMAT) != 0, layout::RowMajor, layout::zN>::type;
     GemmCoord gmm1ProblemShape{maxTokenNum_, gmm1OutputDim_, tokenHiddenSize_};
     GemmCoord gmm2ProblemShape{maxTokenNum_, gmm2OutputDim_, gmm2InputDim_};
 
     layout::RowMajor layoutX1{maxTokenNum_, tokenHiddenSize_};
-    auto layoutWeight1 = CreateWeightLayout<EXEC_FLAG>(tokenHiddenSize_, gmm1OutputDim_);
+    auto layoutWeight1 = CreateWeightLayout<EXEC_FLAG, WType>(tokenHiddenSize_, gmm1OutputDim_);
     layout::VectorLayout layoutW1Scale{gmm1OutputDim_};
     layout::VectorLayout layoutX1Scale{maxTokenNum_};
     layout::RowMajor layoutX2{maxTokenNum_, gmm2InputDim_};
-    auto layoutWeight2 = CreateWeightLayout<EXEC_FLAG>(gmm2InputDim_, gmm2OutputDim_);
+    auto layoutWeight2 = CreateWeightLayout<EXEC_FLAG, WType>(gmm2InputDim_, gmm2OutputDim_);
     layout::VectorLayout layoutW2Scale{gmm2OutputDim_};
     layout::VectorLayout layoutX2Scale{maxTokenNum_};
     layout::RowMajor layoutOutput{maxTokenNum_, gmm2OutputDim_};
 
     size_t workspaceOffset = 0;
     constexpr int32_t resveredWorkSpaceSize = 256 * 1024;
-    int64_t x1TokenSize = maxTokenNum_ * tokenHiddenSize_ * sizeof(int8_t);
-    int64_t x2TokenSize = maxTokenNum_ * gmm2InputDim_ * sizeof(int8_t);
+    int64_t x1TokenSize = maxTokenNum_ * tokenHiddenSize_ * sizeof(ExpandXType);
+    int64_t x2TokenSize = maxTokenNum_ * gmm2InputDim_ * sizeof(ExpandXType);
     int64_t maxTokenSize = x1TokenSize < x2TokenSize ? x2TokenSize : x1TokenSize;
-    int64_t tokenScaleSize = maxTokenNum_ * sizeof(float);
     GM_ADDR gmX1 = workspaceGM_ + workspaceOffset;
     GM_ADDR gmX2 = workspaceGM_ + workspaceOffset;
     workspaceOffset += RoundUp<GM_ALIGN_BYTE>(maxTokenSize);
-    GM_ADDR gmX1Scale = workspaceGM_ + workspaceOffset;
-    GM_ADDR gmX2Scale = workspaceGM_ + workspaceOffset;
-    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(tokenScaleSize);
+    GM_ADDR gmX1Scale = nullptr;
+    GM_ADDR gmX2Scale = nullptr;
     GM_ADDR gmWorkspace = workspaceGM_ + workspaceOffset;
     GM_ADDR gmCVSwap = workspaceGM_ + workspaceOffset;
-    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(blockDim_) * (GMM1_L1M * GMM1_L1N) *
-                                              WORKSPACE_STAGES * sizeof(int32_t));
+    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(blockDim_) * (FP16_BF16_L1M * FP16_BF16_L1N) *
+                                              WORKSPACE_STAGES * sizeof(float));
     int64_t swigluOutSize = maxTokenNum_ * gmm1OutputDim_ * sizeof(float);
     int64_t gmm2OutSize = maxTokenNum_ * tokenHiddenSize_ * sizeof(ExpandXType);
     int64_t maxSwigluGmm2Size = swigluOutSize < gmm2OutSize ? gmm2OutSize : swigluOutSize;
@@ -408,7 +409,7 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Process()
     if constexpr ((EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) == 0) {
         if constexpr (g_coreType == AscendC::AIV) {
             AscendC::TPipe tpipe;
-            MoeDistributeDispatchImpl::CamMoeDistributeDispatch<ExpandXType, int8_t, false, true, false, false, EXEC_FLAG>
+            MoeDistributeDispatchImpl::CamMoeDistributeDispatch<ExpandXType, ExpandXType, false, false, false, false, EXEC_FLAG>
                 dispatcher;
             dispatcher.Init(gmX_, gmexpertIds_, gmSmoothScales_, xActiveMask_, gmX1, gmX1Scale, gmExpandIdx, gmGroupList,
                             gmEpSendCount, gmExpertTokenNums_, nullptr, gmWorkspace, &tpipe, tilingData_);
@@ -452,5 +453,5 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Process()
                                gmScale2_, layoutW2Scale, gmX2Scale, layoutX2Scale, gmGmm2DepOut,
                                layoutOutput, gmWorkspace, &combiner);
 }
-} // namespace DispatchGmmCombineDecodeImpl
-#endif  // DISPATCH_GMM_COMBINE_DECODE_H
+} // namespace DispatchGmmCombineDecodeBf16Fp16Impl
+#endif  // DISPATCH_GMM_COMBINE_DECODE_BF16_FP16_H
