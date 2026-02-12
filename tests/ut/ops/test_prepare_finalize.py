@@ -6,13 +6,17 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAll2All, PrepareAndFinalizeWithAllGather,
-    PrepareAndFinalizeWithMC2, PrepareAndFinalizeWithNaiveMulticast)
+    PrepareAndFinalizeWithMC2)
 
 
 class TestPrepareAndFinalize(unittest.TestCase):
 
     def setUp(self):
         # Mock FusedMoEConfig
+        fake_stream = MagicMock()
+        patcher = patch("torch.npu.Stream", return_value=fake_stream)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.moe_config = MagicMock(spec=FusedMoEConfig)
         self.moe_config.tp_group = MagicMock()
         self.moe_config.tp_group.device_group = MagicMock()
@@ -165,15 +169,12 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(final_result.shape[0], 2)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
-    @patch(
-        "vllm_ascend.ops.fused_moe.prepare_finalize.tensor_model_parallel_all_reduce"
-    )
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp",
            return_value=False)
     def test_allgather_prepare_finalize(self, mock_enable_sp,
                                         mock_get_forward_context,
-                                        mock_tp_all_reduce, mock_get_dp_group):
+                                        mock_get_dp_group):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.max_tokens_across_dp = 6
@@ -218,63 +219,5 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         self.assertEqual(result.shape[0], 3)
 
-        # Test with TP all-reduce
-        mock_tp_all_reduce.return_value = result
         result_with_tp = layer.finalize(h_out, reduce_results=True)
         self.assertEqual(result_with_tp.shape[0], 3)
-
-    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
-    @patch(
-        "vllm_ascend.ops.fused_moe.prepare_finalize.tensor_model_parallel_all_reduce"
-    )
-    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
-    def test_naive_multicast_prepare_finalize(self, mock_get_forward_context,
-                                              mock_tp_all_reduce,
-                                              mock_get_dp_group):
-        # Mock forward context with DP metadata
-        mock_context = MagicMock()
-        mock_context.dp_metadata.cu_tokens_across_sp.return_value = torch.tensor(
-            [2, 5, 7])
-        mock_get_forward_context.return_value = mock_context
-
-        # Setup DP group mock
-        mock_dp_group = MagicMock()
-        mock_dp_group.broadcast = MagicMock()
-        mock_dp_group.all_reduce = MagicMock()
-        mock_get_dp_group.return_value = mock_dp_group
-
-        # Mock all_reduce to just return input (simulate sum)
-        def mock_all_reduce(tensor):
-            return tensor * 2
-
-        mock_dp_group.all_reduce.side_effect = mock_all_reduce
-
-        # Setup config
-        self.moe_config.dp_size = 3
-        self.moe_config.dp_rank = 1
-        self.moe_config.tp_size = 1
-        self.moe_config.ep_size = 1
-
-        layer = PrepareAndFinalizeWithNaiveMulticast(self.moe_config)
-
-        # Local inputs
-        hidden_states = torch.randn(3, 8)
-        router_logits = torch.randn(3, 2)
-
-        # Run prepare
-        h_out, r_out, _, _ = layer.prepare(hidden_states, router_logits)
-
-        # Should be global tensor: [7, 8] and [7, 2]
-        self.assertEqual(h_out.shape, (7, 8))
-        self.assertEqual(r_out.shape, (7, 2))
-
-        # Run finalize
-        result = layer.finalize(h_out, reduce_results=False)
-
-        # Should slice back to local: [3, 8]
-        self.assertEqual(result.shape, (3, 8))
-
-        # Test with reduce_results=True and TP/EP > 1
-        mock_tp_all_reduce.return_value = result
-        result_with_tp = layer.finalize(h_out, reduce_results=True)
-        self.assertEqual(result_with_tp.shape, (3, 8))

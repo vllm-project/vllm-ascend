@@ -46,6 +46,7 @@ faqs
 user_guide/support_matrix/index
 user_guide/configuration/index
 user_guide/feature_guide/index
+user_guide/deployment_guide/index
 user_guide/release_notes
 :::
 
@@ -56,7 +57,7 @@ user_guide/release_notes
 developer_guide/contribution/index
 developer_guide/feature_guide/index
 developer_guide/evaluation/index
-developer_guide/performance/index
+developer_guide/performance_and_debug/index
 :::
 
 % How to involve vLLM Ascend

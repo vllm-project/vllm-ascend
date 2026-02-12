@@ -44,11 +44,6 @@ SERVICE_PROFILING_SYMBOLS_YAML = """
   handler: msserviceprofiler.vllm_profiler.vllm_v1.batch_hookers:schedule
   name: batchFrameworkProcessing
 
-- symbol: vllm_ascend.core.scheduler:AscendScheduler.schedule
-  min_version: "0.9.1"
-  handler: msserviceprofiler.vllm_profiler.vllm_v1.batch_hookers:schedule
-  name: batchFrameworkProcessing
-
 - symbol: vllm.v1.core.sched.scheduler:Scheduler._free_request
   min_version: "0.9.1"
   handler: msserviceprofiler.vllm_profiler.vllm_v1.batch_hookers:free_request

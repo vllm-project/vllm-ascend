@@ -9,18 +9,13 @@ import torch
 import vllm.envs as envs
 import zmq
 from vllm.config import KVTransferConfig, VllmConfig
-from vllm.utils import logger
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.logger import logger
+from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.distributed.cpu_offload_manager.cpu_kv_cache_manager import \
     CPUKVCacheManager
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_dtype_size, make_zmq_socket
-else:
-    from vllm.utils.network_utils import make_zmq_socket
-    from vllm.utils.torch_utils import get_dtype_size
 
 
 @dataclass
@@ -145,14 +140,15 @@ class MetadataServer:
             layer.page_size_bytes == any.page_size_bytes
             for any in kv_cache_specs.values()
         ])
+        use_mla = isinstance(layer, MLAAttentionSpec)
         # mla shares the same kv cache among different tp
-        if layer.use_mla:
+        if use_mla:
             tp_rank = 0
         if (pp_rank, tp_rank) in self.shared_memory:
             return self.shared_memory[(pp_rank, tp_rank)]
         available_memory = self.available_memory
         shared_memory_dict = {}
-        if layer.use_mla:
+        if use_mla:
             available_memory //= self.pipeline_parallel_size
             available_memory //= len(kv_cache_specs)
             num_blocks = available_memory // layer.page_size_bytes
@@ -170,7 +166,7 @@ class MetadataServer:
             shared_memory_dict[
                 layer_name] = MetadataServer._safe_create_shared_memory(
                     f"cpu_kv_cache_{pp_rank}_{tp_rank}_{layer_name}", nbytes)
-        if layer.use_mla:
+        if use_mla:
             assert mla_config is not None
             assert layer.head_size == mla_config.rope_dim + mla_config.nope_dim
             self.shared_memory[(pp_rank,

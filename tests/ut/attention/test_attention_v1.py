@@ -1,48 +1,34 @@
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.distributed.parallel_state import GroupCoordinator
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendAttentionBackendImpl,
                                                 AscendAttentionMetadataBuilder,
-                                                AscendAttentionState,
-                                                AscendMetadata)
+                                                AscendAttentionState)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestAscendAttentionBackend(TestBase):
 
     def test_get_name(self):
-        self.assertEqual(AscendAttentionBackend.get_name(), "ASCEND")
+        self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
         self.assertEqual(AscendAttentionBackend.get_impl_cls(),
                          AscendAttentionBackendImpl)
 
-    def test_get_metadata_cls(self):
-        self.assertEqual(AscendAttentionBackend.get_metadata_cls(),
-                         AscendMetadata)
-
     def test_get_builder_cls(self):
         self.assertEqual(AscendAttentionBackend.get_builder_cls(),
                          AscendAttentionMetadataBuilder)
 
-    @patch('vllm_ascend.attention.attention_v1.is_310p')
-    def test_get_kv_cache_shape_310p(self, mock_is_310p):
-        mock_is_310p.return_value = True
-        result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
-        self.assertEqual(result, (2, 10, 30 * 40 // 16, 20, 16))
-
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
-    def test_get_kv_cache_shape_not_310p(self, mock_is_310p):
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType.A3)
+    def test_get_kv_cache_shape_not_310p(self, mock_soc_version):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 20, 30, 40))
-
-    def test_get_bsh_kv_cache_shape(self):
-        result = AscendAttentionBackend.get_bsh_kv_cache_shape(10, 20, 30, 40)
-        self.assertEqual(result, (2, 10, 20, 30 * 40))
 
     def test_swap_blocks(self):
         src_kv_cache = [torch.zeros((10, 20)), torch.zeros((10, 20))]
@@ -63,28 +49,18 @@ class TestAscendAttentionBackend(TestBase):
 
 class TestAscendAttentionMetadataBuilder(TestBase):
 
-    @patch('vllm.distributed.parallel_state.get_dcp_group')
-    @patch('vllm.distributed.parallel_state._DCP',
-           new_callable=lambda: MagicMock(spec=GroupCoordinator))
-    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
-           return_value=1)
-    def setUp(self, mock_get_dcp_size, mock_dcp, mock_get_dcp_group):
-        mock_dcp.world_size = 1
-        dcp_group = MagicMock(spec=GroupCoordinator)
-        dcp_group.rank_in_group = 0
-        dcp_group.world_size = 1
-        dcp_group.device_group = MagicMock()
-        mock_get_dcp_group.return_value = dcp_group
-
+    def setUp(self):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.speculative_config = None
         self.mock_vllm_config.model_config.max_model_len = 640
+        self.mock_vllm_config.model_config.hf_text_config.sliding_window = None
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_vllm_config.compilation_config.cudagraph_mode = None
         self.mock_vllm_config.scheduler_config.max_num_seqs = 10
         self.mock_vllm_config.scheduler_config.decode_max_num_seqs = 10
         self.mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         self.mock_device = 'cpu:0'
+        torch.Tensor.pin_memory = lambda x: x  # noqa
         self.builder = AscendAttentionMetadataBuilder(None, None,
                                                       self.mock_vllm_config,
                                                       self.mock_device)
@@ -99,45 +75,9 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertFalse(result)
 
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
-    @patch('torch_npu.npu_format_cast')
-    @patch('vllm_ascend.utils.nd_to_nz_2d')
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=True)
-    def test_build_prefill_no_cache(self, mock_is_310p, mock_nd_to_nz_2d,
-                                    mock_npu_format_cast,
-                                    mock_ascend_metadata):
-        common_attn_metadata = AscendCommonAttentionMetadata(
-            query_start_loc=torch.tensor([0, 3, 7]),
-            query_start_loc_cpu=torch.tensor([0, 3, 7]),
-            seq_lens_cpu=torch.tensor([5, 6]),
-            num_reqs=2,
-            num_actual_tokens=10,
-            max_query_len=5,
-            decode_token_per_req=torch.tensor([1, 1]),
-            block_table_tensor=torch.zeros((10, 10)),
-            slot_mapping=torch.tensor(range(20)),
-            actual_seq_lengths_q=torch.tensor([0, 1]),
-            positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((10, 10)),
-            spec_attn_mask=None,
-            attn_state=AscendAttentionState.PrefillNoCache,
-            num_computed_tokens_cpu=None,
-            seq_lens=None)
-
-        mock_nz_tensor = MagicMock()
-        mock_model = MagicMock()
-        mock_nd_to_nz_2d.return_value = mock_nz_tensor
-        mock_npu_format_cast.return_value = mock_nz_tensor
-
-        self.builder.build(1, common_attn_metadata, mock_model)
-
-    @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
-    @patch('torch_npu.npu_format_cast')
-    @patch('vllm_ascend.utils.nd_to_nz_spec')
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=True)
-    @patch('vllm_ascend.attention.attention_v1.AscendAttentionState')
-    def test_build_chunked_prefill(self, mock_ascend_attention_state,
-                                   mock_is_310p, mock_nd_to_nz_spec,
-                                   mock_npu_format_cast, mock_ascend_metadata):
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType.A3)
+    def test_build_non_310p(self, mock_soc_version, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),
             query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
@@ -150,42 +90,10 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             slot_mapping=torch.tensor(range(20)),
             actual_seq_lengths_q=torch.tensor([0, 1, 2]),
             positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((15, 15)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.ChunkedPrefill,
             num_computed_tokens_cpu=None,
-            seq_lens=None)
-
-        mock_ascend_attention_state = MagicMock()
-        mock_ascend_attention_state.PrefillNoCache = 0
-
-        mock_nz_tensor = MagicMock()
-        mock_model = MagicMock()
-        mock_nd_to_nz_spec.return_value = mock_nz_tensor
-        mock_npu_format_cast.return_value = mock_nz_tensor
-
-        self.builder.build(1, common_attn_metadata, mock_model)
-
-    @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
-    def test_build_non_310p(self, mock_is_310p, mock_ascend_metadata):
-        common_attn_metadata = AscendCommonAttentionMetadata(
-            query_start_loc=torch.tensor([0, 2, 5, 9]),
-            query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
-            seq_lens_cpu=torch.tensor([4, 5, 6]),
-            num_reqs=3,
-            num_actual_tokens=15,
-            max_query_len=6,
-            decode_token_per_req=torch.tensor([1, 1, 1]),
-            block_table_tensor=torch.zeros((10, 10)),
-            slot_mapping=torch.tensor(range(20)),
-            actual_seq_lengths_q=torch.tensor([0, 1, 2]),
-            positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((15, 15)),
-            spec_attn_mask=None,
-            attn_state=AscendAttentionState.ChunkedPrefill,
-            num_computed_tokens_cpu=None,
-            seq_lens=None)
+            seq_lens=None,
+            max_seq_len=6)
         mock_model = MagicMock()
 
         self.builder.build(1, common_attn_metadata, mock_model)
@@ -193,19 +101,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
 class TestAscendAttentionBackendImpl(TestBase):
 
-    @patch('vllm.distributed.parallel_state.get_dcp_group')
-    @patch('vllm.distributed.parallel_state._DCP',
-           new_callable=lambda: MagicMock(spec=GroupCoordinator))
-    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
-           return_value=1)
-    def setUp(self, mock_get_dcp_size, mock_dcp, mock_get_dcp_group):
-        mock_dcp.world_size = 1
-        dcp_group = MagicMock(spec=GroupCoordinator)
-        dcp_group.rank_in_group = 0
-        dcp_group.world_size = 1
-        dcp_group.device_group = MagicMock()
-        mock_get_dcp_group.return_value = dcp_group
-
+    def setUp(self):
         self.layer = MagicMock()
         self.layer.layer_name = "test_layer"
         self.layer._k_scale_float = 1.0
@@ -286,96 +182,66 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         assert output.shape == (10, 8 * 64)
 
-    @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    @patch('torch_npu._npu_reshape_and_cache')
-    @patch('torch_npu._npu_flash_attention')
-    def test_forward_prefill_no_cache(self, mock_flash_attention,
-                                      mock_reshape_cache,
-                                      mock_get_forward_context):
-        """Test forward pass in PrefillNoCache state"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
-        kv_cache = torch.empty(2, 5, 128, 8, 64)
-        output = torch.empty_like(query)
-
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
-
-        metadata = self.attn_metadata
-        metadata.attn_state = AscendAttentionState.PrefillNoCache
-        metadata.attn_mask = torch.randn(1, 1, 10, 10)
-        metadata.seq_lens = torch.tensor([10])
-        metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
-        metadata.num_decodes = 0
-        metadata.num_prefills = 10
-        layer = self.layer_no_quant
-
-        output = self.impl.forward(layer, query, key, value, kv_cache,
-                                   metadata, output)
-
-        mock_reshape_cache.assert_called_once()
-        mock_flash_attention.assert_called_once()
-        assert output.shape == (10, 8 * 64)
-
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu.npu_fused_infer_attention_score')
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    def test_forward_prefill_cache_hit(self, mock_get_forward_context,
-                                       mock_npu_fused_infer_attention_score,
-                                       mock_npu_reshape_and_cache):
+    def test_forward_fused_infer_attention(
+            self, mock_get_forward_context,
+            mock_npu_fused_infer_attention_score, mock_npu_reshape_and_cache):
         """Test forward pass in PrefillCacheHit state"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty_like(query)
-
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.PrefillCacheHit
         metadata.attn_mask = torch.randn(1, 1, 10, 10)
         metadata.query_lens = torch.tensor([10])
         metadata.seq_lens = torch.tensor([10])
+        metadata.actual_seq_lengths_q = [10]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        metadata.num_decode_tokens = 0
         metadata.num_decodes = 0
         metadata.num_prefills = 10
+        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         layer = self.layer_no_quant
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        mock_npu_fused_infer_attention_score.return_value = (output,
-                                                             torch.ones(
-                                                                 10, 8, 64))
-
+        mock_npu_fused_infer_attention_score.return_value = (torch.ones(
+            10, 8, 64), torch.ones(10, 8, 64))
         output = self.impl.forward(layer, query, key, value, kv_cache,
                                    metadata, output)
 
         mock_npu_fused_infer_attention_score.assert_called_once()
-        assert output.shape == (10, 8 * 64)
+        assert output.shape == (10, 8, 64)
 
+    @patch('vllm_ascend.attention.attention_v1.using_paged_attention')
     @patch('torch_npu._npu_paged_attention')
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    def test_forward_decode_only(self, mock_get_forward_context,
-                                 mock_npu_reshape_and_cache,
-                                 mock_paged_attention):
+    def test_forward_paged_attention(self, mock_get_forward_context,
+                                     mock_npu_reshape_and_cache,
+                                     mock_paged_attention,
+                                     mock_using_paged_attention):
         """Test forward pass in DecodeOnly state"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
+        query = torch.randn(4, 8 * 64)
+        key = torch.randn(4, 8 * 64)
+        value = torch.randn(4, 8 * 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty_like(query)
 
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
-        metadata.seq_lens = torch.tensor([10])
+        metadata.seq_lens = torch.tensor([4])
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
-        metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
-        metadata.num_decodes = 10
+        metadata.num_actual_tokens = 4
+        metadata.slot_mapping = torch.zeros(4, dtype=torch.long)
+        metadata.num_decodes = 4
         metadata.num_prefills = 0
         layer = self.layer_no_quant
+        mock_using_paged_attention.return_value = True
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
@@ -383,7 +249,7 @@ class TestAscendAttentionBackendImpl(TestBase):
                                    metadata, output)
 
         mock_paged_attention.assert_called_once()
-        assert output.shape == (10, 8 * 64)
+        assert output.shape == (4, 8 * 64)
 
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
     @patch('torch_npu.npu_fused_infer_attention_score')
@@ -425,9 +291,9 @@ class TestAscendAttentionBackendImpl(TestBase):
             self, mock_npu_reshape_and_cache, mock_fused_infer_attention_score,
             mock_paged_attention, mock_get_forward_context):
         """Test forward pass in DecodeOnly state when seq)len_mismatch"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty_like(query)
 
@@ -440,6 +306,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
         metadata.num_decodes = 10
         metadata.num_prefills = 0
+        metadata.actual_seq_lengths_q = [10]
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
@@ -449,140 +316,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         output = self.impl_swa.forward(layer, query, key, value, kv_cache,
                                        metadata, output)
 
-        mock_paged_attention.assert_called_once()
-        mock_fused_infer_attention_score.assert_not_called()
+        mock_paged_attention.assert_not_called()
+        mock_fused_infer_attention_score.assert_called_once()
 
-        assert output.shape == (10, 8 * 64)
-
-    @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
-    @patch('torch_npu._npu_reshape_and_cache')
-    @patch('vllm_ascend.attention.attention_v1.vanilla_chunked_prefill')
-    def test_forward_head_size_192(self, mock_vanilla_prefill,
-                                   mock_npu_reshape_and_cache, mock_is_310p,
-                                   mock_get_forward_context):
-        """Test forward pass when head_size is 192"""
-
-        self.impl.head_size = 192
-        query = torch.randn(10, 8 * 192)
-        key = torch.randn(10, 8 * 192)
-        value = torch.randn(10, 8 * 192)
-        kv_cache = torch.empty(2, 5, 128, 8, 192)
-        output = torch.empty_like(query)
-
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
-
-        metadata = self.attn_metadata
-        metadata.attn_mask = torch.randn(1, 1, 10, 10)
-        metadata.query_lens = torch.tensor([10])
-        metadata.seq_lens = torch.tensor([10])
-        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
-        metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
-        metadata.num_decodes = 10
-        metadata.num_prefills = 0
-        layer = self.layer_no_quant
-        mock_vanilla_prefill.return_value = MagicMock()
-
-        output = self.impl_192.forward(layer, query, key, value, kv_cache,
-                                       metadata, output)
-
-        mock_vanilla_prefill.assert_called_once()
-        assert output.shape == (10, 8 * 192)
-
-    @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    @patch('torch_npu.npu_fused_infer_attention_score')
-    @patch('torch_npu._npu_reshape_and_cache')
-    def test_forward_normal_v1_situation(self, mock_npu_reshape_and_cache,
-                                         mock_npu_fused_infer_attention_score,
-                                         mock_get_forward_context):
-        """Test forward pass in normal V1 situation"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
-        kv_cache = torch.empty(2, 5, 128, 8, 64)
-        output = torch.empty_like(query)
-
-        metadata = self.attn_metadata
-        metadata.attn_mask = torch.randn(1, 1, 10, 10)
-        metadata.query_lens = torch.tensor([10])
-        metadata.seq_lens = torch.tensor([10])
-        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
-        metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
-        metadata.num_decodes = 0
-        metadata.num_prefills = 10
-        layer = self.layer_no_quant
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
-        mock_npu_fused_infer_attention_score.return_value = (output,
-                                                             torch.ones(
-                                                                 10, 8, 64))
-
-        output = self.impl.forward(layer, query, key, value, kv_cache,
-                                   metadata, output)
-
-        mock_npu_fused_infer_attention_score.assert_called_once()
-        assert output.shape == (10, 8 * 64)
-
-    @patch('torch_npu.npu_format_cast')
-    @patch('torch_npu._npu_reshape_and_cache')
-    @patch('torch_npu.npu_fused_infer_attention_score')
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=True)
-    @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    def test_forward_310p_device(self, mock_get_forward_context, mock_is_310p,
-                                 mock_npu_fused_infer_attention_score,
-                                 mock_npu_reshape_and_cache,
-                                 mock_npu_format_cast):
-        """Test forward pass on 310P device"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
-        kv_cache = torch.empty(2, 5, 128, 8, 64)
-        output = torch.empty_like(query)
-
-        metadata = self.attn_metadata
-        metadata.attn_mask = torch.randn(1, 1, 10, 10)
-        metadata.query_lens = torch.tensor([10])
-        metadata.seq_lens = torch.tensor([10])
-        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
-        metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
-        metadata.num_decodes = 0
-        metadata.num_prefills = 10
-        layer = self.layer_no_quant
-
-        mock_npu_format_cast.return_value = metadata.attn_mask
-
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
-        mock_npu_fused_infer_attention_score.return_value = (output,
-                                                             torch.ones(
-                                                                 10, 8, 64))
-
-        output = self.impl.forward(layer, query, key, value, kv_cache,
-                                   metadata, output)
-
-        mock_npu_fused_infer_attention_score.assert_called_once()
-        assert output.shape == (10, 8 * 64)
-
-    @patch('torch_npu._npu_reshape_and_cache')
-    def test_forward_raise_error(self, mock_paged_attention):
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
-        kv_cache = torch.empty(2, 5, 128, 8, 64)
-        output = torch.empty_like(query)
-
-        metadata = self.attn_metadata
-        metadata.attn_mask = torch.randn(1, 1, 10, 10)
-        metadata.query_lens = torch.tensor([10])
-        metadata.seq_lens = torch.tensor([10])
-        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
-        metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
-        metadata.num_decodes = 0
-        metadata.num_prefills = 10
-        layer = self.layer_no_quant
-
-        with self.assertRaises(NotImplementedError):
-            self.impl_error.forward(layer, query, key, value, kv_cache,
-                                    metadata, output)
+        assert output.shape == (10, 8, 64)

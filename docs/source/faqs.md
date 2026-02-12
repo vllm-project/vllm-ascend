@@ -2,8 +2,8 @@
 
 ## Version Specific FAQs
 
-- [[v0.9.1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2643)
-- [[v0.11.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/3222)
+- [[v0.11.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/4808)
+- [[v0.13.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/5333)
 
 ## General FAQs
 
@@ -67,7 +67,7 @@ docker images | grep vllm-ascend
 
 ### 3. What models does vllm-ascend supports?
 
-Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_models.html).
+Find more details [<u>here</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
 
 ### 4. How to get in touch with our community?
 
@@ -80,7 +80,7 @@ There are many channels that you can communicate with our community developers /
 
 ### 5. What features does vllm-ascend V1 supports?
 
-Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html).
+Find more details [<u>here</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html).
 
 ### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
 
@@ -104,7 +104,7 @@ vllm-ascend is a hardware plugin for vLLM. Basically, the version of vllm-ascend
 
 ### 8. Does vllm-ascend support Prefill Disaggregation feature?
 
-Yes, vllm-ascend supports Prefill Disaggregation feature with LLMdatadist, Mooncake backend. Take [official tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node_pd_disaggregation_llmdatadist.html) for example.
+Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. Take [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html) for example.
 
 ### 9. Does vllm-ascend support quantization method?
 
@@ -112,13 +112,13 @@ Currently, w8a8, w4a8 and w4a4 quantization methods are already supported by vll
 
 ### 10. How to run a W8A8 DeepSeek model?
 
-Follow the [inference tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html) and replace the model with DeepSeek.
+Follow the [inference tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/multi_node.html) and replace the model with DeepSeek.
 
 ### 11. How is vllm-ascend tested?
 
 vllm-ascend is tested in three aspects, functions, performance, and accuracy.
 
-- **Functional test**: We added CI, including part of vllm's native unit tests and vllm-ascend's own unit tests. On vllm-ascend's test, we test basic functionalities, popular model availability, and [supported features](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html) through E2E test.
+- **Functional test**: We added CI, including part of vllm's native unit tests and vllm-ascend's own unit tests. On vllm-ascend's test, we test basic functionalities, popular model availability, and [supported features](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html) through E2E test.
 
 - **Performance test**: We provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for E2E performance benchmark, which can be easily re-routed locally. We will publish a perf website to show the performance test results for each pull request.
 
@@ -240,3 +240,18 @@ This is often due to system compatibility issues. You can resolve this by using 
 2. Transfer the image archive
 
 Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine
+
+### 21. Why am I getting an error when executing the script to start a Docker container? The error message is: "operation not permitted".
+When using `--shm-size`, you may need to add the `--privileged=true` flag to your `docker run` command to grant the container necessary permissions. Please be aware that using `--privileged=true` grants the container extensive privileges on the host system, which can be a security risk. Only use this option if you understand the implications and trust the container's source.
+
+### 22. How to achieve low latency in a small batch scenario?
+The performance of `torch_npu.npu_fused_infer_attention_score` in small batch scenario is not satisfactory, mainly due to the lack of flash decoding function. We offer an alternative operator in `tools/install_flash_infer_attention_score_ops_a2.sh` and `tools/install_flash_infer_attention_score_ops_a3.sh`, you can install it by the following instruction:
+
+```bash
+bash tools/install_flash_infer_attention_score_ops_a2.sh
+## change to run the following instruction if you're using A3 machine
+# bash tools/install_flash_infer_attention_score_ops_a3.sh
+```
+
+**NOTE**: Don't set `additional_config.pa_shape_list` when using this method, otherwise it will lead to another attention operator.
+**Important**: Please make sure you're using the **official image** of vllm-ascend, otherwise you **must change** the directory `/vllm-workspace` in `tools/install_flash_infer_attention_score_ops_a2.sh` or `tools/install_flash_infer_attention_score_ops_a3.sh` to your own or create one. If you're not in root user, you need `sudo` permission to run this script.

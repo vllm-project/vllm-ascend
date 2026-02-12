@@ -62,7 +62,8 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch('torch_npu.npu_convert_weight_to_int4pack')
     @patch('torch.Tensor.npu')
-    def test_process_weights_after_loading(self, mock_npu,
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading(self, mock_format_cast, mock_npu,
                                            mock_npu_convert_weight):
         mock_npu.side_effect = lambda: torch.zeros(
             (1, 32), dtype=torch.float32)
@@ -85,6 +86,8 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         layer.weight_offset_second = torch.nn.Parameter(torch.empty_like(
             layer.weight_scale_second.data),
                                                         requires_grad=False)
+        mock_format_cast.return_value = layer.weight.data.transpose(
+            0, 1).contiguous()
         self.method.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "weight_scale_bias"))
         self.assertEqual(layer.weight_scale_bias.data.shape, (32, ))
@@ -110,6 +113,8 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         new_layer.scale_bias = torch.nn.Parameter(torch.zeros(
             (32, 1), dtype=torch.float32),
                                                   requires_grad=False)
+        mock_format_cast.return_value = new_layer.weight.data.transpose(
+            0, 1).contiguous()
         self.method.process_weights_after_loading(new_layer)
         self.assertEqual(new_layer.scale_bias.data.shape, (32, ))
         self.assertTrue(hasattr(new_layer, "weight_scale_second"))
@@ -260,7 +265,6 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
                 requires_grad=False)
         return layer
 
-    @patch('vllm_ascend.utils._ENABLE_NZ', False)
     @patch('torch_npu.npu_format_cast')
     @patch('torch_npu.npu_quantize')
     @patch('torch.Tensor.npu')

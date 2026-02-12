@@ -1,0 +1,10 @@
+model_name: "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+hardware: "Atlas A2 Series"
+model: "vllm-vlm"
+tasks:
+- name: "ceval-valid"
+  metrics:
+  - name: "acc,none"
+    value: 0.42
+trust_remote_code: True
+gpu_memory_utilization: 0.8

@@ -28,7 +28,7 @@ import huggingface_hub
 import pandas as pd
 from modelscope import snapshot_download  # type: ignore
 
-BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("."))
+BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("./benchmark"))
 DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark",
                                 "configs", "datasets")
 REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark",
@@ -74,9 +74,13 @@ class AisbenchRunner:
                  host_ip: str = "localhost",
                  verify=True):
         self.model = model
-        self.dataset_path = maybe_download_from_modelscope(
-            aisbench_config["dataset_path"], repo_type="dataset")
-        self.model_path = maybe_download_from_modelscope(model)
+        self.dataset_path = aisbench_config.get("dataset_path_local")
+        if not self.dataset_path:
+            self.dataset_path = maybe_download_from_modelscope(
+                aisbench_config["dataset_path"], repo_type="dataset")
+        self.model_path = aisbench_config.get("model_path")
+        if not self.model_path:
+            self.model_path = maybe_download_from_modelscope(model)
         assert self.dataset_path is not None and self.model_path is not None, \
             f"Failed to download dataset or model: dataset={self.dataset_path}, model={self.model_path}"
         self.port = port
@@ -88,6 +92,8 @@ class AisbenchRunner:
         self.max_out_len = aisbench_config["max_out_len"]
         self.batch_size = aisbench_config["batch_size"]
         self.request_rate = aisbench_config.get("request_rate", 0)
+        self.trust_remote_code = aisbench_config.get("trust_remote_code",
+                                                     False)
         self.temperature = aisbench_config.get("temperature")
         self.top_k = aisbench_config.get("top_k")
         self.top_p = aisbench_config.get("top_p")
@@ -140,6 +146,9 @@ class AisbenchRunner:
         content = re.sub(r'max_out_len.*',
                          f'max_out_len = {self.max_out_len},', content)
         content = re.sub(r'batch_size.*', f'batch_size = {self.batch_size},',
+                         content)
+        content = re.sub(r'trust_remote_code=.*',
+                         f'trust_remote_code={self.trust_remote_code},',
                          content)
         content = content.replace("top_k", "#top_k")
         content = content.replace("seed", "#seed")

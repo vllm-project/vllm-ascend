@@ -3,21 +3,10 @@
 from typing import Callable, Optional, Tuple, Union
 
 import torch
-
-from vllm_ascend.utils import is_310p
-
-if is_310p():
-    from vllm.lora.ops.torch_ops import (bgmv_expand, bgmv_expand_slice,
-                                         bgmv_shrink, sgmv_expand,
-                                         sgmv_expand_slice, sgmv_shrink)
-else:
-    from vllm_ascend.lora.lora_ops import (bgmv_expand, bgmv_expand_slice,
-                                           bgmv_shrink, sgmv_expand,
-                                           sgmv_expand_slice, sgmv_shrink)
-
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.utils import refresh_all_lora_classes
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -34,6 +23,27 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
                                    device)
         refresh_all_lora_classes()
+        self.lora_config = kwargs.get("lora_config")
+        if get_ascend_device_type() == AscendDeviceType._310P or (
+                self.lora_config is not None
+                and self.lora_config.max_lora_rank >= 128):
+            from vllm.lora.ops.torch_ops import (bgmv_expand,
+                                                 bgmv_expand_slice,
+                                                 bgmv_shrink, sgmv_expand,
+                                                 sgmv_expand_slice,
+                                                 sgmv_shrink)
+        else:
+            from vllm_ascend.lora.lora_ops import (bgmv_expand,
+                                                   bgmv_expand_slice,
+                                                   bgmv_shrink, sgmv_expand,
+                                                   sgmv_expand_slice,
+                                                   sgmv_shrink)
+        self.bgmv_expand = bgmv_expand
+        self.bgmv_expand_slice = bgmv_expand_slice
+        self.bgmv_shrink = bgmv_shrink
+        self.sgmv_expand = sgmv_expand
+        self.sgmv_expand_slice = sgmv_expand_slice
+        self.sgmv_shrink = sgmv_shrink
 
     def _shrink_prefill(
         self,
@@ -45,7 +55,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         #No LoRA request, so return directly
         if self.no_lora:
             return
-        sgmv_shrink(
+        self.sgmv_shrink(
             x,
             w_t_all,
             y,
@@ -60,7 +70,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         scale: float,
     ):
-        bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
+        self.bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
 
     def _expand_prefill(
         self,
@@ -72,7 +82,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         #No LoRA request, so return directly
         if self.no_lora:
             return
-        sgmv_expand(
+        self.sgmv_expand(
             x,
             w_t_all,
             y,
@@ -87,7 +97,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         add_inputs: bool,
     ):
-        bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
+        self.bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
 
     def _expand_slice_prefill(
         self,
@@ -101,7 +111,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         #No LoRA request, so return directly
         if self.no_lora:
             return
-        sgmv_expand_slice(
+        self.sgmv_expand_slice(
             x,
             w_t_all,
             y,
@@ -120,8 +130,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
-        bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
-                          y_slice_size, add_inputs)
+        self.bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices,
+                               y_offset, y_slice_size, add_inputs)
 
     def _apply_expand(
         self,
@@ -255,6 +265,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # Embedding layer only need expand op
         expand_fun: Callable = (self._expand_prefill
                                 if self.is_prefill else self._expand_decode)
+        x = x.to(torch.float32)
         expand_fun(y, x, lora_b_stacked, add_inputs)
 
     def add_lora_linear(self,
@@ -345,68 +356,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         indices = self.sampler_indices
 
-        bgmv_shrink(x, lora_a_stacked, buffer, indices, scale)
-        bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
+        self.bgmv_shrink(x, lora_a_stacked, buffer, indices, scale)
+        self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
 
         y = y.view_as(y_org)
-
-
-class PunicaWrapperNPU0110(PunicaWrapperNPU):
-    # NOTE: remove me when 0.11.0 id dropped
-    def add_lora_linear(  # type: ignore[override]
-            self,
-            y: torch.Tensor,
-            x: torch.Tensor,
-            lora_a_stacked: Tuple[torch.Tensor, ...],
-            lora_b_stacked: Tuple[torch.Tensor, ...],
-            lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
-            scale: float,
-            output_slices: Tuple[int, ...],
-            *,
-            buffer: Optional[Tuple[torch.Tensor, ...]] = None,
-            **kwargs) -> None:
-        """
-        Applicable to linear-related lora.
-
-        Semantics:
-            for i in range(len(lora_a_stacked)):
-                y[i] += (
-                    x[i].unsqueeze(0)
-                    @ lora_a_stacked[indices[i], layer_idx, :, :]
-                    @ lora_b_stacked[indices[i], layer_idx, :, :]
-                    * scale
-                    ).squeeze(0)+lora_bias_stacked[i]
-
-        Args:
-            y (torch.Tensor): Output tensor. Will be changed in-place.
-            x (torch.Tensor): Input tensor
-            lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weight.
-            lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight.
-            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): lora's bias.
-            scale (float): Scaling factor.
-            output_slices (Tuple[int, ...]): Every slice's size.
-            buffer (Optional[Tuple[torch.Tensor, ...]]): Defaults to None.
-        """
-
-        assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
-        if lora_bias_stacked is not None:
-            assert len(lora_bias_stacked) == len(output_slices)
-            y = self._apply_bias(self.token_lora_indices, y, output_slices,
-                                 lora_bias_stacked)
-
-        if buffer is None:
-            r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default, consistent with the
-            # triton op
-            buffer = tuple(
-                torch.zeros(
-                    (x.size(0), r), dtype=torch.float32, device=x.device)
-                for _ in range(len(output_slices)))
-        self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
-        self.add_expand(y,
-                        buffer,
-                        lora_b_stacked,
-                        None,
-                        output_slices,
-                        add_inputs=True,
-                        **kwargs)
