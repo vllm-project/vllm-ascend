@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -24,19 +24,18 @@
 
 namespace Catlass::Gemm::Kernel {
 
-template <class ArchTag>
-class BlockQuant
+template <class ArchTag, typename ElementOutput_>
+class SwigluPost
 {
 public:
     using ElementInput = float;
     using LayoutInput = layout::RowMajor;
-    using ElementDequantScale = float;
-    using LayoutDequantScale = layout::VectorLayout;
-    using ElementOutput = int8_t;
+    using ElementSwigluScale = float;
+    using LayoutSwigluScale = layout::VectorLayout;
+    using ElementOutput = ElementOutput_;
     using LayoutOutput = layout::RowMajor;
 
     using InputType = GemmType<ElementInput, LayoutInput>;
-    using DequantScaleType = GemmType<ElementDequantScale, LayoutDequantScale>;
     using OutputType = GemmType<ElementOutput, LayoutOutput>;
 
     using EpilogueTileSwizzle = Epilogue::Tile::EpilogueHorizontalTileSwizzle;
@@ -44,8 +43,8 @@ public:
     struct Params {
         __gm__ ElementInput *ptrInput{nullptr};
         LayoutInput layoutInput;
-        __gm__ ElementDequantScale *ptrDequantScale{nullptr};
-        LayoutDequantScale layoutDequantScale;
+        __gm__ ElementSwigluScale *ptrSwigluScale{nullptr};
+        LayoutSwigluScale layoutSwigluScale;
         __gm__ ElementOutput *ptrOutput{nullptr};
         LayoutOutput layoutOutput;
         uint32_t tileRow;
@@ -56,13 +55,13 @@ public:
 
         CATLASS_DEVICE
         Params(__gm__ ElementInput *ptrInput_, LayoutInput const &layoutInput_,
-               __gm__ ElementDequantScale *ptrQuantScale_, LayoutDequantScale const &layoutQuantScale_,
+               __gm__ ElementSwigluScale *ptrSwigluScale_, LayoutSwigluScale const &layoutSwigluScale_,
                __gm__ ElementOutput *ptrOutput_, LayoutOutput const layoutOutput_, const uint32_t tileRow_,
                const uint32_t tileColumn_)
             : ptrInput(ptrInput_),
               layoutInput(layoutInput_),
-              ptrDequantScale(ptrQuantScale_),
-              layoutDequantScale(layoutQuantScale_),
+              ptrSwigluScale(ptrSwigluScale_),
+              layoutSwigluScale(layoutSwigluScale_),
               ptrOutput(ptrOutput_),
               layoutOutput(layoutOutput_),
               tileRow(tileRow_),
@@ -71,7 +70,7 @@ public:
     };
 
     CATLASS_DEVICE
-    BlockQuant(Arch::Resource<ArchTag> const &resource, Params const &params_) : params(params_)
+    SwigluPost(Arch::Resource<ArchTag> const &resource, Params const &params_) : params(params_)
     {
         int64_t ubOffset = 0;
         tileRow = params_.tileRow;
@@ -82,24 +81,11 @@ public:
 
         ubInput = resource.ubBuf.template GetBufferByByte<ElementInput>(ubOffset);
         ubOffset += tileCount * sizeof(ElementInput);
-        ubDequantScale = resource.ubBuf.template GetBufferByByte<ElementDequantScale>(ubOffset);
-        ubOffset += CEIL_UP(tileRow * sizeof(ElementDequantScale));
         ubOutput = resource.ubBuf.template GetBufferByByte<ElementOutput>(ubOffset);
         ubOffset += tileCount * sizeof(ElementOutput);
 
-        ubAbs = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
+        ubInputRightHalf = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
         ubOffset += tileCount * sizeof(float);
-        ubMax = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-        ubOffset += halfTileCount * sizeof(float);
-        ubReduceMax = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-        ubOffset += CEIL_UP(tileRow * sizeof(float));
-        ubQuantScale = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-        ubOffset += CEIL_UP(tileRow * sizeof(float));
-        ubInputTmp = ubAbs;
-        ubInputRightHalf = ubAbs;
-        ubQuantF32 = ubAbs;
-        ubQuantS32 = ubAbs.ReinterpretCast<int32_t>();
-        ubQuantF16 = ubAbs.ReinterpretCast<half>();
 
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(0);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
@@ -107,7 +93,7 @@ public:
     }
 
     CATLASS_DEVICE
-    ~BlockQuant()
+    ~SwigluPost()
     {
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
@@ -121,8 +107,6 @@ public:
 
         AscendC::GlobalTensor<ElementInput> gmInput;
         gmInput.SetGlobalBuffer(params.ptrInput);
-        AscendC::GlobalTensor<ElementDequantScale> gmDequantScale;
-        gmDequantScale.SetGlobalBuffer(params.ptrDequantScale);
         AscendC::GlobalTensor<ElementOutput> gmOutput;
         gmOutput.SetGlobalBuffer(params.ptrOutput);
 
@@ -145,7 +129,7 @@ public:
             layout::RowMajor layoutUbInput{actualTileShape, ubTileStride};
 
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
-            // continue swiglu computing here and then quant
+            // continue swiglu computing here
             copyGmToUbInput(ubInput, gmTileInput, layoutUbInput, layoutGmTileInput);
             copyGmToUbInput(ubInputRightHalf, gmTileInput[params.layoutInput.shape(1) >> 1], layoutUbInput, layoutGmTileInput);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(0);
@@ -153,72 +137,8 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(0);
             AscendC::Mul(ubInput, ubInput, ubInputRightHalf, tileCount);
             AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Abs(ubAbs, ubInput, tileCount);
-            AscendC::PipeBarrier<PIPE_V>();
-
-            for (uint32_t rowIdx = 0; rowIdx < tileRow; ++rowIdx) {
-                AscendC::Max(ubMax[rowIdx * halfTileColumn], ubAbs[rowIdx * tileColumn],
-                             ubAbs[rowIdx * tileColumn + halfTileColumn], halfTileColumn);
-            }
-
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Muls(ubInputTmp, ubInput, 127.f, tileCount);
-
-            constexpr uint32_t elementPerBlk = BYTE_PER_BLK / sizeof(float);
-            constexpr int32_t mask = 64;
-
-            AscendC::BinaryRepeatParams maxParams;
-            maxParams.dstBlkStride = halfTileColumn / elementPerBlk;
-            maxParams.src0BlkStride = halfTileColumn / elementPerBlk;
-            maxParams.src1BlkStride = halfTileColumn / elementPerBlk;
-            maxParams.dstRepStride = 1;
-            maxParams.src0RepStride = 1;
-            maxParams.src1RepStride = 1;
-            constexpr uint32_t colNumPerCompute = BYTE_PER_VECTOR_FRACTAL / sizeof(float);
-            uint32_t reduceWidth = halfTileColumn;
-            while (reduceWidth > (BLK_NUM_PER_VECTOR_FRACTAL * BYTE_PER_BLK / sizeof(float))) {
-                reduceWidth >>= 1;
-                AscendC::Max(ubMax, ubMax, ubMax[reduceWidth], mask, reduceWidth / elementPerBlk, maxParams);
-                AscendC::PipeBarrier<PIPE_V>();
-            }
-
-            AscendC::WholeReduceMax(ubReduceMax, ubMax, mask, tileRow, 1, 1, halfTileColumn / elementPerBlk,
-                                    AscendC::ReduceOrder::ORDER_ONLY_VALUE);
-            AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
-            AscendC::PipeBarrier<PIPE_V>();
-
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
-            AscendC::Muls(ubDequantScale, ubReduceMax, 1.0f / 127.0f, tileRow);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(0);
-
-            auto dequantScaleTileOffset = tileOffset.template GetCoordByAxis<0>();
-            auto dequantScaleTileShape = actualTileShape.template GetCoordByAxis<0>();
-
-            auto gmTileDequantScale = gmDequantScale[params.layoutDequantScale.GetOffset(dequantScaleTileOffset)];
-            auto layoutGmTileDequantScale = params.layoutDequantScale.GetTileLayout(dequantScaleTileShape);
-
-            auto layoutUbDequantScale =
-                LayoutDequantScale::template MakeLayoutInUb<ElementDequantScale>(dequantScaleTileShape);
-
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(0);
-            copyUbToGmDequantScale(gmTileDequantScale, ubDequantScale, layoutGmTileDequantScale, layoutUbDequantScale);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
-
-            AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
-            for (uint32_t rowIdx = 0; rowIdx < tileRow; ++rowIdx) {
-                AscendC::Muls(ubQuantF32[rowIdx * tileColumn], ubInputTmp[rowIdx * tileColumn],
-                              1.f / ubReduceMax.GetValue(rowIdx), tileColumn);
-            }
-
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Cast(ubQuantS32, ubQuantF32, AscendC::RoundMode::CAST_RINT, tileCount);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::SetDeqScale(static_cast<half>(1.0));
-            AscendC::Cast(ubQuantF16, ubQuantS32, AscendC::RoundMode::CAST_RINT, tileCount);
-            AscendC::PipeBarrier<PIPE_V>();
-
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(1);
-            AscendC::Cast(ubOutput, ubQuantF16, AscendC::RoundMode::CAST_RINT, tileCount);
+            AscendC::Cast(ubOutput, ubInput, AscendC::RoundMode::CAST_RINT, tileCount);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(1);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(0);
 
@@ -242,28 +162,17 @@ private:
     uint32_t halfTileCount;
 
     AscendC::LocalTensor<ElementInput> ubInput;
-    AscendC::LocalTensor<ElementDequantScale> ubDequantScale;
     AscendC::LocalTensor<ElementOutput> ubOutput;
 
-    AscendC::LocalTensor<float> ubAbs;
-    AscendC::LocalTensor<float> ubMax;
-    AscendC::LocalTensor<float> ubReduceMax;
-    AscendC::LocalTensor<float> ubQuantScale;
-    AscendC::LocalTensor<float> ubQuantScaleBrcb;
-    AscendC::LocalTensor<float> ubInputTmp;
     AscendC::LocalTensor<float> ubInputRightHalf;
-    AscendC::LocalTensor<float> ubQuantF32;
-    AscendC::LocalTensor<int32_t> ubQuantS32;
-    AscendC::LocalTensor<half> ubQuantF16;
 
     Epilogue::Tile::CopyGm2Ub<ArchTag, InputType> copyGmToUbInput;
-    Epilogue::Tile::CopyUb2Gm<ArchTag, DequantScaleType> copyUbToGmDequantScale;
     Epilogue::Tile::CopyUb2Gm<ArchTag, OutputType> copyUbToGmOutput;
 };
 
 template <TemplateMC2TypeClass, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_, uint32_t WORKSPACE_STAGES_,
           class ElementGroupList_>
-class GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspace
+class GroupedMatmulSliceMSwigluMultiStageWorkspace
 {
 public:
     using BlockMmad = BlockMmad_;
@@ -286,16 +195,16 @@ public:
     using LayoutD = typename BlockEpilogue::LayoutD;
     using EpilogueParams = typename BlockEpilogue::Params;
 
-    using ElementDequantScale = typename BlockQuant<ArchTag>::ElementDequantScale;
-    using LayoutDequantScale = typename BlockQuant<ArchTag>::LayoutDequantScale;
-    using ElementOutput = typename BlockQuant<ArchTag>::ElementOutput;
-    using LayoutOutput = typename BlockQuant<ArchTag>::LayoutOutput;
+    using XType = ExpandXType;
+    using ElementSwigluScale = typename SwigluPost<ArchTag, XType>::ElementSwigluScale;
+    using LayoutSwigluScale = typename SwigluPost<ArchTag, XType>::LayoutSwigluScale;
+    using ElementOutput = typename SwigluPost<ArchTag, XType>::ElementOutput;
+    using LayoutOutput = typename SwigluPost<ArchTag, XType>::LayoutOutput;
 
     using BlockScheduler = BlockScheduler_;
     static constexpr uint32_t WORKSPACE_STAGES = WORKSPACE_STAGES_;
     using ElementGroupList = ElementGroupList_;
 
-    using XType = ExpandXType;
 
     // Parameters structure
     struct Params {
@@ -313,8 +222,8 @@ public:
         LayoutPerTokenScale layoutPerTokenScale;
         __gm__ ElementOutput *ptrOutput;
         LayoutOutput layoutOutput;
-        __gm__ ElementDequantScale *ptrDequantScale;
-        LayoutDequantScale layoutDequantScale;
+        __gm__ ElementSwigluScale *ptrSwigluScale;
+        LayoutSwigluScale layoutSwigluScale;
         GM_ADDR ptrWorkspace;
         GM_ADDR gmX;
         GM_ADDR debugGm;
@@ -346,7 +255,7 @@ public:
                LayoutA const &layoutA_, GM_ADDR ptrB_, LayoutB const &layoutB_, GM_ADDR ptrScale_,
                LayoutScale const &layoutScale_, GM_ADDR ptrPerTokenScale_,
                LayoutPerTokenScale const &layoutPerTokenScale_, GM_ADDR ptrOutput_, LayoutOutput const &layoutOutput_,
-               GM_ADDR ptrDequantScale_, LayoutDequantScale const &layoutDequantScale_, GM_ADDR ptrWorkspace_,
+               GM_ADDR ptrSwigluScale_, LayoutSwigluScale const &layoutSwigluScale_, GM_ADDR ptrWorkspace_,
                GM_ADDR gmX_, GM_ADDR debugGm_, GM_ADDR gmexpertIds_, GM_ADDR gmExpandIdx_, GM_ADDR gmEpSendCount_, GM_ADDR gmXActiveMask_,
                GM_ADDR gmResvered_, GM_ADDR gmExpertTokenNums_, uint32_t epRankSize_, uint32_t epRankId_,
                uint32_t moeExpertNum_, uint32_t moeExpertNumPerRank_, uint32_t sharedExpertNum_,
@@ -365,8 +274,8 @@ public:
               layoutPerTokenScale(layoutPerTokenScale_),
               ptrOutput(reinterpret_cast<__gm__ ElementOutput *>(ptrOutput_)),
               layoutOutput(layoutOutput_),
-              ptrDequantScale(reinterpret_cast<__gm__ ElementDequantScale *>(ptrDequantScale_)),
-              layoutDequantScale(layoutDequantScale_),
+              ptrSwigluScale(reinterpret_cast<__gm__ ElementSwigluScale *>(ptrSwigluScale_)),
+              layoutSwigluScale(layoutSwigluScale_),
               ptrWorkspace(ptrWorkspace_),
               gmX(gmX_),
               debugGm(debugGm_),
@@ -392,7 +301,7 @@ public:
 
     // Methods
     CATLASS_DEVICE
-    GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspace() {}
+    GroupedMatmulSliceMSwigluMultiStageWorkspace() {}
 
     template <int32_t CORE_TYPE = g_coreType>
     CATLASS_DEVICE void operator()(Params const &params);
@@ -687,46 +596,6 @@ public:
     }
 
     CATLASS_DEVICE
-    void QuantToken(AscendC::LocalTensor<XType> &xInTensor, AscendC::LocalTensor<int8_t> &yInt8Tensor, int64_t ubOffset)
-    {
-        int64_t subUbOffset = ubOffset;
-        AscendC::LocalTensor<float> xFp32TmpTensor = resource.ubBuf.template GetBufferByByte<float>(subUbOffset);
-        subUbOffset += CEIL_UP(tokenLength * sizeof(float));
-        AscendC::LocalTensor<float> xFp32AbsTensor = resource.ubBuf.template GetBufferByByte<float>(subUbOffset);
-        subUbOffset += CEIL_UP(tokenLength * sizeof(float));
-        AscendC::LocalTensor<float> xRowMaxTensor = resource.ubBuf.template GetBufferByByte<float>(subUbOffset);
-        subUbOffset += CEIL_UP(UB_BLOCK_SIZE);
-        AscendC::LocalTensor<int32_t> ytmpInt32Tensor = xFp32TmpTensor.template ReinterpretCast<int32_t>();
-        AscendC::LocalTensor<half> yHalfTensor = xFp32TmpTensor.template ReinterpretCast<half>();
-        AscendC::LocalTensor<float> yFp32Tensor = yInt8Tensor.template ReinterpretCast<float>();
-        AscendC::LocalTensor<int32_t> yInt32Tensor = yInt8Tensor.template ReinterpretCast<int32_t>();
-
-        AscendC::Cast(xFp32TmpTensor, xInTensor, AscendC::RoundMode::CAST_NONE, tokenLength);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Abs(xFp32AbsTensor, xFp32TmpTensor, tokenLength);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::ReduceMax(xRowMaxTensor, xFp32AbsTensor, xFp32AbsTensor, tokenLength, false);
-        AscendC::PipeBarrier<PIPE_V>();
-
-        AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
-        float dynamicQuantScale = float(127.0) / xRowMaxTensor.GetValue(0);
-        yFp32Tensor.SetValue(tokenLength / sizeof(float), float(1.0) / dynamicQuantScale);
-        yInt32Tensor.SetValue(tokenLength / sizeof(int32_t) + 1, tokenFlag);
-        AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-
-        AscendC::Muls(xFp32TmpTensor, xFp32TmpTensor, dynamicQuantScale, tokenLength);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(ytmpInt32Tensor, xFp32TmpTensor, AscendC::RoundMode::CAST_RINT, tokenLength);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(yHalfTensor, ytmpInt32Tensor, AscendC::RoundMode::CAST_ROUND, tokenLength);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(yInt8Tensor, yHalfTensor, AscendC::RoundMode::CAST_TRUNC, tokenLength);
-    }
-
-    CATLASS_DEVICE
     void SendToShareExprt(GM_ADDR gmX, GM_ADDR gmX1, GM_ADDR gmX1Scale)
     {
         uint32_t newAivId = sendCoreIdx - sendToMoeAivNum;
@@ -745,33 +614,24 @@ public:
         }
 
         AscendC::LocalTensor<XType> xInTensor[BUFFER_NUM];
-        AscendC::LocalTensor<int8_t> yInt8Tensor[BUFFER_NUM];
-        AscendC::LocalTensor<float> yFp32Tensor[BUFFER_NUM];
+        AscendC::LocalTensor<int32_t> xInt32Tensor[BUFFER_NUM];
 
         AscendC::GlobalTensor<XType> srcWinGMTensor;
         srcWinGMTensor.SetGlobalBuffer((__gm__ XType *)gmX);
 
         xInTensor[0] = resource.ubBuf.template GetBufferByByte<XType>(ubOffset);
-        ubOffset += CEIL_UP(tokenLength * sizeof(XType));
+        xInt32Tensor[0] = xInTensor[0].template ReinterpretCast<int32_t>();
+        ubOffset += CEIL_UP(axisHCommuBf16Fp16 * sizeof(XType));
         xInTensor[1] = resource.ubBuf.template GetBufferByByte<XType>(ubOffset);
-        ubOffset += CEIL_UP(tokenLength * sizeof(XType));
-        yInt8Tensor[0] = resource.ubBuf.template GetBufferByByte<int8_t>(ubOffset);
-        yFp32Tensor[0] = yInt8Tensor[0].template ReinterpretCast<float>();
-        ubOffset += CEIL_UP(axisHCommu * sizeof(int8_t));
-        yInt8Tensor[1] = resource.ubBuf.template GetBufferByByte<int8_t>(ubOffset);
-        yFp32Tensor[1] = yInt8Tensor[1].template ReinterpretCast<float>();
-        ubOffset += CEIL_UP(axisHCommu * sizeof(int8_t));
-        AscendC::GlobalTensor<int8_t> dstWinGMTensor;
-        AscendC::GlobalTensor<int8_t> expandXOutGlobal;
-        expandXOutGlobal.SetGlobalBuffer((__gm__ int8_t *)(gmX1));
-        AscendC::GlobalTensor<float> dynamicScalesOutGMTensor_;
-        dynamicScalesOutGMTensor_.SetGlobalBuffer((__gm__ float *)(gmX1Scale));
+        xInt32Tensor[1] = xInTensor[1].template ReinterpretCast<int32_t>();
+        ubOffset += CEIL_UP(axisHCommuBf16Fp16 * sizeof(XType));
+        AscendC::GlobalTensor<XType> dstWinGMTensor;
+        AscendC::GlobalTensor<XType> expandXOutGlobal;
+        expandXOutGlobal.SetGlobalBuffer((__gm__ XType *)(gmX1));
 
         // double buffer
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(0);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(1);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(0);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(1);
 
         for (uint32_t tokenIndex = startTokenId; tokenIndex < endTokenId; ++tokenIndex) {
             uint32_t index = (tokenIndex & 1) ? 0 : 1;
@@ -781,38 +641,29 @@ public:
             uint32_t preCnt = (moeOnShareRank + epRankId) * axisBS / sharedExpertRankNum -
                                 epRankId * axisBS / sharedExpertRankNum;
             dstWinGMTensor.SetGlobalBuffer(
-                (__gm__ int8_t *)(GET_WIND_ADDR_BY_RANK_ID(moeOnShareRank) + expertPerSizeOnWin * epRankId));
+                (__gm__ XType *)(GET_WIND_ADDR_BY_RANK_ID(moeOnShareRank) + expertPerSizeOnWin * epRankId));
 
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventId);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
             AscendC::DataCopy(xInTensor[index], srcWinGMTensor[tokenIndex * tokenLength], tokenLength);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventId);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventId);
-            QuantToken(xInTensor[index], yInt8Tensor[index], ubOffset);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventId);
-            AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(0);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(eventId);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(eventId);
+            xInt32Tensor[index](hOutSize / sizeof(int32_t)) = tokenFlag;
+            AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(eventId);
+            AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(eventId);
 
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventId);
             if (isShareExpert) {
-                AscendC::DataCopyExtParams dataCopyParamsFloat = {1U, sizeof(float), 0U, 0U, 0U};
-                AscendC::DataCopy(expandXOutGlobal[tokenIndex * tokenLength], yInt8Tensor[index], tokenLength);
-                AscendC::PipeBarrier<PIPE_MTE3>();
-                AscendC::DataCopyPad(dynamicScalesOutGMTensor_[tokenIndex],
-                                        yFp32Tensor[index][tokenLength / sizeof(float)], dataCopyParamsFloat);
+                AscendC::DataCopy(expandXOutGlobal[tokenIndex * tokenLength], xInTensor[index], tokenLength);
             } else {
-                AscendC::DataCopy(dstWinGMTensor[(tokenIndex - preCnt) * axisHCommu], yInt8Tensor[index],
+                AscendC::DataCopy(dstWinGMTensor[(tokenIndex - preCnt) * axisHCommuBf16Fp16], xInTensor[index],
                                     tokenLength);
                 AscendC::PipeBarrier<PIPE_MTE3>();
-                AscendC::DataCopy(dstWinGMTensor[(tokenIndex - preCnt) * axisHCommu + tokenLength],
-                                    yInt8Tensor[index][tokenLength], scaleParamPad);
+                AscendC::DataCopy(dstWinGMTensor[(tokenIndex - preCnt) * axisHCommuBf16Fp16 + tokenLength],
+                                    xInTensor[index][hOutSize / sizeof(XType)], 16);
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventId);
         }
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(1);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(1);
     }
 
     CATLASS_DEVICE
@@ -838,25 +689,20 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::V_S>(1);
 
         AscendC::LocalTensor<XType> xInTensor[BUFFER_NUM];
-        AscendC::LocalTensor<int8_t> yInt8Tensor[BUFFER_NUM];
-        AscendC::LocalTensor<float> yFp32Tensor[BUFFER_NUM];
+        AscendC::LocalTensor<int32_t> xInt32Tensor[BUFFER_NUM];
 
         AscendC::GlobalTensor<XType> srcWinGMTensor;
         srcWinGMTensor.SetGlobalBuffer((__gm__ XType *)gmX);
 
         xInTensor[0] = resource.ubBuf.template GetBufferByByte<XType>(ubOffset);
-        ubOffset += CEIL_UP(tokenLength * sizeof(XType));
+        xInt32Tensor[0] = xInTensor[0].template ReinterpretCast<int32_t>();
+        ubOffset += CEIL_UP(axisHCommuBf16Fp16 * sizeof(XType));
         xInTensor[1] = resource.ubBuf.template GetBufferByByte<XType>(ubOffset);
-        ubOffset += CEIL_UP(tokenLength * sizeof(XType));
-        yInt8Tensor[0] = resource.ubBuf.template GetBufferByByte<int8_t>(ubOffset);
-        ubOffset += CEIL_UP(axisHCommu * sizeof(int8_t));
-        yInt8Tensor[1] = resource.ubBuf.template GetBufferByByte<int8_t>(ubOffset);
-        ubOffset += CEIL_UP(axisHCommu * sizeof(int8_t));
-        AscendC::GlobalTensor<int8_t> dstWinGMTensor;
+        xInt32Tensor[1] = xInTensor[1].template ReinterpretCast<int32_t>();
+        ubOffset += CEIL_UP(axisHCommuBf16Fp16 * sizeof(XType));
+        AscendC::GlobalTensor<XType> dstWinGMTensor;
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(0);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(1);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(0);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(1);
         uint32_t sendValidTokenIndex = 0;
         for (uint32_t sendGroupIndex = 0; sendGroupIndex < moeExpertNumPerRank; ++sendGroupIndex) {
             for (uint32_t tokenIndex = startTokenId; tokenIndex < endTokenId; ++tokenIndex) {
@@ -879,30 +725,25 @@ public:
                                                     (expertPerSizeOnWin * (epRankId * moeExpertNumPerRank +
                                                                            dstExpertId % moeExpertNumPerRank)) +
                                                     hCommuSize * curExpertCnt);
-                dstWinGMTensor.SetGlobalBuffer((__gm__ int8_t *)rankGM);
+                dstWinGMTensor.SetGlobalBuffer((__gm__ XType *)rankGM);
 
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventId);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
                 AscendC::DataCopy(xInTensor[index], srcWinGMTensor[tokenIndex / axisK * tokenLength], tokenLength);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventId);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventId);
-                QuantToken(xInTensor[index], yInt8Tensor[index], ubOffset);
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventId);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(eventId);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(eventId);
+                xInt32Tensor[index](hOutSize / sizeof(int32_t)) = tokenFlag;
+                AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(eventId);
 
-                AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(0);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventId);
+                AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(eventId);
 
-                AscendC::DataCopy(dstWinGMTensor, yInt8Tensor[index], tokenLength);
+                AscendC::DataCopy(dstWinGMTensor, xInTensor[index], tokenLength);
                 AscendC::PipeBarrier<PIPE_MTE3>();
-                AscendC::DataCopy(dstWinGMTensor[tokenLength], yInt8Tensor[index][tokenLength], scaleParamPad);
+                AscendC::DataCopy(dstWinGMTensor[tokenLength], xInTensor[index][hOutSize / sizeof(XType)], 16);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventId);
             }
         }
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(1);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(1);
 
         AscendC::GlobalTensor<int32_t> expandIdxGMTensor;
         expandIdxGMTensor.SetGlobalBuffer((__gm__ int32_t *)gmExpandIdx + startTokenId);
@@ -1052,17 +893,14 @@ public:
         AscendC::LocalTensor<float> statusFp32Tensor_ = statusTensor_.ReinterpretCast<float>();
 
         AscendC::DataCopyExtParams dataCopyParamsFloat = {1U, sizeof(float), 0U, 0U, 0U};
-        AscendC::LocalTensor<int8_t> xTmpTensor_ = resource.ubBuf.template GetBufferByByte<int8_t>(subUbOffset);
-        subUbOffset += CEIL_UP(axisHCommu * sizeof(int8_t));
-        AscendC::LocalTensor<float> xOutFp32Tensor_ = xTmpTensor_.template ReinterpretCast<float>();
+        AscendC::LocalTensor<XType> xTmpTensor_ = resource.ubBuf.template GetBufferByByte<XType>(subUbOffset);
+        subUbOffset += CEIL_UP(axisHCommu * sizeof(XType));
         AscendC::LocalTensor<int32_t> tmpLocalTensor = resource.ubBuf.template GetBufferByByte<int32_t>(subUbOffset);
         subUbOffset += CEIL_UP(UB_BLOCK_SIZE);
         AscendC::LocalTensor<int32_t> gatherMaskOutCountTensor = (gatherMaskOutTensor.template ReinterpretCast<int32_t>());
-        AscendC::GlobalTensor<int8_t> tokGlobal;
+        AscendC::GlobalTensor<XType> tokGlobal;
         AscendC::GlobalTensor<int32_t> tokGlobalInt32;
-        AscendC::GlobalTensor<int8_t> expandXOutGlobal;
-        AscendC::GlobalTensor<float> dynamicScalesOutGMTensor_;
-        dynamicScalesOutGMTensor_.SetGlobalBuffer((__gm__ float *)(gmX1Scale));
+        AscendC::GlobalTensor<XType> expandXOutGlobal;
         uint32_t beginIdx = 0;
         for (uint32_t index = startRankId; index < endRankId; index++) {
             uint32_t i = index - startRankId;
@@ -1087,16 +925,16 @@ public:
             GM_ADDR wAddr = (__gm__ uint8_t *)(GET_WIND_ADDR_BY_RANK_ID(epRankId)) + winOffset * expertPerSizeOnWin;
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(0);
             for (uint32_t j = 0; j < count; j++) {
-                tokGlobal.SetGlobalBuffer((__gm__ int8_t *)(wAddr + j * hCommuSize));
+                tokGlobal.SetGlobalBuffer((__gm__ XType *)(wAddr + j * hCommuSize));
                 tokGlobalInt32.SetGlobalBuffer((__gm__ int32_t *)(wAddr + j * hCommuSize + hOutSize));
-                expandXOutGlobal.SetGlobalBuffer((__gm__ int8_t *)(gmX1) + (beginIdx + j) * tokenLength, tokenLength);
+                expandXOutGlobal.SetGlobalBuffer((__gm__ XType *)(gmX1) + (beginIdx + j) * tokenLength, tokenLength);
 
                 while (true) {
                     AscendC::DataCopy(tmpLocalTensor, tokGlobalInt32, INT32_COUNT_PER_BLOCK);
                     AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(0);
                     AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(0);
-                    if (tmpLocalTensor.GetValue(1) == tokenFlag) {
-                        tokGlobalInt32.SetValue(1, 0);
+                    if (tmpLocalTensor.GetValue(0) == tokenFlag) {
+                        tokGlobalInt32.SetValue(0, 0);
                         __asm__ __volatile__("");
                         AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
                                                         AscendC::DcciDst::CACHELINE_OUT>(tokGlobalInt32[1]);
@@ -1107,11 +945,9 @@ public:
                 AscendC::PipeBarrier<PIPE_ALL>();
 
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(0);
-                AscendC::DataCopy(xTmpTensor_, tokGlobal, axisHCommu);
+                AscendC::DataCopy(xTmpTensor_, tokGlobal, tokenLength);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(0);
-                AscendC::DataCopyPad(dynamicScalesOutGMTensor_[beginIdx + j], xOutFp32Tensor_[tokenLength / sizeof(float)],
-                                    dataCopyParamsFloat);
                 AscendC::DataCopy(expandXOutGlobal, xTmpTensor_, tokenLength);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(0);
             }
@@ -1330,17 +1166,18 @@ public:
             recvCoreNum = aiCoreGroupNum;
         }
 
-        hOutSize = tokenLength * sizeof(int8_t);
-        scaleParamPad = TOKEN_EXTRA_SPACE;  // 512B for dynamic quant scale
+        hOutSize = tokenLength * sizeof(XType);
+        scaleParamPad = TOKEN_EXTRA_SPACE;
         hCommuSize = hOutSize + scaleParamPad;
         axisHCommu = hCommuSize / sizeof(int8_t);
+        axisHCommuBf16Fp16 = hCommuSize / sizeof(XType);
         axisBS = params.bs;
         activeMaskBsCnt = axisBS;
         axisK = params.topK;
         uint32_t maxAxisBs = params.globalBs / epRankSize;
 
         stateOffset = STATE_OFFSET;
-        expertPerSizeOnWin = maxAxisBs * tokenLength * sizeof(XType);
+        expertPerSizeOnWin = maxAxisBs * hCommuSize;
         winContext_ = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<AscendC::HCCL_GROUP_ID_0>();
         statusDataSpaceGm = (GM_ADDR)(winContext_->localWindowsExp);
     }
@@ -1486,7 +1323,6 @@ public:
 
         UpdateAndCleanInfo(params.ptrGroupList, params.gmEpSendCount, params.gmExpertTokenNums);
         {
-            // dynamic quant
             AscendC::GlobalTensor<int32_t> sendCountsGlobal;
             sendCountsGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(params.gmEpSendCount));
             __asm__ __volatile__("");
@@ -1497,21 +1333,21 @@ public:
             AscendC::PipeBarrier<PIPE_ALL>();
             uint32_t n = params.problemShape.n();
             uint32_t nOut = params.problemShape.n() / 2;
-            uint32_t quantRowOnce = 0;
-            CalQuantRow(nOut, quantRowOnce);
+            uint32_t swigluRowOnce = 0;
+            CalQuantRow(nOut, swigluRowOnce);
             auto swigluLayout = layout::RowMajor{totalTokenCount, n};
-            typename BlockQuant<ArchTag>::Params quantParams{
-                gmSwigluOutput,   swigluLayout,        params.ptrDequantScale, params.layoutDequantScale,
-                params.ptrOutput, params.layoutOutput, quantRowOnce,           nOut};
+            typename SwigluPost<ArchTag, XType>::Params swigluParams{
+                gmSwigluOutput,   swigluLayout,        params.ptrSwigluScale, params.layoutSwigluScale,
+                params.ptrOutput, params.layoutOutput, swigluRowOnce,           nOut};
 
-            BlockQuant<ArchTag> blockQuant(resource, quantParams);
-            MatrixCoord quantShape(totalTokenCount, nOut);
-            MatrixCoord quantBlockShape((uint16_t)(subBlockNum * quantRowOnce), nOut);
-            Epilogue::Tile::EpilogueHorizontalTileSwizzle quantSwizzle(quantShape, quantBlockShape);
-            for (uint32_t loopIdx = aiCoreGroupIdx; loopIdx < quantSwizzle.GetLoops(); loopIdx += aiCoreGroupNum) {
-                auto blockCoord = quantSwizzle.GetTileCoord(loopIdx);
-                auto actualBlockShape = quantSwizzle.GetActualTileShape(blockCoord);
-                blockQuant(quantBlockShape, blockCoord, actualBlockShape);
+            SwigluPost<ArchTag, XType> blockSwiglu(resource, swigluParams);
+            MatrixCoord swigluShape(totalTokenCount, nOut);
+            MatrixCoord swigluBlockShape((uint16_t)(subBlockNum * swigluRowOnce), nOut);
+            Epilogue::Tile::EpilogueHorizontalTileSwizzle swigluSwizzle(swigluShape, swigluBlockShape);
+            for (uint32_t loopIdx = aiCoreGroupIdx; loopIdx < swigluSwizzle.GetLoops(); loopIdx += aiCoreGroupNum) {
+                auto blockCoord = swigluSwizzle.GetTileCoord(loopIdx);
+                auto actualBlockShape = swigluSwizzle.GetActualTileShape(blockCoord);
+                blockSwiglu(swigluBlockShape, blockCoord, actualBlockShape);
             }
         }
     }
@@ -1571,6 +1407,7 @@ private:
     uint32_t scaleParamPad{0};
     uint32_t hCommuSize{0};
     uint32_t axisHCommu{0};
+    uint32_t axisHCommuBf16Fp16{0};
     uint32_t axisBS{0};
     uint32_t activeMaskBsCnt{0};
     uint32_t axisK{0};
@@ -1624,7 +1461,7 @@ namespace Catlass::Gemm::Kernel {
 
 template <TemplateMC2TypeClass, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_, uint32_t WORKSPACE_STAGES_,
           class ElementGroupList_>
-class GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspaceWithShallowDispatch
+class GroupedMatmulSliceMSwigluMultiStageWorkspaceWithShallowDispatch
 {
 public:
     using BlockMmad = BlockMmad_;
@@ -1647,10 +1484,11 @@ public:
     using LayoutD = typename BlockEpilogue::LayoutD;
     using EpilogueParams = typename BlockEpilogue::Params;
 
-    using ElementDequantScale = typename BlockQuant<ArchTag>::ElementDequantScale;
-    using LayoutDequantScale = typename BlockQuant<ArchTag>::LayoutDequantScale;
-    using ElementOutput = typename BlockQuant<ArchTag>::ElementOutput;
-    using LayoutOutput = typename BlockQuant<ArchTag>::LayoutOutput;
+    using XType = ExpandXType;
+    using ElementSwigluScale = typename SwigluPost<ArchTag, XType>::ElementSwigluScale;
+    using LayoutSwigluScale = typename SwigluPost<ArchTag, XType>::LayoutSwigluScale;
+    using ElementOutput = typename SwigluPost<ArchTag, XType>::ElementOutput;
+    using LayoutOutput = typename SwigluPost<ArchTag, XType>::LayoutOutput;
 
     using BlockScheduler = BlockScheduler_;
     static constexpr uint32_t WORKSPACE_STAGES = WORKSPACE_STAGES_;
@@ -1672,8 +1510,8 @@ public:
         LayoutPerTokenScale layoutPerTokenScale;
         __gm__ ElementOutput *ptrOutput;
         LayoutOutput layoutOutput;
-        __gm__ ElementDequantScale *ptrDequantScale;
-        LayoutDequantScale layoutDequantScale;
+        __gm__ ElementSwigluScale *ptrSwigluScale;
+        LayoutSwigluScale layoutSwigluScale;
         GM_ADDR ptrWorkspace;
 
         // Methods
@@ -1685,7 +1523,7 @@ public:
                LayoutA const &layoutA_, GM_ADDR ptrB_, LayoutB const &layoutB_, GM_ADDR ptrScale_,
                LayoutScale const &layoutScale_, GM_ADDR ptrPerTokenScale_,
                LayoutPerTokenScale const &layoutPerTokenScale_, GM_ADDR ptrOutput_, LayoutOutput const &layoutOutput_,
-               GM_ADDR ptrDequantScale_, LayoutDequantScale const &layoutDequantScale_, GM_ADDR ptrWorkspace_)
+               GM_ADDR ptrSwigluScale_, LayoutSwigluScale const &layoutSwigluScale_, GM_ADDR ptrWorkspace_)
             : problemShape(problemShape_),
               problemCount(problemCount_),
               ptrGroupList(reinterpret_cast<__gm__ ElementGroupList *>(ptrGroupList_)),
@@ -1699,15 +1537,15 @@ public:
               layoutPerTokenScale(layoutPerTokenScale_),
               ptrOutput(reinterpret_cast<__gm__ ElementOutput *>(ptrOutput_)),
               layoutOutput(layoutOutput_),
-              ptrDequantScale(reinterpret_cast<__gm__ ElementDequantScale *>(ptrDequantScale_)),
-              layoutDequantScale(layoutDequantScale_),
+              ptrSwigluScale(reinterpret_cast<__gm__ ElementSwigluScale *>(ptrSwigluScale_)),
+              layoutSwigluScale(layoutSwigluScale_),
               ptrWorkspace(ptrWorkspace_)
         {}
     };
 
     // Methods
     CATLASS_DEVICE
-    GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspaceWithShallowDispatch()
+    GroupedMatmulSliceMSwigluMultiStageWorkspaceWithShallowDispatch()
     {
         Arch::FlagID flagId = 0;
         for (uint32_t stageId = 0; stageId < WORKSPACE_STAGES; ++stageId) {
@@ -1893,27 +1731,27 @@ public:
         Arch::CrossCoreBarrier<0x0, PIPE_MTE3>();
 
         {
-            uint32_t quantRowOnce = 0;
-            CalQuantRow(nOut, quantRowOnce);
+            uint32_t swigluRowOnce = 0;
+            CalQuantRow(nOut, swigluRowOnce);
             auto swigluLayout = layout::RowMajor{mActual, n};
-            typename BlockQuant<ArchTag>::Params quantParams{ptrD,
+            typename SwigluPost<ArchTag, XType>::Params swigluParams{ptrD,
                                                              swigluLayout,
-                                                             params.ptrDequantScale,
-                                                             params.layoutDequantScale,
+                                                             params.ptrSwigluScale,
+                                                             params.layoutSwigluScale,
                                                              params.ptrOutput,
                                                              params.layoutOutput,
-                                                             quantRowOnce,
+                                                             swigluRowOnce,
                                                              nOut};
 
-            BlockQuant<ArchTag> blockQuant(resource, quantParams);
-            MatrixCoord quantShape(mActual, nOut);
-            MatrixCoord quantBlockShape((uint16_t)(AscendC::GetSubBlockNum() * quantRowOnce), nOut);
-            Epilogue::Tile::EpilogueHorizontalTileSwizzle quantSwizzle(quantShape, quantBlockShape);
-            for (uint32_t loopIdx = coreIdx; loopIdx < quantSwizzle.GetLoops(); loopIdx += coreNum) {
-                auto blockCoord = quantSwizzle.GetTileCoord(loopIdx);
-                auto actualBlockShape = quantSwizzle.GetActualTileShape(blockCoord);
+            SwigluPost<ArchTag, XType> blockSwiglu(resource, swigluParams);
+            MatrixCoord swigluShape(mActual, nOut);
+            MatrixCoord swigluBlockShape((uint16_t)(AscendC::GetSubBlockNum() * swigluRowOnce), nOut);
+            Epilogue::Tile::EpilogueHorizontalTileSwizzle swigluSwizzle(swigluShape, swigluBlockShape);
+            for (uint32_t loopIdx = coreIdx; loopIdx < swigluSwizzle.GetLoops(); loopIdx += coreNum) {
+                auto blockCoord = swigluSwizzle.GetTileCoord(loopIdx);
+                auto actualBlockShape = swigluSwizzle.GetActualTileShape(blockCoord);
 
-                blockQuant(quantBlockShape, blockCoord, actualBlockShape);
+                blockSwiglu(swigluBlockShape, blockCoord, actualBlockShape);
             }
         }
     }
@@ -1923,7 +1761,7 @@ private:
     friend struct AicSetFunc;
 
     struct AicWaitFunc {
-        using MatmulKernel = GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspaceWithShallowDispatch<
+        using MatmulKernel = GroupedMatmulSliceMSwigluMultiStageWorkspaceWithShallowDispatch<
             TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>;
 
         CATLASS_DEVICE
@@ -1940,7 +1778,7 @@ private:
     };
 
     struct AicSetFunc {
-        using MatmulKernel = GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspaceWithShallowDispatch<
+        using MatmulKernel = GroupedMatmulSliceMSwigluMultiStageWorkspaceWithShallowDispatch<
             TemplateMC2TypeFunc, BlockMmad, BlockEpilogue, BlockScheduler, WORKSPACE_STAGES, ElementGroupList>;
 
         CATLASS_DEVICE
