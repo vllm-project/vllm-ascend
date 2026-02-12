@@ -208,11 +208,11 @@ def split_qkv_rmsnorm_mrope_kernel(
             strides=(1, 1),
         )
         if IS_PARTIAL_ROPE:
-            orig_k = tl.extract_slice(k_normalized, offsets=(0, 0), sizes=(num_kv_heads, rope_dim),
+            orig_qk = tl.extract_slice(k_normalized, offsets=(0, 0), sizes=(num_kv_heads, rope_dim),
                                       strides=(1, 1))
         else:
-            orig_k = k_normalized
-        roped_k = cat_y * sin_tensor + orig_k * cos_tensor
+            orig_qk = k_normalized
+        roped_k = cat_y * sin_tensor + orig_qk * cos_tensor
         # roped_k = roped_k.to(tl.bfloat16)
         if IS_PARTIAL_ROPE:
             q_normalized = tl.insert_slice(q_normalized, roped_q,
