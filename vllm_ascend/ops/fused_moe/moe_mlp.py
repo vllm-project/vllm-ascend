@@ -22,6 +22,7 @@ from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
@@ -65,6 +66,86 @@ def cumsum_group_list(
     )
 
 
+def get_mxfp_quant_extra_args(act_quant_type, weight_quant_type, scale_type, per_token_scale_type):
+    x_dtype = act_quant_type if act_quant_type in [torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8] else None
+    weight_dtype = weight_quant_type if weight_quant_type in [torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8] else None
+    scale_dtype = scale_type if scale_type in [torch_npu.float8_e8m0fnu] else None
+    per_token_scale_dtype = per_token_scale_type if per_token_scale_type in [torch_npu.float8_e8m0fnu] else None
+    return x_dtype, weight_dtype, scale_dtype, per_token_scale_dtype
+
+
+def mxfp_quant_apply_mlp(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    group_list: torch.Tensor,
+    group_list_type: int = 1,
+    dynamic_scale: torch.Tensor = None,
+    fusion: bool = False,
+    **kwargs,
+) -> torch.Tensor:
+    act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
+    weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)
+    scale_type = kwargs.get("scale_type")
+    per_token_scale_type = kwargs.get("per_token_scale_type")
+    output_dtype = (
+        hidden_states.dtype
+        if hidden_states.dtype in [torch.bfloat16, torch.float16]
+        else (torch.bfloat16 if kwargs.get("use_bf16", True) else torch.float16)
+    )
+
+    if dynamic_scale is None:
+        unquantized_hidden_states = hidden_states
+        hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
+        # Dispose the original unquantized hidden states
+        # to save npu memory because they're no longer used.
+        dispose_tensor(unquantized_hidden_states)
+    else:
+        # w8a8mx GMM quantization requires a 3D scale input, which is then split into two tail axes.
+        if dynamic_scale.ndim == 2:
+            dynamic_scale = dynamic_scale.reshape(dynamic_scale.shape[0], dynamic_scale.shape[1] // 2, 2)
+        pertoken_scale = dynamic_scale
+
+    weight_prefetch_method = get_weight_prefetch_method()
+    if weight_prefetch_method:
+        weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
+
+    x_dtype, weight_dtype, scale_dtype, per_token_scale_dtype = get_mxfp_quant_extra_args(
+        act_quant_type, weight_quant_type, scale_type, per_token_scale_type
+    )
+    hidden_states, swiglu_out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+        x=hidden_states,
+        weight=[w1],
+        group_list=cumsum_group_list(group_list, group_list_type, 0),
+        weight_scale=[w1_scale],
+        x_scale=pertoken_scale,
+        dequant_mode=2,
+        quant_mode=2,
+        dequant_dtype=torch.float32,
+        quant_dtype=torch.float8_e4m3fn,
+        weight_scale_dtype=torch_npu.float8_e8m0fnu,
+        x_scale_dtype=torch_npu.float8_e8m0fnu,
+    )
+    hidden_states = torch_npu.npu_grouped_matmul(
+        x=[hidden_states],
+        weight=[w2],
+        scale=[w2_scale],
+        scale_dtype=scale_dtype,
+        per_token_scale=[swiglu_out_scale],
+        per_token_scale_dtype=per_token_scale_dtype,
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=group_list,
+        x_dtype=x_dtype,
+        weight_dtype=weight_dtype,
+        output_dtype=output_dtype,
+    )[0]
+    return hidden_states
+
+
 def quant_apply_mlp(
     hidden_states: torch.Tensor,
     w1: list[torch.Tensor],
@@ -80,6 +161,7 @@ def quant_apply_mlp(
     w2_offset: torch.Tensor | None = None,
     fusion: bool = False,
     dynamic_eplb: bool = False,
+    **kwargs,
 ) -> torch.Tensor:
     if w1_offset is not None:
         unquantized_hidden_states = hidden_states
@@ -100,7 +182,8 @@ def quant_apply_mlp(
     _output_dtype = w2_scale[0].dtype
 
     weight_prefetch_method = get_weight_prefetch_method()
-    weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
+    if weight_prefetch_method:
+        weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
     is_mc2 = get_forward_context().moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and w1_offset is None and is_mc2:
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
@@ -320,26 +403,13 @@ def unified_apply_mlp(
     fusion: bool = False,
     need_trans: bool = True,
     dynamic_eplb: bool = False,
+    **kwargs,
 ) -> torch.Tensor:
-    if with_quant:
-        assert w1_scale is not None and w2_scale is not None
-        return quant_apply_mlp(
-            hidden_states=hidden_states,
-            w1=w1,
-            w1_scale=w1_scale,
-            w2=w2,
-            w2_scale=w2_scale,
-            group_list=group_list,
-            dynamic_scale=dynamic_scale,
-            group_list_type=group_list_type,
-            w1_scale_bias=w1_scale_bias,
-            w2_scale_bias=w2_scale_bias,
-            w1_offset=w1_offset,
-            w2_offset=w2_offset,
-            fusion=fusion,
-            dynamic_eplb=dynamic_eplb,
-        )
-    else:
+    """
+    Unified MoE MLP entry.
+    Quant path is dispatched by DeviceOperator (A5 vs non-A5).
+    """
+    if not with_quant:
         return unquant_apply_mlp(
             hidden_states=hidden_states,
             w1=w1,
@@ -349,3 +419,33 @@ def unified_apply_mlp(
             topk_scales=topk_scales,
             need_trans=need_trans,
         )
+
+    assert w1_scale is not None and w2_scale is not None
+    act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
+    weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)
+    scale_type = kwargs.get("scale_type")
+    per_token_scale_type = kwargs.get("per_token_scale_type")
+    adaptor_cls = DeviceOperator
+    if adaptor_cls is None:
+        raise RuntimeError("Device adaptor is not initialized.")
+    return adaptor_cls.quant_apply_mlp(
+        hidden_states=hidden_states,
+        w1=w1,
+        w1_scale=w1_scale,
+        w2=w2,
+        w2_scale=w2_scale,
+        group_list=group_list,
+        dynamic_scale=dynamic_scale,
+        group_list_type=group_list_type,
+        w1_scale_bias=w1_scale_bias,
+        w2_scale_bias=w2_scale_bias,
+        w1_offset=w1_offset,
+        w2_offset=w2_offset,
+        fusion=fusion,
+        dynamic_eplb=dynamic_eplb,
+        act_quant_type=act_quant_type,
+        weight_quant_type=weight_quant_type,
+        scale_type=scale_type,
+        per_token_scale_type=per_token_scale_type,
+        use_bf16=kwargs.get("use_bf16", True),
+    )

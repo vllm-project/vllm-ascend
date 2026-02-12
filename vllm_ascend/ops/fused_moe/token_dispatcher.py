@@ -104,7 +104,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.ep_world_size = get_mc2_group().world_size
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = get_ascend_device_type() == AscendDeviceType.A3
-
+        self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
@@ -136,8 +136,15 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         expert_map: torch.Tensor,
         mc2_mask: torch.Tensor,
         global_redundant_expert_num: int = 0,
+        **kwargs,
     ):
-        quant_mode = 2 if self.with_quant else 0
+        # NOTE: quant_mode differs by device runtime:
+        # - A3 uses dynamic communication quantization with quant_mode=2.
+        # - A5 MXFP8 communication requires quant_mode=4.
+        if self.with_quant:
+            quant_mode = 4 if self.a5_need_extra_args else 2
+        else:
+            quant_mode = 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
         kwargs_mc2 = {
             "x": hidden_states,
@@ -145,9 +152,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.moe_expert_num,
-            "global_bs": self.global_bs,
+            "global_bs": 0 if self.a5_need_extra_args else self.global_bs,
             "expert_token_nums_type": 0,
         }
+        if self.a5_need_extra_args:
+            kwargs_mc2["comm_alg"] = "ccu"
 
         stage1_kwargs = {
             "scales": None,
@@ -164,7 +173,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                     "tp_rank_id": 0,
                 }
             )
-        if self.need_expert_scale:
+        if self.a5_need_extra_args:
+            y_dtype = kwargs.get("y_dtype")
+            if self.with_quant:
+                y_dtype = torch.float8_e4m3fn if y_dtype is None else y_dtype
+            stage1_kwargs.update({"tp_world_size": 1, "tp_rank_id": 0, "y_dtype": y_dtype})
+        if self.need_expert_scale or self.a5_need_extra_args:
             stage1_kwargs.update(
                 {
                     "expert_scales": topk_weights.to(torch.float32),
@@ -186,11 +200,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         with_quant: bool = False,
         dynamic_eplb: bool = False,
         pertoken_scale: torch.Tensor | None = None,
+        **kwargs,
     ):
         self.with_quant = with_quant
-
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(
-            hidden_states, topk_weights, topk_ids, expert_map, mc2_mask, global_redundant_expert_num
+            hidden_states, topk_weights, topk_ids, expert_map, mc2_mask, global_redundant_expert_num, **kwargs
         )
         output = (
             torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
@@ -264,7 +278,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         else:
             stage3_kwargs["expand_idx"] = assist_info_for_combine
 
-        if self.need_extra_args:
+        if self.need_extra_args or self.a5_need_extra_args:
             stage3_kwargs.update(
                 {
                     "tp_send_counts": tp_recv_counts,
@@ -273,7 +287,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                     "tp_rank_id": 0,
                 }
             )
-
+        if self.a5_need_extra_args:
+            stage3_kwargs.update(
+                {
+                    "comm_alg": "ccu",
+                }
+            )
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
 
