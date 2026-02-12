@@ -200,6 +200,9 @@ class AscendMetadata:
     # sliding window attention mask
     swa_mask: torch.Tensor | None = None
 
+    # sliding window attention mask for bsh layout
+    sliding_mask: torch.Tensor | None = None
+
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
@@ -739,7 +742,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = (indices < start_indices) | (indices >= seq_lens)
             return mask.unsqueeze(1).npu()
 
-        if hasattr(attn_metadata, "sliding_mask"):
+        if hasattr(attn_metadata, "sliding_mask") and attn_metadata.sliding_mask is not None:
             atten_mask = attn_metadata.sliding_mask
         else:
             block_table = attn_metadata.block_tables
