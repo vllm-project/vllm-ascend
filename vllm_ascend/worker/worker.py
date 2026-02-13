@@ -52,7 +52,6 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
@@ -334,7 +333,9 @@ class NPUWorker(WorkerBase):
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
             self.model_runner.profile_run()
-            non_torch_memory_before_empty_cache = NPUPlatform.get_non_torch_memory_usage()
+            free_memory, total_memory = torch.npu.mem_get_info()
+            torch_memory = torch.npu.memory_reserved()
+            non_torch_memory_before_empty_cache = total_memory - free_memory - torch_memory
 
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = profile_result.torch_peak_increase
