@@ -256,10 +256,11 @@ class QKNormRopeFusionPass(VllmInductorPass):
         layer = next(iter(attn_layers.values()))
         rope_dim = get_rope_dim(vllm_config)
         if layer.head_size != 128 or rope_dim != layer.head_size:
-            logger.debug(f"Currently, QKNorm and Rope fusion is only supported where"
-                         f"rotary_dim == head_size and head_size == 128. But rotary_dim"
-                         f"is {rope_dim} and head_size is {layer.head_size}. Therefore"
-                         f"the fusion is skipped.")
+            logger.debug(
+                f"Currently, QKNorm and Rope fusion is only supported where"
+                f"rotary_dim == head_size and head_size == 128. But rotary_dim"
+                f"is {rope_dim} and head_size is {layer.head_size}. Therefore"
+                f"the fusion is skipped.")
             return
 
         for epsilon in [1e-6, 1e-5]:

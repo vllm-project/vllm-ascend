@@ -50,7 +50,7 @@ def get_rope_dim(vllm_config):
                            model_config.hf_text_config.partial_rotary_factor)
         elif hasattr(model_config.hf_text_config, "rotary_dim"):
             rope_dim = int(model_config.hf_text_config.rotary_dim)
-    
+
     return rope_dim
 
 
