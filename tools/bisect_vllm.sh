@@ -29,6 +29,7 @@
 #     [--step-timeout 600]     # Per-step timeout in seconds (default: 600)
 #     [--total-timeout 7200]   # Total timeout in seconds (default: 7200)
 #     [--env "K1=V1 K2=V2"]   # Extra environment variables for the test command
+#     [--test-cmds-file <path>]# File with semicolon-separated test commands (batch mode)
 #
 # Examples:
 #   # With environment variables in --test-cmd (inline style):
@@ -49,11 +50,11 @@
 #   ./tools/bisect_vllm.sh --good v0.14.1 --bad main \
 #     --test-cmd "pytest -sv tests/ut/worker/"
 #
-#   # Local run (skip git fetch, use local repo as-is):
+#   # Batch mode - bisect multiple test commands sequentially:
 #   ./tools/bisect_vllm.sh --no-fetch \
 #     --good abc1234 --bad def5678 \
 #     --vllm-repo /path/to/vllm \
-#     --test-cmd "pytest -sv tests/ut/ops/test_activation.py"
+#     --test-cmds-file /tmp/cmds.txt
 
 set -euo pipefail
 
@@ -98,6 +99,7 @@ STEP_TIMEOUT=600
 TOTAL_TIMEOUT=7200
 EXTRA_ENV=""
 NO_FETCH=false
+TEST_CMDS_FILE=""
 
 # ============================================================================
 # Logging helpers
@@ -115,8 +117,9 @@ usage() {
     cat <<'EOF'
 Usage: bisect_vllm.sh [OPTIONS]
 
-Required:
-  --test-cmd <cmd>          The failing pytest command.
+Required (one of):
+  --test-cmd <cmd>          The failing pytest command (single mode)
+  --test-cmds-file <path>   File with semicolon-separated test commands (batch mode).
                             Environment variables can be included inline:
                             "VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -sv ..."
 
@@ -146,6 +149,7 @@ parse_args() {
             --good)          GOOD_COMMIT="$2"; shift 2 ;;
             --bad)           BAD_COMMIT="$2";  shift 2 ;;
             --test-cmd)      TEST_CMD="$2";    shift 2 ;;
+            --test-cmds-file) TEST_CMDS_FILE="$2"; shift 2 ;;
             --vllm-repo)     VLLM_REPO="$2";   shift 2 ;;
             --ascend-repo)   ASCEND_REPO="$2";  shift 2 ;;
             --env)           EXTRA_ENV="$2";    shift 2 ;;
@@ -161,9 +165,14 @@ parse_args() {
         esac
     done
 
-    if [[ -z "${TEST_CMD}" ]]; then
-        log_error "--test-cmd is required"
+    if [[ -z "${TEST_CMD}" && -z "${TEST_CMDS_FILE}" ]]; then
+        log_error "--test-cmd or --test-cmds-file is required"
         usage
+    fi
+
+    if [[ -n "${TEST_CMDS_FILE}" && ! -f "${TEST_CMDS_FILE}" ]]; then
+        log_error "Test commands file not found: ${TEST_CMDS_FILE}"
+        exit 1
     fi
 }
 
@@ -585,11 +594,9 @@ _generate_report() {
 }
 
 # ============================================================================
-# Main
+# Run a single bisect for one test command
 # ============================================================================
-main() {
-    parse_args "$@"
-
+run_single_bisect() {
     log_step "vllm bisect automation"
     log_info "Test command: ${TEST_CMD}"
     if [[ -n "${EXTRA_ENV}" ]]; then
@@ -608,6 +615,61 @@ main() {
 
     # Run bisect
     run_bisect
+    return $?
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+main() {
+    parse_args "$@"
+
+    # Batch mode: read semicolon-separated commands from file
+    if [[ -n "${TEST_CMDS_FILE}" ]]; then
+        local cmds_content
+        cmds_content=$(cat "${TEST_CMDS_FILE}")
+
+        # Split by semicolons into an array
+        IFS=';' read -ra CMD_ARRAY <<< "${cmds_content}"
+
+        local total=${#CMD_ARRAY[@]}
+        local passed=0
+        local failed=0
+        local idx=0
+
+        log_step "Batch bisect: ${total} test command(s)"
+
+        for cmd in "${CMD_ARRAY[@]}"; do
+            # Trim whitespace
+            cmd=$(echo "${cmd}" | xargs)
+            [[ -z "${cmd}" ]] && continue
+
+            idx=$((idx + 1))
+            echo ""
+            log_step "========== [${idx}/${total}] =========="
+            log_info "Test command: ${cmd}"
+
+            TEST_CMD="${cmd}"
+            run_single_bisect
+            local rc=$?
+
+            if [[ ${rc} -eq 0 ]]; then
+                log_ok "[${idx}/${total}] Bisect completed successfully"
+                passed=$((passed + 1))
+            else
+                log_error "[${idx}/${total}] Bisect failed"
+                failed=$((failed + 1))
+            fi
+        done
+
+        echo ""
+        log_step "Batch bisect summary: ${passed} passed, ${failed} failed out of ${total}"
+        [[ ${failed} -gt 0 ]] && return 1
+        return 0
+    fi
+
+    # Single mode
+    run_single_bisect
     local exit_code=$?
 
     if [[ ${exit_code} -eq 0 ]]; then
