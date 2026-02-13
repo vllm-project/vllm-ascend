@@ -1,10 +1,10 @@
 # Prefill-Decode Disaggregation (Deepseek)
 
-## Getting Start
+## Getting Started
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide take one-by-one steps to verify these features with constrained resources.
+vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the ip of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs 16 chips to deploy one service instance.
+Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs 16 chips to deploy one service instance.
 
 ## Verify Multi-Node Communication Environment
 
@@ -48,7 +48,7 @@ cat /etc/hccn.conf
 3. Get NPU IP Addresses
 
 ```bash
-# Get virtual npu ip
+# Get virtual NPU IP.
 for i in {0..15}; do hccn_tool -i $i -vnic -g;done
 ```
 
@@ -61,14 +61,14 @@ for i in {0..15}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-i
 5. Cross-Node PING Test
 
 ```bash
-# Execute on the target node (replace 'x.x.x.x' with virtual npu ip address)
+# Execute on the target node (replace 'x.x.x.x' with virtual NPU IP address).
 for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
 ```
 
 6. Check NPU TLS Configuration
 
 ```bash
-# The tls settings should be consistent across all nodes
+# The TLS settings should be consistent across all nodes
 for i in {0..15}; do hccn_tool -i $i -tls -g ; done | grep switch
 ```
 
@@ -117,7 +117,7 @@ for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 5. Check NPU TLS Configuration
 
 ```bash
-# The tls settings should be consistent across all nodes
+# The TLS settings should be consistent across all nodes
 for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
 ```
 
@@ -136,7 +136,7 @@ export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+# Note: If you are running bridge network with Docker, please expose available ports for multiple nodes communication in advance.
 docker run --rm \
 --name $NAME \
 --net=host \
@@ -173,7 +173,7 @@ docker run --rm \
 
 ## Install Mooncake
 
-Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
+Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
@@ -886,7 +886,7 @@ cd benchmark/
 pip3 install -e ./
 ```
 
-You need to canncel the http proxy before assessing performance, as following
+You need to cancel the http proxy before assessing performance, as following
 
 ```shell
 # unset proxy
@@ -895,7 +895,7 @@ unset https_proxy
 ```
 
 - You can place your datasets in the dir: `benchmark/ais_bench/datasets`
-- You can change the configurationin the dir :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the ``vllm_api_stream_chat.py`` for examples
+- You can change the configuration in the dir :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the ``vllm_api_stream_chat.py`` for example
 
 ```python
 models = [
@@ -943,7 +943,7 @@ Check service health using the proxy server endpoint.
 curl http://192.0.0.1:8080/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "qwen3-moe",
+        "model": "ds_r1",
         "prompt": "Who are you?",
         "max_completion_tokens": 100,
         "temperature": 0

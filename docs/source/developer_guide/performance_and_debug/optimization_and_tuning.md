@@ -61,7 +61,7 @@ VLLM_USE_MODELSCOPE=true
 Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vllm-ascend are installed correctly.
 
 :::{note}
-Make sure your vLLM and vllm-ascend are installed after your python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vllm-ascend before completing section 1.1, the binary files will not use the optimized python.
+Make sure your vLLM and vllm-ascend are installed after your Python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vllm-ascend before completing section 1.1, the binary files will not use the optimized python.
 :::
 
 ## Optimizations
@@ -102,7 +102,7 @@ export PATH=/usr/bin:/usr/local/python/bin:$PATH
 
 #### 2.1. jemalloc
 
-**jemalloc** is a memory allocator that improves performance for multi-thread scenarios and can reduce memory fragmentation. jemalloc uses local thread memory manager to allocate variables, which can avoid lock competition between threads and can hugely optimize performance.
+**jemalloc** is a memory allocator that improves performance for multi-threaded scenarios and can reduce memory fragmentation. jemalloc uses a local thread memory manager to allocate variables, which can avoid lock competition between threads and can hugely optimize performance.
 
 ```{code-block} bash
    :substitutions:
@@ -116,7 +116,7 @@ export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2 $LD_PRELOAD
 
 #### 2.2. Tcmalloc
 
-**Tcmalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex competition and optimizing large object processing flow. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
+**TCMalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex contention and optimizing large object processing flow. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 
 ```{code-block} bash
    :substitutions:
@@ -188,7 +188,7 @@ Plus, there are more features for performance optimization in specific scenarios
 This section describes operating system–level optimizations applied on the host machine (bare metal or Kubernetes node) to improve performance stability, latency, and throughput for inference workloads.
 
 :::{note}
-These settings must be applied on the host OS and with root privileges. not inside containers.
+These settings must be applied on the host OS and with root privileges. Not inside containers.
 :::
 
 #### 5.1

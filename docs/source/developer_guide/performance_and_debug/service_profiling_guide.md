@@ -101,8 +101,8 @@ The configuration is in JSON format. Main parameters:
 | npu_memory_usage_freq | Sampling frequency of NPU memory utilization. Disabled by default. Range: integer 1–50, unit: Hz (times per second). Set to -1 to disable. <br />Note: Enabling this may consume significant memory. | No |
 | acl_task_time | Switch to collect operator dispatch latency and execution latency: <br />0: disable (default; 0 or invalid values mean disabled).<br />1: enable; calls `aclprofCreateConfig` with `ACL_PROF_TASK_TIME_L0`.<br />2: enable MSPTI-based data dumping; uses MSPTI for profiling and requires: `export LD_PRELOAD=$ASCEND_TOOLKIT_HOME/lib64/libmspti.so` | No |
 | acl_prof_task_time_level | Level and duration for profiling: <br />L0: collect operator dispatch and execution latency only; lower overhead (no operator basic info).<br />L1: collect AscendCL interface performance (host–device and inter-device sync/async memory copy latencies), plus operator dispatch, execution, and basic info for comprehensive analysis.<br />time: profiling duration, integer 1–999, in seconds.<br />If unset, defaults to L0 until program exit; invalid values fall back to defaults.<br />Level and duration can be combined, e.g., `"acl_prof_task_time_level": "L1,10"`. | No |
-| api_filter | Filter to select API performance data to dump. For example, specifying "matmul" dumps all API data whose `name` contains "matmul". String, case-sensitive; use "；" to separate multiple targets. Empty means dump all. <br />Effective only when `acl_task_time` is 2. | No |
-| kernel_filter | Filter to select kernel performance data to dump. For example, specifying "matmul" dumps all kernel data whose `name` contains "matmul". String, case-sensitive; use "；" to separate multiple targets. Empty means dump all. <br />Effective only when `acl_task_time` is 2. | No |
+| api_filter | Filter to select API performance data to dump. For example, specifying "matmul" dumps all API data whose `name` contains "matmul". String, case-sensitive; use ";" to separate multiple targets. Empty means dump all. <br />Effective only when `acl_task_time` is 2. | No |
+| kernel_filter | Filter to select kernel performance data to dump. For example, specifying "matmul" dumps all kernel data whose `name` contains "matmul". String, case-sensitive; use ";" to separate multiple targets. Empty means dump all. <br />Effective only when `acl_task_time` is 2. | No |
 | timelimit | Profiling duration for the service. The process stops automatically after this time. Range: integer 0–7200, unit: seconds. Default 0 means unlimited. | No |
 | domain | Limit profiling to the specified domains to reduce data volume. String, separated by semicolons, case-sensitive, e.g., "Request; KVCache".<br />Empty means all available domains.<br />Available domains: Request, KVCache, ModelExecute, BatchSchedule, Communication.<br />Note: If the selected domains are incomplete, analysis output may show warnings due to missing data. See [Reference Table 1](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/devaids/Profiling/mindieprofiling_0009.html#ZH-CN_TOPIC_0000002370256365__table1985410131831). | No |
 
@@ -129,7 +129,7 @@ The symbols configuration file defines which functions/methods to profile and su
 
 #### 2.1 File Name and Loading
 
-- Default load path:`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`( According to the installed version of vllm )
+- Default load path:`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`(According to the installed version of vllm )
 
 If you need to customize the profiling points, it is highly recommended to copy a profiling configuration file to your working directory using the `PROFILING_SYMBOLS_PATH` environment variable.
 
@@ -143,7 +143,7 @@ If you need to customize the profiling points, it is highly recommended to copy 
 | name | Event name | `"EngineCoreExecute"` |
 | min_version | Upper version constraint | `"0.9.1"` |
 | max_version | Lower version constraint | `"0.11.0"` |
-| attributes | Custom attribute collection | Only support for `"timer"` handler. See the section below |
+| attributes | Custom attribute collection | Only supported for `"timer"` handler. See the section below |
 
 #### 2.3 Examples
 

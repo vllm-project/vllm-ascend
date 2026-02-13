@@ -2,9 +2,9 @@
 
 ## Introduction
 
-GLM-4.x series models use a Mixture-of-Experts (MoE) architecture and are foundational models specifically designed for agent applications
+GLM-4.x series models use a Mixture-of-Experts (MoE) architecture and are foundational models specifically designed for agent applications.
 
-The `GLM-4.5` model is first supported in `vllm-ascend:v0.10.0rc1`
+The `GLM-4.5` model is first supported in `vllm-ascend:v0.10.0rc1`.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -25,7 +25,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm do not support GLM4.6 mtp in October, so we do not provide mtp version. And last month, it supported, you can use the following quantization scheme to add mtp weights to Quantized weights.
 - `Method of Quantify`: [quantization scheme](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209). You can use these methods to quantify the model.
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### Installation
 
@@ -43,7 +43,7 @@ export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
 docker run --rm \
 --name $NAME \
 --net=host \

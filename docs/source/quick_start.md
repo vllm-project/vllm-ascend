@@ -99,7 +99,7 @@ There are two ways to start vLLM on Ascend NPU:
 :::::{tab-set}
 ::::{tab-item} Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing).
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inference).
 
 Try to run below Python script directly or use `python3` shell to generate texts:
 

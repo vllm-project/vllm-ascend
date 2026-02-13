@@ -78,7 +78,7 @@ Single-node deployment is recommended.
 
 ### Prefill-Decode Disaggregation
 
-Not supported yet
+Not supported yet.
 
 ## Functional Verification
 
@@ -190,7 +190,7 @@ pip install safetensors
 ```
 
 :::{note}
-The OpenCV component may be missing：
+The OpenCV component may be missing:
 
 ```bash
 apt-get update
