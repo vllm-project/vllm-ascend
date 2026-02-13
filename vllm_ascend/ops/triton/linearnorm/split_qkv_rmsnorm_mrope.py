@@ -218,7 +218,7 @@ def split_qkv_rmsnorm_mrope_kernel(
         else:
             orig_qk = k_normalized
         roped_k = cat_y * sin_tensor + orig_qk * cos_tensor
-        
+
         if IS_PARTIAL_ROPE:
             q_normalized = tl.insert_slice(
                 q_normalized,
@@ -274,7 +274,7 @@ def triton_split_qkv_rmsnorm_mrope(
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
     num_tokens = qkv.shape[0]
-    
+
     if rope_dim is None:
         rope_dim = head_size
     IS_PARTIAL_ROPE = rope_dim != head_size
