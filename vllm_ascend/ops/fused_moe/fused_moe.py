@@ -30,9 +30,9 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm_ascend.utils import vllm_version_is
 
 if not vllm_version_is("0.15.0"):
-    from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
-    from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter  # type: ignore
     from vllm.model_executor.layers.fused_moe.fused_moe_method_base import FusedMoEMethodBase  # type: ignore
+    from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter  # type: ignore
+    from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
