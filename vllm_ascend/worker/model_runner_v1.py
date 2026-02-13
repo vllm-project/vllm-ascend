@@ -1318,7 +1318,7 @@ class NPUModelRunner(GPUModelRunner):
             self.kv_connector_output = kv_connector_output
         return None
 
-    @torch.inference_mode
+    @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
