@@ -22,7 +22,10 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.logger import logger
 
-from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
+from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import (
+    check_and_register_fusion_pass,
+    extra_stream_scope_check,
+)
 
 
 class GraphEXAddRMSNormQuantPattern:
@@ -55,7 +58,9 @@ class GraphEXAddRMSNormQuantPattern:
             """
             Pattern for AddRMSNormQuant fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, None, self.eps
+            )
             out0 = output[0]
             out1 = output[2]
             quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
@@ -120,10 +125,11 @@ class GraphEXAddRMSNormQuantPatternWithBias:
             """
             Pattern for AddRMSNormQuantWithBias fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, bias, self.eps
+            )
             out0 = output[0]
             out1 = output[2]
-            out0 = out0 + bias
             quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
 
@@ -185,7 +191,9 @@ class GraphEXAddRMSNormQuantSPPattern:
             """
             Pattern for AddRMSNormQuantSPPattern fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, None, self.eps
+            )
             out0 = output[0]
             out1 = output[2]
             out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
@@ -252,10 +260,11 @@ class GraphEXAddRMSNormQuantSPPatternWithBias:
             """
             Pattern for AddRMSNormQuantSPPatternWithBias fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, bias, self.eps
+            )
             out0 = output[0]
             out1 = output[2]
-            out0 = out0 + bias
             out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
             quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
@@ -301,10 +310,10 @@ class GraphEXAddRMSNormFusionPass:
 
         common_epsilons = [1e-5, 1e-6]
         for eps in common_epsilons:
-            GraphEXAddRMSNormQuantPattern(vllm_config, eps=eps).register()
-            GraphEXAddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register()
-            GraphEXAddRMSNormQuantSPPattern(vllm_config, eps=eps).register()
-            GraphEXAddRMSNormQuantSPPatternWithBias(vllm_config, eps=eps).register()
+            check_and_register_fusion_pass(GraphEXAddRMSNormQuantPattern, vllm_config=vllm_config, eps=eps)
+            check_and_register_fusion_pass(GraphEXAddRMSNormQuantPatternWithBias, vllm_config=vllm_config, eps=eps)
+            check_and_register_fusion_pass(GraphEXAddRMSNormQuantSPPattern, vllm_config=vllm_config, eps=eps)
+            check_and_register_fusion_pass(GraphEXAddRMSNormQuantSPPatternWithBias, vllm_config=vllm_config, eps=eps)
 
     def __call__(self, graph: torch.fx.Graph):
         pass

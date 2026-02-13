@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 import torch_npu
@@ -29,7 +29,7 @@ from .registry import register_scheme
 @register_scheme("W8A16", "linear")
 class AscendW8A16LinearMethod(AscendLinearScheme):
     """Linear method for Ascend W8A16.
-    
+
     This scheme uses 8-bit quantized weights with 16-bit activations.
     """
 
@@ -41,39 +41,34 @@ class AscendW8A16LinearMethod(AscendLinearScheme):
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype = torch.bfloat16,
-    ) -> Dict[str, Any]:
-        params_dict = {
-            "weight": torch.empty(output_size, input_size, dtype=torch.int8)
-        }
+    ) -> dict[str, Any]:
+        params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict
 
     def get_perchannel_param(
         self,
         output_size: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(output_size,
-                                                  1,
-                                                  dtype=params_dtype)
-        params_dict["weight_offset"] = torch.empty(output_size,
-                                                   1,
-                                                   dtype=params_dtype)
+        params_dict["weight_scale"] = torch.empty(output_size, 1, dtype=params_dtype)
+        params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
         return params_dict
 
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-        tp_rank: Optional[int] = 0,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
     ) -> torch.Tensor:
         output = torch_npu.npu_weight_quant_batchmatmul(
             x=x,
             weight=layer.weight,
             antiquant_scale=layer.weight_scale,
             antiquant_offset=layer.weight_offset,
-            bias=bias)
+            bias=bias,
+        )
         return output
 
     def process_weights_after_loading(self, layer):

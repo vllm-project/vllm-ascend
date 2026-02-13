@@ -21,7 +21,6 @@ import torch
 import torch.nn as nn
 import torch_npu
 import vllm.config
-from vllm.compilation.fx_utils import OpOverload
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -33,6 +32,13 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.norm_quant_fusion_pass import \
     AddRMSNormQuantFusionPass
 from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.15.0"):
+    from vllm.compilation.fx_utils import OpOverload  # type: ignore
+else:
+    from vllm.compilation.passes.fx_utils import OpOverload
+
 
 
 class TestModelWithoutBias(nn.Module):
@@ -68,8 +74,8 @@ class TestModelWithoutBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
-            x, residual, self.rms_norm_weight, self.eps)
+        norm_output, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, None, self.eps)
 
         quantized_output = torch.ops.vllm.quantize(norm_output,
                                                    self.quant_scale,
@@ -81,7 +87,7 @@ class TestModelWithoutBias(nn.Module):
     def ops_in_model_before(self) -> List[OpOverload]:
         """Return the list of expected operators BEFORE fusion."""
         return [
-            torch.ops.npu.npu_add_rms_norm.default,
+            torch.ops._C_ascend.npu_add_rms_norm_bias.default,
             torch.ops.vllm.quantize.default
         ]
 
@@ -181,8 +187,8 @@ class TestModelSPWithoutBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
-            x, residual, self.rms_norm_weight, self.eps)
+        norm_output, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, None, self.eps)
 
         norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             norm_output, True)
@@ -197,7 +203,7 @@ class TestModelSPWithoutBias(nn.Module):
     def ops_in_model_before(self) -> List[OpOverload]:
         """Return the list of expected operators BEFORE fusion."""
         return [
-            torch.ops.npu.npu_add_rms_norm.default,
+            torch.ops._C_ascend.npu_add_rms_norm_bias.default,
             torch.ops.vllm.maybe_all_gather_and_maybe_unpad.default,
             torch.ops.vllm.quantize.default
         ]

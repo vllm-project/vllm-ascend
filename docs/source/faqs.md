@@ -2,9 +2,8 @@
 
 ## Version Specific FAQs
 
-- [[v0.14.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6148)
-- [[v0.13.0rc2] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6186)
-- [[v0.11.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/4808)
+- [[v0.14.0c1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6148)
+- [[v0.13.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6583)
 
 ## General FAQs
 
@@ -131,7 +130,7 @@ vllm-ascend is tested in three aspects, functions, performance, and accuracy.
 
 - **Nightly test**: we'll run full test every night to make sure the code is working.
 
-Finnall, for each release, we'll publish the performance test and accuracy test report in the future.
+Finally, for each release, we'll publish the performance test and accuracy test report in the future.
 
 ### 12. How to fix the error "InvalidVersion" when using vllm-ascend?
 

@@ -19,6 +19,7 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
+    vllm_version_is,
 )
 
 
@@ -119,18 +120,8 @@ def set_ascend_forward_context(
         if has_layer_idx(model_instance):
             forward_context.layer_idx = model_instance.model.start_layer
 
-        # TODO(rjg-lyh): refactor mlp weight prefetch method
-        # set for mlp weight prefetch
-        prefetch_mlp_enabled = (
-            envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP
-            and forward_context.layer_idx is not None
-            and num_tokens is not None
-            and num_tokens < 500
-        )
-        if prefetch_mlp_enabled:
-            forward_context.prefetch_mlp_gate_up_proj = False
-            forward_context.prefetch_mlp_down_proj = False
-        forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
+        forward_context.prefetch_mlp_gate_up_proj = False
+        forward_context.prefetch_mlp_down_proj = False
         forward_context.model_instance = model_instance
         forward_context.is_draft_model = is_draft_model
 
@@ -162,6 +153,9 @@ def set_ascend_forward_context(
                 mc2_mask[num_actual_tokens:] = False
                 forward_context.mc2_mask = mc2_mask
 
+        if is_draft_model and vllm_version_is("0.15.0"):
+            forward_context.remaining_moe_layers = None
+
         try:
             yield
         finally:
@@ -170,8 +164,6 @@ def set_ascend_forward_context(
 
 _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
-_sin: torch.Tensor | None = None
-_cos: torch.Tensor | None = None
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
@@ -218,6 +210,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     4. On A3 with expert parallel, prefer fused MC2 when using w8a8_dynamic
        quantization with small EP size, no dynamic_eplb, and not in MTP
        mode; otherwise use MC2 within capacity or all-to-all.
+    5. On 310P, always use all-gather.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
@@ -272,7 +265,8 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
-
+    elif soc_version in {AscendDeviceType._310P}:
+        moe_comm_type = MoECommType.ALLGATHER
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     return moe_comm_type

@@ -210,6 +210,18 @@ class NPUPlatform(Platform):
                     "{new_compile_ranges_split_points} for matmul and allreduce fusion"
                 )
 
+        npugraph_ex_config = ascend_config.npugraph_ex_config
+        if npugraph_ex_config and npugraph_ex_config.fuse_allreduce_rms:
+            from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THREHOLD
+
+            new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+            new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THREHOLD)
+            new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+            vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+            logger.debug(
+                "set compile_ranges_split_points to {new_compile_ranges_split_points} for matmul and allreduce fusion"
+            )
+
         elif model_config and hasattr(model_config.hf_text_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
 
@@ -378,16 +390,31 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.enable_chunked_prefill = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
+        cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         if (
             vllm_config.kv_transfer_config is not None
             and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
-            and parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size > 1
+            and cp_size > 1
         ):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
                 f"and block_size({cache_config.block_size}) "
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
+
+        use_sparse = (
+            model_config is not None
+            and model_config.hf_text_config is not None
+            and hasattr(model_config.hf_text_config, "index_topk")
+        )
+        if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+            logger.warning_once(
+                "The current SFA's PCP&DCP implementation requires"
+                f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
+                f" == block_size({cache_config.block_size}). "
+                f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
+            )
+            vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
 
         if is_vl_model(vllm_config):
             if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0"))) or bool(
@@ -524,7 +551,7 @@ class NPUPlatform(Platform):
         vllm_config: VllmConfig,
         dp_metadata,
         virtual_engine: int = 0,
-        num_tokens: int | None = None,
+        num_tokens: int = 0,
         num_tokens_across_dp: torch.Tensor | None = None,
         cudagraph_runtime_mode=None,
         batch_descriptor=None,
@@ -574,10 +601,6 @@ class NPUPlatform(Platform):
         if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
             return {}
 
-        num_actual_tokens = list(attn_metadata.values())[0].num_actual_tokens
-        if num_tokens is None:
-            num_tokens = num_actual_tokens
-
         moe_comm_type = select_moe_comm_method(
             num_tokens,
             vllm_config,
@@ -609,10 +632,13 @@ class NPUPlatform(Platform):
 
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
         flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
-        pad_size = 0
+        pad_size = None
+        padded_length = None
         if sp_enabled or flashcomm_v2_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
 
+        if num_tokens is None and attn_metadata is not None:
+            num_tokens = list(attn_metadata.values())[0].num_actual_tokens
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.max_tokens_across_dp_cpu.item()
@@ -621,8 +647,9 @@ class NPUPlatform(Platform):
                 pad_size = padded_length - num_tokens
         else:
             max_tokens_across_dp = num_tokens
-
+        mc2_mask = None
         if num_tokens is not None:
+            num_actual_tokens = num_tokens
             # NOTE: token num which need to pad to when mc2
             padded_num_tokens = math.ceil(max_tokens_across_dp / tp_world_size) * tp_world_size
             reserved_mc2_mask = get_mc2_mask()
