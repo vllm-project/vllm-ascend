@@ -416,6 +416,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         kv_c, k_pe = kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         assert len(kv_cache) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
+        assert attn_metadata.sfa_cp_metadata is not None
         kv_c_normed = kv_c_normed.view([kv_c_normed.shape[0], self.num_kv_heads, -1])
         k_pe = k_pe.unsqueeze(1)
         k_pe = self.rope_single(k_pe, cos, sin)
@@ -433,6 +434,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         if self.pcp_size == 1 or self.enable_mlapo:
             return k
         else:
+            assert attn_metadata.sfa_cp_metadata is not None
             k = get_pcp_group().all_gather(k.contiguous(), 0)
             k = torch.index_select(k, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)
             return k
