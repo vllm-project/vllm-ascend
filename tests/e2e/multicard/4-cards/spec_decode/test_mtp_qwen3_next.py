@@ -47,18 +47,19 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
 
     max_tokens = 1024
 
-    with VllmRunner(model_name,
-                    tensor_parallel_size=4,
-                    max_model_len=4096,
-                    gpu_memory_utilization=0.8,
-                    distributed_executor_backend="mp",
-                    disable_log_stats=False,
-                    speculative_config={
-                        "method": "qwen3_next_mtp",
-                        "num_speculative_tokens": 3,
-                    },
-                    compilation_config=CompilationConfig(
-                        cudagraph_capture_sizes=[20])) as spec_vllm_model:
+    with VllmRunner(
+        model_name,
+        tensor_parallel_size=4,
+        max_model_len=4096,
+        gpu_memory_utilization=0.8,
+        distributed_executor_backend="mp",
+        disable_log_stats=False,
+        speculative_config={
+            "method": "qwen3_next_mtp",
+            "num_speculative_tokens": 3,
+        },
+        compilation_config=CompilationConfig(cudagraph_capture_sizes=[20]),
+    ) as spec_vllm_model:
         _ = spec_vllm_model.generate_greedy(example_prompts, max_tokens)
         metrics = spec_vllm_model.model.get_metrics()
 
@@ -73,10 +74,7 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
             for pos in range(len(metric.values)):
                 num_accepted_tokens_per_pos[pos] += metric.values[pos]
 
-    acceptance_per_pos = [
-        num_accepted_tokens / num_drafts
-        for num_accepted_tokens in num_accepted_tokens_per_pos
-    ]
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
 
     match = all((a >= b) or (b - a < 0.06) for a, b in zip(acceptance_per_pos, golden))
     if not match:
@@ -92,9 +90,9 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("num_speculative_tokens", [1])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
-def test_qwen3_next_mtp_correctness_tp4(model_name: str,
-                                        num_speculative_tokens: int,
-                                        disable_padded_drafter_batch: bool):
+def test_qwen3_next_mtp_correctness_tp4(
+    model_name: str, num_speculative_tokens: int, disable_padded_drafter_batch: bool
+):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -103,35 +101,34 @@ def test_qwen3_next_mtp_correctness_tp4(model_name: str,
     ]
 
     max_tokens = 20
-    '''
+    """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using mtp speculative decoding.
-    '''
-    with VllmRunner(model_name,
-                    tensor_parallel_size=4,
-                    max_model_len=4096,
-                    gpu_memory_utilization=0.8,
-                    distributed_executor_backend="mp",
-                    speculative_config={
-                        "method":
-                        "mtp",
-                        "num_speculative_tokens":
-                        num_speculative_tokens,
-                        "disable_padded_drafter_batch":
-                        disable_padded_drafter_batch,
-                    },
-                    compilation_config=CompilationConfig(
-                        cudagraph_capture_sizes=[20])) as spec_llm:
+    """
+    with VllmRunner(
+        model_name,
+        tensor_parallel_size=4,
+        max_model_len=4096,
+        gpu_memory_utilization=0.8,
+        distributed_executor_backend="mp",
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": num_speculative_tokens,
+            "disable_padded_drafter_batch": disable_padded_drafter_batch,
+        },
+        compilation_config=CompilationConfig(cudagraph_capture_sizes=[20]),
+    ) as spec_llm:
         spec_outputs = spec_llm.generate_greedy(example_prompts, max_tokens)
     del spec_llm
 
-    with VllmRunner(model_name,
-                    tensor_parallel_size=4,
-                    max_model_len=4096,
-                    gpu_memory_utilization=0.8,
-                    distributed_executor_backend="mp",
-                    compilation_config=CompilationConfig(
-                        cudagraph_capture_sizes=[20])) as ref_llm:
+    with VllmRunner(
+        model_name,
+        tensor_parallel_size=4,
+        max_model_len=4096,
+        gpu_memory_utilization=0.8,
+        distributed_executor_backend="mp",
+        compilation_config=CompilationConfig(cudagraph_capture_sizes=[20]),
+    ) as ref_llm:
         ref_outputs = ref_llm.generate_greedy(example_prompts, max_tokens)
     del ref_llm
 
@@ -140,7 +137,7 @@ def test_qwen3_next_mtp_correctness_tp4(model_name: str,
     for ref_output, spec_output in zip(ref_outputs, spec_outputs):
         ref_token_ids = ref_output[0]
         spec_token_ids = spec_output[0]
-        if ref_token_ids == spec_token_ids[:len(ref_token_ids)]:
+        if ref_token_ids == spec_token_ids[: len(ref_token_ids)]:
             matches += 1
         else:
             misses += 1
@@ -155,8 +152,7 @@ def test_qwen3_next_mtp_correctness_tp4(model_name: str,
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("num_speculative_tokens", [1])
-def test_qwen3_next_mtp_full_decode(model_name: str,
-                                        num_speculative_tokens: int):
+def test_qwen3_next_mtp_full_decode(model_name: str, num_speculative_tokens: int):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -165,22 +161,22 @@ def test_qwen3_next_mtp_full_decode(model_name: str,
     ]
 
     max_tokens = 20
-    '''
+    """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using mtp speculative decoding.
-    '''
-    with VllmRunner(model_name,
-                    tensor_parallel_size=4,
-                    max_model_len=4096,
-                    gpu_memory_utilization=0.8,
-                    distributed_executor_backend="mp",
-                    speculative_config={
-                        "method": "qwen3_next_mtp",
-                        "num_speculative_tokens": num_speculative_tokens,
-                    },
-                    compilation_config=CompilationConfig(
-                        cudagraph_mode="FULL_DECODE_ONLY",
-                        cudagraph_capture_sizes=[4])) as llm:
+    """
+    with VllmRunner(
+        model_name,
+        tensor_parallel_size=4,
+        max_model_len=4096,
+        gpu_memory_utilization=0.8,
+        distributed_executor_backend="mp",
+        speculative_config={
+            "method": "qwen3_next_mtp",
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[4]),
+    ) as llm:
         outputs = llm.generate_greedy(example_prompts, max_tokens)
         print(outputs)
     del llm
