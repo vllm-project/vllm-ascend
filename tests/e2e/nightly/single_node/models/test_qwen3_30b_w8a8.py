@@ -37,18 +37,20 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_cases = [{
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 180,
-    "max_out_len": 1500,
-    "batch_size": 45,
-    "request_rate": 0,
-    "baseline": 1,
-    "threshold": 0.97
-}]
+aisbench_cases = [
+    {
+        "case_type": "performance",
+        "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+        "request_conf": "vllm_api_stream_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+        "num_prompts": 180,
+        "max_out_len": 1500,
+        "batch_size": 45,
+        "request_rate": 0,
+        "baseline": 1,
+        "threshold": 0.97,
+    }
+]
 
 
 @pytest.mark.asyncio
@@ -61,25 +63,39 @@ async def test_models(model: str, tp_size: int) -> None:
         "OMP_NUM_THREADS": "10",
         "HCCL_BUFFSIZE": "1024",
         "HCCL_OP_EXPANSION_MODE": "AIV",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     }
     server_args = [
-        "--quantization", "ascend", "--async-scheduling",
-        "--no-enable-prefix-caching", "--tensor-parallel-size",
-        str(tp_size), "--port",
-        str(port), "--max-model-len", "5600", "--max-num-batched-tokens",
-        "16384", "--max-num-seqs", "100", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.9", "--compilation-config",
-        '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+        "--quantization",
+        "ascend",
+        "--async-scheduling",
+        "--no-enable-prefix-caching",
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--port",
+        str(port),
+        "--max-model-len",
+        "5600",
+        "--max-num-batched-tokens",
+        "16384",
+        "--max-num-seqs",
+        "100",
+        "--trust-remote-code",
+        "--gpu-memory-utilization",
+        "0.9",
+        "--compilation-config",
+        '{"cudagraph_mode": "FULL_DECODE_ONLY"}',
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+    with RemoteOpenAIServer(
+        model,
+        server_args,
+        server_port=port,
+        env_dict=env_dict,
+        auto_port=False,
+    ) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,

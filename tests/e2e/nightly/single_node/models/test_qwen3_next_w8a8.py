@@ -35,16 +35,18 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_cases = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "baseline": 95,
-    "threshold": 5
-}]
+aisbench_cases = [
+    {
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/gsm8k-lite",
+        "request_conf": "vllm_api_general_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+        "max_out_len": 32768,
+        "batch_size": 32,
+        "baseline": 95,
+        "threshold": 5,
+    }
+]
 
 
 @pytest.mark.asyncio
@@ -83,11 +85,13 @@ async def test_models(model: str) -> None:
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+    with RemoteOpenAIServer(
+        model,
+        server_args,
+        server_port=port,
+        env_dict=env_dict,
+        auto_port=False,
+    ) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,
@@ -98,7 +102,4 @@ async def test_models(model: str) -> None:
         assert choices[0].text, "empty response"
         print(choices)
         # aisbench test
-        run_aisbench_cases(model,
-                           port,
-                           aisbench_cases,
-                           server_args=server_args)
+        run_aisbench_cases(model, port, aisbench_cases, server_args=server_args)

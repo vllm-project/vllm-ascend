@@ -39,27 +39,30 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_cases = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "max_out_len": 4096,
-    "batch_size": 8,
-    "baseline": 95,
-    "threshold": 5
-}, {
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 16,
-    "max_out_len": 1500,
-    "batch_size": 8,
-    "request_rate": 0,
-    "baseline": 1,
-    "threshold": 0.97
-}]
+aisbench_cases = [
+    {
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/gsm8k-lite",
+        "request_conf": "vllm_api_general_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+        "max_out_len": 4096,
+        "batch_size": 8,
+        "baseline": 95,
+        "threshold": 5,
+    },
+    {
+        "case_type": "performance",
+        "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+        "request_conf": "vllm_api_stream_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+        "num_prompts": 16,
+        "max_out_len": 1500,
+        "batch_size": 8,
+        "request_rate": 0,
+        "baseline": 1,
+        "threshold": 0.97,
+    },
+]
 
 
 @pytest.mark.asyncio
@@ -67,8 +70,7 @@ aisbench_cases = [{
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("dp_size", DATA_PARALLELS)
 @pytest.mark.parametrize("full_graph", FULL_GRAPH)
-async def test_models(model: str, tp_size: int, dp_size: int,
-                      full_graph: bool) -> None:
+async def test_models(model: str, tp_size: int, dp_size: int, full_graph: bool) -> None:
     port = get_open_port()
     env_dict = {"HCCL_BUFFSIZE": "1024"}
     server_args = [
@@ -93,16 +95,18 @@ async def test_models(model: str, tp_size: int, dp_size: int,
     if full_graph:
         server_args += [
             "--compilation-config",
-            '{"cudagraph_capture": [1,2,4,8,16], "cudagraph_model":"FULL_DECODE_ONLY"}'
+            '{"cudagraph_capture": [1,2,4,8,16], "cudagraph_model":"FULL_DECODE_ONLY"}',
         ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+    with RemoteOpenAIServer(
+        model,
+        server_args,
+        server_port=port,
+        env_dict=env_dict,
+        auto_port=False,
+    ) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,
