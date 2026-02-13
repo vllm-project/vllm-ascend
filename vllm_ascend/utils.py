@@ -628,13 +628,11 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
-        from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
         from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 
         REGISTERED_ASCEND_OPS.update(
             {
                 "SiluAndMul": AscendSiluAndMul310,
-                "MMEncoderAttention": AscendMMEncoderAttention310,
                 "RotaryEmbedding": AscendRotaryEmbedding310,
                 "RMSNorm": AscendRMSNorm310,
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
