@@ -94,6 +94,7 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
                 )
             else:
                 prefill_q_cum_seqlens = actual_seq_lengths_query
+            assert sfa_cp_metadata is not None
             sfa_cp_metadata.prefill_q_cum_seqlens = prefill_q_cum_seqlens
         metadata_cls.sfa_cp_metadata = sfa_cp_metadata
         return metadata_cls
