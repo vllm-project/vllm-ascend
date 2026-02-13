@@ -641,6 +641,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             }
         )
 
+        REGISTERED_ASCEND_OPS.pop("MRotaryEmbedding", None)
+
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
