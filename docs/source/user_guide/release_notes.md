@@ -636,7 +636,7 @@ This is the 3rd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 - Fix incorrect req block length in ascend scheduler [#2394](https://github.com/vllm-project/vllm-ascend/pull/2394)
 - Fix header include issue in rope [#2398](https://github.com/vllm-project/vllm-ascend/pull/2398)
 - Fix mtp config bug [#2412](https://github.com/vllm-project/vllm-ascend/pull/2412)
-- Fix error info and adapt `attn_metedata` refactor [#2402](https://github.com/vllm-project/vllm-ascend/pull/2402)
+- Fix error info and adapt `attn_metadata` refactor [#2402](https://github.com/vllm-project/vllm-ascend/pull/2402)
 - Fix torchair runtime error caused by configuration mismatches and `.kv_cache_bytes` file missing [#2312](https://github.com/vllm-project/vllm-ascend/pull/2312)
 - Move `with_prefill` allreduce from cpu to npu [#2230](https://github.com/vllm-project/vllm-ascend/pull/2230)
 
