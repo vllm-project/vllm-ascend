@@ -3,7 +3,6 @@ import copy
 import pytest
 import torch
 import torch.nn as nn
-import torch_npu
 import torchair
 import vllm.config
 from vllm.config import ModelConfig, VllmConfig
@@ -60,7 +59,9 @@ class ModelWithoutBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
+        norm_output, _, new_residual = torch.ops._C_ascend_npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, self.bias, self.eps
+        )
 
         quantized_output = torch.ops.vllm.quantize(
             norm_output, self.quant_scale, self.quant_scale_reciprocal, self.quant_offset
@@ -95,7 +96,9 @@ class ModelWithBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
+        norm_output, _, new_residual = torch.ops._C_ascend_npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, self.bias, self.eps
+        )
 
         # Add bias
         norm_output_with_bias = norm_output + self.bias
@@ -132,7 +135,9 @@ class ModelSPWithoutBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
+        norm_output, _, new_residual = torch.ops._C_ascend_npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, self.bias, self.eps
+        )
 
         norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output, True)
 
@@ -170,7 +175,9 @@ class ModelSPWithBias(nn.Module):
         """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(x, residual, self.rms_norm_weight, self.eps)
+        norm_output, _, new_residual = torch.ops._C_ascend_npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, self.bias, self.eps
+        )
 
         # Add bias
         norm_output_with_bias = norm_output + self.bias
@@ -187,7 +194,7 @@ class ModelSPWithBias(nn.Module):
 def assert_addrmsnorm_quant(after_gm, expect_fused=True, use_bias=False, sp_enable=False):
     check_rules = [
         (torch.ops.npu.npu_add_rms_norm_quant.default, expect_fused),
-        (torch.ops.npu.npu_add_rms_norm.default, not expect_fused),
+        (torch.ops._C_ascend.npu_add_rms_norm_bias.default, not expect_fused),
         (torch.ops.npu.npu_quantize.default, not expect_fused),
     ]
     if use_bias:
