@@ -3,12 +3,14 @@ import copy
 import pytest
 import torch
 import torch.nn as nn
+import torch_npu
 import torchair
 import vllm.config
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
 from vllm.utils.system_utils import update_environment_variables
 
+import vllm_ascend.ops.register_custom_ops  # noqa
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.norm_quant_fusion_pass import (
     AddRMSNormQuantPattern,
@@ -51,16 +53,9 @@ class ModelWithoutBias(nn.Module):
         self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
 
     def forward(self, x):
-        """
-        Forward pass:
-          1. Perform npu_add_rms_norm
-          2. Quantize the normalized output to int8
-        Returns both quantized output and updated residual.
-        """
         residual = torch.zeros_like(x)
-
-        norm_output, _, new_residual = torch.ops._C_ascend_npu_add_rms_norm_bias(
-            x, residual, self.rms_norm_weight, self.bias, self.eps
+        norm_output, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, None, self.eps
         )
 
         quantized_output = torch.ops.vllm.quantize(
@@ -87,24 +82,14 @@ class ModelWithBias(nn.Module):
         self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
 
     def forward(self, x):
-        """
-        Forward pass:
-          1. Perform npu_add_rms_norm
-          2. Add bias
-          3. Quantize to int8
-        Returns both quantized output and updated residual.
-        """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch.ops._C_ascend_npu_add_rms_norm_bias(
+        norm_output, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
             x, residual, self.rms_norm_weight, self.bias, self.eps
         )
 
-        # Add bias
-        norm_output_with_bias = norm_output + self.bias
-
         quantized_output = torch.ops.vllm.quantize(
-            norm_output_with_bias, self.quant_scale, self.quant_scale_reciprocal, self.quant_offset
+            norm_output, self.quant_scale, self.quant_scale_reciprocal, self.quant_offset
         )
 
         return quantized_output, new_residual
@@ -126,17 +111,10 @@ class ModelSPWithoutBias(nn.Module):
         self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
 
     def forward(self, x):
-        """
-        Forward pass:
-          1. Perform npu_add_rms_norm
-          2. Perform a fake maybe_all_gather_and_maybe_unpad
-          3. Quantize the normalized output to int8
-        Returns both quantized output and updated residual.
-        """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch.ops._C_ascend_npu_add_rms_norm_bias(
-            x, residual, self.rms_norm_weight, self.bias, self.eps
+        norm_output, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+            x, residual, self.rms_norm_weight, None, self.eps
         )
 
         norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output, True)
@@ -150,8 +128,8 @@ class ModelSPWithoutBias(nn.Module):
 
 class ModelSPWithBias(nn.Module):
     """
-    A minimal test model that simulates the pattern:
-        AddRMSNorm → Add bias → maybe_allgather → Quantization (without bias)
+    A test model that simulates the pattern:
+        AddRMSNorm → Add bias → maybe_allgather → Quantization (with bias)
     """
 
     def __init__(self, hidden_size: int, dtype: torch.bfloat16, eps: float = 1e-6, device="npu"):
@@ -165,27 +143,16 @@ class ModelSPWithBias(nn.Module):
         self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
 
     def forward(self, x):
-        """
-        Forward pass:
-          1. Perform npu_add_rms_norm
-          2. Add bias
-          3. Perform a fake maybe_all_gather_and_maybe_unpad
-          4. Quantize the normalized output to int8
-        Returns both quantized output and updated residual.
-        """
         residual = torch.zeros_like(x)
 
-        norm_output, _, new_residual = torch.ops._C_ascend_npu_add_rms_norm_bias(
+        norm_output, _, new_residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
             x, residual, self.rms_norm_weight, self.bias, self.eps
         )
 
-        # Add bias
-        norm_output_with_bias = norm_output + self.bias
-
-        norm_output_with_bias = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output_with_bias, True)
+        norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output, True)
 
         quantized_output = torch.ops.vllm.quantize(
-            norm_output_with_bias, self.quant_scale, self.quant_scale_reciprocal, self.quant_offset
+            norm_output, self.quant_scale, self.quant_scale_reciprocal, self.quant_offset
         )
 
         return quantized_output, new_residual
@@ -195,7 +162,7 @@ def assert_addrmsnorm_quant(after_gm, expect_fused=True, use_bias=False, sp_enab
     check_rules = [
         (torch.ops.npu.npu_add_rms_norm_quant.default, expect_fused),
         (torch.ops._C_ascend.npu_add_rms_norm_bias.default, not expect_fused),
-        (torch.ops.npu.npu_quantize.default, not expect_fused),
+        (torch.ops.vllm.quantize.default, not expect_fused),
     ]
     if use_bias:
         check_rules.append((torch.ops.aten.add.Tensor, not expect_fused))
