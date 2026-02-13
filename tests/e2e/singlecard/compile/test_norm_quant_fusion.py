@@ -40,6 +40,18 @@ else:
     from vllm.compilation.passes.fx_utils import OpOverload
 
 
+# Cache backend to avoid duplicate pattern registration
+_backend_cache = None
+
+
+def get_or_create_backend(vllm_config):
+    """Get or create backend with fusion passes (cached to avoid duplicate pattern registration)."""
+    global _backend_cache
+    if _backend_cache is None:
+        _backend_cache = TestBackend(custom_passes=[
+            AddRMSNormQuantFusionPass(vllm_config=vllm_config)
+        ])
+    return _backend_cache
 
 class TestModelWithoutBias(nn.Module):
     """
@@ -317,9 +329,7 @@ def test_rmsnorm_quant_fusion(
 
     with vllm.config.set_current_vllm_config(vllm_config):
         with set_ascend_forward_context(None, vllm_config):
-            backend = TestBackend(custom_passes=[
-                AddRMSNormQuantFusionPass(vllm_config=vllm_config)
-            ])
+            backend = get_or_create_backend(vllm_config)
             if use_bias:
                 if not enable_custom_op():
                     return

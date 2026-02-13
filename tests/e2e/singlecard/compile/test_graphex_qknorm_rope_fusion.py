@@ -10,9 +10,9 @@ from vllm.distributed import ensure_model_parallel_initialized, init_distributed
 from vllm.utils.system_utils import update_environment_variables
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.compilation.npugraph_ex_passes.graphex_qknorm_rope_fusion_pass import (
-    GraphEXQKNormRopeFusionPattern,
-    GraphEXQKNormRopeFusionPatternWithBias,
+from vllm_ascend.compilation.passes.qknorm_rope_fusion_pass import (
+    QKNormRopeFusionPattern,
+    QKNormRopeFusionPatternWithBias,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
@@ -192,15 +192,17 @@ def test_rmsnorm_quant_fusion(
         qkv_size = q_size + 2 * kv_size
         if use_bias:
             model = ModelQKNormRopeWithBias(head_dim, num_heads, num_kv_heads, dtype, eps, device="npu")
-            fusion_pattern = GraphEXQKNormRopeFusionPatternWithBias(
+            fusion_pattern = QKNormRopeFusionPatternWithBias(
                 vllm_config=vllm_config, head_dim=head_dim, num_heads=num_heads, num_kv_heads=num_kv_heads, eps=eps
             )
         else:
             model = ModelQKNormRopeWithoutBias(head_dim, num_heads, num_kv_heads, dtype, eps, device="npu")
-            fusion_pattern = GraphEXQKNormRopeFusionPattern(
+            fusion_pattern = QKNormRopeFusionPattern(
                 vllm_config=vllm_config, head_dim=head_dim, num_heads=num_heads, num_kv_heads=num_kv_heads, eps=eps
             )
-        fusion_pattern.register()
+        from torch._inductor.pattern_matcher import PatternMatcherPass
+        pm_pass = PatternMatcherPass()
+        fusion_pattern.register(pm_pass)
         model = model.to("npu")
         seq_len = 5
         qkv = torch.randn(seq_len, qkv_size, device="npu", dtype=dtype)
