@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,7 +24,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.kimi_k25_vit import Learnable2DInterpPosEmbDivided_fixed, get_rope_shape_decorate
 
 logger = init_logger(__name__)
-
 
 @get_rope_shape_decorate
 def get_rope_shape(org, interpolation_mode, shape):
