@@ -100,6 +100,7 @@ The details of each configuration option are as follows:
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
 | `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
 | `fuse_allreduce_rms` | bool | `False` | Whether to enable fuse_allreduce_rms pass. It's set to False because of conflict with SP. |
+| `fuse_muls_add` | bool | `True` | Whether to enable fuse_muls_add pass.|
 
 ### Example
 
