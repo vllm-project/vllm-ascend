@@ -6,7 +6,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_dcp_group, get_pcp_group, get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
@@ -19,15 +19,16 @@ from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
+    enable_cp,
     maybe_save_kv_layer_to_connector,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
-    enable_cp,
 )
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.layer_shard_linear import (
@@ -36,7 +37,6 @@ from vllm_ascend.ops.layer_shard_linear import (
     reach_layer_for_shard_weight_series,
     register_all_layers_to_shard_weight_series,
 )
-from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
@@ -71,8 +71,8 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_builder_cls():
         if enable_cp():
-            from vllm_ascend.attention.context_parallel.sfa_cp import \
-                AscendSFACPMetadataBuilder
+            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPMetadataBuilder
+
             return AscendSFACPMetadataBuilder
         return AscendSFAMetadataBuilder
 
@@ -83,8 +83,8 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
         if enable_cp():
-            from vllm_ascend.attention.context_parallel.sfa_cp import \
-                AscendSFACPImpl
+            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl
+
             return AscendSFACPImpl
         return AscendSFAImpl
 
@@ -191,14 +191,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
         self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
-
-        self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        self.pcp_group = get_pcp_group().device_group if self.pcp_size > 1 else None
-
-        self.dcp_size = get_dcp_group().world_size
-        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
-        self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -546,7 +538,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _get_full_kv(self, k, attn_metadata):
         return k
-    
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -881,9 +873,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             need_gather_q_kv=need_gather_q_kv,
         )
 
-        attn_output = self._execute_sparse_flash_attention_process(ql_nope, q_pe, kv_cache, topk_indices, 
-                                                                   attn_metadata, actual_seq_lengths_query, 
-                                                                   actual_seq_lengths_key)
+        attn_output = self._execute_sparse_flash_attention_process(
+            ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+        )
 
         attn_output = self._v_up_proj(attn_output)
         weight_prefetch_method = get_weight_prefetch_method()
@@ -914,8 +906,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         return output_padded
 
-    def _execute_sparse_flash_attention_process(self, ql_nope, q_pe, kv_cache, topk_indices, 
-                                                attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key):
+    def _execute_sparse_flash_attention_process(
+        self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+    ):
         block_table = attn_metadata.block_table
         kv = kv_cache[0]
         key_rope = kv_cache[1]
