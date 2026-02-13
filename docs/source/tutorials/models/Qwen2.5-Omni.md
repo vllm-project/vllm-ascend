@@ -95,7 +95,7 @@ VLLM_TARGET_DEVICE=empty pip install -v ".[audio]"
 
 :::
 
-`--allowed-local-media-path` is optional, only set it if you need infer model with local media file
+`--allowed-local-media-path` is optional, only set it if you need infer model with local media file.
 
 `--gpu-memory-utilization` should not be set manually only if you know what this parameter aims to.
 
@@ -118,11 +118,11 @@ vllm serve ${MODEL_PATH}\
 --no-enable-prefix-caching
 ```
 
-`--tensor_parallel_size` no need to set for this 7B model, but if you really need tensor parallel, tp size can be one of `1\2\4`
+`--tensor_parallel_size` no need to set for this 7B model, but if you really need tensor parallel, tp size can be one of `1/2/4`.
 
 ### Prefill-Decode Disaggregation
 
-Not supported yet
+Not supported yet.
 
 ## Functional Verification
 
@@ -145,7 +145,7 @@ curl http://127.0.0.1:8000/v1/chat/completions   -H "Content-Type: application/j
         "content": [
           {
             "type": "text",
-            "text": "What is the text in the illustrate?"
+            "text": "What is the text in the illustration?"
           },
           {
             "type": "image_url",
@@ -170,7 +170,7 @@ If you query the server successfully, you can see the info shown below (client):
 
 ## Accuracy Evaluation
 
-Qwen2.5-Omni on vllm-ascend has been test on AISBench.
+Qwen2.5-Omni on vllm-ascend has been tested on AISBench.
 
 ### Using AISBench
 
@@ -204,7 +204,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-vllm bench serve --model Qwen/Qwen2.5-Omni-7B --dataset-name random --random-input 1024 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen2.5-Omni-7B --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
