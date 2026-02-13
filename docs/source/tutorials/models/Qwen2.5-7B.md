@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `Qwen2.5-7B-Instruct`(BF16 version): require 1 910B4 cards(32G × 1). [Qwen2.5-7B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)
+- `Qwen2.5-7B-Instruct`(BF16 version): require 1 910B4 cards(32G × 1) [Qwen2.5-7B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)
 
 It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-7B-Instruct/`) for quick access during deployment.
 
@@ -171,7 +171,7 @@ vllm bench serve \
   --model ./Qwen2.5-7B-Instruct/ \
   --dataset-name random \
   --random-input 200 \
-  --num-prompt 200 \
+  --num-prompts 200 \
   --request-rate 1 \
   --save-result \
   --result-dir ./perf_results/

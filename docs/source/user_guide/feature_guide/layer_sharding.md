@@ -7,7 +7,7 @@
 Instead of replicating all weights on every device, **Layer Shard Linear shards the weights of a "series" of such operators across the NPU devices in a communication group**:
 
 - The **i-th layer's linear weight** is stored **only on device `i % K`**, where `K` is the number of devices in the group.
-- Other devices hold a lightweight **shared dummy tensor** during initialization and fetch the real weight **on-demand via asynchronous broadcast** during the forward pass.
+- Other devices hold a lightweight **shared dummy tensor** during initialization and fetch the real weight **on-demand** via asynchronous broadcast during the forward pass.
 
 As illustrated in the figure below, this design enables broadcast to reach weights: while the current layer (e.g., MLA or MOE) is being computed, the system **asynchronously broadcasts the next layer's weight** in the background. Because the attention computation in the MLA module is sufficiently latency-bound, the weight transfer for `o_proj` is **fully overlapped with computation**, making the communication **latency-free from the perspective of end-to-end inference**.
 
@@ -23,7 +23,7 @@ This approach **preserves exact computational semantics** while **significantly 
 
 ![layer shard](./images/layer_sharding.png)
 
-> **Figure.** Layer Shard Linear workflow: weights are sharded by layer across devices (top), and during forward execution (bottom), asynchronous broadcast pre-fetches the next layer's weight while the current layer computes—enabling zero-overhead weight loading.
+> **Figure.** Layer Shard Linear workflow: weights are sharded by layer across devices (top), and during forward execution (bottom), asynchronous broadcast **pre-fetches** the next layer's weight while the current layer computes—enabling **zero-overhead** weight loading.
 
 ---
 

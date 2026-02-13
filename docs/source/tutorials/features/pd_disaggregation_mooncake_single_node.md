@@ -44,7 +44,7 @@ for i in {0..7}; do hccn_tool -i $i -ip -g;done
 4. Cross-Node PING Test
 
 ```bash
-# Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
+# Execute on the target node (replace 'x.x.x.x' with actual npu ip address).
 for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 ```
 
@@ -94,21 +94,21 @@ docker run --rm \
 
 ## Install Mooncake
 
-Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
+Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
 First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
 git clone -b v0.3.8.post1 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 ```
 
-(Optional) Replace go install url if the network is poor
+(Optional) Replace go install url if the network is poor.
 
 ```shell
 cd Mooncake
 sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
 ```
 
-Install mpi
+Install mpi.
 
 ```shell
 apt-get install mpich libmpich-dev -y
@@ -120,7 +120,7 @@ Install the relevant dependencies. The installation of Go is not required.
 bash dependencies.sh -y
 ```
 
-Compile and install
+Compile and install.
 
 ```shell
 mkdir build
@@ -130,7 +130,7 @@ make -j
 make install
 ```
 
-Set environment variables
+Set environment variables.
 
 **Note:**
 
@@ -268,7 +268,7 @@ curl http://192.0.0.1:8080/v1/chat/completions \
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-                {"type": "text", "text": "What is the text in the illustrate?"}
+                {"type": "text", "text": "What is the text in the illustration?"}
             ]}
             ],
         "max_completion_tokens": 100,

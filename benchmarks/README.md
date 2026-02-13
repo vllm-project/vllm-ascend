@@ -145,7 +145,7 @@ These files contain detailed benchmarking results for further analysis.
 #### Use benchmark cli
 
 For more flexible and customized use, benchmark cli is also provided to run online/offline benchmarks
-Similarly, let’s take `Qwen2.5-VL-7B-Instruct` benchmark as an example:
+Similarly, let's take `Qwen2.5-VL-7B-Instruct` benchmark as an example:
 
 ##### Online serving
 

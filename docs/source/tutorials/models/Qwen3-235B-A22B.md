@@ -18,10 +18,10 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `Qwen3-235B-A22B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node， 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2（32G * 8）nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B)
-- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2（32G * 8）nodes. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
+- `Qwen3-235B-A22B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node, 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G * 8)nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B)
+- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G * 8)nodes. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### Verify Multi-node Communication(Optional)
 
@@ -46,7 +46,7 @@ Select an image based on your machine type and start the docker image on your no
   export NAME=vllm-ascend
 
   # Run the container using the defined variables
-  # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+  # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
   docker run --rm \
   --name $NAME \
   --net=host \
@@ -87,7 +87,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-`Qwen3-235B-A22B` and `Qwen3-235B-A22B-w8a8` can both be deployed on 1 Atlas 800 A3（64G*16）、 1 Atlas 800 A2（64G*8）.
+`Qwen3-235B-A22B` and `Qwen3-235B-A22B-w8a8` can both be deployed on 1 Atlas 800 A3(64G*16), 1 Atlas 800 A2(64G*8).
 Quantized version need to start with parameter `--quantization ascend`.
 
 Run the following script to execute online 128k inference.
@@ -310,7 +310,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
@@ -328,7 +328,7 @@ In this section, we provide simple scripts to re-produce our latest performance.
 - HDK/driver 25.3.RC1
 - triton_ascend 3.2.0
 
-### Single Node A3 （64G*16）
+### Single Node A3 (64G*16)
 
 Example server scripts:
 
@@ -394,7 +394,7 @@ Note:
 
 ### Three Node A3 -- PD disaggregation
 
-On three Atlas 800 A3（64G*16）server, we recommend to use one node as one prefill instance and two nodes as one decode instance. Example server scripts:
+On three Atlas 800 A3(64G*16) server, we recommend to use one node as one prefill instance and two nodes as one decode instance. Example server scripts:
 Prefill Node 1
 
 ```shell
