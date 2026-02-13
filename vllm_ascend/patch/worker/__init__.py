@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-from contextlib import suppress
-
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
@@ -35,8 +33,5 @@ import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
 import vllm_ascend.patch.worker.patch_v2_eagle  # noqa
 import vllm_ascend.patch.worker.patch_v2_uva  # noqa
+import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
 import vllm_ascend.patch.worker.patch_npugraph_ex_triton  # noqa
-
-# Skip if dependencies like torchaudio are not available
-with suppress(ImportError, ModuleNotFoundError):
-    import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa

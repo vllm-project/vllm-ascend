@@ -524,6 +524,19 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
         )
 
+    from vllm_ascend.utils import vllm_version_is
+
+    # Get architecture name for logging
+    # For multimodal models, use text_config architecture; otherwise use main architecture
+    if vllm_version_is("0.15.0"):
+        arch_name = vllm_config.model_config.architectures[0]
+    else:
+        # Access architecture from hf_text_config to avoid recursion when calling with_hf_config
+        if hf_config and hasattr(hf_config, "architectures") and hf_config.architectures:
+            arch_name = hf_config.architectures[0]
+        else:
+            arch_name = vllm_config.model_config.architectures[0]
+
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
@@ -535,10 +548,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
         sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
-
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
-            vllm_config.model_config.architectures[0],
+            arch_name,
             num_hidden_layers,
             len(original_sizes),
             len(
@@ -550,7 +562,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         compilation_config.cudagraph_capture_sizes = original_sizes
         logger.info(
             "No adjustment needed for ACL graph batch sizes: %s model (layers: %d) with %d sizes",
-            vllm_config.model_config.architectures[0],
+            arch_name,
             num_hidden_layers,
             len(original_sizes),
         )
