@@ -25,7 +25,6 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet, Qwen3NextAttention
-from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -34,29 +33,6 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
     fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-
-
-class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
-    def __init__(
-        self,
-        config: Qwen3_5TextConfig | Qwen3_5MoeTextConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        speculative_config: SpeculativeConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().init(self,config, model_config, cache_config, \
-                    quant_config, speculative_config, prefix)
-        
-        self.in_proj_b = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.num_v_heads,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_b",
-        )
-
 
 class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
 
@@ -405,4 +381,3 @@ class AscendQwen3NextAttention(nn.Module):
 Qwen3NextGatedDeltaNet.forward = AscendQwen3Next_GatedDeltaNet.forward
 Qwen3NextGatedDeltaNet._forward_core = AscendQwen3Next_GatedDeltaNet._forward_core
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
-Qwen3_5GatedDeltaNet.__init__ = AscendQwen3_5GatedDeltaNet.__init__
