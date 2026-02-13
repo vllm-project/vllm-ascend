@@ -113,7 +113,7 @@ class AscendPrefillContextParallelMetadata:
     # when entering from linear-attention to attention
     pcp_enter_fa_restore_idx: torch.Tensor = None
 
-    # the number of tokens padded in linear-attn across all ranks
+    # the number of tokens padded in linear-attn per rank
     pcp_padded_tokens_fla: int = 0
 
 
