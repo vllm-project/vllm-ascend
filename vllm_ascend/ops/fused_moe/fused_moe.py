@@ -27,6 +27,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod, get_compressed_expert_map
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+
 from vllm_ascend.utils import vllm_version_is
 
 if not vllm_version_is("0.15.0"):
