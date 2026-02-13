@@ -2,7 +2,7 @@
 
 ## Overview
 
-Sleep Mode is an API designed to offload model weights and discard KV cache from NPU memory. This functionality is essential for reinforcement learning (RL) post-training workloads, particularly in online algorithms such as PPO, GRPO, or DPO. During training, the policy model typically performs auto-regressive generation using inference engines like vLLM, followed by forward and backward passes for optimization.
+Sleep Mode is an API designed to offload model weights and discard KV cache from NPU memory. This functionality is essential for reinforcement learning (RL) post-training workloads, particularly in online algorithms such as PPO, GRPO, or DPO. During training, the policy model typically performs autoregressive generation using inference engines like vLLM, followed by forward and backward passes for optimization.
 
 Since the generation and training phases may employ different model parallelism strategies, it becomes crucial to free KV cache and even offload model parameters stored within vLLM during training. This ensures efficient memory utilization and avoids resource contention on the NPU.
 
@@ -71,7 +71,7 @@ The following is a simple example of how to use sleep mode.
 
 - Online serving:
     :::{note}
-    Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicit specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
+    Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicitly specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
     :::
 
     ```bash

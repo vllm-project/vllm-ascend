@@ -10,7 +10,7 @@ DeepSeek-V3.1 is a hybrid model that supports both thinking mode and non-thinkin
 
 - Higher thinking efficiency: DeepSeek-V3.1-Think achieves comparable answer quality to DeepSeek-R1-0528, while responding more quickly.
 
-The `DeepSeek-V3.1` model is first supported in `vllm-ascend:v0.9.1rc3`
+The `DeepSeek-V3.1` model is first supported in `vllm-ascend:v0.9.1rc3`.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -30,7 +30,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
 - `Method of Quantify`: [msmodelslim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v31-w8a8-%E6%B7%B7%E5%90%88%E9%87%8F%E5%8C%96-mtp-%E9%87%8F%E5%8C%96). You can use these methods to quantify the model.
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### Verify Multi-node Communication(Optional)
 
@@ -52,7 +52,7 @@ export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
 docker run --rm \
 --name $NAME \
 --net=host \
@@ -580,7 +580,7 @@ The parameters are explained as follows:
 - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 - `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
 
-6. run server for each node
+6. run server for each node:
 
 ```shell
 # p0
@@ -593,7 +593,7 @@ python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank
 python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
 ```
 
-7. Run proxy `proxy.sh` scripts on the prefill master node
+7. Run the `proxy.sh` script on the prefill master node
 
 Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -716,7 +716,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-vllm bench serve --model /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot  --dataset-name random --random-input 1024 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot  --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.

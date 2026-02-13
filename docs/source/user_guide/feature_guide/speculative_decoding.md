@@ -150,3 +150,4 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    ```

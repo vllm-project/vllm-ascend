@@ -70,7 +70,7 @@ such as IP addresses according to your actual environment.
 5. Check NPU TLS Configuration
 
    ```bash
-   # The tls settings should be consistent across all nodes
+   # The tls settings should be consistent across all nodes.
    for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
    ```
 
@@ -267,7 +267,7 @@ configuration.
 
 ## Benchmark
 
-We recommend using the **aisbench** tool to assess performance. The test uses
+We recommend using the **AISBench** tool to assess performance. The test uses
 **Dataset A**, consisting of fully random data, with the following
 configuration:
 
@@ -328,7 +328,7 @@ models = [
 ]
 ```
 
-**Performance Benchmarking Commands**：
+**Performance Benchmarking Commands**:
 
 ```shell
 ais_bench --models vllm_api_stream_chat \

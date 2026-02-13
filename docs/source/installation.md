@@ -6,25 +6,25 @@ This document describes how to install vllm-ascend manually.
 
 - OS: Linux
 - Python: >= 3.10, < 3.12
-- A hardware with Ascend NPU. It's usually the Atlas 800 A2 series.
+- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
 - Software:
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 8.5.0                       | Required for vllm-ascend and torch-npu    |
+    | Ascend HDK    | Refer to the documentation [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
+    | CANN          | == 8.5.0                        | Required for vllm-ascend and torch-npu    |
     | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
     | NNAL          | == 8.5.0                       | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 
-- **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
+- **Using pip**: first prepare the environment manually or via a CANN image, then install `vllm-ascend` using pip.
 - **Using docker**: use the `vllm-ascend` pre-built docker image directly.
 
 ## Configure Ascend CANN environment
 
-Before installation, you need to make sure firmware/driver and CANN are installed correctly, refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
+Before installation, you need to make sure firmware/driver, and CANN are installed correctly, refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
 
 ### Configure hardware environment
 
@@ -48,7 +48,7 @@ Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/
 The easiest way to prepare your software environment is using CANN image directly:
 
 ```{note}
-The CANN prebuilt image includes NNAL (Ascend Neural Network Acceleration Library) which provides libatb.so for advanced tensor operations. No additional installation is required when using the prebuilt image.
+The CANN prebuilt image includes NNAL (Ascend Neural Network Acceleration Library), which provides libatb.so for advanced tensor operations. No additional installation is required when using the prebuilt image.
 ```
 
 ```{code-block} bash
@@ -112,15 +112,15 @@ source /usr/local/Ascend/nnal/atb/set_env.sh
 
 ::::{tab-item} Before using docker
 :sync: docker
-No more extra step if you are using `vllm-ascend` prebuilt Docker image.
+No extra steps are needed if you are using the `vllm-ascend` prebuilt Docker image.
 ::::
 :::::
 
-Once it is done, you can start to set up `vllm` and `vllm-ascend`.
+Once this is done, you can start to set up `vllm` and `vllm-ascend`.
 
 ## Set up using Python
 
-First install system dependencies and configure pip mirror:
+First, install system dependencies and configure the pip mirror:
 
 ```bash
 # Using apt-get with mirror
@@ -139,7 +139,7 @@ pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/si
 pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
 ```
 
-Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
+Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel**:
 
 ```{code-block} bash
    :substitutions:
@@ -171,12 +171,12 @@ pip install -v -e .
 cd ..
 ```
 
-If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has Internet access.
+If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has internet access.
 :::
 
 ```{note}
-To build custom operators, gcc/g++ higher than 8 and c++ 17 or higher is required. If you're using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
-If you encounter other problems during compiling, it is probably because unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in environment to specify your g++ and gcc locations before compiling.
+To build custom operators, gcc/g++ higher than 8 and C++17 or higher are required. If you are using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
+If you encounter other problems during compiling, it is probably because an unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in the environment to specify your g++ and gcc locations before compiling.
 ```
 
 ## Set up using Docker

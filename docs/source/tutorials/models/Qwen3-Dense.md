@@ -304,7 +304,7 @@ Take the `serve` as an example. Run the code as follows.
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
 ```shell
-vllm bench serve --model /model/Qwen3-32B-W8A8 --served-model-name qwen3 --port 8113 --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model /model/Qwen3-32B-W8A8 --served-model-name qwen3 --port 8113 --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
@@ -389,4 +389,4 @@ If this list is not manually specified, it will be filled with a series of evenl
 
 Therefore, like the above real-world scenario, when adjusting the benchmark request concurrency, we always ensure that the concurrency is actually included in the cudagraph_capture_sizes list. This way, during the decode phase, padding operations are essentially avoided, ensuring the reliability of the experimental data.
 
-It’s important to note that if you enable FlashComm_v1, the values in this list must be integer multiples of the TP size. Any values that do not meet this condition will be automatically filtered out. Therefore, I recommend incrementally adding concurrency based on the TP size after enabling FlashComm_v1.
+It's important to note that if you enable FlashComm_v1, the values in this list must be integer multiples of the TP size. Any values that do not meet this condition will be automatically filtered out. Therefore, I recommend incrementally adding concurrency based on the TP size after enabling FlashComm_v1.

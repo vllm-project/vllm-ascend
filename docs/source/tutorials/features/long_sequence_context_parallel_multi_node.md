@@ -1,6 +1,6 @@
 # Long-Sequence Context Parallel (Deepseek)
 
-## Getting Start
+## Getting Started
 
 :::{note}
 Context parallel feature currently is only supported on Atlas A3 device, and will be supported on Atlas A2 in the future.
@@ -8,13 +8,13 @@ Context parallel feature currently is only supported on Atlas A3 device, and wil
 
 vLLM-Ascend now supports long sequence with context parallel options. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Take the Deepseek-V3.1-w8a8 model as an example, use 3 Atlas 800T A3 servers to deploy the “1P1D” architecture. Node p is deployed across multiple machines, while node d is deployed on a single machine. Assume the ip of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1). On each server, use 8 NPUs 16 chips to deploy one service instance.In the current example, we will enable the context parallel feature on node p to improve TTFT. Although enabling the DCP feature on node d can reduce memory usage, it would introduce additional communication and small operator overhead. Therefore, we will not enable the DCP feature on node d.
+Take the Deepseek-V3.1-w8a8 model as an example, use 3 Atlas 800T A3 servers to deploy the “1P1D” architecture. Node p is deployed across multiple machines, while node d is deployed on a single machine. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1). On each server, use 8 NPUs 16 chips to deploy one service instance.In the current example, we will enable the context parallel feature on node p to improve TTFT. Although enabling the DCP feature on node d can reduce memory usage, it would introduce additional communication and small operator overhead. Therefore, we will not enable the DCP feature on node d.
 
 ## Environment Preparation
 
 ### Model Weight
 
-- `DeepSeek-V3.1_w8a8mix_mtp`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8). Please modify `torch_dtype` from `float16` to `bfloat16` in `config.json`.
+- `DeepSeek-V3.1_w8a8mix_mtp` (Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8). Please modify `torch_dtype` from `float16` to `bfloat16` in `config.json`.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -24,9 +24,9 @@ Refer to [verify multi-node communication environment](../../installation.md#ver
 
 ### Installation
 
-You can use our official docker image to run `DeepSeek-V3.1` directly.
+You can use our official Docker image to run `DeepSeek-V3.1` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the Docker image on your node, refer to [using Docker](../../installation.md#set-up-using-docker).
 
 ```{code-block} bash
    :substitutions:
@@ -35,7 +35,7 @@ export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+# Note: If you are running bridge network with Docker, please expose available ports for multiple nodes communication in advance
 docker run --rm \
 --name $NAME \
 --net=host \
@@ -273,7 +273,7 @@ vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
 
 :::::
 
-2. Prefill master node `proxy.sh` scripts
+2. Prefill master node `proxy.sh` script
 
 ```shell
 python load_balance_proxy_server_example.py \
@@ -289,7 +289,7 @@ python load_balance_proxy_server_example.py \
     8004
 ```
 
-3. run proxy
+3. Run proxy
 
 Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -318,12 +318,12 @@ The parameters are explained as follows:
 "cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
 - "cudagraph_capture_sizes": represents different levels of graph modes. The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
 - `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 optimization is enabled. Currently, this optimization is only supported for MoE in scenarios where tensor-parallel-size > 1.
-- `export VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL=1` indicates that context parallel is enabled. This environment variable is required in the PD architecture but not needed in the pd co-locate deployment scenario. It will be removed in the future.
+- `export VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL=1` indicates that context parallel is enabled. This environment variable is required in the PD architecture but not needed in the PD co-locate deployment scenario. It will be removed in the future.
 
 **Notice:**
 
 - tensor-parallel-size needs to be divisible by decode-context-parallel-size.
-- decode-context-parallel-size must less than or equal to tensor-parallel-size.
+- decode-context-parallel-size must be less than or equal to tensor-parallel-size.
 
 ## Accuracy Evaluation
 
@@ -361,7 +361,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp  --dataset-name random --random-input 131072 --num-prompt 20 --request-rate 0 --save-result --result-dir ./
+vllm bench serve --model /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp  --dataset-name random --random-input 131072 --num-prompts 20 --request-rate 0 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.

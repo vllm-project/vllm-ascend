@@ -563,7 +563,7 @@ The performance evaluation must be conducted in an online mode. Take the `serve`
 :sync: single
 
 ```shell
-vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 ::::
@@ -571,7 +571,7 @@ vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --rand
 :sync: multi
 
 ```shell
-vllm bench serve --model Qwen/Qwen2.5-VL-32B-Instruct  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen2.5-VL-32B-Instruct  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 ::::
