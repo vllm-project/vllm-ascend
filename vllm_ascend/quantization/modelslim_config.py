@@ -393,8 +393,9 @@ class AscendModelSlimConfig(QuantizationConfig):
         else:
             from vllm.model_executor.layers.attention import Attention
 
-        if prefix.startswith("language_model"):
-            prefix = prefix.split(".", 1)[-1]
+        if model_type != "kimi_k2":
+            if prefix.startswith("language_model"):
+                prefix = prefix.split('.', 1)[-1]
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
