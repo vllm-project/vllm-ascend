@@ -275,14 +275,9 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
-            if ops == "Triton":
-                ssm_state[
-                    non_spec_state_indices_tensor] = last_recurrent_state.to(
-                        ssm_state.dtype)
-            else:
-                ssm_state[
-                non_spec_state_indices_tensor] = last_recurrent_state.transpose(-1,-2).contiguous().to(
-                    ssm_state.dtype)
+            ssm_state[
+            non_spec_state_indices_tensor] = last_recurrent_state.transpose(-1,-2).contiguous().to(
+                ssm_state.dtype)
 
         elif attn_metadata.num_decodes > 0:
             cu_seqlens=non_spec_query_start_loc[
