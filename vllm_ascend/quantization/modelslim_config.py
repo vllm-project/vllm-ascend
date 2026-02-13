@@ -395,7 +395,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         if model_type != "kimi_k2":
             if prefix.startswith("language_model"):
-                prefix = prefix.split('.', 1)[-1]
+                prefix = prefix.split(".", 1)[-1]
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
