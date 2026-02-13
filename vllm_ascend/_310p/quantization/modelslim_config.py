@@ -104,9 +104,9 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
         if isinstance(layer, LinearBase):
             packed = getattr(self, "packed_modules_mapping", {})
             if self.is_layer_skipped_ascend(prefix, packed):
-                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+                from vllm_ascend._310p.ops.linear import AscendUnquantizedLinearMethod310
 
-                return AscendUnquantizedLinearMethod()
+                return AscendUnquantizedLinearMethod310()
 
             scheme = create_scheme_for_layer(
                 quant_description=self.quant_description,
