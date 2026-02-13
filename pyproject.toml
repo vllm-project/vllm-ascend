@@ -50,7 +50,28 @@ plugins.md029.enabled = false # ol-prefix
 line-length = 120
 # Folder to be modified
 exclude = [
-    "tests/**",
+    # Batch (2)
+    "tests/e2e/multicard/4-cards/",
+    "tests/e2e/nightly/multi_node/",
+    
+    # Batch (3)
+    "tests/e2e/nightly/single_node/models/",
+    
+    # Batch (4)
+    "tests/e2e/nightly/single_node/ops/",
+    "tests/e2e/nightly/single_node/ops/singlecard_ops/triton/",
+
+    # Batch (5)
+    "tests/e2e/singlecard/",
+    "tests/e2e/singlecard/pooling/",
+    "tests/e2e/singlecard/spec_decode/",
+    
+    # Batch (6)
+    "tests/e2e/utils.py",
+    "tests/e2e/vllm_interface/",
+    "tests/e2e/weekly/",
+
+    "tests/ut/",
 ]
 
 [tool.ruff.lint]

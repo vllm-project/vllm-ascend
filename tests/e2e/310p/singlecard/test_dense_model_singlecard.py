@@ -24,12 +24,13 @@ def test_qwen3_dense_tp1_fp16():
     ]
     max_tokens = 5
     with VllmRunner(
-            "Qwen/Qwen3-8B",
-            tensor_parallel_size=1,
-            enforce_eager=True,
-            dtype="float16"
+        "Qwen/Qwen3-8B",
+        tensor_parallel_size=1,
+        enforce_eager=True,
+        dtype="float16",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
 
 def test_qwen3_dense_tp1_w8a8():
     example_prompts = [
@@ -37,10 +38,10 @@ def test_qwen3_dense_tp1_w8a8():
     ]
     max_tokens = 5
     with VllmRunner(
-            "vllm-ascend/Qwen3-8B-W8A8",
-            tensor_parallel_size=1,
-            enforce_eager=True,
-            dtype="float16",
-            quantization="ascend"
+        "vllm-ascend/Qwen3-8B-W8A8",
+        tensor_parallel_size=1,
+        enforce_eager=True,
+        dtype="float16",
+        quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
