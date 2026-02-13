@@ -37,10 +37,10 @@ CASE_DS_ACLGRAPH = LLMTestCase(
     quantization="ascend",
     prompts=PROMPTS_SHORT,
     golden_answers=[
-        '\nI am a 20 year old female, and I have been suffering from depression for 3 years now. I have been on medication for 2',
-        ' a man who has been in the public eye for decades. He has been a senator, a governor, and a businessman. He has also been married to the',
-        ' Paris, which is also the largest city in the country. The city is located on the River Seine and is known for its beautiful architecture, museums, and art',
-        ' here, and it’s not what you think.\nThe future of AI is here, and it’s not what you think.\nThe future of'
+        ' Kaitlyn. I am a 20 year old college student. I am currently studying to become a nurse. I am a very outgoing person and I',
+        ' a man who is not only a liar, but a cheat, a thief, a murderer, a traitor, a rapist, a pervert, a ped',
+        ' Paris.\nThe currency of France is the Euro.\nThe languages spoken in France are French and French patois.\nThe dialing code for France is +',
+        ' bright, and it’s only going to get brighter. As AI continues to evolve, it will become more and more integrated into our daily lives. We’'
     ],
 )
 
