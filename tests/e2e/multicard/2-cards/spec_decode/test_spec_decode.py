@@ -18,15 +18,12 @@
 
 from __future__ import annotations
 
-import math
 import os
-import random
-from typing import Any, Union
 from unittest.mock import patch
 
 import pytest
 from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
@@ -101,7 +98,8 @@ def test_eagle3_sp_acceptance(
             [prompt],
             tokenize=False,
             add_generation_prompt=True,
-        ) for prompt in prompts
+        )
+        for prompt in prompts
     ]
 
     speculative_config = {
@@ -112,21 +110,20 @@ def test_eagle3_sp_acceptance(
         "model": spec_model_name,
     }
 
-    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY",
-                                           cudagraph_capture_sizes=[12])
+    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[12])
 
     with VllmRunner(
-            main_model_name,
-            enforce_eager=True,
-            max_model_len=8192,
-            disable_log_stats=False,
-            tensor_parallel_size=2,
-            max_num_seqs=256,
-            distributed_executor_backend="mp",
-            gpu_memory_utilization=0.7,
-            speculative_config=speculative_config,
-            compilation_config=compilation_config,
-            async_scheduling=async_scheduling,
+        main_model_name,
+        enforce_eager=True,
+        max_model_len=8192,
+        disable_log_stats=False,
+        tensor_parallel_size=2,
+        max_num_seqs=256,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.7,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        async_scheduling=async_scheduling,
     ) as llm:
         _ = llm.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()
@@ -142,10 +139,7 @@ def test_eagle3_sp_acceptance(
             for pos in range(len(metric.values)):
                 num_accepted_tokens_per_pos[pos] += metric.values[pos]
 
-    acceptance_per_pos = [
-        num_accepted_tokens / num_drafts
-        for num_accepted_tokens in num_accepted_tokens_per_pos
-    ]
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
     golden = BASELINES_SP[method]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
