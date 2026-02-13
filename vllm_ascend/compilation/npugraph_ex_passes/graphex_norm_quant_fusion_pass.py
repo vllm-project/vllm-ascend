@@ -296,6 +296,222 @@ class GraphEXAddRMSNormQuantSPPatternWithBias:
             extra_check=extra_stream_scope_check,
         )
 
+class GraphEXAddRMSNormDynamicQuantPattern:
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
+        self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
+        self.eps = eps
+
+    def get_inputs(self):
+        """
+        Generate example inputs for the AddRMSNormQuant fusion pattern.
+        """
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        return [rms_norm_input, residual, rms_norm_weight]
+
+    def register(self, pm_pass: PatternMatcherPass):
+        def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor, rms_norm_weight: torch.Tensor):
+            """
+            Pattern for AddRMSNormQuant fusion.
+            """
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, None, self.eps
+            )
+            out0 = output[0]
+            out1 = output[2]
+            quantized_output = torch.ops.npu.npu_dynamic_quant(out0)
+            return quantized_output[0], quantized_output[1], out1
+
+        def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor, rms_norm_weight: torch.Tensor):
+            """
+            Replacement for the AddRMSNormQuant fusion.
+            """
+            output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
+                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, True]
+            )
+            return (
+                output[0],
+                output[3],
+                output[2],
+            )
+
+        torchair.register_replacement(
+            search_fn=pattern,
+            replace_fn=replacement,
+            example_inputs=self.get_inputs(),
+            extra_check=extra_stream_scope_check,
+        )
+
+
+class GraphEXAddRMSNormDynamicQuantPatternWithBias:
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
+        self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
+        self.eps = eps
+
+    def get_inputs(self):
+        """
+        Generate example inputs for the AddRMSNormQuant fusion pattern.
+        """
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        rmsnorm_bias = torch.randn(4, device="npu", dtype=self.dtype)
+        return [rms_norm_input, residual, rms_norm_weight, rmsnorm_bias]
+
+    def register(self, pm_pass: PatternMatcherPass):
+        def pattern(
+            rms_norm_input: torch.Tensor,
+            residual: torch.Tensor,
+            rms_norm_weight: torch.Tensor,
+            bias: torch.Tensor,
+        ):
+            """
+            Pattern for AddRMSNormQuant fusion.
+            """
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, bias, self.eps
+            )
+            out0 = output[0]
+            out1 = output[2]
+            quantized_output = torch.ops.npu.npu_dynamic_quant(out0)
+            return quantized_output[0], quantized_output[1], out1
+
+        def replacement(
+            rms_norm_input: torch.Tensor,
+            residual: torch.Tensor,
+            rms_norm_weight: torch.Tensor,
+            bias: torch.Tensor,
+        ):
+            """
+            Replacement for the AddRMSNormQuant fusion.
+            """
+            output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
+                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, True], beta=bias
+            )
+            return (
+                output[0],
+                output[3],
+                output[2],
+            )
+
+        torchair.register_replacement(
+            search_fn=pattern,
+            replace_fn=replacement,
+            example_inputs=self.get_inputs(),
+            extra_check=extra_stream_scope_check,
+        )
+
+
+class GraphEXAddRMSNormDynamicQuantSPPattern:
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
+        self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
+        self.eps = eps
+
+    def get_inputs(self):
+        """
+        Generate example inputs for the AddRMSNormQuant fusion pattern.
+        """
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        return [rms_norm_input, residual, rms_norm_weight]
+
+    def register(self, pm_pass: PatternMatcherPass):
+        def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor, rms_norm_weight: torch.Tensor):
+            """
+            Pattern for AddRMSNormQuant fusion.
+            """
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, None, self.eps
+            )
+            out0 = output[0]
+            out1 = output[2]
+            out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
+            quantized_output = torch.ops.npu.npu_dynamic_quant(out0)
+            return quantized_output[0], quantized_output[1], out1
+
+        def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor, rms_norm_weight: torch.Tensor):
+            """
+            Replacement for the AddRMSNormQuant fusion.
+            """
+            output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
+                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, True]
+            )
+            out3 = output[3]
+            quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(output[0], True)
+            out3 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out3, True)
+            return quantized_output, out3, output[2]
+
+        torchair.register_replacement(
+            search_fn=pattern,
+            replace_fn=replacement,
+            example_inputs=self.get_inputs(),
+            extra_check=extra_stream_scope_check,
+        )
+
+
+class GraphEXAddRMSNormDynamicQuantSPPatternWithBias:
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
+        self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
+        self.eps = eps
+
+    def get_inputs(self):
+        """
+        Generate example inputs for the AddRMSNormQuant fusion pattern.
+        """
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        rmsnorm_bias = torch.randn(4, device="npu", dtype=self.dtype)
+        return [rms_norm_input, residual, rms_norm_weight, rmsnorm_bias]
+
+    def register(self, pm_pass: PatternMatcherPass):
+        def pattern(
+            rms_norm_input: torch.Tensor,
+            residual: torch.Tensor,
+            rms_norm_weight: torch.Tensor,
+            bias: torch.Tensor,
+        ):
+            """
+            Pattern for AddRMSNormQuant fusion.
+            """
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, bias, self.eps
+            )
+            out0 = output[0]
+            out1 = output[2]
+            out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
+            quantized_output = torch.ops.npu.npu_dynamic_quant(out0)
+            return quantized_output[0], quantized_output[1], out1
+
+        def replacement(
+            rms_norm_input: torch.Tensor,
+            residual: torch.Tensor,
+            rms_norm_weight: torch.Tensor,
+            bias: torch.Tensor,
+        ):
+            """
+            Replacement for the AddRMSNormQuant fusion.
+            """
+            output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
+                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, True], beta=bias
+            )
+            out3 = output[3]
+            quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(output[0], True)
+            out3 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out3, True)
+            return quantized_output, out3, output[2]
+
+        torchair.register_replacement(
+            search_fn=pattern,
+            replace_fn=replacement,
+            example_inputs=self.get_inputs(),
+            extra_check=extra_stream_scope_check,
+        )
 
 class GraphEXAddRMSNormFusionPass:
     """
@@ -314,6 +530,14 @@ class GraphEXAddRMSNormFusionPass:
             check_and_register_fusion_pass(GraphEXAddRMSNormQuantPatternWithBias, vllm_config=vllm_config, eps=eps)
             check_and_register_fusion_pass(GraphEXAddRMSNormQuantSPPattern, vllm_config=vllm_config, eps=eps)
             check_and_register_fusion_pass(GraphEXAddRMSNormQuantSPPatternWithBias, vllm_config=vllm_config, eps=eps)
+            check_and_register_fusion_pass(GraphEXAddRMSNormDynamicQuantPattern, vllm_config=vllm_config, eps=eps)
+            check_and_register_fusion_pass(GraphEXAddRMSNormDynamicQuantSPPattern, vllm_config=vllm_config, eps=eps)
+            check_and_register_fusion_pass(
+                GraphEXAddRMSNormDynamicQuantPatternWithBias, vllm_config=vllm_config, eps=eps
+            )
+            check_and_register_fusion_pass(
+                GraphEXAddRMSNormDynamicQuantSPPatternWithBias, vllm_config=vllm_config, eps=eps
+            )
 
     def __call__(self, graph: torch.fx.Graph):
         pass
