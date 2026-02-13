@@ -36,6 +36,24 @@ if HAS_TRITON:
 
     from vllm_ascend.ops.triton.rope import rope_forward_triton
 
+
+def get_rope_dim(vllm_config):
+    model_config = vllm_config.model_config
+
+    if model_config.use_mla:
+        rope_dim = model_config.hf_text_config.qk_rope_head_dim
+    else:
+        rope_dim = model_config.get_head_size()
+        # For models using partial rope like Qwen3-Next.
+        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
+            rope_dim = int(rope_dim *
+                           model_config.hf_text_config.partial_rotary_factor)
+        elif hasattr(model_config.hf_text_config, "rotary_dim"):
+            rope_dim = int(model_config.hf_text_config.rotary_dim)
+    
+    return rope_dim
+
+
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
 # However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
 # So we have to preprocess cos_sin_cache int cos && sin. In the future,
@@ -73,7 +91,7 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
     max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
     if model_config.use_mla:
-        rope_dim = model_config.hf_text_config.qk_rope_head_dim
+        rope_dim = get_rope_dim(vllm_config)
         _cos_mla = torch.ones(max_num_batched_tokens,
                               1,
                               1,
@@ -87,11 +105,7 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
                                dtype=dtype,
                                device=device)
     elif not is_vl_model(vllm_config) and has_rope(vllm_config):
-        rope_dim = model_config.get_head_size()
-        # For models using partial rope like Qwen3-Next.
-        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
-            rope_dim = int(rope_dim *
-                           model_config.hf_text_config.partial_rotary_factor)
+        rope_dim = get_rope_dim(vllm_config)
         _cos = torch.ones(1,
                           max_num_batched_tokens,
                           1,
