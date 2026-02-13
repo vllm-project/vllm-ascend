@@ -285,7 +285,7 @@ python3 -m vllm.entrypoints.openai.api_server --model $MODEL --tensor-parallel-s
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 pip install -r vllm-ascend/benchmarks/requirements-bench.txt
 
-vllm bench serve --model $MODEL --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model $MODEL --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After execution, you can get the result, here is the result of `Qwen3-Omni-30B-A3B-Thinking` in vllm-ascend:0.13.0rc1 for reference only.

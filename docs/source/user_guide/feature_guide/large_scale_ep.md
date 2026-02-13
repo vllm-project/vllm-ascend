@@ -1,9 +1,9 @@
-# Distributed DP Server With Large Scale Expert Parallelism
+# Distributed DP Server With Large-Scale Expert Parallelism
 
 ## Getting Start
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large scale **Expert  Parallelism (EP)** scenario. To achieve better performance，the distributed DP server is applied in vLLM-Ascend. In the PD separation scenario, different optimization strategies can be implemented based on the distinct characteristics of PD nodes, thereby enabling more flexible model deployment. \
-Take the deepseek model as an example, use 8 Atlas 800T A3 servers to deploy the model. Assume the ip of the servers start from 192.0.0.1, and end by 192.0.0.8. Use the first 4 servers as prefiller nodes and the last 4 servers as decoder nodes. And the prefiller nodes deployed as master node independently, the decoder nodes set 192.0.0.5 node to be the master node.
+vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large-scale **Expert Parallelism (EP)** scenario. To achieve better performance, the distributed DP server is applied in vLLM-Ascend. In the PD separation scenario, different optimization strategies can be implemented based on the distinct characteristics of PD nodes, thereby enabling more flexible model deployment. \
+Taking the DeepSeek model as an example, using 8 Atlas 800T A3 servers to deploy the model. Assume the IP of the servers starts from 192.0.0.1 and ends by 192.0.0.8. Use the first 4 servers as prefiller nodes and the last 4 servers as decoder nodes. And the prefiller nodes are deployed as master nodes independently, while the decoder nodes use the 192.0.0.5 node as the master node.
 
 ## Verify Multi-Node Communication Environment
 
@@ -51,7 +51,7 @@ for i in {0..15}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-i
 4. Cross-Node PING Test
 
 ```bash
-# Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
+# Execute on the target node (replace 'x.x.x.x' with actual NPU IP address)
 for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
 ```
 
@@ -87,7 +87,7 @@ for i in {0..7}; do hccn_tool -i $i -ip -g;done
 3. Cross-Node PING Test
 
 ```bash
-# Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
+# Execute on the target node (replace 'x.x.x.x' with actual NPU IP address)
 for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 ```
 
@@ -95,11 +95,11 @@ for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 
 :::::
 
-## Large Scale EP model deployment
+## Large-Scale EP model deployment
 
 ### Generate script with configurations
 
-In the PD separation scenario, we provide a optimized configuration. You can use the following shell script for configuring the prefiller and decoder nodes respectively.
+In the PD separation scenario, we provide an optimized configuration. You can use the following shell script for configuring the prefiller and decoder nodes respectively.
 
 :::::{tab-set}
 
@@ -140,7 +140,7 @@ export VLLM_USE_MODELSCOPE="True"
 export VLLM_WORKER_MULTIPROC_METHOD="fork"
 export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 
-# The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8
+# The w8a8 weight can be obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8
 # "--additional-config" is used to enable characteristics from vllm-ascend
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
     --host 0.0.0.0 \
@@ -207,7 +207,7 @@ export VLLM_USE_MODELSCOPE="True"
 export VLLM_WORKER_MULTIPROC_METHOD="fork"
 export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 
-# The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8
+# The w8a8 weight can be obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8
 # "--additional-config" is used to enable characteristics from vllm-ascend
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
     --host 0.0.0.0 \
@@ -254,7 +254,7 @@ dp_size = 2 # total number of DP engines for decode/prefill
 dp_size_local = 2 # number of DP engines on the current node
 dp_rank_start = 0 # starting DP rank for the current node
 # dp_ip is different on prefiller nodes in this example
-dp_ip = "192.0.0.1" # master node ip for DP communication
+dp_ip = "192.0.0.1" # master node IP for DP communication
 dp_port = 13395 # port used for DP communication
 engine_port = 9000 # starting port for all DP groups on the current node
 template_path = "./run_dp_template.sh"
@@ -288,7 +288,7 @@ dp_size = 64 # total number of DP engines for decode/prefill
 dp_size_local = 16 # number of DP engines on the current node
 dp_rank_start = 0 # starting DP rank for the current node. e.g. 0/16/32/48
 # dp_ip is the same on decoder nodes in this example
-dp_ip = "192.0.0.5" # master node ip for DP communication.
+dp_ip = "192.0.0.5" # master node IP for DP communication.
 dp_port = 13395 # port used for DP communication
 engine_port = 9000 # starting port for all DP groups on the current node
 template_path = "./run_dp_template.sh"
@@ -314,7 +314,7 @@ for process in processes:
 
 :::::
 
-Note that the prefiller nodes and the decoder nodes may have different configurations. In this example, each prefiller node deployed as master node independently, but all decoder nodes take the first node as the master node. So it leads to difference in 'dp_size_local' and 'dp_rank_start'
+Note that the prefiller nodes and the decoder nodes may have different configurations. In this example, each prefiller node is deployed as a master node independently, while the decoder nodes use the 192.0.0.5 node as the master node. This leads to differences in 'dp_size_local' and 'dp_rank_start'
 
 ## Example proxy for Distributed DP Server
 
@@ -365,7 +365,7 @@ You can get the proxy program in the repository's examples, [load\_balance\_prox
 
 ## Benchmark
 
-We recommend use aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark) Execute the following commands to install aisbench
+We recommend using aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark). Execute the following commands to install aisbench
 
 ```shell
 git clone https://gitee.com/aisbench/benchmark.git
@@ -373,7 +373,7 @@ cd benchmark/
 pip3 install -e ./
 ```
 
-You need to canncel the http proxy before assessing performance, as following
+You need to cancel the http proxy before assessing performance, as follows:
 
 ```shell
 # unset proxy
@@ -381,8 +381,8 @@ unset http_proxy
 unset https_proxy
 ```
 
-- You can place your datasets in the dir: `benchmark/ais_bench/datasets`
-- You can change the configurationin the dir :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the ``vllm_api_stream_chat.py`` for examples
+- You can place your datasets in the directory: `benchmark/ais_bench/datasets`
+- You can change the configuration in the directory :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take `vllm_api_stream_chat.py` as an example:
 
 ```python
 models = [
@@ -408,23 +408,23 @@ models = [
 ]
 ```
 
-- Take gsm8k dataset for example, execute the following commands  to assess performance.
+- Taking the gsm8k dataset as an example, execute the following commands to assess performance.
 
 ```shell
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf  --debug  --mode perf
 ```
 
-- For more details for commands and parameters for aisbench, refer to  [aisbench](https://gitee.com/aisbench/benchmark)
+- For more details on commands and parameters for aisbench, refer to [aisbench](https://gitee.com/aisbench/benchmark)
 
 ## Prefill & Decode Configuration Details
 
-In the PD separation scenario, we provide a optimized configuration.
+In the PD separation scenario, we provide an optimized configuration.
 
 - **prefiller node**
 
 1. set HCCL_BUFFSIZE=256
 2. add '--enforce-eager' command to 'vllm serve'
-3. Take '--kv-transfer-config' as follow
+3. Take '--kv-transfer-config' as follows:
 
 ```shell
 --kv-transfer-config \
@@ -437,7 +437,7 @@ In the PD separation scenario, we provide a optimized configuration.
     }'
 ```
 
-4. Take '--additional-config' as follow
+4. Take '--additional-config' as follows:
 
 ```shell
 --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
@@ -446,7 +446,7 @@ In the PD separation scenario, we provide a optimized configuration.
 - **decoder node**
 
 1. set HCCL_BUFFSIZE=1024
-2. Take '--kv-transfer-config' as follow
+2. Take '--kv-transfer-config' as follows:
 
 ```shell
 --kv-transfer-config
@@ -459,7 +459,7 @@ In the PD separation scenario, we provide a optimized configuration.
     }'
 ```
 
-3. Take '--additional-config' as follow
+3. Take '--additional-config' as follows:
 
 ```shell
 --additional-config '{"enable_weight_nz_layout":true}'
@@ -467,13 +467,13 @@ In the PD separation scenario, we provide a optimized configuration.
 
 ### Parameters Description
 
-1.'--additional-config'  Parameter Introduction:
+1. '--additional-config' Parameter Introduction:
 
-- **"enable_weight_nz_layout"：** Whether to convert quantized weights to NZ format to accelerate matrix multiplication.
-- **"enable_prefill_optimizations"：** Whether to enable DeepSeek models' prefill optimizations.
+- **"enable_weight_nz_layout"**: Whether to convert quantized weights to NZ format to accelerate matrix multiplication.
+- **"enable_prefill_optimizations"**: Whether to enable DeepSeek models' prefill optimizations.
   <br>
 
-3.enable MTP
+2. Enable MTP
 Add the following command to your configurations.
 
 ```shell
@@ -482,7 +482,7 @@ Add the following command to your configurations.
 
 ### Recommended Configuration Example
 
-For example，if the average input length is 3.5k, and the output length is 1.1k, the context length is 16k, the max length of the input dataset is 7K. In this scenario, we give a recommended configuration for distributed DP server with high EP. Here we use 4 nodes for prefill and 4 nodes for decode.
+For example, if the average input length is 3.5k, and the output length is 1.1k, the context length is 16k, the max length of the input dataset is 7K. In this scenario, we give a recommended configuration for distributed DP server with high EP. Here we use 4 nodes for prefill and 4 nodes for decode.
 
 | node     | DP | TP | EP | max-model-len | max-num-batched-tokens | max-num-seqs |  gpu-memory-utilization |
 |----------|----|----|----|---------------|------------------------|--------------|-----------|
@@ -495,6 +495,6 @@ Note that these configurations are not related to optimization. You need to adju
 
 ## FAQ
 
-### 1. Prefiller nodes need to warmup
+### 1. Prefiller nodes need to warm up
 
 Since the computation of some NPU operators requires several rounds of warm-up to achieve best performance, we recommend preheating the service with some requests before conducting performance tests to achieve the best end-to-end throughput.
