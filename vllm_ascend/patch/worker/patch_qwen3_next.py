@@ -23,7 +23,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
+from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet, Qwen3NextAttention
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -308,5 +308,68 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
 
+class AscendQwen3NextAttention(nn.Module):
+    def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
+        qkv, _ = self.qkv_proj(hidden_states)
+        if "qwen3_5" in self.config.model_type:
+            if self.attn_output_gate:
+                q_gate, kv = qkv.split([self.q_size * 2, self.kv_size * 2], dim=-1)
+                orig_shape = q_gate.shape[:-1]
+                q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
+                q, gate = torch.chunk(q_gate, chunks=2, dim=-1)
+                gate = gate.reshape(*orig_shape, -1)
+                q = q.reshape(*orig_shape, -1)
+                qkv = torch.cat([q, kv], dim=-1)
+
+            cos_sin = self.rotary_emb.cos_sin_cache[positions]
+            if cos_sin.device != qkv.device:
+                cos_sin = cos_sin.to(qkv.device)
+            if cos_sin.dtype != qkv.dtype:
+                cos_sin = cos_sin.to(qkv.dtype)
+
+            q, k, v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+                qkv=qkv,
+                q_weight=self.q_norm.weight,
+                k_weight=self.k_norm.weight,
+                cos_sin=cos_sin,
+                num_q_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_dim,
+                eps=self.config.rms_norm_eps,
+                mrope_section=self.rotary_emb.mrope_section,
+                is_interleaved=self.rotary_emb.mrope_interleaved,
+                rope_dim=self.rotary_emb.rotary_dim, )
+        else:
+            if self.attn_output_gate:
+                q_gate, k, v = qkv.split(
+                    [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
+                )
+                orig_shape = q_gate.shape[:-1]
+                q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
+                q, gate = torch.chunk(q_gate, 2, dim=-1)
+                q = q.reshape(*orig_shape, -1)
+                gate = gate.reshape(*orig_shape, -1)
+            else:
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+            q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
+                -1, self.num_heads * self.head_dim
+            )
+            k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
+                -1, self.num_kv_heads * self.head_dim
+            )
+
+            q, k = self.rotary_emb(positions, q, k)
+
+        attn_output = self.attn(q, k, v)
+
+        if self.attn_output_gate:
+            gate = torch.sigmoid(gate)
+            attn_output = attn_output * gate
+
+        output[:], _ = self.o_proj(attn_output)
+
+
 Qwen3NextGatedDeltaNet.forward = AscendQwen3Next_GatedDeltaNet.forward
 Qwen3NextGatedDeltaNet._forward_core = AscendQwen3Next_GatedDeltaNet._forward_core
+Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
