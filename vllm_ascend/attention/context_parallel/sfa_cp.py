@@ -74,7 +74,6 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
         sfa_cp_metadata = self.build_cp_metadata(
             block_table_cp, valid_block_ids, metadata_cls.seq_lens, common_attn_metadata
         )
-        metadata_cls.sfa_cp_metadata = sfa_cp_metadata
         metadata_cls.num_decode_tokens = num_decode_tokens
         metadata_cls.num_decodes = num_decodes
         metadata_cls.num_prefills = num_prefills
@@ -95,8 +94,8 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
                 )
             else:
                 prefill_q_cum_seqlens = actual_seq_lengths_query
-            metadata_cls.sfa_cp_metadata.prefill_q_cum_seqlens = prefill_q_cum_seqlens
-
+            sfa_cp_metadata.prefill_q_cum_seqlens = prefill_q_cum_seqlens
+        metadata_cls.sfa_cp_metadata = sfa_cp_metadata
         return metadata_cls
 
     def build_cp_metadata(
