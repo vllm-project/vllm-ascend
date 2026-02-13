@@ -54,6 +54,10 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "language_model.lm_head.": "lm_head.",
         "language_model.model.": "model.language_model.",
     },
+    "kimi_k25": {
+        "mm_projector.linear_1": "mm_projector.proj.0",
+        "mm_projector.linear_2": "mm_projector.proj.2",
+    },
 }
 
 # key: model_type
