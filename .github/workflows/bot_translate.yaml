@@ -22,9 +22,6 @@ on:
     types: [opened]
     branches: [main]
     paths: ['docs/source/**/*.md']
-  push:
-    branches: [main]
-    paths: ['docs/source/**']
   workflow_dispatch:
     inputs:
       target_branch:
@@ -60,7 +57,7 @@ jobs:
           token: ${{ secrets.PAT_TOKEN }}
           ref: main
 
-      - name: Checkout PR branch (pull_request)
+      - name: Checkout PR branch
         if: env.IS_PR == 'true'
         uses: actions/checkout@v6.0.1
         with:
@@ -94,83 +91,59 @@ jobs:
           sphinx-build -b gettext source _build/gettext
           sphinx-intl update -p _build/gettext -l zh_CN
 
-      - name: Detect changed PO files
-        if: env.IS_PR == 'false'
+      - name: Detect PO files to translate
         id: detect
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          tracked=$(git diff --name-only --diff-filter=ACMUX || true)
-          untracked=$(git ls-files --others --exclude-standard || true)
-          po_files=$(printf "%s\n%s" "$tracked" "$untracked" | grep '\.po$' || true)
+          if [ "${{ env.IS_PR }}" == "true" ]; then
+            changed_md=$(git diff --name-only --diff-filter=ACMR \
+              ${{ github.event.pull_request.base.sha }} \
+              ${{ github.sha }} \
+              -- 'docs/source/**/*.md' || true)
 
-          if [ -z "$po_files" ]; then
-            echo "No PO files changed"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+            [ -z "$changed_md" ] && echo "has_changes=false" >> $GITHUB_OUTPUT && exit 0
+
+            echo "Changed MD files:"
+            echo "$changed_md"
+
+            po_files=""
+            while IFS= read -r md; do
+              [ -z "$md" ] && continue
+              po=$(echo "$md" | sed 's|^docs/source/|docs/source/locale/zh_CN/LC_MESSAGES/|; s|\.md$|.po|')
+              if [ -f "$po" ]; then
+                echo "  $md -> $po"
+                [ -z "$po_files" ] && po_files="$po" || po_files="$po_files,$po"
+              fi
+            done <<< "$changed_md"
           else
-            file_count=$(echo "$po_files" | grep -c '.')
-            files_csv=$(echo "$po_files" | tr '\n' ',' | sed 's/,$//')
-            echo "Found $file_count changed PO files"
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "files_count=$file_count" >> $GITHUB_OUTPUT
-            echo "files=$files_csv" >> $GITHUB_OUTPUT
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            tracked=$(git diff --name-only --diff-filter=ACMUX || true)
+            untracked=$(git ls-files --others --exclude-standard || true)
+            po_files=$(printf "%s\n%s" "$tracked" "$untracked" | grep '\.po$' | tr '\n' ',' | sed 's/,$//' || true)
           fi
 
-      - name: Get changed markdown files and map to PO
-        if: env.IS_PR == 'true'
-        id: detect_pr
-        run: |
-          changed_md=$(git diff --name-only --diff-filter=ACMR \
-            ${{ github.event.pull_request.base.sha }} \
-            ${{ github.sha }} \
-            -- 'docs/source/**/*.md' || true)
-
-          if [ -z "$changed_md" ]; then
-            echo "No markdown files changed in docs/source"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          md_count=$(echo "$changed_md" | grep -c '.')
-          echo "Found $md_count changed markdown file(s):"
-          echo "$changed_md"
-
-          # Map MD files to PO files
-          po_files=""
-          while IFS= read -r md; do
-            [ -z "$md" ] && continue
-            po=$(echo "$md" | sed 's|^docs/source/|docs/source/locale/zh_CN/LC_MESSAGES/|; s|\.md$|.po|')
-            if [ -f "$po" ]; then
-              echo "Mapped: $md -> $po"
-              [ -z "$po_files" ] && po_files="$po" || po_files="$po_files,$po"
-            else
-              echo "Skip (no PO): $md -> $po"
-            fi
-          done <<< "$changed_md"
-
           if [ -z "$po_files" ]; then
-            echo "No matching PO files found"
+            echo "No PO files to translate"
             echo "has_changes=false" >> $GITHUB_OUTPUT
           else
-            echo "PO files to translate: $po_files"
+            echo "PO files: $po_files"
             echo "has_changes=true" >> $GITHUB_OUTPUT
             echo "files=$po_files" >> $GITHUB_OUTPUT
           fi
 
       - name: Translate PO files
-        if: steps.detect.outputs.has_changes == 'true' || steps.detect_pr.outputs.has_changes == 'true'
+        if: steps.detect.outputs.has_changes == 'true'
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
-          FILES="${{ steps.detect.outputs.files }}${{ steps.detect_pr.outputs.files }}"
           python .github/workflows/scripts/po_translate.py \
-            --files "$FILES" \
+            --files "${{ steps.detect.outputs.files }}" \
             --output-json /tmp/translation_results.json
 
-      - name: Collect translated files
-        if: steps.detect.outputs.has_changes == 'true' || steps.detect_pr.outputs.has_changes == 'true'
+      - name: Process translated files
+        if: steps.detect.outputs.has_changes == 'true'
         id: results
         run: |
-          [ ! -f /tmp/translation_results.json ] && echo "No results found" && exit 1
+          [ ! -f /tmp/translation_results.json ] && echo "No results" && exit 1
 
           success_files=$(python3 -c "
           import json, os
@@ -178,48 +151,38 @@ jobs:
               for p in json.load(f).get('success_files', []):
                   if os.path.exists(p): print(p)
           ")
-
           [ -z "$success_files" ] && echo "No files translated" && exit 1
 
           count=0
           file_list=""
+          mkdir -p /tmp/translated_po_files
           while IFS= read -r file; do
             [ -n "$file" ] && [ -f "$file" ] && {
               count=$((count + 1))
               file_list="${file_list}- <code>${file}</code>"$'\n'
+              if [ "${{ env.IS_PR }}" == "true" ]; then
+                cp "$file" /tmp/translated_po_files/
+              else
+                git add "$file"
+              fi
             }
           done <<< "$success_files"
 
-          [ $count -eq 0 ] && echo "No files collected" && exit 1
-
-          echo "Collected $count file(s)"
+          [ $count -eq 0 ] && echo "No files processed" && exit 1
+          echo "Processed $count file(s)"
           echo "file_count=$count" >> $GITHUB_OUTPUT
           echo "file_list<<EOF" >> $GITHUB_OUTPUT
           echo "$file_list" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Stage and commit
+      - name: Commit and push
         if: env.IS_PR == 'false' && steps.detect.outputs.has_changes == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          success_files=$(python3 -c "
-          import json, os
-          with open('/tmp/translation_results.json') as f:
-              for p in json.load(f).get('success_files', []):
-                  if os.path.exists(p): print(p)
-          ")
-
-          while IFS= read -r file; do
-            [ -n "$file" ] && [ -f "$file" ] && git add "$file"
-          done <<< "$success_files"
-
           git diff --cached --quiet && echo "Nothing to commit" && exit 1
-
-          staged=$(git diff --cached --name-only)
-          count=$(echo "$staged" | wc -l)
-          msg="[Doc] Auto-translate ${count} file(s)"
-          git commit -s -m "$msg"
+          count=$(git diff --cached --name-only | wc -l)
+          git commit -s -m "[Doc] Auto-translate ${count} file(s)"
           git push -f origin "${{ env.BRANCH_NAME }}"
 
       - name: Create PR in upstream
@@ -235,56 +198,32 @@ jobs:
           github-token: ${{ secrets.PAT_TOKEN }}
           script: |
             try {
-              const fileList = process.env.FILE_LIST;
-              const fileCount = process.env.FILE_COUNT;
-              const runUrl = process.env.RUN_URL;
-
               const prBody = '## Auto-Translation Summary\n\n' +
-                'Translated **' + fileCount + '** file(s):\n\n' +
-                fileList + '\n---\n\n' +
-                '[Workflow run](' + runUrl + ')';
-
+                'Translated **' + process.env.FILE_COUNT + '** file(s):\n\n' +
+                process.env.FILE_LIST + '\n---\n\n' +
+                '[Workflow run](' + process.env.RUN_URL + ')';
               const pr = await github.rest.pulls.create({
-                owner: 'vllm-project',
-                repo: 'vllm-ascend',
-                head: process.env.PR_HEAD,
-                base: process.env.PR_BASE,
-                title: '[Doc] Translated Doc files',
-                body: prBody
+                owner: 'vllm-project', repo: 'vllm-ascend',
+                head: process.env.PR_HEAD, base: process.env.PR_BASE,
+                title: '[Doc] Translated Doc files', body: prBody
               });
               core.info('Created PR #' + pr.data.number);
             } catch (error) {
               if (error.message.includes('A pull request already exists')) {
                 core.warning('PR already exists');
-              } else {
-                throw error;
-              }
+              } else { throw error; }
             }
 
-      - name: Prepare artifact
-        if: env.IS_PR == 'true' && steps.detect_pr.outputs.has_changes == 'true'
-        run: |
-          mkdir -p /tmp/translated_po_files
-          success_files=$(python3 -c "
-          import json, os
-          with open('/tmp/translation_results.json') as f:
-              for p in json.load(f).get('success_files', []):
-                  if os.path.exists(p): print(p)
-          ")
-          while IFS= read -r file; do
-            [ -n "$file" ] && [ -f "$file" ] && cp "$file" /tmp/translated_po_files/
-          done <<< "$success_files"
-
       - name: Upload translated PO files
-        if: env.IS_PR == 'true' && steps.detect_pr.outputs.has_changes == 'true'
+        if: env.IS_PR == 'true' && steps.detect.outputs.has_changes == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: translated-po-files-pr${{ github.event.pull_request.number }}
           path: /tmp/translated_po_files/
           retention-days: 30
 
-      - name: Comment on PR with download link
-        if: env.IS_PR == 'true' && steps.detect_pr.outputs.has_changes == 'true'
+      - name: Comment on PR
+        if: env.IS_PR == 'true' && steps.detect.outputs.has_changes == 'true'
         uses: actions/github-script@v8
         env:
           FILE_LIST: ${{ steps.results.outputs.file_list }}
@@ -294,52 +233,38 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const fileList = process.env.FILE_LIST;
-            const fileCount = process.env.FILE_COUNT;
-            const runUrl = process.env.RUN_URL;
-            const artifactName = process.env.ARTIFACT_NAME;
-
+            const { FILE_LIST, FILE_COUNT, RUN_URL, ARTIFACT_NAME } = process.env;
             const body = [
               '## Auto-Translation Complete\n',
-              'Translated **' + fileCount + '** PO file(s) for the markdown changes in this PR:\n',
-              fileList,
+              'Translated **' + FILE_COUNT + '** PO file(s) for the markdown changes in this PR:\n',
+              FILE_LIST,
               '### Download Translated Files\n',
-              '**[Download artifacts from workflow run](' + runUrl + ')**\n',
-              'Artifact name: `' + artifactName + '`\n',
+              '**[Download artifacts from workflow run](' + RUN_URL + ')**\n',
+              'Artifact name: `' + ARTIFACT_NAME + '`\n',
               '### How to add translations to this PR\n',
               '1. Click the download link above',
-              '2. Download the `' + artifactName + '` artifact (zip file)',
+              '2. Download the `' + ARTIFACT_NAME + '` artifact (zip file)',
               '3. Extract the PO files and place them in the correct paths under `docs/source/locale/zh_CN/LC_MESSAGES/`',
               '4. Commit and push to this PR branch\n',
               '---',
-              '*Auto-generated by [translation workflow](' + runUrl + ')*',
+              '*Auto-generated by [translation workflow](' + RUN_URL + ')*',
             ].join('\n');
 
-            // Update existing comment or create new one
             const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner: context.repo.owner, repo: context.repo.repo,
               issue_number: context.issue.number,
             });
-
             const botComment = comments.find(c =>
               c.user.type === 'Bot' && c.body.includes('Auto-Translation Complete')
             );
-
             if (botComment) {
               await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: body,
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: botComment.id, body: body,
               });
-              core.info('Updated existing comment #' + botComment.id);
             } else {
-              const comment = await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: body,
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body: body,
               });
-              core.info('Created comment #' + comment.data.id);
             }
