@@ -36,7 +36,7 @@ on:
         required: false
         default: ''
       test_cmd:
-        description: 'The failing pytest command (e.g. pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py)'
+        description: 'Failing pytest command(s), semicolon-separated for batch mode'
         required: true
         default: 'pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py'
 
@@ -49,80 +49,75 @@ defaults:
 
 jobs:
   # ================================================================
-  # Centralized parameter resolution:
+  # Centralized parameter resolution + matrix generation:
   # - workflow_dispatch: uses user-provided inputs
   # - pull_request: falls back to defaults defined here
   #
-  # To change PR-triggered defaults, edit ONLY this job.
+  # Supports batch mode: semicolon-separated test commands are grouped
+  # by (runner, image, test_type) into a matrix for parallel execution.
   # ================================================================
   set-params:
     name: Set parameters
     runs-on: ubuntu-latest
     outputs:
-      test_cmd: ${{ steps.resolve.outputs.test_cmd }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
       good_commit: ${{ steps.resolve.outputs.good_commit }}
       bad_commit: ${{ steps.resolve.outputs.bad_commit }}
-    steps:
-      - name: Resolve parameters
-        id: resolve
-        run: |
-          # ---- PR-trigger defaults (edit here) ----
-          DEFAULT_TEST_CMD="pytest -sv tests/e2e/singlecard/test_llama32_lora.py"
-          # good_commit / bad_commit: leave empty to let bisect_vllm.sh auto-detect
-          # from pr_test_light.yaml (good from origin/main, bad from current branch).
-          # Only set these if you want to override auto-detection for PR triggers.
-          DEFAULT_GOOD_COMMIT="d7e17aaacd5ed1b4b4be6bcfef3a1b7cbc84fc9a"
-          DEFAULT_BAD_COMMIT="18e7cbbb158a86bdc76585e64ada795bf1c0d435"
-          # ---- end defaults ----
-
-          echo "test_cmd=${{ inputs.test_cmd || '' }}" >> "$GITHUB_OUTPUT"
-          echo "good_commit=${{ inputs.good_commit || '' }}" >> "$GITHUB_OUTPUT"
-          echo "bad_commit=${{ inputs.bad_commit || '' }}" >> "$GITHUB_OUTPUT"
-
-          # Apply defaults for empty values (pull_request trigger)
-          if [ -z "${{ inputs.test_cmd }}" ]; then
-            echo "test_cmd=${DEFAULT_TEST_CMD}" >> "$GITHUB_OUTPUT"
-          fi
-          if [ -z "${{ inputs.good_commit }}" ]; then
-            echo "good_commit=${DEFAULT_GOOD_COMMIT}" >> "$GITHUB_OUTPUT"
-          fi
-          if [ -z "${{ inputs.bad_commit }}" ]; then
-            echo "bad_commit=${DEFAULT_BAD_COMMIT}" >> "$GITHUB_OUTPUT"
-          fi
-
-  detect-env:
-    name: Detect runner and image
-    needs: set-params
-    runs-on: ubuntu-latest
-    outputs:
-      runner: ${{ steps.detect.outputs.runner }}
-      image: ${{ steps.detect.outputs.image }}
-      test_type: ${{ steps.detect.outputs.test_type }}
     steps:
       - name: Checkout vllm-ascend repo
         uses: actions/checkout@v6
 
-      - name: Detect environment from test command
-        id: detect
+      - name: Resolve parameters and build matrix
+        id: resolve
         run: |
-          python3 tools/bisect_helper.py detect-env \
-            --test-cmd "${{ needs.set-params.outputs.test_cmd }}" \
+          # ---- PR-trigger defaults (edit here) ----
+          DEFAULT_TEST_CMD="pytest -sv tests/e2e/singlecard/test_llama32_lora.py; pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py; pytest -sv tests/ut/spec_decode/test_eagle_proposer.py; pytest -sv tests/e2e/singlecard/test_models.py; pytest -sv tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py"
+          DEFAULT_GOOD_COMMIT="d7e17aaacd5ed1b4b4be6bcfef3a1b7cbc84fc9a"
+          DEFAULT_BAD_COMMIT="18e7cbbb158a86bdc76585e64ada795bf1c0d435"
+          # ---- end defaults ----
+
+          # Resolve test_cmd(s)
+          INPUT_TEST_CMD="${{ inputs.test_cmd }}"
+          if [[ -n "${INPUT_TEST_CMD}" ]]; then
+            TEST_CMDS="${INPUT_TEST_CMD}"
+          else
+            TEST_CMDS="${DEFAULT_TEST_CMD}"
+          fi
+
+          # Resolve commits
+          INPUT_GOOD="${{ inputs.good_commit }}"
+          INPUT_BAD="${{ inputs.bad_commit }}"
+          echo "good_commit=${INPUT_GOOD:-${DEFAULT_GOOD_COMMIT}}" >> "$GITHUB_OUTPUT"
+          echo "bad_commit=${INPUT_BAD:-${DEFAULT_BAD_COMMIT}}" >> "$GITHUB_OUTPUT"
+
+          # Build matrix from semicolon-separated commands
+          python3 tools/bisect_helper.py batch-matrix \
+            --test-cmds "${TEST_CMDS}" \
             --output-format github
 
   bisect:
-    name: Bisect vLLM
-    needs: [set-params, detect-env]
-    runs-on: ${{ needs.detect-env.outputs.runner }}
+    name: Bisect (${{ matrix.group }})
+    needs: set-params
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-params.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     container:
-      image: ${{ needs.detect-env.outputs.image }}
+      image: ${{ matrix.image }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        # UT needs these for CPU-only environment (matching _unit_test.yaml)
+        SOC_VERSION: ${{ matrix.test_type == 'ut' && 'ascend910b1' || '' }}
+        MAX_JOBS: ${{ matrix.test_type == 'ut' && '4' || '' }}
+        COMPILE_CUSTOM_KERNELS: ${{ matrix.test_type == 'ut' && '0' || '' }}
+        # 2-cards needs HCCL_BUFFSIZE (matching _e2e_test.yaml 2-cards jobs)
+        HCCL_BUFFSIZE: ${{ matrix.runner == 'linux-aarch64-a3-2' && '1024' || '' }}
     steps:
       # ================================================================
-      # Common: config mirrors (shared by both e2e and ut)
+      # Common: config mirrors + install git
       # ================================================================
       - name: Config mirrors
         run: |
@@ -130,31 +125,16 @@ jobs:
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple || true
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local || true
           apt-get update -y
-
-      # ================================================================
-      # Install system dependencies (diverges by test_type)
-      # ================================================================
-      - name: Install system dependencies (e2e)
-        if: ${{ needs.detect-env.outputs.test_type == 'e2e' }}
-        run: |
           apt install git -y
-          apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15 || true
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 || true
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 || true
-
-      - name: Install system dependencies (ut)
-        if: ${{ needs.detect-env.outputs.test_type == 'ut' }}
-        run: |
-          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       # ================================================================
-      # Common: checkout repos
+      # Common: checkout repos (before system deps, packages.txt needed)
       # ================================================================
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
+          ref: ${{ needs.set-params.outputs.bad_commit }}
           path: ./vllm-empty
           fetch-depth: 500
 
@@ -172,32 +152,55 @@ jobs:
           fi
 
       # ================================================================
-      # Install vllm + vllm-ascend (diverges by test_type)
+      # E2E: system deps (with clang)
+      # ================================================================
+      - name: Install system dependencies (e2e)
+        if: ${{ matrix.test_type == 'e2e' }}
+        working-directory: ./vllm-ascend
+        run: |
+          apt-get -y install `cat packages.txt` || true
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15 || true
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 || true
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 || true
+
+      # ================================================================
+      # UT: system deps (matching _unit_test.yaml)
+      # ================================================================
+      - name: Install system dependencies (ut)
+        if: ${{ matrix.test_type == 'ut' }}
+        run: |
+          apt-get install -y python3-pip vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+
+      # ================================================================
+      # E2E: install vllm (editable) + vllm-ascend (editable)
       # ================================================================
       - name: Install vllm from source (e2e)
-        if: ${{ needs.detect-env.outputs.test_type == 'e2e' }}
+        if: ${{ matrix.test_type == 'e2e' }}
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
 
       - name: Install vllm-ascend (e2e)
-        if: ${{ needs.detect-env.outputs.test_type == 'e2e' }}
+        if: ${{ matrix.test_type == 'e2e' }}
         working-directory: ./vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          python3 -m pip install -r requirements-dev.txt
+          python3 -m pip install -v -e .
 
+      # ================================================================
+      # UT: install vllm (non-editable) + vllm-ascend (non-editable)
+      # ================================================================
       - name: Install vllm from source (ut)
-        if: ${{ needs.detect-env.outputs.test_type == 'ut' }}
+        if: ${{ matrix.test_type == 'ut' }}
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty python3 -m pip install . --extra-index https://download.pytorch.org/whl/cpu/
           python3 -m pip uninstall -y triton
 
       - name: Install vllm-ascend (ut)
-        if: ${{ needs.detect-env.outputs.test_type == 'ut' }}
+        if: ${{ matrix.test_type == 'ut' }}
         working-directory: ./vllm-ascend
         run: |
           export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
@@ -206,7 +209,7 @@ jobs:
           python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
 
       # ================================================================
-      # Common: run bisect
+      # Common: run bisect (batch or single)
       # ================================================================
       - name: Run bisect
         working-directory: ./vllm-ascend
@@ -214,16 +217,20 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
-          TORCH_DEVICE_BACKEND_AUTOLOAD: ${{ needs.detect-env.outputs.test_type == 'ut' && '0' || '' }}
-          LD_LIBRARY_PATH: ${{ needs.detect-env.outputs.test_type == 'ut' && '/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib' || '' }}
+          TORCH_DEVICE_BACKEND_AUTOLOAD: ${{ matrix.test_type == 'ut' && '0' || '' }}
+          LD_LIBRARY_PATH: ${{ matrix.test_type == 'ut' && '/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib' || '' }}
         run: |
           chmod +x tools/bisect_vllm.sh
+
+          # Write test commands to file for batch mode
+          echo "${{ matrix.test_cmds }}" > /tmp/bisect_cmds.txt
+
           tools/bisect_vllm.sh \
             --vllm-repo ../vllm-empty \
             --ascend-repo . \
             --fetch-depth 500 \
             --step-timeout 1200 \
             --total-timeout 20400 \
-            --test-cmd "${{ needs.set-params.outputs.test_cmd }}" \
+            --test-cmds-file /tmp/bisect_cmds.txt \
             ${{ needs.set-params.outputs.good_commit && format('--good {0}', needs.set-params.outputs.good_commit) || '' }} \
             ${{ needs.set-params.outputs.bad_commit && format('--bad {0}', needs.set-params.outputs.bad_commit) || '' }}

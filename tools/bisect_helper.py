@@ -41,36 +41,42 @@ ENV_RULES = [
         "runner": "linux-aarch64-310p-4",
         "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-310p-ubuntu22.04-py3.11",
         "test_type": "e2e",
+        "extra_env": {},
     },
     {
         "pattern": r"tests/e2e/310p/",
         "runner": "linux-aarch64-310p-1",
         "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-310p-ubuntu22.04-py3.11",
         "test_type": "e2e",
+        "extra_env": {},
     },
     {
         "pattern": r"tests/e2e/multicard/4-cards/",
         "runner": "linux-aarch64-a3-4",
         "image": "m.daocloud.io/quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11",
         "test_type": "e2e",
+        "extra_env": {},
     },
     {
         "pattern": r"tests/e2e/multicard/2-cards/",
         "runner": "linux-aarch64-a3-2",
         "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11",
         "test_type": "e2e",
+        "extra_env": {"HCCL_BUFFSIZE": "1024"},
     },
     {
         "pattern": r"tests/e2e/singlecard/",
         "runner": "linux-aarch64-a2b3-1",
         "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11",
         "test_type": "e2e",
+        "extra_env": {},
     },
     {
         "pattern": r"tests/ut/",
         "runner": "linux-amd64-cpu-8-hk",
         "image": "quay.nju.edu.cn/ascend/cann:8.5.0-910b-ubuntu22.04-py3.11",
         "test_type": "ut",
+        "extra_env": {},
     },
 ]
 
@@ -86,8 +92,13 @@ def detect_env(test_cmd: str) -> dict:
     """Detect runner and image based on the test file path in test_cmd."""
     for rule in ENV_RULES:
         if re.search(rule["pattern"], test_cmd):
-            return {"runner": rule["runner"], "image": rule["image"], "test_type": rule["test_type"]}
-    return {"runner": DEFAULT_RUNNER, "image": DEFAULT_IMAGE, "test_type": "e2e"}
+            return {
+                "runner": rule["runner"],
+                "image": rule["image"],
+                "test_type": rule["test_type"],
+                "extra_env": rule.get("extra_env", {}),
+            }
+    return {"runner": DEFAULT_RUNNER, "image": DEFAULT_IMAGE, "test_type": "e2e", "extra_env": {}}
 
 
 def get_commit_from_yaml(yaml_path: str, ref: str | None = None) -> str | None:
@@ -225,6 +236,48 @@ def generate_report(
     return "\n".join(lines)
 
 
+def build_batch_matrix(test_cmds_str: str) -> dict:
+    """Parse semicolon-separated test commands and group by (runner, image, test_type).
+
+    Returns a GitHub Actions matrix JSON object with an "include" array.
+    Each element has: group, runner, image, test_type, test_cmds (semicolon-joined),
+    and extra_env (merged from all commands in the group, JSON string).
+    """
+    cmds = [c.strip() for c in test_cmds_str.split(";") if c.strip()]
+    if not cmds:
+        return {"include": []}
+
+    # Group by environment
+    groups: dict[tuple[str, str, str], list[str]] = {}
+    group_extra_env: dict[tuple[str, str, str], dict] = {}
+    for cmd in cmds:
+        env = detect_env(cmd)
+        key = (env["runner"], env["image"], env["test_type"])
+        groups.setdefault(key, []).append(cmd)
+        # Merge extra_env from all commands in the group
+        merged = group_extra_env.setdefault(key, {})
+        merged.update(env.get("extra_env", {}))
+
+    # Build matrix include array
+    include = []
+    for (runner, image, test_type), group_cmds in groups.items():
+        # Generate a human-readable group name from the runner
+        group_name = f"{test_type}-{runner.split('-')[-1]}"
+        entry = {
+            "group": group_name,
+            "runner": runner,
+            "image": image,
+            "test_type": test_type,
+            "test_cmds": ";".join(group_cmds),
+        }
+        extra = group_extra_env.get((runner, image, test_type), {})
+        if extra:
+            entry["extra_env"] = json.dumps(extra)
+        include.append(entry)
+
+    return {"include": include}
+
+
 def cmd_detect_env(args):
     env = detect_env(args.test_cmd)
     if args.output_format == "github":
@@ -241,6 +294,20 @@ def cmd_detect_env(args):
         print(f"test_type={env['test_type']}")
     else:
         print(json.dumps(env))
+
+
+def cmd_batch_matrix(args):
+    matrix = build_batch_matrix(args.test_cmds)
+    matrix_json = json.dumps(matrix, separators=(",", ":"))
+    if args.output_format == "github":
+        github_output = os.environ.get("GITHUB_OUTPUT")
+        if github_output:
+            with open(github_output, "a") as f:
+                f.write(f"matrix={matrix_json}\n")
+        print(f"matrix={matrix_json}")
+        print(f"Total: {len(matrix['include'])} group(s) from {sum(len(g['test_cmds'].split(';')) for g in matrix['include'])} command(s)")
+    else:
+        print(json.dumps(matrix, indent=2))
 
 
 def cmd_get_commit(args):
@@ -336,6 +403,23 @@ def main():
         help="Output format (default: github)",
     )
     p_env.set_defaults(func=cmd_detect_env)
+
+    # batch-matrix
+    p_batch = subparsers.add_parser(
+        "batch-matrix",
+        help="Build a GitHub Actions matrix from semicolon-separated test commands",
+    )
+    p_batch.add_argument(
+        "--test-cmds", required=True,
+        help="Semicolon-separated test commands",
+    )
+    p_batch.add_argument(
+        "--output-format",
+        choices=["json", "github"],
+        default="github",
+        help="Output format (default: github)",
+    )
+    p_batch.set_defaults(func=cmd_batch_matrix)
 
     # get-commit
     p_commit = subparsers.add_parser(
