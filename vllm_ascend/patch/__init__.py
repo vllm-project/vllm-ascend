@@ -249,3 +249,26 @@
 #       make unquantized_gemm as a customop.
 #    Future Plan:
 #       Remove this patch when vLLM support the operator as customop.
+#
+# ** 13. File: worker/patch_npugraph_ex_triton.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `torchair.core._concrete_graph.ValuePack`,
+#      `torchair.npu_fx_compiler._unpack_meta`,
+#      `torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu`
+#    Why:
+#       In the Triton scenario, npugraph_ex backend needs to process the value pack of the input parameters.
+#    How：
+#       Supplement the relevant processing logic through patches.
+#    Related PR (if no, explain why):
+#       https://gitcode.com/Ascend/torchair/pull/2575
+#    Future Plan:
+#       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
+# ** 14. File: worker/patch_v2_uva.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.states.UvaBuffer`
+#    Why:
+#       ASCEND NPUs do not support UVA yet, so we need to wrap it in vLLM.
+#    How：
+#       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
+#    Future Plan:
+#       Remove this patch when NPU support UVA.
