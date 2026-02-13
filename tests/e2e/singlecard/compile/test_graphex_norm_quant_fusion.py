@@ -279,6 +279,10 @@ def test_rmsnorm_quant_fusion(
                     AddRMSNormQuantPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantPatternWithBias"
                 )
         else:
+            # The non-bias patterns currently use npu_add_rms_norm_bias in their pattern matching
+            # so we need to skip if it's not available
+            if not hasattr(torch.ops._C_ascend, 'npu_add_rms_norm_bias'):
+                pytest.skip("Operator npu_add_rms_norm_bias not available, skipping test")
             if sp_enable:
                 model = ModelSPWithoutBias(hidden_size, dtype, eps, device="npu")
                 register_pattern_safe(
