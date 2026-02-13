@@ -161,7 +161,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
 
 if not vllm_version_is("0.15.0"):
-    # Please remove this inheritance after extending vllm.
+    # Please remove this inheritance after extending vllm, todo(wxs)
     class AscendMoERunner(DefaultMoERunner):
         """
         Default implementation of the MoE runner for executing Mixture of Experts layers.
