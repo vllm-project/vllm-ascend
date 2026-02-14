@@ -450,9 +450,14 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 ::::
 :::::
 
-- Use this script on each node to enable [Multi Token Prediction (MTP)](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/Multi_Token_Prediction.html).
+- For bf16 weight, use this script on each node to enable [Multi Token Prediction (MTP)](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/Multi_Token_Prediction.html).
+
+```shell
+python adjust_weight.py "path_of_bf16_weight"
+```
 
 ```python
+# adjust_weight.py
 from safetensors.torch import safe_open, save_file
 import torch
 import json
@@ -500,11 +505,7 @@ if __name__ == "__main__":
    for key in new_key:
          json_data["weight_map"][key] = "mtp-others.safetensors"
    with open(json_path, 'w', encoding='utf-8') as f:
-         json.dump(
-            json_data,
-            f,
-            indent=2
-         )
+         json.dump(json_data, f, indent=2)
 ```
 
 ### Prefill-Decode Disaggregation
