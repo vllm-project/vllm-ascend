@@ -12,11 +12,11 @@ from vllm.utils.system_utils import update_environment_variables
 
 import vllm_ascend.ops.register_custom_ops  # noqa
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.compilation.passes.norm_quant_fusion_pass import (
-    AddRMSNormQuantPattern,
-    AddRMSNormQuantPatternWithBias,
-    AddRMSNormQuantSPPattern,
-    AddRMSNormQuantSPPatternWithBias,
+from vllm_ascend.compilation.npugraph_ex_passes.graphex_norm_quant_fusion_pass import (
+    GraphEXAddRMSNormQuantPattern,
+    GraphEXAddRMSNormQuantPatternWithBias,
+    GraphEXAddRMSNormQuantSPPattern,
+    GraphEXAddRMSNormQuantSPPatternWithBias,
 )
 from vllm_ascend.utils import enable_custom_op
 
@@ -187,10 +187,7 @@ def register_pattern_safe(pattern_class, vllm_config, eps, pattern_key):
 
     pattern = pattern_class(vllm_config=vllm_config, eps=eps)
     try:
-        # Import the required pass class
-        from torch._inductor.pattern_matcher import PatternMatcherPass
-        pm_pass = PatternMatcherPass()
-        pattern.register(pm_pass)
+        pattern.register()
         _registered_patterns.add(pattern_key)
         print(f"Successfully registered pattern: {pattern_key}")
     except RuntimeError as e:
@@ -216,9 +213,8 @@ def test_rmsnorm_quant_fusion(
     use_bias: bool,
     sp_enable: bool,
 ):
-    # Check if fusion operator is available
-    if not hasattr(torch.ops.npu, 'npu_add_rms_norm_quant'):
-        pytest.skip("Fusion operator npu_add_rms_norm_quant not available, skipping test")
+    torch_npu.npu.set_device(0)
+    torch.manual_seed(1) 
 
     vllm_config = VllmConfig(model_config=ModelConfig(dtype=dtype))
     with vllm.config.set_current_vllm_config(vllm_config):
@@ -235,46 +231,48 @@ def test_rmsnorm_quant_fusion(
         ensure_model_parallel_initialized(1, 1)
 
     with vllm.config.set_current_vllm_config(vllm_config), set_ascend_forward_context(None, vllm_config):
-        if use_bias:
-            # Skip test if custom ops are not available
-            if not enable_custom_op():
-                pytest.skip("Custom ops not available, skipping bias test")
-            # Check if the bias operator exists
-            if not hasattr(torch.ops._C_ascend, 'npu_add_rms_norm_bias'):
-                pytest.skip("Operator npu_add_rms_norm_bias not available, skipping bias test")
-            if sp_enable:
-                model = ModelSPWithBias(hidden_size, dtype, eps, device="npu")
-                register_pattern_safe(
-                    AddRMSNormQuantSPPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantSPPatternWithBias"
-                )
+        if enable_custom_op():
+            if use_bias:
+                if sp_enable:
+                    model = ModelSPWithBias(hidden_size, dtype, eps, device="npu")
+                    register_pattern_safe(
+                        GraphEXAddRMSNormQuantSPPatternWithBias, vllm_config, eps,
+                        "GraphEXAddRMSNormQuantSPPatternWithBias"
+                    )
+                else:
+                    model = ModelWithBias(hidden_size, dtype, eps, device="npu")
+                    register_pattern_safe(
+                        GraphEXAddRMSNormQuantPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantPatternWithBias"
+                    )
             else:
-                model = ModelWithBias(hidden_size, dtype, eps, device="npu")
-                register_pattern_safe(
-                    AddRMSNormQuantPatternWithBias, vllm_config, eps, "GraphEXAddRMSNormQuantPatternWithBias"
-                )
+                if sp_enable:
+                    model = ModelSPWithoutBias(hidden_size, dtype, eps, device="npu")
+                    register_pattern_safe(
+                        GraphEXAddRMSNormQuantSPPattern, vllm_config, eps, "GraphEXAddRMSNormQuantSPPattern"
+                    )
+                else:
+                    model = ModelWithoutBias(hidden_size, dtype, eps, device="npu")
+                    register_pattern_safe(GraphEXAddRMSNormQuantPattern, vllm_config, eps,
+                                          "GraphEXAddRMSNormQuantPattern")
         else:
-            # The non-bias patterns currently use npu_add_rms_norm_bias in their pattern matching
-            # so we need to skip if it's not available
-            if not hasattr(torch.ops._C_ascend, 'npu_add_rms_norm_bias'):
-                pytest.skip("Operator npu_add_rms_norm_bias not available, skipping test")
-            if sp_enable:
-                model = ModelSPWithoutBias(hidden_size, dtype, eps, device="npu")
-                register_pattern_safe(
-                    AddRMSNormQuantSPPattern, vllm_config, eps, "GraphEXAddRMSNormQuantSPPattern"
-                )
-            else:
-                model = ModelWithoutBias(hidden_size, dtype, eps, device="npu")
-                register_pattern_safe(AddRMSNormQuantPattern, vllm_config, eps, "GraphEXAddRMSNormQuantPattern")
+            if use_bias:
+                pytest.skip("Custom op not enabled, skip bias test")
+            model = ModelWithoutBias(hidden_size, dtype, eps, device="npu") if not sp_enable \
+                else ModelSPWithoutBias(hidden_size, dtype, eps, device="npu")
 
         model = model.to("npu")
         x = torch.randn(num_tokens, hidden_size, device="npu", dtype=dtype, requires_grad=False)
 
         with torch.no_grad():
-            # Don't expect fusion since patterns are not properly integrated into the compilation pipeline
-            # Just test that the model compiles and runs without errors
-            compiled_model = torch.compile(model, backend="npugraph_ex", fullgraph=True, dynamic=True)
+            original_optimize = torchair.npu_fx_compiler._optimize_fx
+            torchair.npu_fx_compiler._optimize_fx = create_pattern_wrapper(
+                lambda gm: assert_addrmsnorm_quant(gm, expect_fused=True, use_bias=use_bias, sp_enable=sp_enable)
+            )
+            compiled_model = torch.compile(model, backend="npugraph_ex", fullgraph=False, dynamic=True)
+
             compiled_out, compiled_res = compiled_model(x)
 
-            # Verify output shapes are correct
-            assert compiled_out.shape == (num_tokens, hidden_size), f"Expected shape {(num_tokens, hidden_size)}, got {compiled_out.shape}"
-            assert compiled_res.shape == (num_tokens, hidden_size), f"Expected shape {(num_tokens, hidden_size)}, got {compiled_res.shape}"
+            torchair.npu_fx_compiler._optimize_fx = original_optimize
+
+            assert compiled_out.shape == (num_tokens, hidden_size), f"Output shape mismatch: {compiled_out.shape}"
+            assert compiled_res.shape == (num_tokens, hidden_size), f"Residual shape mismatch: {compiled_res.shape}"
