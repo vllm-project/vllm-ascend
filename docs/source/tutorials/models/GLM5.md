@@ -17,14 +17,15 @@ Refer to [feature guide](https://docs.vllm.ai/projects/ascend/en/latest/user_gui
 ### Model Weight
 
 - `GLM-5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5).
-- `GLM-5-w4a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5-w4a8).
+- `GLM-5-w4a8`(Quantized version without MTP quant): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
+- `GLM-5-w4a8`(Quantized version with MTP quant): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8-mtp-QuaRot).
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantify the model naively.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ### Installation
 
-vLLM and vLLM-ascend only support GLM-5 on our main branches. you can use our official docker images and upgrade vllm and vllm-ascend for inference.
+vLLM and vLLM-ascend only support GLM-5 on our main branches. you can use our glm5 docker images for inference.
 
 :::::{tab-set}
 :sync-group: install
@@ -121,7 +122,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 - Install `vllm-ascend` from source, refer to [installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html).
 
-To inference `GLM-5`, you should upgrade vllm、vllm-ascend、transformers to main branches:
+- After install `vllm-ascend`  from source, you should upgrade vllm、vllm-ascend、transformers to main branches:
 
 ```shell
 # upgrade vllm
@@ -239,6 +240,8 @@ The parameters are explained as follows:
 - `--async-scheduling` Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
 
 ### Multi-node Deployment
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](https://docs.vllm.ai/projects/ascend/en/latest/installation.html#verify-multi-node-communication).
 
 :::::{tab-set}
 :sync-group: install
@@ -446,6 +449,63 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 
 ::::
 :::::
+
+- Use this script on each node to enable [Multi Token Prediction (MTP)](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/Multi_Token_Prediction.html).
+
+```python
+from safetensors.torch import safe_open, save_file
+import torch
+import json
+import os
+import sys
+
+target_keys = ["model.embed_tokens.weight", "lm_head.weight"]
+
+def get_tensor_info(file_path):
+   with safe_open(file_path, framework="pt", device="cpu") as f:
+         tensor_names = f.keys()
+         tensor_dict = {}
+         for name in tensor_names:
+            tensor = f.get_tensor(name)
+            tensor_dict[name] = tensor
+         return tensor_dict
+
+
+if __name__ == "__main__":
+   directory_path = sys.argv[1]
+   json_name = "model.safetensors.index.json"
+   json_path = os.path.join(directory_path, json_name)
+   with open(json_path, 'r', encoding='utf-8') as f:
+         json_data = json.load(f)
+   weight_map = json_data.get('weight_map', {})
+   file_list = []
+   for key in target_keys:
+         safetensor_file = weight_map.get(key)
+         file_list.append(directory_path + safetensor_file)
+
+   new_dict = {}
+   for file_path in file_list:
+         tensor_dict = get_tensor_info(file_path)
+         for key in target_keys:
+            if key in tensor_dict:
+               if key == "model.embed_tokens.weight":
+                     new_key = "model.layers.78.embed_tokens.weight"
+               elif key == "lm_head.weight":
+                     new_key = "model.layers.78.shared_head.head.weight"
+               new_dict[new_key] = tensor_dict[key]
+
+   new_file_name = os.path.join(directory_path, "mtp-others.safetensors")
+   new_key = ["model.layers.78.embed_tokens.weight", "model.layers.78.shared_head.head.weight"]
+   save_file(tensors=new_dict, filename=new_file_name)
+   for key in new_key:
+         json_data["weight_map"][key] = "mtp-others.safetensors"
+   with open(json_path, 'w', encoding='utf-8') as f:
+         json.dump(
+            json_data,
+            f,
+            indent=2
+         )
+```
 
 ### Prefill-Decode Disaggregation
 
