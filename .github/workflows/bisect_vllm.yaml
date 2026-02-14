@@ -67,7 +67,7 @@ jobs:
           # ---- PR-trigger defaults (edit here) ----
           DEFAULT_TEST_CMD="pytest -sv tests/e2e/singlecard/test_llama32_lora.py; pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py; pytest -sv tests/ut/spec_decode/test_eagle_proposer.py; pytest -sv tests/e2e/singlecard/test_models.py; pytest -sv tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py"
           DEFAULT_GOOD_COMMIT=""
-          DEFAULT_BAD_COMMIT="0916e7960bddf565c33153d2cf753e799de105b7"
+          DEFAULT_BAD_COMMIT=""
           # ---- end defaults ----
 
           INPUT_TEST_CMD="${{ inputs.test_cmd }}"
@@ -112,21 +112,6 @@ jobs:
         COMPILE_CUSTOM_KERNELS: ${{ matrix.cenv_COMPILE_CUSTOM_KERNELS }}
         HCCL_BUFFSIZE: ${{ matrix.cenv_HCCL_BUFFSIZE }}
     steps:
-      - name: Config mirrors
-        run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list || true
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple || true
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local || true
-          apt-get update -y
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ needs.set-params.outputs.bad_commit }}
-          path: ./vllm-empty
-          fetch-depth: 500
-
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
         with:
@@ -140,10 +125,24 @@ jobs:
             cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           fi
 
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list || true
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple || true
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local || true
+          apt-get update -y
+
       - name: Install system dependencies
         working-directory: ./vllm-ascend
         run: ${{ matrix.sys_deps }}
 
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ needs.set-params.outputs.bad_commit }}
+          path: ./vllm-empty
+          fetch-depth: 500
       - name: Install vllm from source
         working-directory: ./vllm-empty
         run: ${{ matrix.vllm_install }}
