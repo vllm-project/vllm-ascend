@@ -12,7 +12,6 @@ enable_custom_op()
 
 
 class TestDispatchFFNCombine:
-
     def __init__(self, rank, world_size, port):
         self.rank = rank
         self.world_size = world_size
