@@ -25,8 +25,8 @@ import pytest
 import torch
 from vllm.utils.network_utils import get_open_port
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from tests.e2e.conftest import wait_until_npu_memory_free
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MODELS = [
     # Offline data parallel mode will be not supported/useful for dense models
@@ -58,8 +58,7 @@ def _install_spies(counters: dict[str, Any]) -> contextlib.ExitStack:
     ]
 
     for cls, method, counter in hooks:
-        stack.enter_context(
-            patch.object(cls, method, make_spy(cls, method, counter)))
+        stack.enter_context(patch.object(cls, method, make_spy(cls, method, counter)))
 
     return stack
 
@@ -75,18 +74,19 @@ def _run_worker_process(
     max_tokens: int,
 ):
     """Main entry point for the worker process."""
-    os.environ.update({
-        "VLLM_DP_RANK": str(rank),
-        "VLLM_DP_RANK_LOCAL": str(local_rank),
-        "VLLM_DP_SIZE": str(world_size),
-        "VLLM_DP_MASTER_IP": master_ip,
-        "VLLM_DP_MASTER_PORT": str(master_port),
-    })
+    os.environ.update(
+        {
+            "VLLM_DP_RANK": str(rank),
+            "VLLM_DP_RANK_LOCAL": str(local_rank),
+            "VLLM_DP_SIZE": str(world_size),
+            "VLLM_DP_MASTER_IP": master_ip,
+            "VLLM_DP_MASTER_PORT": str(master_port),
+        }
+    )
 
     # Import vLLM only after environment setup
     from vllm import LLM, SamplingParams
-    from vllm.distributed.parallel_state import (
-        destroy_distributed_environment, destroy_model_parallel)
+    from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
 
     # Apply hooks and run inference
     with _install_spies(counters):
@@ -100,23 +100,20 @@ def _run_worker_process(
         # Simple data sharding
         chunk_size = len(prompts) // world_size
         start_idx = rank * chunk_size
-        end_idx = start_idx + chunk_size if rank < world_size - 1 else len(
-            prompts)
+        end_idx = start_idx + chunk_size if rank < world_size - 1 else len(prompts)
         local_prompts = prompts[start_idx:end_idx]
 
         llm = LLM(
             model=model_path,
             quantization="ascend" if "W8A8" in model_path else None,
-            enable_expert_parallel=True if "DeepSeek" in model_path else False,
+            enable_expert_parallel="DeepSeek" in model_path,
             trust_remote_code=True,
         )
 
         # Expose model config to the main test process
-        counters["hidden_layers"].value = (
-            llm.llm_engine.model_config.hf_text_config.num_hidden_layers)
+        counters["hidden_layers"].value = llm.llm_engine.model_config.hf_text_config.num_hidden_layers
 
-        llm.generate(local_prompts,
-                     SamplingParams(max_tokens=max_tokens, temperature=0.0))
+        llm.generate(local_prompts, SamplingParams(max_tokens=max_tokens, temperature=0.0))
 
         # Explicit cleanup is mandatory in multi-process vLLM tests
         del llm
@@ -162,8 +159,7 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     for rank in range(dp_size):
         p = multiprocessing.Process(
             target=_run_worker_process,
-            args=(rank, rank, dp_size, "127.0.0.1", port, counters, model,
-                  max_tokens),
+            args=(rank, rank, dp_size, "127.0.0.1", port, counters, model, max_tokens),
         )
         p.start()
         workers.append(p)
@@ -175,8 +171,7 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
             for k in workers:
                 if k.is_alive():
                     k.kill()
-            raise RuntimeError(
-                f"Worker {p.pid} failed with exit code {p.exitcode}")
+            raise RuntimeError(f"Worker {p.pid} failed with exit code {p.exitcode}")
 
     actual_capture = counters["capture"].value
     actual_replay = counters["replay"].value
@@ -185,18 +180,16 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     num_layers = counters["hidden_layers"].value
 
     num_acl_graphs = num_layers + 1
-    num_comm_groups = sum(1 for s in [dp_size, 1]
-                          if s > 1)  # dp_size=2, tp_size=1
+    num_comm_groups = sum(1 for s in [dp_size, 1] if s > 1)  # dp_size=2, tp_size=1
 
     # Metric 1: Graph Capture (ACL Graph Construction)
     # Ref: vllm_ascend.utils.update_aclgraph_sizes
-    max_batch_sizes = math.floor((1800 - num_comm_groups * 40) /
-                                 num_acl_graphs / (1 + num_comm_groups * 2))
+    max_batch_sizes = math.floor((1800 - num_comm_groups * 40) / num_acl_graphs / (1 + num_comm_groups * 2))
 
     expected_capture = max_batch_sizes * num_acl_graphs * dp_size
-    assert (
-        actual_capture == expected_capture
-    ), f"Capture count mismatch. Expected: {expected_capture}, Got: {actual_capture}"
+    assert actual_capture == expected_capture, (
+        f"Capture count mismatch. Expected: {expected_capture}, Got: {actual_capture}"
+    )
 
     # Metric 2: Model Execution (NPUModelRunner.execute_model)
     # vLLM Step Breakdown:
@@ -207,9 +200,9 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     # vllm default enables Async scheduler, this will take 1 more steps
     expected_exec_model = (total_steps + 1 + 1) * dp_size
 
-    assert (
-        num_execute_model == expected_exec_model
-    ), f"Model execution count mismatch. Expected: {expected_exec_model}, Got: {num_execute_model}"
+    assert num_execute_model == expected_exec_model, (
+        f"Model execution count mismatch. Expected: {expected_exec_model}, Got: {num_execute_model}"
+    )
 
     # Metric 3: Dummy Runs (Warmup & Alignment)
     # vLLM synchronizes globally every 32 steps.
@@ -228,14 +221,12 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
 
     expected_dummy_run = (warmup_runs + padding_runs) * dp_size
 
-    assert (
-        num_dummy_run == expected_dummy_run
-    ), f"Dummy run count mismatch. Expected: {expected_dummy_run}, Got: {num_dummy_run}"
+    assert num_dummy_run == expected_dummy_run, (
+        f"Dummy run count mismatch. Expected: {expected_dummy_run}, Got: {num_dummy_run}"
+    )
 
     # Metric 4: Graph Replay (Inference Execution)
     # Replays happen for every aligned step across all graphs.
     expected_replay = num_acl_graphs * aligned_steps * dp_size
 
-    assert (
-        actual_replay == expected_replay
-    ), f"Replay count mismatch. Expected: {expected_replay}, Got: {actual_replay}"
+    assert actual_replay == expected_replay, f"Replay count mismatch. Expected: {expected_replay}, Got: {actual_replay}"
