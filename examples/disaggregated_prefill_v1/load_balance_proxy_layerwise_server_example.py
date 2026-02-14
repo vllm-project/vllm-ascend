@@ -562,11 +562,15 @@ async def healthcheck():
 
 @app.post("/v1/metaserver")
 async def metaserver(request: Request):
+    prefiller_idx = None
+    prefiller_score = None
     try:
         kv_transfer_params = await request.json()
 
         request_id = kv_transfer_params["request_id"]
-        assert request_id in proxy_state.req_data_dict
+        if request_id not in proxy_state.req_data_dict:
+            logger.error(f"Request ID {request_id} not found in req_data_dict")
+            return {"error": f"Request ID {request_id} not found"}
         req_data, request_length, api = proxy_state.req_data_dict[request_id]
         request_id = get_origin_request_id(api, request_id)
         req_data["kv_transfer_params"] = kv_transfer_params
@@ -592,8 +596,9 @@ async def metaserver(request: Request):
 
     except Exception as e:
         logger.error(f"Post metaserver failed with: {str(e)}")
-        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+        if prefiller_idx is not None and prefiller_score is not None:
+            proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+            proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
 
 if __name__ == "__main__":
