@@ -18,12 +18,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from vllm.logger import init_logger
-
 from vllm.model_executor.models.kimi_k25_vit import Learnable2DInterpPosEmbDivided_fixed, get_rope_shape_decorate
 
 logger = init_logger(__name__)
+
 
 @get_rope_shape_decorate
 def get_rope_shape(org, interpolation_mode, shape):
@@ -40,7 +39,6 @@ def get_rope_shape(org, interpolation_mode, shape):
 
 
 class AscendLearnable2DInterpPosEmbDivided_fixed(nn.Module):
-
     def forward(self, x: torch.Tensor, grid_thws: torch.Tensor) -> torch.Tensor:
         pos_embs = []
         for t, h, w in grid_thws.tolist():
