@@ -17,22 +17,192 @@
 
 import torch
 import torch_npu
-from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+
 from einops import rearrange
-from torch import nn
-from vllm.config import CUDAGraphMode
+from transformers.activations import ACT2FN
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+
+from vllm.config import (
+    CUDAGraphMode,
+    CacheConfig,
+    ModelConfig,
+    SpeculativeConfig,
+    get_current_vllm_config,
+)
+from vllm.distributed import (
+    divide,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule
+from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.layernorm import RMSNormGated
+from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
-from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet, Qwen3NextAttention
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
+from vllm.model_executor.models.qwen3_next import (
+    Qwen3NextAttention,
+    Qwen3NextGatedDeltaNet,
+)
+from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
+
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
-    fused_qkvzba_split_reshape_cat
+from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import (
+    fused_qkvzba_split_reshape_cat,
+)
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+
+
+class AscendQwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
+    def __init__(
+        self,
+        config: Qwen3_5TextConfig | Qwen3_5MoeTextConfig,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        speculative_config: SpeculativeConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super(Qwen3NextGatedDeltaNet, self).__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.hidden_size = config.hidden_size
+        self.num_v_heads = config.linear_num_value_heads
+        self.num_k_heads = config.linear_num_key_heads
+        self.head_k_dim = config.linear_key_head_dim
+        self.head_v_dim = config.linear_value_head_dim
+        self.key_dim = self.head_k_dim * self.num_k_heads
+        self.value_dim = self.head_v_dim * self.num_v_heads
+
+        self.conv_kernel_size = config.linear_conv_kernel_dim
+        self.layer_idx = extract_layer_index(prefix)
+        self.activation = config.hidden_act
+        self.act = ACT2FN[config.hidden_act]
+        self.layer_norm_epsilon = config.rms_norm_eps
+        self.prefix = prefix
+
+        self.config = config
+        self.model_config = model_config
+        self.cache_config = cache_config
+        self.quant_config = quant_config
+        self.speculative_config = speculative_config
+        self.num_spec = (
+            self.speculative_config.num_speculative_tokens
+            if self.speculative_config
+            else 0
+        )
+
+        # QKV
+        self.conv_dim = self.key_dim * 2 + self.value_dim
+        self.conv1d = ColumnParallelLinear(
+            input_size=self.conv_kernel_size,
+            output_size=self.conv_dim,
+            bias=False,
+            prefix=f"{prefix}.conv1d",
+        )
+        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
+
+        self.in_proj_qkv = MergedColumnParallelLinear(
+            input_size=self.hidden_size,
+            output_sizes=[self.key_dim, self.key_dim, self.value_dim],
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_qkv",
+        )
+        self.in_proj_z = ColumnParallelLinear(
+            input_size=self.hidden_size,
+            output_size=self.value_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_z",
+        )
+        self.in_proj_b = ColumnParallelLinear(
+            input_size=self.hidden_size,
+            output_size=self.num_v_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_b",
+        )
+        self.in_proj_a = ColumnParallelLinear(
+            input_size=self.hidden_size,
+            output_size=self.num_v_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_a",
+        )
+
+        query_key_settings = (self.key_dim, 0, False)
+        value_settings = (self.value_dim, 0, False)
+
+        delattr(self.conv1d.weight, "weight_loader")
+        set_weight_attrs(
+            self.conv1d.weight,
+            {
+                "weight_loader": mamba_v2_sharded_weight_loader(
+                    [
+                        query_key_settings,
+                        query_key_settings,
+                        value_settings,
+                    ],
+                    self.tp_size,
+                    self.tp_rank,
+                )
+            },
+        )
+
+        # selective projection used to make dt, B and C input dependant
+
+        # time step projection (discretization)
+        # instantiate once and copy inv_dt in init_weights of PretrainedModel
+        self.dt_bias = nn.Parameter(
+            torch.ones(self.num_v_heads // self.tp_size),
+        )
+        self.A_log = nn.Parameter(
+            torch.empty(
+                divide(self.num_v_heads, self.tp_size),
+            )
+        )
+
+        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
+        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+
+        self.norm = RMSNormGated(
+            self.head_v_dim,
+            eps=self.layer_norm_epsilon,
+            group_size=None,
+            norm_before_gate=True,
+            device=current_platform.current_device(),
+            dtype=config.dtype,
+        )
+
+        self.out_proj = RowParallelLinear(
+            self.value_dim,
+            self.hidden_size,
+            bias=False,
+            input_is_parallel=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
+        )
+
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
 
 class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
 
@@ -381,3 +551,4 @@ class AscendQwen3NextAttention(nn.Module):
 Qwen3NextGatedDeltaNet.forward = AscendQwen3Next_GatedDeltaNet.forward
 Qwen3NextGatedDeltaNet._forward_core = AscendQwen3Next_GatedDeltaNet._forward_core
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
+Qwen3_5GatedDeltaNet.__init__ = AscendQwen3_5GatedDeltaNet.__init__
