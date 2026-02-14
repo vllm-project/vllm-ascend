@@ -252,10 +252,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         tp_rank: int,
         dcp_size: int,
         ready_event: threading.Event,
+        invalid_block_ids: set[int],
+        invalid_block_ids_lock: threading.Lock,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
         )
+        self._invalid_block_ids = invalid_block_ids
+        self._invalid_block_ids_lock = invalid_block_ids_lock
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
@@ -268,15 +272,32 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         addr_list = []
         size_list = []
         key_list = []
+        block_id_list = []
         for start, end, key in self.token_database.process_tokens(token_len, req_meta.block_hashes, mask_num):
-            addr, size, _ = self.token_database.prepare_value(start, end, req_meta.block_ids)
+            addr, size, block_id = self.token_database.prepare_value(start, end, req_meta.block_ids)
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-        addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-        size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-        self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            block_id_list.append(block_id)
+
+        offset = self.tp_rank % len(key_list)
+        key_list_c = key_list[offset:] + key_list[:offset]
+        addr_list_c = addr_list[offset:] + addr_list[:offset]
+        size_list_c = size_list[offset:] + size_list[:offset]
+        block_id_list_c = block_id_list[offset:] + block_id_list[:offset]
+        ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+
+        if ret is not None and any(r != 0 for r in ret):
+            missing_block_ids = record_failed_blocks(
+                block_id_list_c,
+                ret,
+            )
+            with self._invalid_block_ids_lock:
+                self._invalid_block_ids.update(missing_block_ids)
+        elif ret is None:
+            with self._invalid_block_ids_lock:
+                self._invalid_block_ids.update(block_id_list_c)
+
         self.set_finished_request(req_id)
         self.request_queue.task_done()
 
@@ -344,7 +365,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         addr_list = []
         size_list = []
         for index, key in enumerate(key_list):
-            addr, size = self.token_database.prepare_value_layer(
+            addr, size, _ = self.token_database.prepare_value_layer(
                 starts[index], ends[index], req_meta.block_ids, layer_id
             )
             addr_list.append(addr)
@@ -377,11 +398,15 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         dcp_size: int,
         ready_event: threading.Event,
         get_event: threading.Event,
+        invalid_block_ids: set[int],
+        invalid_block_ids_lock: threading.Lock,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreLayerRecvingThread"
         )
         self.get_event = get_event
+        self._invalid_block_ids = invalid_block_ids
+        self._invalid_block_ids_lock = invalid_block_ids_lock
 
     def add_request(  # type: ignore[override]
         self, req_meta: LasyerMultiBlockReqMeta
@@ -394,17 +419,43 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         addr_list = []
         size_list = []
         key_list = []
+        block_id_list = []
         for index, key in enumerate(req_meta.keys):
-            addr, size = self.token_database.prepare_value_layer(
+            addr, size, block_id = self.token_database.prepare_value_layer(
                 req_meta.starts[index], req_meta.ends[index], req_meta.block_ids, req_meta.layer_id
             )
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-        addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-        size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-        self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            block_id_list.append(block_id)
+
+        offset = self.tp_rank % len(key_list)
+        key_list_c = key_list[offset:] + key_list[:offset]
+        addr_list_c = addr_list[offset:] + addr_list[:offset]
+        size_list_c = size_list[offset:] + size_list[:offset]
+        block_id_list_c = block_id_list[offset:] + block_id_list[:offset]
+        ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+
+        if ret is not None and any(r != 0 for r in ret):
+            missing_block_ids = record_failed_blocks(
+                block_id_list_c,
+                ret,
+            )
+            with self._invalid_block_ids_lock:
+                self._invalid_block_ids.update(missing_block_ids)
+        elif ret is None:
+            with self._invalid_block_ids_lock:
+                self._invalid_block_ids.update(block_id_list_c)
 
         self.request_queue.task_done()
         self.get_event.set()
+
+
+def record_failed_blocks(
+    block_ids: list[int],
+    ret_codes: list[int],
+) -> set[int]:
+    failed_blocks = {block_id for block_id, code in zip(block_ids, ret_codes) if code != 0}
+    if failed_blocks:
+        logger.error(f"Failed to load blocks: {failed_blocks}")
+    return failed_blocks
