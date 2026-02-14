@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import subprocess
@@ -44,6 +45,7 @@ def run_e2e_files(
     success = True
     passed_tests = []
     failed_tests = []
+    test_stats = []  # Collect execution stats for each test
 
     for i, file in enumerate(files):
         filename, estimated_time = file.name, file.estimated_time
@@ -68,6 +70,14 @@ def run_e2e_files(
                 {elapsed=:.0f}, {estimated_time=}\n.\n.\n"
         )
 
+        # Record test execution stats
+        test_stat = {
+            "name": filename,
+            "duration": round(elapsed, 2),
+            "status": "passed" if ret_code == 0 else "failed",
+        }
+        test_stats.append(test_stat)
+
         if ret_code == 0:
             passed_tests.append(filename)
         else:
@@ -78,6 +88,19 @@ def run_e2e_files(
                 break
 
     elapsed_total = time.perf_counter() - tic
+
+    # Save test stats to JSON file (opt-in side effect for CI scheduling).
+    # NOTE: We always collect stats in-memory, but only write to disk when enabled.
+    collect_stats_env = os.getenv("VLLM_COLLECT_TEST_STATS", "0").strip().lower()
+    collect_stats = collect_stats_env in {"1", "true", "yes", "y", "on"}
+    if collect_stats:
+        stats_filename = os.getenv("VLLM_TEST_STATS_FILE", "test_stats.json")
+        stats_file = os.path.join(os.getcwd(), stats_filename)
+        try:
+            with open(stats_file, "w") as f:
+                json.dump(test_stats, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save test stats to {stats_file}: {e}")
 
     if success:
         logger.info(f"{Colors.OKGREEN}Success. Time elapsed: {elapsed_total:.2f}s{Colors.ENDC}")
