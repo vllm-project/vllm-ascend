@@ -22,7 +22,6 @@ import pytest
 
 from tests.e2e.conftest import VllmRunner
 
-
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -35,14 +34,14 @@ def test_kimi_k2_thinking_w4a16_tp4():
     max_tokens = 5
 
     with VllmRunner(
-            "vllm-ascend/Kimi-K2-Thinking-Pruning",
-            max_model_len=8192,
-            dtype="auto",
-            tensor_parallel_size=4,
-            enable_expert_parallel=True,
-            compilation_config={
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-                "cudagraph_capture_sizes": [1],
-            },
+        "vllm-ascend/Kimi-K2-Thinking-Pruning",
+        max_model_len=8192,
+        dtype="auto",
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [1],
+        },
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

@@ -2,15 +2,21 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
 
 import regex as re
 import yaml
 
 # isort: off
 from tests.e2e.nightly.multi_node.scripts.utils import (
-    CONFIG_BASE_PATH, DEFAULT_SERVER_PORT, get_all_ipv4, get_cluster_ips,
-    get_net_interface, setup_logger, get_available_port)
+    CONFIG_BASE_PATH,
+    DEFAULT_SERVER_PORT,
+    get_all_ipv4,
+    get_cluster_ips,
+    get_net_interface,
+    setup_logger,
+    get_available_port,
+)
+
 # isort: on
 setup_logger()
 logger = logging.getLogger(__name__)
@@ -29,18 +35,12 @@ class NodeInfo:
             raise ValueError("NodeInfo.ip must not be empty")
 
     def __str__(self) -> str:
-        return ("NodeInfo(\n"
-                f"  index={self.index},\n"
-                f"  ip={self.ip},\n"
-                f"  headless={self.headless},\n"
-                ")")
+        return f"NodeInfo(\n  index={self.index},\n  ip={self.ip},\n  headless={self.headless},\n)"
 
 
 class DisaggregatedPrefillCfg:
-
     def __init__(self, raw_cfg: dict, num_nodes: int):
-        self.prefiller_indices: list[int] = raw_cfg.get(
-            "prefiller_host_index", [])
+        self.prefiller_indices: list[int] = raw_cfg.get("prefiller_host_index", [])
         self.decoder_indices: list[int] = raw_cfg.get("decoder_host_index", [])
 
         if not self.decoder_indices:
@@ -74,7 +74,6 @@ class DisaggregatedPrefillCfg:
 
 
 class DistEnvBuilder:
-
     def __init__(
         self,
         *,
@@ -95,21 +94,22 @@ class DistEnvBuilder:
     def build(self) -> dict:
         envs = dict(self.base_envs)
 
-        envs.update({
-            "HCCL_IF_IP": self.cur_ip,
-            "HCCL_SOCKET_IFNAME": self.nic_name,
-            "GLOO_SOCKET_IFNAME": self.nic_name,
-            "TP_SOCKET_IFNAME": self.nic_name,
-            "LOCAL_IP": self.cur_ip,
-            "NIC_NAME": self.nic_name,
-            "MASTER_IP": self.master_ip,
-        })
+        envs.update(
+            {
+                "HCCL_IF_IP": self.cur_ip,
+                "HCCL_SOCKET_IFNAME": self.nic_name,
+                "GLOO_SOCKET_IFNAME": self.nic_name,
+                "TP_SOCKET_IFNAME": self.nic_name,
+                "LOCAL_IP": self.cur_ip,
+                "NIC_NAME": self.nic_name,
+                "MASTER_IP": self.master_ip,
+            }
+        )
 
         return {k: str(v) for k, v in envs.items()}
 
 
 class ProxyLauncher:
-
     def __init__(
         self,
         *,
@@ -125,12 +125,12 @@ class ProxyLauncher:
         self.proxy_port = proxy_port
         self.proxy_script = envs.get(
             "DISAGGREGATED_PREFILL_PROXY_SCRIPT",
-            'examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py'
+            "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py",
         )
         self.envs = envs
         self.is_master = cur_index == 0
         self.cur_ip = nodes[cur_index].ip
-        self.process: Optional[subprocess.Popen[bytes]] = None
+        self.process: subprocess.Popen[bytes] | None = None
 
     def __enter__(self):
         if not self.is_master or self.cfg is None:
@@ -172,7 +172,6 @@ class ProxyLauncher:
 
 
 class MultiNodeConfig:
-
     def __init__(
         self,
         *,
@@ -195,13 +194,11 @@ class MultiNodeConfig:
         self.cur_index = self._resolve_cur_index()
         self.cur_node = self.nodes[self.cur_index]
 
-        self.disagg_cfg = (DisaggregatedPrefillCfg(disaggregated_prefill,
-                                                   len(nodes))
-                           if disaggregated_prefill else None)
+        self.disagg_cfg = DisaggregatedPrefillCfg(disaggregated_prefill, len(nodes)) if disaggregated_prefill else None
 
-        master_ip = (self.disagg_cfg.master_ip_for_node(
-            self.cur_index, self.nodes)
-                     if self.disagg_cfg else self.nodes[0].ip)
+        master_ip = (
+            self.disagg_cfg.master_ip_for_node(self.cur_index, self.nodes) if self.disagg_cfg else self.nodes[0].ip
+        )
         self.proxy_port = get_available_port()
 
         self.envs = DistEnvBuilder(
@@ -214,7 +211,7 @@ class MultiNodeConfig:
         self.server_cmd = self._expand_env(self.cur_node.server_cmd)
 
     def _resolve_cur_index(self) -> int:
-        if (idx := os.environ.get("LWS_WORKER_INDEX")):
+        if idx := os.environ.get("LWS_WORKER_INDEX"):
             return int(idx)
 
         local_ips = get_all_ipv4()
@@ -267,7 +264,7 @@ class MultiNodeConfigLoader:
     DEFAULT_CONFIG_NAME = "DeepSeek-V3.yaml"
 
     @classmethod
-    def from_yaml(cls, yaml_path: Optional[str] = None) -> MultiNodeConfig:
+    def from_yaml(cls, yaml_path: str | None = None) -> MultiNodeConfig:
         config = cls._load_yaml(yaml_path)
         cls._validate_root(config)
 
@@ -286,22 +283,19 @@ class MultiNodeConfigLoader:
         )
 
     @classmethod
-    def _load_yaml(cls, yaml_path: Optional[str]) -> dict:
+    def _load_yaml(cls, yaml_path: str | None) -> dict:
         if not yaml_path:
             yaml_path = os.getenv("CONFIG_YAML_PATH", cls.DEFAULT_CONFIG_NAME)
 
         full_path = os.path.join(CONFIG_BASE_PATH, yaml_path)
         logger.info("Loading config yaml: %s", full_path)
 
-        with open(full_path, "r") as f:
+        with open(full_path) as f:
             return yaml.safe_load(f)
 
     @staticmethod
     def _validate_root(cfg: dict):
-        required = [
-            "model", "deployment", "num_nodes", "npu_per_node", "env_common",
-            "benchmarks"
-        ]
+        required = ["model", "deployment", "num_nodes", "npu_per_node", "env_common", "benchmarks"]
         missing = [k for k in required if k not in cfg]
         if missing:
             raise KeyError(f"Missing required config fields: {missing}")
@@ -312,9 +306,7 @@ class MultiNodeConfigLoader:
         deployments = cfg["deployment"]
 
         if len(deployments) != num_nodes:
-            raise AssertionError(
-                f"deployment size ({len(deployments)}) != num_nodes ({num_nodes})"
-            )
+            raise AssertionError(f"deployment size ({len(deployments)}) != num_nodes ({num_nodes})")
 
         cluster_ips = cls._resolve_cluster_ips(cfg, num_nodes)
 
@@ -329,7 +321,8 @@ class MultiNodeConfigLoader:
                     server_cmd=cmd,
                     envs=envs,
                     headless="--headless" in cmd,
-                ))
+                )
+            )
         return nodes
 
     @staticmethod
@@ -341,7 +334,8 @@ class MultiNodeConfigLoader:
     def _resolve_cluster_ips(cfg: dict, num_nodes: int) -> list[str]:
         if "cluster_hosts" in cfg and cfg["cluster_hosts"]:
             logger.info(
-                "Using cluster_hosts from config. This typically indicates that your current environment is a non-Kubernetes environment."
+                "Using cluster_hosts from config. This typically indicates that "
+                "your current environment is a non-Kubernetes environment."
             )
             ips = cfg["cluster_hosts"]
             if len(ips) != num_nodes:
