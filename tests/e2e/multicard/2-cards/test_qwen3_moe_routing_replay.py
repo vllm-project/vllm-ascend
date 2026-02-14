@@ -29,4 +29,4 @@ def test_qwen3_moe_routing_replay():
         outputs = vllm_model.model.generate(prompts=inputs, sampling_params=sampling_params)
         assert outputs[0].finished
         assert len(outputs[0].outputs[0].text) > 0
-        assert outputs[0].outputs[0].routed_experts
+        assert outputs[0].outputs[0].routed_experts.size > 0
