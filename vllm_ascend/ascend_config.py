@@ -144,14 +144,14 @@ class AscendConfig:
         if os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0") == "1":
             MAX_PREFETCH_WEIGHT_SIZE: int = 18 * 1024 * 1024
             gate_up_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
-            down_prefetch_szie = int(os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
+            down_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
             self.weight_prefetch_config.set_mlp_pre_version_compatibale_config(
-                gate_up_prefetch_size, down_prefetch_szie
+                gate_up_prefetch_size, down_prefetch_size
             )
             logger.info_once(
                 f"MLP weight prefetch enabled from env variable VLLM_ASCEND_ENABLE_PREFETCH_MLP."
                 f"gate_up_prefetch_size={gate_up_prefetch_size}, "
-                f"down_prefetch_szie={down_prefetch_szie}."
+                f"down_prefetch_size={down_prefetch_size}."
             )
             warnings.warn(
                 "VLLM_ASCEND_ENABLE_PREFETCH_MLP is deprecated and will be removed in a v0.16.0 version. "

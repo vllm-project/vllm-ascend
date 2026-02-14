@@ -741,7 +741,7 @@ class MooncakeLayerwiseConnectorScheduler:
                         computed_tokens.get(req_id, 0) + scheduled_tokens - spec_decode_tokens
                     )
 
-                    def add_tranfer_task(req_id, send_req_info: SendReqInfo, chunk_finish=False):
+                    def add_transfer_task(req_id, send_req_info: SendReqInfo, chunk_finish=False):
                         (
                             local_block_ids,
                             local_transed_tokens,
@@ -771,7 +771,7 @@ class MooncakeLayerwiseConnectorScheduler:
                     # whether chunk finish
                     chunk_finish = send_req_info.local_computed_tokens >= len(send_req_info.request.all_token_ids)
 
-                    add_tranfer_task(req_id, send_req_info, chunk_finish=chunk_finish)
+                    add_transfer_task(req_id, send_req_info, chunk_finish=chunk_finish)
                     if chunk_finish:
                         self._reqs_need_send_layerwise.pop(req_id)
         return meta

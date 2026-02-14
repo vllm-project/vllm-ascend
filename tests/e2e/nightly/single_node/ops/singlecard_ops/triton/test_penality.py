@@ -124,10 +124,10 @@ def create_test_data(
 
     logits = torch.randn(num_reqs, vocab_size, device=device, dtype=dtype)
 
-    repetiton_penalty = torch.ones(num_reqs, device=device, dtype=torch.float32)
+    repetition_penalty = torch.ones(num_reqs, device=device, dtype=torch.float32)
     for i in range(num_reqs):
         if torch.rand(1) > 0.3:
-            repetiton_penalty[i] = torch.rand(1, device=device).item() * 0.8 + 0.6
+            repetition_penalty[i] = torch.rand(1, device=device).item() * 0.8 + 0.6
 
     frequency_penalty = torch.zeros(num_reqs, device=device, dtype=torch.float32)
     for i in range(num_reqs):
@@ -168,7 +168,7 @@ def create_test_data(
             output_bin_counts[state_idx, token] = count
 
     sampling_metadata = SamplingMetadata(
-        repetition_penalty=repetiton_penalty,
+        repetition_penalty=repetition_penalty,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
         temperature=temperature,
@@ -217,4 +217,3 @@ def test_apply_penalties_and_temperature(
         atol = 1e-02
         rtol = 1e-02
     assert torch.allclose(logits_triton, logits_pytorch_result, atol=atol, rtol=rtol)
-
