@@ -45,13 +45,13 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         2. Core attention (custom op)
         3. Output projection
         """
-        num_tokens = hidden_states.size(0)
 
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
         projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
         projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        num_tokens = projected_states_qkvz.size(0)
         forward_context = get_forward_context()
         is_cuda_graph = forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
         # triton grid should be less than 66536
