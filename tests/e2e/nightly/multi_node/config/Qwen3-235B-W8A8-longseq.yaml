@@ -28,6 +28,7 @@ deployment:
         --prefill-context-parallel-size 2
         --tensor-parallel-size 8
         --cp-kv-cache-interleave-size 128
+        --long-prefill-token-threshold 99
         --seed 1024
         --enforce-eager
         --enable-expert-parallel
