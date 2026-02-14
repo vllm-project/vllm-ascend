@@ -96,6 +96,7 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        MODELSCOPE_HUB_FILE_LOCK: False
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
