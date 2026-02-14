@@ -1274,6 +1274,34 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm(
+    const at::Tensor& x,
+    const at::Tensor& gamma,
+    double epsilon)
+{
+    int64_t dim_x = x.dim();
+    int64_t dim_gamma = gamma.dim();
+    int64_t diff = dim_x - dim_gamma;
+    std::vector<int64_t> new_shape;
+    at::Tensor rstd;
+    if (diff > 0) {
+        new_shape.reserve(dim_x);
+        auto x_sizes = x.sizes();
+        for (int64_t i = 0; i < diff; ++i) {
+            new_shape.push_back(x_sizes[i]);
+        }
+        for (int64_t i = 0; i < dim_gamma; ++i) {
+            new_shape.push_back(1);
+        }
+    } else {
+        new_shape.assign(dim_x, 1);
+    }
+    rstd = at::empty(new_shape, x.options().dtype(at::kFloat));
+    at::Tensor y = at::empty(x.sizes(), x.options());
+    EXEC_NPU_CMD(aclnnGemmaRmsNorm, x, gamma, epsilon, y, rstd);
+    return std::tuple<at::Tensor, at::Tensor>(y, rstd);
+}
+
 void transpose_kv_cache_by_block(
     const at::TensorList &kCache,
     const at::TensorList &vCache,
@@ -1290,12 +1318,58 @@ void transpose_kv_cache_by_block(
 
 }
 
+at::Tensor causal_conv1d_fn(
+    const at::Tensor& mixed_qkv_non_spec_T,
+    const at::Tensor& conv_weights,
+    const c10::optional<at::Tensor>& bias_opt,
+    c10::string_view activation, 
+    const at::Tensor& conv_state,
+    const at::Tensor&  has_initial_state,
+    const at::Tensor& non_spec_state_indices_tensor,
+    const at::Tensor& non_spec_query_start_loc,
+    int64_t  pad_slot_id)
+{
+    at::Tensor x=mixed_qkv_non_spec_T; //不需要转置
+    at::Tensor weight=conv_weights;//不需要转置
+    c10::optional<at::Tensor> biasOptional =bias_opt;
+    at::Tensor convStates= conv_state;
+    at::Tensor queryStartLoc=non_spec_query_start_loc;
+    at::Tensor cacheIndices=non_spec_state_indices_tensor;
+    at::Tensor hasInitialState=has_initial_state;
+    int64_t activationMode=(activation.empty()?0:1);
+    int64_t padSlotId=pad_slot_id;
+
+    at::Tensor output = at::empty(mixed_qkv_non_spec_T.sizes(), mixed_qkv_non_spec_T.options());
+    EXEC_NPU_CMD(aclnnCausalConv1d,
+                    x,                 
+                    weight,
+                    biasOptional,                  
+                    convStates,             
+                    queryStartLoc,                     
+                    cacheIndices,
+                    hasInitialState,  
+                    activationMode,    
+                    padSlotId,            
+                    output
+                ); 
+
+    return output;
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
 
     // vLLM-Ascend custom ops
+    // Gemma RmsNorm
+    ops.def(
+        "npu_gemma_rms_norm(Tensor x, "
+                            "Tensor gamma, "
+                            "float epsilon=1e-6)"
+        "-> (Tensor y ,Tensor rstd)"
+        );
+    ops.impl("npu_gemma_rms_norm", torch::kPrivateUse1, &vllm_ascend::npu_gemma_rms_norm);
     ops.def("weak_ref_tensor(Tensor input) -> Tensor");
     ops.impl("weak_ref_tensor", torch::kPrivateUse1, &vllm_ascend::weak_ref_tensor);
 
@@ -1464,4 +1538,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
     );
     ops.impl("transpose_kv_cache_by_block", torch::kPrivateUse1, &vllm_ascend::transpose_kv_cache_by_block);
+    // causal_conv1d_fn    
+    ops.def(
+        "causal_conv1d_fn(Tensor mixed_qkv_non_spec_T, "
+        "                         Tensor conv_weights, "
+        "                         Tensor? bias_opt, "
+        "                         str activation, "
+        "                         Tensor conv_state, "
+        "                         Tensor has_initial_state, "
+        "                         Tensor non_spec_state_indices_tensor, "
+        "                         Tensor non_spec_query_start_loc, "
+        "                         int pad_slot_id) -> (Tensor output)");
+    ops.impl("causal_conv1d_fn", torch::kPrivateUse1, &vllm_ascend::causal_conv1d_fn);
 }
