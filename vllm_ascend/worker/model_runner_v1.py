@@ -1366,6 +1366,9 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+            
+            if self.need_accepted_tokens:  # TODO remove this if
+                self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -1467,8 +1470,6 @@ class NPUModelRunner(GPUModelRunner):
             logits,
             sampling_metadata,
         )
-        if self.need_accepted_tokens:  # TODO remove this if
-            self._update_states_after_model_execute(sampler_output.sampled_token_ids)
         return sampler_output
 
     # TODO: remove this func after eagle_proposer is refactored and

@@ -336,6 +336,13 @@ class NPUWorker(WorkerBase):
         available_kv_cache_memory = int(total_npu_memory * self.cache_config.gpu_memory_utilization - peak_memory)
         available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
         logger.info(f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}")
+        if self.model_config.architecture in ("Qwen3NextForCausalLM",
+                                           "Qwen3_5ForConditionalGeneration",
+                                           "Qwen3_5MoeForConditionalGeneration"):
+            # NOTE(zepeng): Currently for Model with LinearAttention, 
+            # two copies of kv_cache_raw_tensors will be created.
+            # It should be removed after import multi_block_pool.
+            available_kv_cache_memory = available_kv_cache_memory // 2
         return available_kv_cache_memory
 
     def execute_model(
