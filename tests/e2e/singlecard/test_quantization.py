@@ -75,3 +75,47 @@ def test_qwen3_dense_w8a16():
         name_0="vllm_target_outputs",
         name_1="vllm_quant_w8a16_outputs",
     )
+
+
+def test_qwen3_gptq_int8():
+    """Test GPTQ Int8 quantization with Qwen3-0.6B model.
+
+    This test verifies that the GPTQ Int8 quantized model can be loaded
+    and generates consistent outputs with greedy sampling.
+    """
+    max_tokens = 10
+    example_prompts = [
+        "Hello, how are you?",
+        "What is the capital of France?",
+    ]
+
+    # Expected outputs for GPTQ Int8 quantized model
+    # These outputs are generated with greedy sampling (temperature=0)
+    # Note: VllmRunner.generate_greedy() returns prompt + generated text
+    vllm_target_outputs = [
+        ([
+            9707, 11, 1246, 525, 498, 30, 358, 2776, 14589, 369,
+            279, 60009, 13, 358, 2776, 14589
+        ], "Hello, how are you? I'm sorry for the inconvenience. I'm sorry"),
+        ([
+            3838, 374, 279, 6722, 315, 9625, 30, 576, 6722, 315,
+            9625, 374, 12095, 13, 576, 4226, 374
+        ], 'What is the capital of France? The capital of France is Paris. The answer is'),
+    ]
+
+    with VllmRunner(
+            "Qwen/Qwen3-0.6B-GPTQ-Int8",
+            max_model_len=512,
+            enforce_eager=False,
+            gpu_memory_utilization=0.7,
+            quantization="gptq",
+    ) as vllm_model:
+        vllm_gptq_outputs = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=vllm_target_outputs,
+        outputs_1_lst=vllm_gptq_outputs,
+        name_0="vllm_target_outputs",
+        name_1="vllm_gptq_outputs",
+    )
