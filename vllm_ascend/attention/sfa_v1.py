@@ -403,7 +403,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             register_all_layers_to_shard_weight_series(
                 self.layer_sharding_kwargs)
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
+    def process_weights_after_loading(self, act_dtype: torch.dtype, rl_scene=False):
         # NOTE: We currently do not support quant kv_b_proj.
         assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
         # NOTE: Weight will be reshaped next, we need to revert and transpose it.
@@ -434,8 +434,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
         # self.W_UV = maybe_trans_nz(self.W_UV)
 
-        # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
-        dispose_layer(self.kv_b_proj)
+        # In an RL scenario involving training-inference conversion(such as megatron-bridge), kv_b_proj cannot be directly disposed of.
+        if not rl_scene:
+            # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
+            dispose_layer(self.kv_b_proj)
+
         if self.enable_dsa_cp:
             if self.enable_dsa_cp_prefill_only:
                 for layer in (self.layer_sharding_kwargs or []):
@@ -875,7 +878,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_key=actual_seq_lengths_key,
             need_gather_q_kv=need_gather_q_kv)
 
-        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
+        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention_custom(
             query=ql_nope,
             key=kv_cache[0],
             value=kv_cache[0],
@@ -1007,7 +1010,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         block_table = attn_metadata.block_tables
 
-        topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+        topk_indices = torch.ops._C_ascend.npu_lightning_indexer_custom(
             query=q,
             key=kv_cache[2],
             weights=weights,

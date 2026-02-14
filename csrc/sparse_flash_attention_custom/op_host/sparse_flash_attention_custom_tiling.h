@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file sparse_flash_attention_tiling.h
+ * \file sparse_flash_attention_custom_tiling.h
  * \brief
  */
-#ifndef SPARSE_FLASH_ATTENTION_TILING_H
-#define SPARSE_FLASH_ATTENTION_TILING_H
+#ifndef sparse_flash_attention_custom_TILING_H
+#define sparse_flash_attention_custom_TILING_H
 
 #include <sstream>
 #include <graph/utils/type_utils.h>
@@ -126,7 +126,7 @@ struct InnerSplitParams {
     uint32_t s2BaseSize = 1;
 };
 
-BEGIN_TILING_DATA_DEF(SparseFlashAttentionBaseParamsMla)
+BEGIN_TILING_DATA_DEF(SparseFlashAttentionCustomBaseParamsMla)
 TILING_DATA_FIELD_DEF(uint32_t, batchSize)
 TILING_DATA_FIELD_DEF(uint32_t, seqSize)
 TILING_DATA_FIELD_DEF(uint32_t, qSeqSize)
@@ -141,40 +141,40 @@ TILING_DATA_FIELD_DEF(uint32_t, sparseMode)
 TILING_DATA_FIELD_DEF(int64_t, sparseBlockSize)
 TILING_DATA_FIELD_DEF(uint32_t, sparseBlockCount)
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(SparseFlashAttentionBaseParamsMlaOp, SparseFlashAttentionBaseParamsMla)
+REGISTER_TILING_DATA_CLASS(SparseFlashAttentionCustomBaseParamsMlaOp, SparseFlashAttentionCustomBaseParamsMla)
 
-BEGIN_TILING_DATA_DEF(SparseFlashAttentionSingleCoreParamsMla)
+BEGIN_TILING_DATA_DEF(SparseFlashAttentionCustomSingleCoreParamsMla)
 TILING_DATA_FIELD_DEF(uint32_t, usedCoreNum);
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(SparseFlashAttentionSingleCoreParamsMlaOp, SparseFlashAttentionSingleCoreParamsMla)
+REGISTER_TILING_DATA_CLASS(SparseFlashAttentionCustomSingleCoreParamsMlaOp, SparseFlashAttentionCustomSingleCoreParamsMla)
 
-BEGIN_TILING_DATA_DEF(SparseFlashAttentionSingleCoreTensorSizeMla)
+BEGIN_TILING_DATA_DEF(SparseFlashAttentionCustomSingleCoreTensorSizeMla)
 TILING_DATA_FIELD_DEF(uint32_t, mmResUbSize);
 TILING_DATA_FIELD_DEF(uint32_t, bmm2ResUbSize);
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(SparseFlashAttentionSingleCoreTensorSizeMlaOp, SparseFlashAttentionSingleCoreTensorSizeMla)
+REGISTER_TILING_DATA_CLASS(SparseFlashAttentionCustomSingleCoreTensorSizeMlaOp, SparseFlashAttentionCustomSingleCoreTensorSizeMla)
 
-BEGIN_TILING_DATA_DEF(SparseFlashAttentionSplitKVParamsMla)
+BEGIN_TILING_DATA_DEF(SparseFlashAttentionCustomSplitKVParamsMla)
 TILING_DATA_FIELD_DEF(uint32_t, s2)
 TILING_DATA_FIELD_DEF(uint32_t, accumOutSize)   // FD workspace
 TILING_DATA_FIELD_DEF(uint32_t, logSumExpSize)  // FD workspace
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(SparseFlashAttentionSplitKVParamsMlaOp, SparseFlashAttentionSplitKVParamsMla)
+REGISTER_TILING_DATA_CLASS(SparseFlashAttentionCustomSplitKVParamsMlaOp, SparseFlashAttentionCustomSplitKVParamsMla)
 
-BEGIN_TILING_DATA_DEF(SparseFlashAttentionInnerSplitParams)
+BEGIN_TILING_DATA_DEF(SparseFlashAttentionCustomInnerSplitParams)
 TILING_DATA_FIELD_DEF(uint32_t, mBaseSize)
 TILING_DATA_FIELD_DEF(uint32_t, s2BaseSize)
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(SparseFlashAttentionInnerSplitParamsOp, SparseFlashAttentionInnerSplitParams)
+REGISTER_TILING_DATA_CLASS(SparseFlashAttentionCustomInnerSplitParamsOp, SparseFlashAttentionCustomInnerSplitParams)
 
-BEGIN_TILING_DATA_DEF(SparseFlashAttentionTilingDataMla)
-TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionBaseParamsMla, baseParams);
-TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionSplitKVParamsMla, splitKVParams);
-TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionSingleCoreParamsMla, singleCoreParams);
-TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionSingleCoreTensorSizeMla, singleCoreTensorSize);
-TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionInnerSplitParams, innerSplitParams);
+BEGIN_TILING_DATA_DEF(SparseFlashAttentionCustomTilingDataMla)
+TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionCustomBaseParamsMla, baseParams);
+TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionCustomSplitKVParamsMla, splitKVParams);
+TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionCustomSingleCoreParamsMla, singleCoreParams);
+TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionCustomSingleCoreTensorSizeMla, singleCoreTensorSize);
+TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionCustomInnerSplitParams, innerSplitParams);
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(SparseFlashAttention, SparseFlashAttentionTilingDataMla)
+REGISTER_TILING_DATA_CLASS(SparseFlashAttentionCustom, SparseFlashAttentionCustomTilingDataMla)
 
 template <typename T> inline T Align(T num, T rnd)
 {
@@ -326,7 +326,7 @@ private:
     uint32_t aivNum_ = 0;
     size_t libapiSize_ = 0;
 
-    SparseFlashAttentionTilingDataMla tilingData_;
+    SparseFlashAttentionCustomTilingDataMla tilingData_;
     uint32_t blockDim_{0};
     uint64_t workspaceSize_{0};
     uint64_t tilingKey_{0};
@@ -580,4 +580,4 @@ public:
     gert::Shape keyRopeShape_{};
 };
 } // namespace optiling
-#endif // SPARSE_FLASH_ATTENTION_TILING_H
+#endif // sparse_flash_attention_custom_TILING_H
