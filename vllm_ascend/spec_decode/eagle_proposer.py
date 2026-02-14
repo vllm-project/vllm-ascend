@@ -104,7 +104,7 @@ class EagleProposer(VllmEagleProposer):
             and not self.vllm_config.model_config.enforce_eager
             and not self.vllm_config.speculative_config.enforce_eager)
         if self.method == "mtp":
-            self.use_cuda_graph = self.use_cuda_graph and not self.use_async_scheduling
+            self.use_cuda_graph = False
 
         self.cudagraph_batch_sizes = list(
             sorted(
