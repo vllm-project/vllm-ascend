@@ -81,6 +81,11 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         AscendLIMetadata,
+                                         get_sfa_skip_indices,
+                                         get_index_of_skipped_queries_numpy,
+                                         hidden_states_reorder,
+                                         maybe_pad_and_reorder_inputs,
                                          using_paged_attention)
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -106,9 +111,9 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
-                               enable_sp, get_ascend_device_type,
-                               is_drafter_moe_model, is_moe_model,
-                               lmhead_tp_enable, maybe_trans_nz,
+                               enable_lightling_indexer_skip, enable_sp,
+                               get_ascend_device_type, is_drafter_moe_model,
+                               is_moe_model, lmhead_tp_enable, maybe_trans_nz,
                                set_weight_prefetch_method, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -365,6 +370,8 @@ class NPUModelRunner(GPUModelRunner):
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
 
+        self.skip_li_metadata: AscendLIMetadata | None = None
+
     def _init_device_properties(self) -> None:
         self.num_sms = None
 
@@ -537,6 +544,39 @@ class NPUModelRunner(GPUModelRunner):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
 
+        if enable_lightling_indexer_skip():
+            li_reorder_indices, li_cum_query_lens, li_seq_lens, li_skiped_query_mask \
+                = get_sfa_skip_indices(self.input_batch.num_computed_tokens_cpu, num_scheduled_tokens)
+
+            if li_reorder_indices is not None:
+                top_k_indices_of_skipped_queries_numpy = get_index_of_skipped_queries_numpy(li_cum_query_lens, li_seq_lens, num_reqs, 2048)
+                # make lighting skip metadata
+                self.skip_li_metadata = AscendLIMetadata(
+                    li_reorder_indices=torch.from_numpy(
+                        li_reorder_indices).pin_memory().to(dtype=torch.int32,
+                                                            device=self.device,
+                                                            non_blocking=True),
+                    li_cum_query_lens=torch.from_numpy(
+                        li_cum_query_lens).pin_memory().to(dtype=torch.int32,
+                                                           device=self.device,
+                                                           non_blocking=True),
+                    li_seq_lens=torch.from_numpy(li_seq_lens).pin_memory().to(
+                        dtype=torch.int32,
+                        device=self.device,
+                        non_blocking=True),
+                    li_skip_request_mask=torch.from_numpy(
+                        li_skiped_query_mask).pin_memory().to(
+                            dtype=torch.bool,
+                            device=self.device,
+                            non_blocking=True),
+                    top_k_indices_of_skipped_queries=torch.from_numpy(
+                        top_k_indices_of_skipped_queries_numpy).pin_memory().to(
+                            dtype=torch.int32,
+                            device=self.device,
+                            non_blocking=True))
+            else:
+                self.skip_li_metadata = None
+
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
         if not scheduler_output.scheduled_spec_decode_tokens:
@@ -625,7 +665,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         num_input_tokens = batch_descriptor.num_tokens
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
-
         # Get info across DP ranks.
         # NOTE: maybe_padded_num_tokens is only used when using TorchAir with DP,
         # Otherwise, it's just max_tokens_across_dp_cpu
@@ -636,7 +675,6 @@ class NPUModelRunner(GPUModelRunner):
         # TODO: Now that num_input_tokens is basically identical with maybe_padded_num_tokens
         # We should consider removing maybe_padded_num_tokens later
         num_input_tokens = maybe_padded_num_tokens
-
         # Hot-Swap lora model
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
@@ -1039,7 +1077,8 @@ class NPUModelRunner(GPUModelRunner):
                 prefill_context_parallel_metadata=self.long_seq_metadata,
                 max_seq_len=0,
                 encoder_seq_lens=encoder_seq_lens,
-                encoder_seq_lens_cpu=encoder_seq_lens_cpu)
+                encoder_seq_lens_cpu=encoder_seq_lens_cpu,
+                li_skip_metadata=self.skip_li_metadata)
 
             if self.speculative_config and self.pcp_size * self.dcp_size > 1:
                 # For pcp + spec decode, we flatten block_table
@@ -1553,6 +1592,11 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
+            if enable_lightling_indexer_skip(
+            ) and self.skip_li_metadata is not None:
+                input_ids, positions = maybe_pad_and_reorder_inputs(
+                    input_ids, positions,
+                    self.skip_li_metadata.li_reorder_indices)
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -1569,6 +1613,10 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = self._generate_process_reqs_hidden_states(
                     maybe_padded_num_tokens, input_ids, positions,
                     intermediate_tensors, inputs_embeds, model_kwargs)
+            if enable_lightling_indexer_skip(
+            ) and self.skip_li_metadata is not None:
+                hidden_states = hidden_states_reorder(
+                    hidden_states, self.skip_li_metadata.li_reorder_indices)
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfer(
