@@ -37,28 +37,31 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_cases = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "max_out_len": 4096,
-    "batch_size": 32,
-    "baseline": 95,
-    "threshold": 5
-}, {
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 512,
-    "max_out_len": 256,
-    "batch_size": 64,
-    "trust_remote_code": True,
-    "request_rate": 11.2,
-    "baseline": 1,
-    "threshold": 0.97
-}]
+aisbench_cases = [
+    {
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/gsm8k-lite",
+        "request_conf": "vllm_api_general_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+        "max_out_len": 4096,
+        "batch_size": 32,
+        "baseline": 95,
+        "threshold": 5,
+    },
+    {
+        "case_type": "performance",
+        "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+        "request_conf": "vllm_api_stream_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+        "num_prompts": 512,
+        "max_out_len": 256,
+        "batch_size": 64,
+        "trust_remote_code": True,
+        "request_rate": 11.2,
+        "baseline": 1,
+        "threshold": 0.97,
+    },
+]
 
 
 @pytest.mark.asyncio
@@ -71,7 +74,7 @@ async def test_models(model: str, tp_size: int) -> None:
         "TASK_QUEUE_ENABLE": "1",
         "OMP_PROC_BIND": "false",
         "HCCL_OP_EXPANSION_MODE": "AIV",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     }
     server_args = [
         "--tensor-parallel-size",
@@ -93,11 +96,13 @@ async def test_models(model: str, tp_size: int) -> None:
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+    with RemoteOpenAIServer(
+        model,
+        server_args,
+        server_port=port,
+        env_dict=env_dict,
+        auto_port=False,
+    ) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,

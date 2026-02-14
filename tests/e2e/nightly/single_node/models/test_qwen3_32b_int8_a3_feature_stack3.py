@@ -33,31 +33,32 @@ prompts = [
 ]
 
 api_keyword_args = {
-    "chat_template_kwargs": {
-        "enable_thinking": True
-    },
+    "chat_template_kwargs": {"enable_thinking": True},
 }
 
-aisbench_cases = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_noncot_chat_prompt",
-    "max_out_len": 10240,
-    "batch_size": 32,
-    "baseline": 96,
-    "threshold": 4
-}, {
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 240,
-    "max_out_len": 1500,
-    "batch_size": 60,
-    "baseline": 1,
-    "threshold": 0.97
-}]
+aisbench_cases = [
+    {
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/gsm8k-lite",
+        "request_conf": "vllm_api_general_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_noncot_chat_prompt",
+        "max_out_len": 10240,
+        "batch_size": 32,
+        "baseline": 96,
+        "threshold": 4,
+    },
+    {
+        "case_type": "performance",
+        "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+        "request_conf": "vllm_api_stream_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+        "num_prompts": 240,
+        "max_out_len": 1500,
+        "batch_size": 60,
+        "baseline": 1,
+        "threshold": 0.97,
+    },
+]
 
 
 @pytest.mark.asyncio
@@ -74,25 +75,40 @@ async def test_models(model: str, tp_size: int) -> None:
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
     }
     server_args = [
-        "--quantization", "ascend", "--tensor-parallel-size",
-        str(tp_size), "--port",
-        str(port), "--trust-remote-code", "--reasoning-parser", "qwen3",
-        "--distributed_executor_backend", "mp", "--gpu-memory-utilization",
-        "0.9", "--block-size", "128", "--max-num-seqs", "256",
-        "--enforce-eager", "--max-model-len", "35840",
-        "--max-num-batched-tokens", "35840", "--additional-config",
+        "--quantization",
+        "ascend",
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--port",
+        str(port),
+        "--trust-remote-code",
+        "--reasoning-parser",
+        "qwen3",
+        "--distributed_executor_backend",
+        "mp",
+        "--gpu-memory-utilization",
+        "0.9",
+        "--block-size",
+        "128",
+        "--max-num-seqs",
+        "256",
+        "--enforce-eager",
+        "--max-model-len",
+        "35840",
+        "--max-num-batched-tokens",
+        "35840",
+        "--additional-config",
         '{"enable_weight_nz_layout":true, "weight_prefetch_config":{"enabled": true}}',
         "--compilation-config",
-        '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60]}'
+        '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60]}',
     ]
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
-        send_v1_chat_completions(prompts[0],
-                                 model,
-                                 server,
-                                 request_args=api_keyword_args)
+    with RemoteOpenAIServer(
+        model,
+        server_args,
+        server_port=port,
+        env_dict=env_dict,
+        auto_port=False,
+    ) as server:
+        send_v1_chat_completions(prompts[0], model, server, request_args=api_keyword_args)
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)
