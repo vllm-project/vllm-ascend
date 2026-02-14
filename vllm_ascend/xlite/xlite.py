@@ -229,9 +229,8 @@ class XliteWrapper:
 
         rank = torch.distributed.get_rank()
         local_rank = get_world_group().local_rank
-        self.xlite_rt = Runtime(
-            local_rank, 0, rank, get_tensor_model_parallel_world_size(), vllm_config.parallel_config.data_parallel_size
-        )
+        self.data_parallel_size = vllm_config.parallel_config.data_parallel_size
+        self.xlite_rt = Runtime(local_rank, 0, rank, get_tensor_model_parallel_world_size(), self.data_parallel_size)
 
         (self.xlite_model, self.freq_cis, hidden_size, dtype) = xlite_model_init(runnable, vllm_config)
 
@@ -278,7 +277,16 @@ class XliteWrapper:
             AscendAttentionState.SpecDecoding,
         ]
 
-        if not with_prefill or self.full_mode:
+        # Full: graph for prefill and decode
+        # Decode-Only: runnable for prefill, graph for decode
+        if not self.full_mode and self.data_parallel_size > 1:
+            num_tokens = forward_context.batch_descriptor.num_tokens
+            num_reqs = forward_context.batch_descriptor.num_reqs
+            use_xlite_graph = num_reqs is not None and num_tokens <= num_reqs
+        else:
+            use_xlite_graph = not with_prefill or self.full_mode
+
+        if use_xlite_graph:
             # TODO: When vllm_ascend enables graph mode, attn_metadata.num_decodes
             # will be padded in decode requests. Therefore, it is first fixed using
             # num_decode_tokens. However, in the future, when MTP is enabled, there
