@@ -25,15 +25,11 @@ def test_qwen3_topk() -> None:
     example_prompts = [
         "Hello, my name is",
     ]
-    sampling_params = SamplingParams(max_tokens=5,
-                                     temperature=0.0,
-                                     top_k=50,
-                                     top_p=0.9)
+    sampling_params = SamplingParams(max_tokens=5, temperature=0.0, top_k=50, top_p=0.9)
 
-    with VllmRunner("Qwen/Qwen3-0.6B",
-                    max_model_len=8192,
-                    cudagraph_capture_sizes=[1, 2, 4, 8],
-                    gpu_memory_utilization=0.7) as runner:
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B", max_model_len=8192, cudagraph_capture_sizes=[1, 2, 4, 8], gpu_memory_utilization=0.7
+    ) as runner:
         runner.generate(example_prompts, sampling_params)
 
 
@@ -42,29 +38,25 @@ def test_qwen3_prompt_logprobs() -> None:
         "Hello, my name is",
     ]
 
-    with VllmRunner("Qwen/Qwen3-0.6B",
-                    max_model_len=8192,
-                    cudagraph_capture_sizes=[1, 2, 4, 8],
-                    gpu_memory_utilization=0.7) as runner:
-        runner.generate_greedy_logprobs(example_prompts,
-                                        max_tokens=5,
-                                        num_logprobs=1)
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B", max_model_len=8192, cudagraph_capture_sizes=[1, 2, 4, 8], gpu_memory_utilization=0.7
+    ) as runner:
+        runner.generate_greedy_logprobs(example_prompts, max_tokens=5, num_logprobs=1)
 
 
 def test_qwen3_exponential_overlap() -> None:
     example_prompts = [
         "Hello, my name is",
     ]
-    sampling_params = SamplingParams(max_tokens=5,
-                                     temperature=1.0,
-                                     top_k=50,
-                                     top_p=0.9)
+    sampling_params = SamplingParams(max_tokens=5, temperature=1.0, top_k=50, top_p=0.9)
 
-    with VllmRunner("Qwen/Qwen3-0.6B",
-                    max_model_len=8192,
-                    cudagraph_capture_sizes=[1, 2, 4, 8],
-                    gpu_memory_utilization=0.7,
-                    additional_config={
-                        "enable_async_exponential": True,
-                    }) as runner:
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=8192,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        gpu_memory_utilization=0.7,
+        additional_config={
+            "enable_async_exponential": True,
+        },
+    ) as runner:
         runner.generate(example_prompts, sampling_params)
