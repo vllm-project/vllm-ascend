@@ -345,6 +345,8 @@ def _update_attn_fia_params(update_stream,
             else:
                 seq_lens = attn_metadata[key].seq_lens_list
                 actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                actual_seq_lengths_q, seq_lens = _pad_attention_seq_params(
+                    actual_seq_lengths_q, seq_lens, runtime_shape)
 
             torch.npu.graph_task_update_begin(update_stream, handle)
             torch_npu.npu_fused_infer_attention_score.out(
