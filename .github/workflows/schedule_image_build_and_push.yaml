@@ -42,26 +42,33 @@ jobs:
       matrix:
         build_meta:
           - name: A2 Ubuntu
-            dockerfile: Dockerfile
+            dockerfile: ./docker/Dockerfile
+            base: ./docker/base/Dockerfile
             suffix: ''
           - name: A2 openeuler
-            dockerfile: Dockerfile.openEuler
+            dockerfile: ./docker/Dockerfile.openEuler
+            base: ./docker/base/Dockerfile.openEuler
             suffix: 'openeuler'
           - name: A3 Ubuntu
-            dockerfile: Dockerfile.a3
+            dockerfile: ./docker/Dockerfile.a3
+            base: ./docker/base/Dockerfile.a3
             suffix: 'a3'
           - name: A3 openEuler
-            dockerfile: Dockerfile.a3.openEuler
+            dockerfile: ./docker/Dockerfile.a3.openEuler
+            base: ./docker/base/Dockerfile.a3.openEuler
             suffix: 'a3-openeuler'
           - name: 310P Ubuntu
-            dockerfile: Dockerfile.310p
+            dockerfile: ./docker/Dockerfile.310p
+            base: ''
             suffix: '310p'
           - name: 310P openEuler
-            dockerfile: Dockerfile.310p.openEuler
+            dockerfile: ./docker/Dockerfile.310p.openEuler
+            base: ''
             suffix: '310p-openeuler'
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
+      base: ${{ matrix.build_meta.base }}
       suffix: ${{ matrix.build_meta.suffix }}
       quay_username: ${{ vars.QUAY_USERNAME }}
       should_push: ${{ github.repository_owner == 'vllm-project' && (github.event_name != 'pull_request') }}
