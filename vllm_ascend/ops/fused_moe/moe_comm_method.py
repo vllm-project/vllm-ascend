@@ -39,18 +39,21 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 )
 from vllm_ascend.quantization.methods.base import QuantType
 
-_MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+_MoECommMethods: dict[MoECommType | None, list[MoECommMethod]] = {}
 
 
-def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
-    return _MoECommMethods.get(moe_comm_type)
+def get_moe_comm_method(moe_comm_type: MoECommType | None, ubatch_num=0) -> MoECommType | None:
+    moe_comm_method = _MoECommMethods.get(moe_comm_type)
+    if moe_comm_method is not None:
+        return moe_comm_method[ubatch_num]
+    return moe_comm_method
 
 
 def setup_moe_comm_method(moe_config):
-    _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-    _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-    _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-    _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+    _MoECommMethods[MoECommType.ALLTOALL] = [AlltoAllCommImpl(moe_config), AlltoAllCommImpl(moe_config)]
+    _MoECommMethods[MoECommType.ALLGATHER] = [AllGatherCommImpl(moe_config), AllGatherCommImpl(moe_config)]
+    _MoECommMethods[MoECommType.MC2] = [MC2CommImpl(moe_config), MC2CommImpl(moe_config)]
+    _MoECommMethods[MoECommType.FUSED_MC2] = [FusedMC2CommImpl(moe_config), FusedMC2CommImpl(moe_config)]
 
 
 def set_gmmswigluquant_method():

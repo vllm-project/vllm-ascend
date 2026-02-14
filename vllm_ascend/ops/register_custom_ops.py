@@ -38,7 +38,9 @@ def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch
     return residual
 
 
-def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool, is_ep_comm: bool = False) -> torch.Tensor:
+def _maybe_all_gather_and_maybe_unpad_impl(
+    x: torch.Tensor, label: bool, is_ep_comm: bool = False, do_comm: bool = True
+) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
@@ -48,12 +50,15 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool, is_ep_c
     if sp_enabled and label:
         dp_metadata = forward_context.dp_metadata
         if dp_metadata is None or not is_ep_comm:
-            x = tensor_model_parallel_all_gather(x, 0)
+            # for better overlap when enabling dbo
+            if do_comm:
+                x = tensor_model_parallel_all_gather(x, 0)
             pad_size = forward_context.pad_size
             if pad_size > 0:
                 x = x[:-pad_size]
         else:
-            x = get_ep_group().all_gather(x, 0)
+            if do_comm:
+                x = get_ep_group().all_gather(x, 0)
             # unpad
             num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
             result = torch.empty((num_tokens_across_dp_cpu.sum(), *x.shape[1:]), device=x.device, dtype=x.dtype)
@@ -69,21 +74,28 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool, is_ep_c
     return x
 
 
-def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> torch.Tensor:
+def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False, do_comm: bool = True) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        return tensor_model_parallel_all_reduce(x)
+        if do_comm:
+            return tensor_model_parallel_all_reduce(x)
+        return x
 
     if not getattr(forward_context, "sp_enabled", False):
-        return tensor_model_parallel_all_reduce(x)
+        if do_comm:
+            return tensor_model_parallel_all_reduce(x)
+        return x
 
     dp_metadata = forward_context.dp_metadata
     if dp_metadata is None or not is_ep_comm:
         pad_size = forward_context.pad_size
         if pad_size > 0:
             x = F.pad(x, (0, 0, 0, pad_size))
-        return tensor_model_parallel_reduce_scatter(x, 0)
+        # for better overlap when enabling dbo
+        if do_comm:
+            x = tensor_model_parallel_reduce_scatter(x, 0)
+        return x
     else:
         # padding
         dp_size = get_dp_group().world_size
@@ -95,11 +107,17 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
             padded_x[idx, :num_tokens_dp] = x[offset : offset + num_tokens_dp]
             offset += num_tokens_dp
 
-        return get_ep_group().reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
+        if do_comm:
+            res = get_ep_group().reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
+        else:
+            res = padded_x.view(-1, *x.shape[1:])
+        return res
 
 
-def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor, label: bool, is_ep_comm: bool = False) -> torch.Tensor:
-    if get_forward_context().sp_enabled and label:
+def _maybe_all_gather_and_maybe_unpad_fake(
+    x: torch.Tensor, label: bool, is_ep_comm: bool = False, do_comm: bool = True
+) -> torch.Tensor:
+    if get_forward_context().sp_enabled and label and do_comm:
         return torch.empty(
             (x.shape[0] * get_tensor_model_parallel_world_size(), *x.shape[1:]), device=x.device, dtype=x.dtype
         )
@@ -107,8 +125,8 @@ def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor, label: bool, is_ep_c
     return x
 
 
-def _maybe_pad_and_reduce_fake(x: torch.Tensor, is_ep_comm: bool = False) -> torch.Tensor:
-    if get_forward_context().sp_enabled:
+def _maybe_pad_and_reduce_fake(x: torch.Tensor, is_ep_comm: bool = False, do_comm: bool = True) -> torch.Tensor:
+    if get_forward_context().sp_enabled and do_comm:
         return torch.empty(
             (x.shape[0] // get_tensor_model_parallel_world_size(), *x.shape[1:]), device=x.device, dtype=x.dtype
         )

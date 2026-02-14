@@ -87,6 +87,8 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
 def get_cos_and_sin_mla(positions, use_cache=False):
     global _cos_cache
     global _sin_cache
+    if _cos_cache is None or _sin_cache is None:
+        return None, None
     cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
     sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
     if not use_cache:
