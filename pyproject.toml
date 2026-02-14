@@ -68,13 +68,14 @@ exclude = [
     
     # Batch (4)
     "tests/e2e/nightly/single_node/ops/",
-    "tests/e2e/nightly/single_node/ops/singlecard_ops/triton/",
-
+    
     # Batch (5)
-    "tests/e2e/singlecard/pooling/",
-    "tests/e2e/singlecard/spec_decode/",
+    # "tests/e2e/singlecard/",
     
     # Batch (6)
+    "tests/e2e/nightly/single_node/ops/singlecard_ops/triton/",
+    "tests/e2e/singlecard/pooling/",
+    "tests/e2e/singlecard/spec_decode/",
     "tests/e2e/utils.py",
     "tests/e2e/vllm_interface/",
     "tests/e2e/weekly/",
