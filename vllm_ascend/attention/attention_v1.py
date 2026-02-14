@@ -200,6 +200,9 @@ class AscendMetadata:
     # sliding window attention mask
     swa_mask: torch.Tensor | None = None
 
+    # sliding window attention mask for bsh layout
+    sliding_mask: torch.Tensor | None = None
+
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
@@ -729,6 +732,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = self.key_cache.flatten(2, 3).contiguous()
             value = self.value_cache.flatten(2, 3).contiguous()
 
+        def create_sliding_window_attention(seq_lens, s2, left_context=512):
+            if seq_lens.dim() == 1:
+                seq_lens = seq_lens.unsqueeze(1)
+            b = seq_lens.size(0)
+            device = seq_lens.device
+            indices = torch.arange(s2, device=device).unsqueeze(0).expand(b, -1)
+            start_indices = torch.clamp(seq_lens - left_context, min=0)
+            mask = (indices < start_indices) | (indices >= seq_lens)
+            return mask.unsqueeze(1).npu()
+
+        if hasattr(attn_metadata, "sliding_mask") and attn_metadata.sliding_mask is not None:
+            atten_mask = attn_metadata.sliding_mask
+        else:
+            block_table = attn_metadata.block_tables
+            max_model_len = block_table.shape[-1] * block_size
+            atten_mask = create_sliding_window_attention(attn_metadata.seq_lens, max_model_len)
+            attn_metadata.sliding_mask = atten_mask
+
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query,
             key,
@@ -737,7 +758,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_key_value_heads=self.num_kv_heads,
             input_layout="BSH",
             block_size=block_size,
-            pre_tokens=self.sliding_window,
+            atten_mask=atten_mask,
+            sparse_mode=0,
             scale=self.scale,
             block_table=attn_metadata.block_tables,
             actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
@@ -781,6 +803,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = key[:num_tokens]
             value = value[:num_tokens]
         # Get workspace from cache or calculate it if not present.
+
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
@@ -814,6 +837,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query=query,
                 key=key,
                 value=value,
+                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
+                next_tokens=0 if self.sliding_window is not None else SWA_INT_MAX,
                 atten_mask=attn_metadata.attn_mask,
                 block_table=block_table,
                 input_layout="TND",
@@ -823,7 +848,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale=self.scale,
-                sparse_mode=3,
+                sparse_mode=4 if self.sliding_window is not None else 3,
             )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
