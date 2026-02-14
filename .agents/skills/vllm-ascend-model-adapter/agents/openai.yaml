@@ -1,0 +1,4 @@
+interface:
+  display_name: "vLLM Ascend Model Adapter"
+  short_description: "Adapt existing or new models on Ascend with direct-run validation, test configs, and tutorial documentation"
+  default_prompt: "Use $vllm-ascend-model-adapter to adapt /models/<model-name> via /vllm-workspace/vllm and /vllm-workspace/vllm-ascend, validate with direct vllm serve from /workspace, and deliver one signed commit in the current repo."
