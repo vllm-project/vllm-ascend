@@ -788,8 +788,6 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
-        logger.warning("cad seq lens: {}".format(cad.seq_lens))
-        # logger.warning("first++++++++self.positions: {}".format(self.positions))
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
@@ -808,9 +806,8 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             # copy inputs to buffer for cudagraph
             if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
                 target_positions = target_positions[0]
-            # logger.warning("first2++++++++self.positions: {}".format(self.positions))
+
             self._set_positions(num_tokens, target_positions)
-            # logger.warning("first3++++++++self.positions: {}".format(self.positions))
             self.hidden_states[:num_tokens] = target_hidden_states
 
             return num_tokens, token_indices_to_sample, cad
@@ -897,8 +894,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
                 arange=self.arange,
                 new_slot_mapping=new_slot_mapping,
             )
-            logger.warning("cad seq lens5: {}".format(new_cad.seq_lens))
-            # logger.warning("first5++++++++self.positions: {}".format(self.positions))
+
             return total_num_output_tokens, token_indices_to_sample, new_cad
     
     def model_returns_tuple(self) -> bool:
