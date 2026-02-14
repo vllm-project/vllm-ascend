@@ -22,6 +22,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from sysconfig import get_paths
 
 from setuptools import Command, Extension, find_packages, setup
@@ -71,6 +72,8 @@ def get_value_from_lines(lines: list[str], key: str) -> str:
 
 
 def get_chip_type() -> str:
+    start_time = time.time()
+    logging.info("[TIMING] Starting chip type detection...")
     try:
         npu_info_lines = subprocess.check_output(["npu-smi", "info", "-l"]).decode().strip().split("\n")
         npu_id = int(get_value_from_lines(npu_info_lines, "NPU ID"))
@@ -87,22 +90,30 @@ def get_chip_type() -> str:
         if "310" in chip_name:
             # 310P case
             assert chip_type
-            return (chip_type + chip_name).lower()
+            result = (chip_type + chip_name).lower()
         elif "910" in chip_name:
             if chip_type:
                 # A2 case
                 assert not npu_name
-                return (chip_type + chip_name).lower()
+                result = (chip_type + chip_name).lower()
             else:
                 # A3 case
                 assert npu_name
-                return (chip_name + "_" + npu_name).lower()
+                result = (chip_name + "_" + npu_name).lower()
         else:
             # TODO(zzzzwwjj): Currently, A5's chip name has not determined yet.
             raise ValueError(f"Unable to recognize chip name: {chip_name}, please manually set env SOC_VERSION")
+
+        elapsed = time.time() - start_time
+        logging.info(f"[TIMING] Chip type detection completed in {elapsed:.2f}s, detected: {result}")
+        return result
     except subprocess.CalledProcessError as e:
+        elapsed = time.time() - start_time
+        logging.error(f"[TIMING] Chip type detection failed after {elapsed:.2f}s")
         raise RuntimeError(f"Get chip info failed: {e}")
     except FileNotFoundError:
+        elapsed = time.time() - start_time
+        logging.warning(f"[TIMING] npu-smi not found after {elapsed:.2f}s")
         logging.warning(
             "npu-smi command not found, if this is an npu envir, please check if npu driver is installed correctly."
         )
@@ -127,6 +138,9 @@ else:
 
 
 def gen_build_info():
+    start_time = time.time()
+    logging.info("[TIMING] Starting build info generation...")
+
     soc_version = envs.SOC_VERSION
 
     soc_to_device = {
@@ -163,7 +177,9 @@ def gen_build_info():
     with open(package_dir, "w+") as f:
         f.write("# Auto-generated file\n")
         f.write(f"__device_type__ = '{device_type}'\n")
-    logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
+
+    elapsed = time.time() - start_time
+    logging.info(f"[TIMING] Build info generation completed in {elapsed:.2f}s (SOC: {soc_version})")
 
 
 class CMakeExtension(Extension):
@@ -195,11 +211,17 @@ class build_and_install_aclnn(Command):
         pass
 
     def run(self):
+        start_time = time.time()
+        logging.info("[TIMING] Starting ACLNN build and install...")
         try:
             print("Running bash build_aclnn.sh ...")
             subprocess.check_call(["bash", "csrc/build_aclnn.sh", ROOT_DIR, envs.SOC_VERSION])
-            print("buid_aclnn.sh executed successfully!")
+            elapsed = time.time() - start_time
+            print(f"buid_aclnn.sh executed successfully in {elapsed:.2f}s!")
+            logging.info(f"[TIMING] ACLNN build completed in {elapsed:.2f}s")
         except subprocess.CalledProcessError as e:
+            elapsed = time.time() - start_time
+            logging.error(f"[TIMING] ACLNN build failed after {elapsed:.2f}s")
             print(f"Error running build_aclnn.sh: {e}")
             raise SystemExit(e.returncode)
 
@@ -233,6 +255,9 @@ class cmake_build_ext(build_ext):
     # Perform cmake configuration for a single extension.
     #
     def configure(self, ext: CMakeExtension) -> None:
+        start_time = time.time()
+        logging.info("[TIMING] Starting CMake configuration...")
+
         build_temp = self.build_temp
         os.makedirs(build_temp, exist_ok=True)
         source_dir = os.path.abspath(ROOT_DIR)
@@ -272,12 +297,18 @@ class cmake_build_ext(build_ext):
 
         # ccache and ninja can not be applied at ascendc kernels now
 
+        pybind11_start = time.time()
+        logging.info("[TIMING] Looking for pybind11...")
         try:
             # if pybind11 is installed via pip
             pybind11_cmake_path = (
                 subprocess.check_output([python_executable, "-m", "pybind11", "--cmakedir"]).decode().strip()
             )
+            pybind11_elapsed = time.time() - pybind11_start
+            logging.info(f"[TIMING] Found pybind11 in {pybind11_elapsed:.2f}s")
         except subprocess.CalledProcessError as e:
+            pybind11_elapsed = time.time() - pybind11_start
+            logging.error(f"[TIMING] pybind11 lookup failed after {pybind11_elapsed:.2f}s")
             # else specify pybind11 path installed from source code on CI container
             raise RuntimeError(f"CMake configuration failed: {e}")
 
@@ -305,11 +336,17 @@ class cmake_build_ext(build_ext):
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
         cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
 
+        torch_npu_start = time.time()
+        logging.info("[TIMING] Looking for torch-npu...")
         torch_npu_command = "python3 -m pip show torch-npu | grep '^Location:' | awk '{print $2}'"
         try:
             torch_npu_path = subprocess.check_output(torch_npu_command, shell=True).decode().strip()
             torch_npu_path += "/torch_npu"
+            torch_npu_elapsed = time.time() - torch_npu_start
+            logging.info(f"[TIMING] Found torch-npu in {torch_npu_elapsed:.2f}s")
         except subprocess.CalledProcessError as e:
+            torch_npu_elapsed = time.time() - torch_npu_start
+            logging.error(f"[TIMING] torch-npu lookup failed after {torch_npu_elapsed:.2f}s")
             raise RuntimeError(f"Retrieve torch version version failed: {e}")
 
         # add TORCH_NPU_PATH
@@ -323,9 +360,16 @@ class cmake_build_ext(build_ext):
 
         cmake_args += [source_dir]
         logging.info(f"cmake config command: {cmake_args}")
+
+        cmake_config_start = time.time()
+        logging.info("[TIMING] Running cmake configuration command...")
         try:
             subprocess.check_call(cmake_args, cwd=self.build_temp)
+            cmake_config_elapsed = time.time() - cmake_config_start
+            logging.info(f"[TIMING] CMake configuration command completed in {cmake_config_elapsed:.2f}s")
         except subprocess.CalledProcessError as e:
+            cmake_config_elapsed = time.time() - cmake_config_start
+            logging.error(f"[TIMING] CMake configuration command failed after {cmake_config_elapsed:.2f}s")
             raise RuntimeError(f"CMake configuration failed: {e}")
 
         subprocess.check_call(
@@ -333,9 +377,13 @@ class cmake_build_ext(build_ext):
             cwd=self.build_temp,
         )
 
+        total_elapsed = time.time() - start_time
+        logging.info(f"[TIMING] Total CMake configuration completed in {total_elapsed:.2f}s")
+
     def build_extensions(self) -> None:
-        if not envs.COMPILE_CUSTOM_KERNELS:
-            return
+        overall_start = time.time()
+        logging.info("[TIMING] ========== Starting build_extensions ==========")
+
         # Ensure that CMake is present and working
         try:
             subprocess.check_output(["cmake", "--version"])
@@ -354,11 +402,16 @@ class cmake_build_ext(build_ext):
             return s.removeprefix("vllm_ascend.")
 
         # Build all the extensions
+        configure_start = time.time()
+        logging.info("[TIMING] Starting extension configuration...")
         for ext in self.extensions:
             self.configure(ext)
             targets.append(target_name(ext.name))
+        configure_elapsed = time.time() - configure_start
+        logging.info(f"[TIMING] All extensions configured in {configure_elapsed:.2f}s")
 
         num_jobs = self.compute_num_jobs()
+        logging.info(f"[TIMING] Building with {num_jobs} parallel jobs")
 
         build_args = [
             "--build",
@@ -366,25 +419,42 @@ class cmake_build_ext(build_ext):
             f"-j={num_jobs}",
             *[f"--target={name}" for name in targets],
         ]
+
+        build_start = time.time()
+        logging.info(f"[TIMING] Starting CMake build with targets: {targets}")
         try:
             subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
+            build_elapsed = time.time() - build_start
+            logging.info(f"[TIMING] CMake build completed in {build_elapsed:.2f}s")
         except OSError as e:
+            build_elapsed = time.time() - build_start
+            logging.error(f"[TIMING] CMake build failed after {build_elapsed:.2f}s")
             raise RuntimeError(f"Build library failed: {e}")
+
         # Install the libraries
         install_args = [
             "cmake",
             "--install",
             ".",
         ]
+        install_start = time.time()
+        logging.info("[TIMING] Starting CMake install...")
         try:
             subprocess.check_call(install_args, cwd=self.build_temp)
+            install_elapsed = time.time() - install_start
+            logging.info(f"[TIMING] CMake install completed in {install_elapsed:.2f}s")
         except OSError as e:
+            install_elapsed = time.time() - install_start
+            logging.error(f"[TIMING] CMake install failed after {install_elapsed:.2f}s")
             raise RuntimeError(f"Install library failed: {e}")
 
         # copy back to build folder for editable build
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             import shutil
 
+            copy_so_start = time.time()
+            logging.info("[TIMING] Starting .so files copy...")
+            so_count = 0
             for root, _, files in os.walk(self.build_temp):
                 for file in files:
                     if file.endswith(".so"):
@@ -392,6 +462,9 @@ class cmake_build_ext(build_ext):
                         dst_path = os.path.join(self.build_lib, "vllm_ascend", file)
                         shutil.copy(src_path, dst_path)
                         print(f"Copy: {src_path} -> {dst_path}")
+                        so_count += 1
+            copy_so_elapsed = time.time() - copy_so_start
+            logging.info(f"[TIMING] Copied {so_count} .so files in {copy_so_elapsed:.2f}s")
 
         # copy back _cann_ops_custom directory
         src_cann_ops_custom = os.path.join(ROOT_DIR, "vllm_ascend", "_cann_ops_custom")
@@ -399,16 +472,30 @@ class cmake_build_ext(build_ext):
         if os.path.exists(src_cann_ops_custom):
             import shutil
 
+            copy_cann_start = time.time()
+            logging.info("[TIMING] Starting _cann_ops_custom directory copy...")
             if os.path.exists(dst_cann_ops_custom):
                 shutil.rmtree(dst_cann_ops_custom)
             shutil.copytree(src_cann_ops_custom, dst_cann_ops_custom)
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
+            copy_cann_elapsed = time.time() - copy_cann_start
+            logging.info(f"[TIMING] _cann_ops_custom directory copied in {copy_cann_elapsed:.2f}s")
+
+        overall_elapsed = time.time() - overall_start
+        logging.info(f"[TIMING] ========== build_extensions completed in {overall_elapsed:.2f}s ==========")
 
     def run(self):
+        run_start = time.time()
+        logging.info("[TIMING] ========== Starting cmake_build_ext.run() ==========")
+
         # First, ensure ACLNN custom-ops is built and installed.
         self.run_command("build_aclnn")
+
         # Then, run the standard build_ext command to compile the extensions
         super().run()
+
+        run_elapsed = time.time() - run_start
+        logging.info(f"[TIMING] ========== cmake_build_ext.run() completed in {run_elapsed:.2f}s ==========")
 
 
 class custom_install(install):
