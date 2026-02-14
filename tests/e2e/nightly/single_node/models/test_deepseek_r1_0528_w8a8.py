@@ -63,10 +63,7 @@ aisbench_cases = [{
 }]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("mode", MODES)
-async def test_models(model: str, mode: str) -> None:
+def config():
     port = get_open_port()
     env_dict = {
         "OMP_NUM_THREADS": "10",
@@ -85,6 +82,13 @@ async def test_models(model: str, mode: str) -> None:
         "--speculative-config",
         json.dumps(speculative_config)
     ]
+    return port, env_dict, additional_config, server_args
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("mode", MODES)
+async def test_models(model: str, mode: str) -> None:
+    port, env_dict, additional_config, server_args = config()
     if mode == "single":
         server_args.append("--enforce-eager")
     server_args.extend(["--additional-config", json.dumps(additional_config)])
