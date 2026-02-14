@@ -146,10 +146,10 @@ jobs:
       # Each version should be tested
       fail-fast: false
       matrix:
-        vllm_verison: [releases-v0.13.0, releases-v0.13.0-openeuler, main, main-openeuler]
+        vllm_version: [releases-v0.13.0, releases-v0.13.0-openeuler, main, main-openeuler]
     runs-on: linux-aarch64-a2b3-1
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_verison }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_version }}
     steps:
       - name: Check NPU/CANN and git info
         run: |
