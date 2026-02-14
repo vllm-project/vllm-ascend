@@ -30,6 +30,7 @@ class AscendConfig:
     """
 
     def __init__(self, vllm_config: "VllmConfig"):
+        self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
@@ -84,7 +85,7 @@ class AscendConfig:
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
-        self.enable_cpu_binding = additional_config.get("enable_cpu_binding", False)
+        self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
@@ -144,14 +145,14 @@ class AscendConfig:
         if os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0") == "1":
             MAX_PREFETCH_WEIGHT_SIZE: int = 18 * 1024 * 1024
             gate_up_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
-            down_prefetch_szie = int(os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
+            down_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
             self.weight_prefetch_config.set_mlp_pre_version_compatibale_config(
-                gate_up_prefetch_size, down_prefetch_szie
+                gate_up_prefetch_size, down_prefetch_size
             )
             logger.info_once(
                 f"MLP weight prefetch enabled from env variable VLLM_ASCEND_ENABLE_PREFETCH_MLP."
                 f"gate_up_prefetch_size={gate_up_prefetch_size}, "
-                f"down_prefetch_szie={down_prefetch_szie}."
+                f"down_prefetch_size={down_prefetch_size}."
             )
             warnings.warn(
                 "VLLM_ASCEND_ENABLE_PREFETCH_MLP is deprecated and will be removed in a v0.16.0 version. "
@@ -159,6 +160,47 @@ class AscendConfig:
                 DeprecationWarning,
                 stacklevel=2,
             )
+
+    def update_compile_ranges_split_points(self):
+        vllm_config = self.vllm_config
+        if self.npugraph_ex_config.enable:
+            if self.npugraph_ex_config.fuse_allreduce_rms:
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
+
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                logger.debug(
+                    "set compile_ranges_split_points to "
+                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                )
+
+        else:
+            new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+            if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
+
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                logger.debug(
+                    "set compile_ranges_split_points to "
+                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                )
+
+            from vllm_ascend.utils import is_moe_model
+
+            if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config):
+                from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_threshold
+
+                sp_threshold = get_sp_threshold(vllm_config)
+                new_compile_ranges_split_points.append(sp_threshold)
+                logger.debug(f"add {sp_threshold} to compile_ranges_split_points for sequence parallelism")
+            if len(new_compile_ranges_split_points) > len(vllm_config.compilation_config.compile_ranges_split_points):
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
 
 
 class FinegrainedTPConfig:

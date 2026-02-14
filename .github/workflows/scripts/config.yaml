@@ -126,10 +126,14 @@ e2e-multicard-2-cards:
     estimated_time: 70
   - name: tests/e2e/multicard/2-cards/test_qwen3_moe.py
     estimated_time: 1050
+  - name: tests/e2e/multicard/2-cards/test_qwen3_moe_routing_replay.py
+    estimated_time: 1050
   - name: tests/e2e/multicard/2-cards/test_single_request_aclgraph.py
     estimated_time: 215
   - name: tests/e2e/multicard/2-cards/test_disaggregated_encoder.py
     estimated_time: 90
+  - name: tests/e2e/multicard/2-cards/test_sp_pass.py
+    estimated_time: 300
 
 e2e-multicard-4-cards:
   # TODO: recover skipped tests
@@ -152,4 +156,3 @@ e2e-multicard-4-cards:
     is_skipped: true
   - name: tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py
     estimated_time: 60
-    is_skipped: true

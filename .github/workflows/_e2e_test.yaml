@@ -17,16 +17,71 @@ on:
         type: boolean
 
 jobs:
+  select-image:
+    runs-on: linux-aarch64-a2b3-0
+    outputs:
+      image: ${{ steps.select.outputs.image }}
+      image_a3: ${{ steps.select.outputs.image_a3 }}
+      image_310p: ${{ steps.select.outputs.image_310p }}
+    steps:
+      - name: Select image based on base branch
+        id: select
+        env:
+          IMAGE_NAMESPACE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend
+        run: |
+          BRANCH="${{ github.base_ref }}"
+          BRANCH_TAG="${BRANCH//\//-}"
+          MAIN_IMAGE="${{ inputs.image }}"
+          MAIN_IMAGE_A3="${{ inputs.image }}-a3"
+          MAIN_IMAGE_310P="${{ inputs.image }}-310p"
+          if [ "$BRANCH_TAG" = "main" ]; then
+            echo "Target branch is main, using main images: ${MAIN_IMAGE} / ${MAIN_IMAGE_A3} / ${MAIN_IMAGE_310P}"
+            echo "image=${MAIN_IMAGE}" >> $GITHUB_OUTPUT
+            echo "image_a3=${MAIN_IMAGE_A3}" >> $GITHUB_OUTPUT
+            echo "image_310p=${MAIN_IMAGE_310P}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # while target branch is not main
+          BRANCH_IMAGE="${IMAGE_NAMESPACE}:${BRANCH_TAG}"
+          BRANCH_IMAGE_A3="${IMAGE_NAMESPACE}:${BRANCH_TAG}-a3"
+          BRANCH_IMAGE_310P="${IMAGE_NAMESPACE}:${BRANCH_TAG}-310p"
+          # Check if branch-specific A2 image exists via IMAGE_NAMESPACE, fallback to main if not
+          if docker manifest inspect "${BRANCH_IMAGE}" > /dev/null 2>&1; then
+            echo "Using branch image: ${BRANCH_IMAGE}"
+            echo "image=${BRANCH_IMAGE}" >> $GITHUB_OUTPUT
+          else
+            echo "Branch image not found, falling back to ${MAIN_IMAGE}"
+            echo "image=${MAIN_IMAGE}" >> $GITHUB_OUTPUT
+          fi
+          # Check if branch-specific A3 image exists via IMAGE_NAMESPACE, fallback to main if not
+          if docker manifest inspect "${BRANCH_IMAGE_A3}" > /dev/null 2>&1; then
+            echo "Using branch A3 image: ${BRANCH_IMAGE_A3}"
+            echo "image_a3=${BRANCH_IMAGE_A3}" >> $GITHUB_OUTPUT
+          else
+            echo "Branch A3 image not found, falling back to ${MAIN_IMAGE_A3}"
+            echo "image_a3=${MAIN_IMAGE_A3}" >> $GITHUB_OUTPUT
+          fi
+          # Check if branch-specific 310P image exists via IMAGE_NAMESPACE, fallback to main if not
+          if docker manifest inspect "${BRANCH_IMAGE_310P}" > /dev/null 2>&1; then
+            echo "Using branch 310P image: ${BRANCH_IMAGE_310P}"
+            echo "image_310p=${BRANCH_IMAGE_310P}" >> $GITHUB_OUTPUT
+          else
+            echo "Branch 310P image not found, falling back to ${MAIN_IMAGE_310P}"
+            echo "image_310p=${MAIN_IMAGE_310P}" >> $GITHUB_OUTPUT
+          fi
+
   e2e-light:
     name: singlecard-light
     if: ${{ inputs.type == 'light' }}
+    needs: [select-image]
     runs-on: linux-aarch64-a2b3-1
     strategy:
       fail-fast: false
       matrix:
         part: [0]
     container:
-      image: ${{ inputs.image }}
+      image: ${{ needs.select-image.outputs.image }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -34,6 +89,8 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -46,14 +103,11 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
-
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -63,19 +117,39 @@ jobs:
           path: ./vllm-empty
           fetch-depth: 1
 
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
+      - name: Install vllm-project/vllm
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y vllm
+          rm -rf /vllm-workspace/vllm
+          cp -r ./vllm-empty /vllm-workspace/vllm
+          VLLM_TARGET_DEVICE=empty pip install -v -e /vllm-workspace/vllm/
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          DEST="/vllm-workspace/vllm-ascend"
+          IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
+          cp -rT . "${DEST}/"
+          if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
+            C_CHANGES=$(git diff "${IMAGE_SHA}"..HEAD --name-only -- \
+              csrc/ cmake/ CMakeLists.txt setup.py requirements.txt requirements-dev.txt)
+            echo "[debug] C_CHANGES=${C_CHANGES:-<empty>}"
+          else
+            echo "[debug] IMAGE_SHA not found in local history (empty or unreachable), forcing reinstall"
+            C_CHANGES="yes"
+          fi
+          
+          pip install -r ${DEST}/requirements-dev.txt
+          if [ -n "$C_CHANGES" ]; then
+            echo "[debug] C code / build changes detected, reinstalling vllm-ascend..."
+            pip install -v -e "${DEST}/"
+          else
+            echo "[debug] No C code / build changes detected, skipping reinstall."
+          fi
 
       - name: Run vllm-project/vllm-ascend test
+        working-directory: /vllm-workspace/vllm-ascend
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -85,20 +159,24 @@ jobs:
   e2e-full:
     name: singlecard-full
     if: ${{ inputs.type == 'full' }}
+    needs: [select-image]
     runs-on: linux-aarch64-a2b3-1
     strategy:
       fail-fast: false
       matrix:
         part: [0, 1]
     container:
-      image: ${{ inputs.image }}
+      image: ${{ needs.select-image.outputs.image }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        MODELSCOPE_HUB_FILE_LOCK: False
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Check npu and CANN info
         run: |
@@ -112,14 +190,11 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
-
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -129,18 +204,38 @@ jobs:
           path: ./vllm-empty
           fetch-depth: 1
 
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
+      - name: Install vllm-project/vllm
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y vllm
+          rm -rf /vllm-workspace/vllm
+          cp -r ./vllm-empty /vllm-workspace/vllm
+          VLLM_TARGET_DEVICE=empty pip install -v -e /vllm-workspace/vllm/
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          DEST="/vllm-workspace/vllm-ascend"
+          IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
+          cp -rT . "${DEST}/"
+          if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
+            C_CHANGES=$(git diff "${IMAGE_SHA}"..HEAD --name-only -- \
+              csrc/ cmake/ CMakeLists.txt setup.py requirements.txt requirements-dev.txt)
+            echo "[debug] C_CHANGES=${C_CHANGES:-<empty>}"
+          else
+            echo "[debug] IMAGE_SHA not found in local history (empty or unreachable), forcing reinstall"
+            C_CHANGES="yes"
+          fi
+          pip install -r ${DEST}/requirements-dev.txt
+          if [ -n "$C_CHANGES" ]; then
+            echo "[debug] C code / build changes detected, reinstalling vllm-ascend..."
+            pip install -v -e "${DEST}/"
+          else
+            echo "[debug] No C code / build changes detected, skipping reinstall."
+          fi
+
       - name: Run e2e test
+        working-directory: /vllm-workspace/vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
@@ -150,13 +245,14 @@ jobs:
   e2e-2-cards-light:
     name: multicard-2-light
     if: ${{ inputs.type == 'light' }}
+    needs: [select-image]
     runs-on: linux-aarch64-a3-2
     strategy:
       fail-fast: false
       matrix:
         part: [0]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: ${{ needs.select-image.outputs.image_a3 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -165,6 +261,8 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -177,14 +275,11 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
-
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -194,18 +289,38 @@ jobs:
           path: ./vllm-empty
           fetch-depth: 1
 
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
+      - name: Install vllm-project/vllm
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y vllm
+          rm -rf /vllm-workspace/vllm
+          cp -r ./vllm-empty /vllm-workspace/vllm
+          VLLM_TARGET_DEVICE=empty pip install -v -e /vllm-workspace/vllm/
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          DEST="/vllm-workspace/vllm-ascend"
+          IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
+          cp -rT . "${DEST}/"
+          if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
+            C_CHANGES=$(git diff "${IMAGE_SHA}"..HEAD --name-only -- \
+              csrc/ cmake/ CMakeLists.txt setup.py requirements.txt requirements-dev.txt)
+            echo "[debug] C_CHANGES=${C_CHANGES:-<empty>}"
+          else
+            echo "[debug] IMAGE_SHA not found in local history (empty or unreachable), forcing reinstall"
+            C_CHANGES="yes"
+          fi
+          pip install -r ${DEST}/requirements-dev.txt
+          if [ -n "$C_CHANGES" ]; then
+            echo "[debug] C code / build changes detected, reinstalling vllm-ascend..."
+            pip install -v -e "${DEST}/"
+          else
+            echo "[debug] No C code / build changes detected, skipping reinstall."
+          fi
+
       - name: Run vllm-project/vllm-ascend test (light)
+        working-directory: /vllm-workspace/vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
@@ -214,13 +329,14 @@ jobs:
   e2e-2-cards-full:
     name: multicard-2-full
     if: ${{ inputs.type == 'full' }}
+    needs: [select-image]
     runs-on: linux-aarch64-a3-2
     strategy:
       fail-fast: false
       matrix:
         part: [0]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: ${{ needs.select-image.outputs.image_a3 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -229,6 +345,8 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -241,14 +359,11 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
-
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -258,18 +373,38 @@ jobs:
           path: ./vllm-empty
           fetch-depth: 1
 
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
+      - name: Install vllm-project/vllm
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y vllm
+          rm -rf /vllm-workspace/vllm
+          cp -r ./vllm-empty /vllm-workspace/vllm
+          VLLM_TARGET_DEVICE=empty pip install -v -e /vllm-workspace/vllm/
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          DEST="/vllm-workspace/vllm-ascend"
+          IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
+          cp -rT . "${DEST}/"
+          if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
+            C_CHANGES=$(git diff "${IMAGE_SHA}"..HEAD --name-only -- \
+              csrc/ cmake/ CMakeLists.txt setup.py requirements.txt requirements-dev.txt)
+            echo "[debug] C_CHANGES=${C_CHANGES:-<empty>}"
+          else
+            echo "[debug] IMAGE_SHA not found in local history (empty or unreachable), forcing reinstall"
+            C_CHANGES="yes"
+          fi
+          pip install -r ${DEST}/requirements-dev.txt
+          if [ -n "$C_CHANGES" ]; then
+            echo "[debug] C code / build changes detected, reinstalling vllm-ascend..."
+            pip install -v -e "${DEST}/"
+          else
+            echo "[debug] No C code / build changes detected, skipping reinstall."
+          fi
+
       - name: Run vllm-project/vllm-ascend test (full)
+        working-directory: /vllm-workspace/vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
@@ -277,6 +412,7 @@ jobs:
 
       - name: Run vllm-project/vllm-ascend test (non triton)
         if: ${{ inputs.type == 'full' && matrix.part == 0 }}
+        working-directory: /vllm-workspace/vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
@@ -286,13 +422,14 @@ jobs:
   e2e-4-cards-full:
     name: multicard-4-full
     if: ${{ inputs.type == 'full' }}
+    needs: [select-image]
     runs-on: linux-aarch64-a3-4
     strategy:
       fail-fast: false
       matrix:
         part: [0]
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: ${{ needs.select-image.outputs.image_a3 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -300,6 +437,8 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -312,14 +451,11 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
-
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -329,19 +465,38 @@ jobs:
           path: ./vllm-empty
           fetch-depth: 1
 
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
+      - name: Install vllm-project/vllm
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y vllm
+          rm -rf /vllm-workspace/vllm
+          cp -r ./vllm-empty /vllm-workspace/vllm
+          VLLM_TARGET_DEVICE=empty pip install -v -e /vllm-workspace/vllm/
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          DEST="/vllm-workspace/vllm-ascend"
+          IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
+          cp -rT . "${DEST}/"
+          if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
+            C_CHANGES=$(git diff "${IMAGE_SHA}"..HEAD --name-only -- \
+              csrc/ cmake/ CMakeLists.txt setup.py requirements.txt requirements-dev.txt)
+            echo "[debug] C_CHANGES=${C_CHANGES:-<empty>}"
+          else
+            echo "[debug] IMAGE_SHA not found in local history (empty or unreachable), forcing reinstall"
+            C_CHANGES="yes"
+          fi
+          pip install -r ${DEST}/requirements-dev.txt
+          if [ -n "$C_CHANGES" ]; then
+            echo "[debug] C code / build changes detected, reinstalling vllm-ascend..."
+            pip install -v -e "${DEST}/"
+          else
+            echo "[debug] No C code / build changes detected, skipping reinstall."
+          fi
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
+        working-directory: /vllm-workspace/vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
@@ -351,17 +506,24 @@ jobs:
     name: 310p singlecard
     runs-on: linux-aarch64-310p-1
     if: ${{ inputs.contains_310 }}
+    needs: [select-image]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-310p-ubuntu22.04-py3.11
+      image: ${{ needs.select-image.outputs.image_310p }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
     steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: Check npu and CANN info
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
       - name: Config mirrors
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
@@ -369,14 +531,11 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -386,19 +545,38 @@ jobs:
           path: ./vllm-empty
           fetch-depth: 1
 
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
+      - name: Install vllm-project/vllm
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y vllm
+          rm -rf /vllm-workspace/vllm
+          cp -r ./vllm-empty /vllm-workspace/vllm
+          VLLM_TARGET_DEVICE=empty pip install -v -e /vllm-workspace/vllm/
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          DEST="/vllm-workspace/vllm-ascend"
+          IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
+          cp -rT . "${DEST}/"
+          if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
+            C_CHANGES=$(git diff "${IMAGE_SHA}"..HEAD --name-only -- \
+              csrc/ cmake/ CMakeLists.txt setup.py requirements.txt requirements-dev.txt)
+            echo "[debug] C_CHANGES=${C_CHANGES:-<empty>}"
+          else
+            echo "[debug] IMAGE_SHA not found in local history (empty or unreachable), forcing reinstall"
+            C_CHANGES="yes"
+          fi
+          pip install -r ${DEST}/requirements-dev.txt
+          if [ -n "$C_CHANGES" ]; then
+            echo "[debug] C code / build changes detected, reinstalling vllm-ascend..."
+            pip install -v -e "${DEST}/"
+          else
+            echo "[debug] No C code / build changes detected, skipping reinstall."
+          fi
 
       - name: Run vllm-project/vllm-ascend test
+        working-directory: /vllm-workspace/vllm-ascend
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -409,17 +587,24 @@ jobs:
     name: 310p multicards 4cards
     runs-on: linux-aarch64-310p-4
     if: ${{ inputs.contains_310 }}
+    needs: [select-image]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-310p-ubuntu22.04-py3.11
+      image: ${{ needs.select-image.outputs.image_310p }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
     steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: Check npu and CANN info
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
       - name: Config mirrors
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
@@ -427,14 +612,11 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -444,19 +626,38 @@ jobs:
           path: ./vllm-empty
           fetch-depth: 1
 
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
+      - name: Install vllm-project/vllm
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y vllm
+          rm -rf /vllm-workspace/vllm
+          cp -r ./vllm-empty /vllm-workspace/vllm
+          VLLM_TARGET_DEVICE=empty pip install -v -e /vllm-workspace/vllm/
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          DEST="/vllm-workspace/vllm-ascend"
+          IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
+          cp -rT . "${DEST}/"
+          if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
+            C_CHANGES=$(git diff "${IMAGE_SHA}"..HEAD --name-only -- \
+              csrc/ cmake/ CMakeLists.txt setup.py requirements.txt requirements-dev.txt)
+            echo "[debug] C_CHANGES=${C_CHANGES:-<empty>}"
+          else
+            echo "[debug] IMAGE_SHA not found in local history (empty or unreachable), forcing reinstall"
+            C_CHANGES="yes"
+          fi
+          pip install -r ${DEST}/requirements-dev.txt
+          if [ -n "$C_CHANGES" ]; then
+            echo "[debug] C code / build changes detected, reinstalling vllm-ascend..."
+            pip install -v -e "${DEST}/"
+          else
+            echo "[debug] No C code / build changes detected, skipping reinstall."
+          fi
 
       - name: Run vllm-project/vllm-ascend test
+        working-directory: /vllm-workspace/vllm-ascend
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
