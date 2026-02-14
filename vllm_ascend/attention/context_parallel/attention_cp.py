@@ -937,15 +937,14 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             # qkv init
             num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
-            prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
-            key = key[self.pcp_size * num_decode_tokens :].contiguous()
-            value = value[self.pcp_size * num_decode_tokens :].contiguous()
             if attn_metadata.use_hybrid_attn:
                 assert attn_metadata.prefill.pcp_metadata is not None
                 fa_query_idx = attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx
                 prefill_query = torch.index_select(query[self.pcp_size * num_decode_tokens :], 0, fa_query_idx)
             else:
-                prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded]
+                prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+            key = key[self.pcp_size * num_decode_tokens :].contiguous()
+            value = value[self.pcp_size * num_decode_tokens :].contiguous()
 
             if has_chunked_context:
                 # all_gather q for chunked prefill // overlap the computation inner current chunk
