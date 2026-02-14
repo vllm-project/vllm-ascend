@@ -285,27 +285,23 @@ class AscendMlaCPImpl(AscendMLAImpl):
         self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
     @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config=None,
-        speculative_config=None,
-        num_dcp_pcp_tokens=None,
-        draft_attn_metadatas=None,
-    ):
+    def get_graph_params(forward_context):
         if forward_context.is_draft_model:
-            graph_params = get_draft_graph_params()
-        else:
-            graph_params = get_graph_params()
+            return get_draft_graph_params()
+        return get_graph_params()
+
+    @staticmethod
+    def update_graph_params(update_ctx):
+        if update_ctx.graph_params is None:
+            raise ValueError("graph_params must be provided for MLA CP update")
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
-        with torch.npu.stream(update_stream):
+        with torch.npu.stream(update_ctx.update_stream):
             for key, param, handle, event in zip(
-                forward_context.attn_metadata,
-                graph_params.attn_params[num_tokens],
-                graph_params.handles[num_tokens],
-                graph_params.events[num_tokens],
+                update_ctx.forward_context.attn_metadata,
+                update_ctx.graph_params.attn_params[update_ctx.num_tokens],
+                update_ctx.graph_params.handles[update_ctx.num_tokens],
+                update_ctx.graph_params.events[update_ctx.num_tokens],
             ):
                 (
                     q_nope,
@@ -326,17 +322,19 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     softmax_lse,
                 ) = param
 
-                decode_meta = forward_context.attn_metadata[key].decode
+                decode_meta = update_ctx.forward_context.attn_metadata[key].decode
                 seq_len = decode_meta.cp_seq_len
                 if isinstance(seq_len, torch.Tensor):
                     seq_len = seq_len.tolist()
                 actual_seq_lengths_kv = seq_len
 
-                pad_length = num_tokens - len(actual_seq_lengths_kv)
+                pad_length = update_ctx.num_tokens - len(actual_seq_lengths_kv)
                 if pad_length > 0:
-                    actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (num_tokens - len(actual_seq_lengths_kv))
+                    actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (
+                        update_ctx.num_tokens - len(actual_seq_lengths_kv)
+                    )
 
-                torch.npu.graph_task_update_begin(update_stream, handle)
+                torch.npu.graph_task_update_begin(update_ctx.update_stream, handle)
 
                 torch_npu.npu_fused_infer_attention_score.out(
                     q_nope,
@@ -357,12 +355,12 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     block_size=block_size,
                     actual_seq_lengths_kv=actual_seq_lengths_kv,
                     actual_seq_lengths=actual_seq_lengths,
-                    workspace=graph_params.workspaces.get(num_tokens),
+                    workspace=update_ctx.graph_params.workspaces.get(update_ctx.num_tokens),
                     out=[attn_output, softmax_lse],
                 )
-                torch.npu.graph_task_update_end(update_stream)
+                torch.npu.graph_task_update_end(update_ctx.update_stream)
 
-                event.record(update_stream)
+                event.record(update_ctx.update_stream)
 
     def get_num_actual_tokens(self, attn_metadata: M):
         if self.pcp_size > 1:
