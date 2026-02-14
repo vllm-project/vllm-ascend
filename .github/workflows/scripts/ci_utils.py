@@ -44,6 +44,8 @@ def run_e2e_files(
     success = True
     passed_tests = []
     failed_tests = []
+    mapping_flag = os.getenv("ENABLE_MAPPING_GEN", "").strip().lower()
+    mapping_enabled = mapping_flag in {"1", "true"}
 
     for i, file in enumerate(files):
         filename, estimated_time = file.name, file.estimated_time
@@ -52,8 +54,19 @@ def run_e2e_files(
         logger.info(f".\n.\n{Colors.HEADER}Begin ({i}/{len(files)}):{Colors.ENDC}\npytest -sv {full_path}\n.\n.\n")
         file_tic = time.perf_counter()
 
+        pytest_cmd = ["pytest", "-sv", "--durations=0", "--color=yes", full_path]
+        if mapping_enabled:
+            pytest_cmd.extend(
+                [
+                    "--cov=vllm_ascend",
+                    "--cov-context=test",
+                    "--cov-append",
+                    "--cov-report=",
+                ]
+            )
+
         process = subprocess.Popen(
-            ["pytest", "-sv", "--durations=0", "--color=yes", full_path],
+            pytest_cmd,
             stdout=None,
             stderr=None,
             env=os.environ,
