@@ -15,26 +15,37 @@
 # limitations under the License.
 #
 import torch
-import torch._inductor.pattern_matcher as pm
-from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
+from torch._inductor.pattern_matcher import Match, PatternMatcherPass, PatternPrettyPrinter
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 
+from vllm_ascend.compilation.passes.base_pattern import BasePattern
+from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.15.0"):
+    from vllm.compilation.inductor_pass import get_pass_context  # type: ignore
     from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
 else:
+    from vllm.compilation.passes.inductor_pass import get_pass_context
     from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THREHOLD = 512
 
 
-class MiddleLayerMatmulAllReduceAddRMSNormPattern:
+def get_compile_range_and_extra_stream_check():
+    def check_func(match: Match) -> bool:
+        compile_range = get_pass_context().compile_range
+        return extra_stream_scope_check(match) and compile_range.start > ALLREDUCE_NORM_FUSE_THREHOLD
+
+    return check_func
+
+
+class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
     """
     recognizing the Matmul+AllReduce+AddRMSNorm computation pattern
     AllReduce is optimized in the fusion operator to a two-stage communication of ReduceScatter+AllGather
@@ -58,7 +69,7 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern:
         rms_norm_weight = torch.randn(hidden_size, device="npu")
         return [x, weight, residual, rms_norm_weight]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def get_pattern(self):
         def pattern(x, weight, residual, rms_norm_weight):
             mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
             all_reduce_ = tensor_model_parallel_all_reduce(mm)
@@ -68,6 +79,9 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern:
 
             return out0, out1
 
+        return pattern
+
+    def get_replacement(self):
         def replacement(x, weight, residual, rms_norm_weight):
             out0, out1 = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(
                 x,
@@ -83,13 +97,15 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern:
             )
             return out0, out1
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+        return replacement
+
+    def get_extra_stream_scope_check(self):
+        return get_compile_range_and_extra_stream_check()
 
 
-class LastLayerMatmulAllReduceAddRMSNormPattern:
+class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
     def __init__(self, vllm_config, eps=1e-6):
-        self.vllm_config = vllm_config
-        self.eps = eps
+        super().__init__(vllm_config, eps)
         device_group = get_tp_group().device_group
         backend = device_group._get_backend(torch.device("npu"))
         self.local_rank = torch.distributed.get_rank(group=device_group)
@@ -105,7 +121,7 @@ class LastLayerMatmulAllReduceAddRMSNormPattern:
         rms_norm_weight = torch.randn(hidden_size, device="npu")
         return [x, weight, residual, rms_norm_weight]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def get_pattern(self):
         def pattern(x, weight, residual, rms_norm_weight):
             mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
             all_reduce_ = tensor_model_parallel_all_reduce(mm)
@@ -113,6 +129,9 @@ class LastLayerMatmulAllReduceAddRMSNormPattern:
 
             return output[0]
 
+        return pattern
+
+    def get_replacement(self):
         def replacement(x, weight, residual, rms_norm_weight):
             out0, _ = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(
                 x,
@@ -126,9 +145,11 @@ class LastLayerMatmulAllReduceAddRMSNormPattern:
                 True,
                 False,
             )
-            return out0
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+        return replacement
+
+    def get_extra_stream_scope_check(self):
+        return get_compile_range_and_extra_stream_check()
 
 
 class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
