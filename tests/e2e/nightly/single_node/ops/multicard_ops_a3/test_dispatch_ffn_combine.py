@@ -11,7 +11,7 @@ from vllm_ascend.utils import enable_custom_op
 enable_custom_op()
 
 
-class TestDisptachFFNCombine:
+class TestDispatchFFNCombine:
 
     def __init__(self, rank, world_size, port):
         self.rank = rank
@@ -208,7 +208,7 @@ class TestDisptachFFNCombine:
 
 
 def worker(rank: int, world_size: int, port: int, q: mp.SimpleQueue):
-    op = TestDisptachFFNCombine(rank, world_size, port)
+    op = TestDispatchFFNCombine(rank, world_size, port)
     op.generate_hcom()
     out1 = op.run_tensor_list()
     q.put(out1)
