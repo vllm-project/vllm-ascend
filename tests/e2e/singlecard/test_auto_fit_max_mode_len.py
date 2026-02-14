@@ -21,6 +21,7 @@ import torch
 from vllm.config import ModelConfig, VllmConfig
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.kv_cache_interface import FullAttentionSpec
+from tests.e2e.conftest import wait_random_secs_zero_to_max
 
 
 def new_kv_cache_spec(
@@ -42,6 +43,8 @@ def new_kv_cache_spec(
         attention_chunk_size=attention_chunk_size,
     )
 
+
+@wait_random_secs_zero_to_max()
 def test_auto_fit_max_model_len():
     """Test that max_model_len=-1 auto-fits to available NPU memory."""
     # Create config with original_max_model_len=-1 to trigger auto-fit
@@ -81,6 +84,7 @@ def test_auto_fit_max_model_len():
     assert vllm_config.model_config.max_model_len > 0
 
 
+@wait_random_secs_zero_to_max()
 def test_auto_fit_max_model_len_not_triggered():
     """Test that auto-fit is not triggered when original_max_model_len is not -1."""
     model_config = ModelConfig(max_model_len=16)

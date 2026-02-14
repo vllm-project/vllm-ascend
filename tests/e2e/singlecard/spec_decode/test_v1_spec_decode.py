@@ -12,7 +12,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_random_secs_zero_to_max
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -327,6 +327,7 @@ def test_eagle_logprobs(
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
 @pytest.mark.parametrize("async_scheduling", [True, False])
+@wait_random_secs_zero_to_max()
 def test_llama_qwen_eagle_acceptance(
     method: str,
     num_speculative_tokens: int,
