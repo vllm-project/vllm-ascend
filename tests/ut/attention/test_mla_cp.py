@@ -538,11 +538,11 @@ class TestAscendMLAImpl(TestBase):
         USED_BLOCKS = 3
         # pcp_size, dcp_size, nums_tokens_per_rank, nums_all_rank_context, num_prefills, num_decodes, num_seqs, cp_local_block_size, num_computed_tokens, num_computed_tokens_of_pcp_dcp
         test_cases = [
-            (2, 2, [4], [128], 1, 0, 1, 1, [[[32, 32], [32, 32]]]),
-            (1, 2, [4], [128], 1, 0, 1, 1, [[[64, 64]]]),
-            (2, 1, [4], [128], 1, 0, 1, 1, [[[64], [64]]]),
-            (2, 2, [4, 7], [128, 128], 2, 0, 2, 1, [[[32, 32], [32, 32]],
-                                                    [[32, 32], [32, 32]]]),
+            (2, 2, [4], [128], 1, 0, 1, 1, torch.tensor([[[32, 32], [32, 32]]])),
+            (1, 2, [4], [128], 1, 0, 1, 1, torch.tensor([[[64, 64]]])),
+            (2, 1, [4], [128], 1, 0, 1, 1, torch.tensor([[[64], [64]]])),
+            (2, 2, [4, 7], [128, 128], 2, 0, 2, 1, torch.tensor([[[32, 32], [32, 32]],
+                                                                 [[32, 32], [32, 32]]])),
         ]
         # kv cache tensor
         kv_cache_0 = torch.randn(NUM_BLOCKS,
@@ -637,11 +637,11 @@ class TestAscendMLAImpl(TestBase):
         max_model_len = 4096
         max_num_seqs = 25
         test_cases = [
-            (2, 2, [4], [128], 1, 0, 1, 1, [[[32, 32], [32, 32]]]),
-            (1, 2, [4], [128], 1, 0, 1, 1, [[[64, 64]]]),
-            (2, 1, [4], [128], 1, 0, 1, 1, [[[64], [64]]]),
-            (2, 2, [4, 7], [128, 128], 2, 0, 2, 1, [[[32, 32], [32, 32]],
-                                                    [[32, 32], [32, 32]]]),
+            (2, 2, [4], [128], 1, 0, 1, 1, torch.tensor([[[32, 32], [32, 32]]])),
+            (1, 2, [4], [128], 1, 0, 1, 1, torch.tensor([[[64, 64]]])),
+            (2, 1, [4], [128], 1, 0, 1, 1, torch.tensor([[[64], [64]]])),
+            (2, 2, [4, 7], [128, 128], 2, 0, 2, 1, torch.tensor([[[32, 32], [32, 32]],
+                                                                 [[32, 32], [32, 32]]])),
         ]
         for test_case in test_cases:
             pcp_size, dcp_size, nums_tokens_per_rank, nums_all_rank_context, num_prefills, num_decodes, num_seqs, cp_local_block_size, num_computed_tokens_of_pcp_dcp = test_case

@@ -145,7 +145,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         assert long_seq_metadata is not None
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
-        local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[self.num_decodes_flatten :]).reshape(
+        local_context_lens_allranks = num_computed_tokens_of_pcp_dcp[self.num_decodes_flatten :].reshape(
             -1, self.dcp_size * self.pcp_size
         )
         # Note(qcs): The max local context lengths
@@ -230,15 +230,11 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
         # [bs, pcp_size, dcp_size]
-        num_computed_tokens_of_cp_dcp_array = np.array(num_computed_tokens_of_pcp_dcp)[: self.num_decodes_flatten]
-
-        cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank, self.dcp_rank]
-        cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
+        cp_seq_len = num_computed_tokens_of_pcp_dcp[: self.num_decodes_flatten, self.pcp_rank, self.dcp_rank]
         decode_metadata.cp_seq_len = cp_seq_len.tolist()
 
         actual_seq_lengths_q = torch.arange(self.num_decodes_flatten) + 1
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
-
         return decode_metadata
 
 
