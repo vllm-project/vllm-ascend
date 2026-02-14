@@ -11,6 +11,7 @@ MAX_POSITION_EMBEDDINGS = [262144]
 NUM_TOKENS = [1, 4, 8, 16, 1024]
 NUM_QKV_HEADS = [(12, 1), (16, 1), (32, 4), (64, 4)]
 HEAD_SIZES = [128]
+ROPE_DIMS = [64, 128]
 EPS = [1e-6]
 DTYPES = [torch.bfloat16]
 SEEDS = [0]
@@ -64,9 +65,10 @@ def rms_norm(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("rope_dim", ROPE_DIMS)
 @torch.inference_mode()
 def test_split_qkv_rmsnorm_rope(max_position_embeddings, num_tokens, num_q_heads, num_kv_heads,
-                                head_size, eps, dtype, seed, device):
+                                head_size, eps, dtype, seed, device, rope_dim):
     torch.manual_seed(seed)
     torch.set_default_device(device)
     init_device_properties_triton()
@@ -81,7 +83,7 @@ def test_split_qkv_rmsnorm_rope(max_position_embeddings, num_tokens, num_q_heads
     k_weight = torch.randn(head_size, dtype=dtype, device=device)
     cos_sin_cache = torch.from_numpy(
         np.random.uniform(0, 1,
-                          [max_position_embeddings, head_size])).to(dtype).npu()
+                          [max_position_embeddings, rope_dim])).to(dtype).npu()
     positions = torch.randint(low=0, high=max_position_embeddings, size=(num_tokens,), dtype=torch.int64, device=device)
     # fused kernel
     q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(input=qkv,
