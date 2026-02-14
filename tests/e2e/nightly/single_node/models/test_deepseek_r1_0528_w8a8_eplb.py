@@ -23,18 +23,7 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
-
-MODELS = [
-    "vllm-ascend/DeepSeek-R1-0528-W8A8",
-]
-
-prompts = [
-    "San Francisco is a",
-]
-
-api_keyword_args = {
-    "max_tokens": 10,
-}
+from .test_deepseek_r1_0528_w8a8 import *
 
 aisbench_cases = [{
     "case_type": "accuracy",
@@ -50,46 +39,23 @@ aisbench_cases = [{
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
-async def test_models(model: str) -> None:
-    port = get_open_port()
-    env_dict = {
-        "OMP_NUM_THREADS": "100",
-        "OMP_PROC_BIND": "false",
-        "HCCL_BUFFSIZE": "200",
-        "VLLM_RPC_TIMEOUT": "3600000",
-        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000",
-        "DISABLE_L2_CACHE": "1",
-        "DYNAMIC_EPLB": "true",
-    }
-    speculative_config = {"num_speculative_tokens": 1, "method": "mtp"}
-    compilation_config = {
-        "cudagraph_capture_sizes": [24],
-        "cudagraph_mode": "FULL_DECODE_ONLY"
-    }
-    additional_config: dict[str, Any] = {
-        "enable_shared_expert_dp": False,
-        "multistream_overlap_shared_expert": False,
-        "eplb_config": {
-            "dynamic_eplb": True,
-            "expert_heat_collection_interval": 512,
-            "algorithm_execution_interval": 100,
-            "num_redundant_experts": 0
+async def test_models_eplb(model: str) -> None:
+    port, env_dict, additional_config, server_args = config()
+    additional_config.update(
+        {
+            "eplb_config": {
+                "dynamic_eplb": "true",
+                "expert_heat_collection_interval": 1000,
+                "algorithm_execution_interval": 50,
+                "eplb_policy_type": 3,
+            }
         }
-    }
-    server_args = [
-        "--quantization", "ascend", "--seed", "1024",
-        "--no-enable-prefix-caching", "--data-parallel-size", "4",
-        "--tensor-parallel-size", "4", "--enable-expert-parallel", "--port",
-        str(port), "--max-model-len", "40000", "--max-num-batched-tokens",
-        "4096", "--max-num-seqs", "12", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.92"
-    ]
-    server_args.extend(
-        ["--speculative-config",
-         json.dumps(speculative_config)])
-    server_args.extend(
-        ["--compilation-config",
-         json.dumps(compilation_config)])
+    )
+    env_dict.update(
+        {
+            "DYNAMIC_EPLB": "true",
+        }
+    )
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
@@ -113,3 +79,4 @@ async def test_models(model: str) -> None:
                            port,
                            aisbench_cases,
                            server_args=server_args)
+
