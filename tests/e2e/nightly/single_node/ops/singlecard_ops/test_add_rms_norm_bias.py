@@ -13,12 +13,7 @@ np.random.seed(seed)
 torch.manual_seed(seed)
 
 
-def npu_add_rms_norm_bias_golden(input_x1,
-                            input_x2,
-                            input_gamma,
-                            input_beta,
-                            kernelType,
-                            epsilon=0.000001):
+def npu_add_rms_norm_bias_golden(input_x1, input_x2, input_gamma, input_beta, kernelType, epsilon=0.000001):
     ori_x_shape = input_x1.shape
     ori_gamma_shape = input_gamma.shape
     xlength = len(ori_x_shape)
@@ -43,14 +38,14 @@ def npu_add_rms_norm_bias_golden(input_x1,
 
     if kernelType == 1:
         oriType = torch.float16
-        xOut = (input_x1.to(oriType) + input_x2.to(oriType))
+        xOut = input_x1.to(oriType) + input_x2.to(oriType)
     elif kernelType == 2:
         oriType = torch.bfloat16
-        x_fp32 = (input_x1.to(torchType32) + input_x2.to(torchType32))
+        x_fp32 = input_x1.to(torchType32) + input_x2.to(torchType32)
         xOut = x_fp32.to(oriType)
     else:
         oriType = torch.float32
-        xOut = (input_x1.to(torchType32) + input_x2.to(torchType32))
+        xOut = input_x1.to(torchType32) + input_x2.to(torchType32)
     x_fp32 = xOut.to(torchType32)
     avgFactor = 1 / gammaSize
     x_2 = torch.pow(x_fp32, 2)
@@ -78,19 +73,12 @@ def npu_add_rms_norm_bias_golden(input_x1,
 
 
 @pytest.mark.parametrize(
-    'row',
+    "row",
     [1, 16, 64, 77, 128, 255, 1000],
 )
 @pytest.mark.parametrize(
-    'col',
-    [
-        8,
-        16,
-        128,
-        3000,
-        7168,
-        15000,
-    ],
+    "col",
+    [8, 16, 128, 3000, 7168, 15000],
 )
 @pytest.mark.parametrize(
     "dtype, atol, rtol, kernelType",
@@ -112,28 +100,22 @@ def test_quant_fpx_linear(row: int, col: int, dtype, atol, rtol, kernelType):
     input_x2 = np.random.uniform(1, 10, size=tuple(shape_x)).astype(np.float32)
     input_x2_tensor = torch.tensor(input_x2).type(dataType)
 
-    input_gamma = np.random.uniform(1, 10,
-                                    size=tuple(shape_gamma)).astype(np.float32)
+    input_gamma = np.random.uniform(1, 10, size=tuple(shape_gamma)).astype(np.float32)
     input_gamma_tensor = torch.tensor(input_gamma).type(dataType)
 
-    input_beta = np.random.uniform(1, 10,
-                                   size=tuple(shape_gamma)).astype(np.float32)
+    input_beta = np.random.uniform(1, 10, size=tuple(shape_gamma)).astype(np.float32)
     grad_bias = torch.tensor(input_beta).type(dataType)
-    y, rstd, x = torch.ops._C_ascend.npu_add_rms_norm_bias(input_x1_tensor.npu(),
-                                                      input_x2_tensor.npu(),
-                                                      input_gamma_tensor.npu(),
-                                                      grad_bias.npu(), 1e-6)
+    y, rstd, x = torch.ops._C_ascend.npu_add_rms_norm_bias(
+        input_x1_tensor.npu(), input_x2_tensor.npu(), input_gamma_tensor.npu(), grad_bias.npu(), 1e-6
+    )
 
     y = y.cpu()
     rstd = rstd.cpu()
     x = x.cpu()
 
-    y1, rstd1, x1 = npu_add_rms_norm_bias_golden(input_x1_tensor,
-                                            input_x2_tensor,
-                                            input_gamma_tensor,
-                                            grad_bias,
-                                            kernelType,
-                                            epsilon=0.000001)
+    y1, rstd1, x1 = npu_add_rms_norm_bias_golden(
+        input_x1_tensor, input_x2_tensor, input_gamma_tensor, grad_bias, kernelType, epsilon=0.000001
+    )
 
     a = y1 > 1
     a1 = y1 <= 1
