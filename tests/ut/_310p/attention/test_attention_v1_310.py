@@ -15,7 +15,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 
 from tests.ut.base import TestBase
@@ -103,7 +102,6 @@ class TestAscendAttentionBackendImpl310(TestBase):
 
         mock_npu_npu_flash_attention.assert_called_once()
 
-    @pytest.mark.parametrize("attn_state", [AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit])
     @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu._npu_paged_attention_splitfuse")
@@ -114,14 +112,48 @@ class TestAscendAttentionBackendImpl310(TestBase):
         mock_npu_paged_attention_splitfuse,
         mock_npu_reshape_and_cache,
         mock_format_cast,
-        attn_state,
     ):
-        """Test forward pass in ChunkedPrefill/PrefillCacheHit state"""
+        """Test forward pass in ChunkedPrefill state"""
         query = torch.randn(5, 8, 64)
         key, value = None, None
         output = torch.empty_like(query)
         metadata = self.attn_metadata
-        metadata.attn_state = attn_state
+        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        metadata.attn_mask = torch.randn(1, 128, 16, 16)
+        metadata.query_lens = torch.tensor([5])
+        metadata.seq_lens = torch.tensor([1, 4])
+        metadata.query_start_loc = torch.tensor([0, 1, 5])
+        metadata.actual_seq_lengths_q = [5]
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+        metadata.num_actual_tokens = 10
+        metadata.num_decode_tokens = 0
+        metadata.num_decodes = 0
+        metadata.num_prefills = 10
+        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_npu_paged_attention_splitfuse.return_value = torch.ones(5, 8, 64)
+        output = self.impl.forward_impl(query, key, value, None, metadata, output)
+
+        mock_npu_paged_attention_splitfuse.assert_called_once()
+
+    @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
+    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu._npu_paged_attention_splitfuse")
+    @patch("vllm_ascend.attention.attention_v1.get_forward_context")
+    def test_forward_prefill_cache_hit_310(
+        self,
+        mock_get_forward_context,
+        mock_npu_paged_attention_splitfuse,
+        mock_npu_reshape_and_cache,
+        mock_format_cast,
+    ):
+        """Test forward pass in PrefillCacheHit state"""
+        query = torch.randn(5, 8, 64)
+        key, value = None, None
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillCacheHit
         metadata.attn_mask = torch.randn(1, 128, 16, 16)
         metadata.query_lens = torch.tensor([5])
         metadata.seq_lens = torch.tensor([1, 4])
