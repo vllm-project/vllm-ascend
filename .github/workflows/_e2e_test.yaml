@@ -140,6 +140,8 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+          pip uninstall platformdirs
+          pip install platformdirs==4.5.0
       - name: Run e2e test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
