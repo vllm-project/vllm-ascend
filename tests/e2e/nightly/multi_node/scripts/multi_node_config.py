@@ -8,8 +8,15 @@ import yaml
 
 # isort: off
 from tests.e2e.nightly.multi_node.scripts.utils import (
-    CONFIG_BASE_PATH, DEFAULT_SERVER_PORT, get_all_ipv4, get_cluster_ips,
-    get_net_interface, setup_logger, get_available_port)
+    CONFIG_BASE_PATH,
+    DEFAULT_SERVER_PORT,
+    get_all_ipv4,
+    get_cluster_ips,
+    get_net_interface,
+    setup_logger,
+    get_available_port,
+)
+
 # isort: on
 setup_logger()
 logger = logging.getLogger(__name__)
@@ -189,9 +196,9 @@ class MultiNodeConfig:
 
         self.disagg_cfg = DisaggregatedPrefillCfg(disaggregated_prefill, len(nodes)) if disaggregated_prefill else None
 
-        master_ip = (self.disagg_cfg.master_ip_for_node(
-            self.cur_index, self.nodes)
-                     if self.disagg_cfg else self.nodes[0].ip)
+        master_ip = (
+            self.disagg_cfg.master_ip_for_node(self.cur_index, self.nodes) if self.disagg_cfg else self.nodes[0].ip
+        )
         self.proxy_port = get_available_port()
 
         self.envs = DistEnvBuilder(
