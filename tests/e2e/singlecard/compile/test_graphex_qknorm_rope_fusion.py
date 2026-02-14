@@ -8,6 +8,7 @@ import vllm.config
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
 from vllm.utils.system_utils import update_environment_variables
+from tests.e2e.conftest import wait_random_secs_zero_to_max
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.qknorm_rope_fusion_pass import (
@@ -162,6 +163,7 @@ def assert_qknorm_rope_fusion(after_gm, expect_fused=True, use_bias=False):
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("use_bias", [False, True])
+@wait_random_secs_zero_to_max()
 def test_rmsnorm_quant_fusion(
     dtype: torch.dtype,
     hidden_size: int,

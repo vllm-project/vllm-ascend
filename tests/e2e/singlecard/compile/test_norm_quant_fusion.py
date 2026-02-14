@@ -28,6 +28,8 @@ from vllm.utils.system_utils import update_environment_variables
 
 import vllm_ascend.ops.register_custom_ops  # noqa
 from tests.e2e.singlecard.compile.backend import TestBackend
+from tests.e2e.conftest import wait_random_secs_zero_to_max
+
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.norm_quant_fusion_pass import \
     AddRMSNormQuantFusionPass
@@ -299,6 +301,7 @@ class TestModelSPWithBias(nn.Module):
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("use_bias", [False, True])
 @pytest.mark.parametrize("sp_enable", [False, True])
+@wait_random_secs_zero_to_max()
 def test_rmsnorm_quant_fusion(
     dtype: torch.dtype,
     hidden_size: int,

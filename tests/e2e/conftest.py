@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import random
 import traceback
 from pathlib import Path
 from typing import Any, Optional, Tuple, TypeVar, Union
@@ -126,6 +127,24 @@ def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: fl
         gc.collect()
         torch.npu.empty_cache()
         time.sleep(1)
+
+
+def wait_random_secs_zero_to_max(max_wait_seconds: float = 120):
+    """Decorator to wait until the NPU memory free size is above target_free_percentage.
+
+    Args:
+        target_free_percentage (float): Target free memory percentage of total.
+        max_wait_seconds (float): Maximum wait time in seconds.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            sleep_time = random.uniform(0, 60)
+            time.sleep(sleep_time)
+
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 def wait_until_npu_memory_free(target_free_percentage: float = 0.5, max_wait_seconds: float = 50):
