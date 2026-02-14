@@ -14,6 +14,7 @@ eplb_swift_balancer
 netloader
 Multi_Token_Prediction
 dynamic_batch
+epd_disaggregation
 kv_pool
 external_dp
 large_scale_ep
