@@ -1,6 +1,6 @@
 [files]
 # these files may be written in non english words
-extend-exclude = []
+extend-exclude = [".pre-commit-config.yaml",]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
@@ -17,9 +17,9 @@ ignore-hex = true
 identifier-leading-digits = false
 locale = "en"
 extend-ignore-identifiers-re = [".*Unc.*", ".*_thw",
-    ".*UE8M0.*", ".*[UE4M3|ue4m3].*", ".*eles.*", ".*fo.*", ".*ba.*",
+    ".*UE8M0.*", ".*(UE4M3|ue4m3).*", ".*eles.*", ".*fo.*", ".*ba.*",
     ".*ot.*", ".*[Tt]h[rR].*"]
-extend-ignore-words-re = ["CANN", "cann","ND","alog"]
+extend-ignore-words-re = ["CANN", "cann","ND","alog","nd","BA","datas","ful","udo",]
 extend-ignore-re = []
 
 [default.extend-identifiers]

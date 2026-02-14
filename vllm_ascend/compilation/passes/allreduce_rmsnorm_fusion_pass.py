@@ -34,13 +34,13 @@ else:
     from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 
 # computation-communication tiling block is 512
-ALLREDUCE_NORM_FUSE_THREHOLD = 512
+ALLREDUCE_NORM_FUSE_THRESHOLD = 512
 
 
 def get_compile_range_and_extra_stream_check():
     def check_func(match: Match) -> bool:
         compile_range = get_pass_context().compile_range
-        return extra_stream_scope_check(match) and compile_range.start > ALLREDUCE_NORM_FUSE_THREHOLD
+        return extra_stream_scope_check(match) and compile_range.start > ALLREDUCE_NORM_FUSE_THRESHOLD
 
     return check_func
 
@@ -176,5 +176,5 @@ class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
         """
         Check if the pass is applicable for the current configuration.
         """
-        applicable = compile_range.start > ALLREDUCE_NORM_FUSE_THREHOLD
+        applicable = compile_range.start > ALLREDUCE_NORM_FUSE_THRESHOLD
         return applicable
