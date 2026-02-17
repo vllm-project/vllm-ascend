@@ -673,6 +673,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import (
+        AscendFastGELU,
+        AscendNewGELU,
         AscendQuickGELU,
         AscendSiluAndMul,
         AscendSiluAndMulWithClamp,
@@ -707,6 +709,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     global REGISTERED_ASCEND_OPS
     REGISTERED_ASCEND_OPS = {
+        "NewGELU": AscendNewGELU,
+        "FastGELU": AscendFastGELU,
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "SiluAndMulClamp": AscendSiluAndMulWithClamp,
