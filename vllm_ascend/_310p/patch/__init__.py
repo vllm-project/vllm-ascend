@@ -15,4 +15,5 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import vllm_ascend._patch.patch_qwen3_next_mtp  # noqa
+# import vllm_ascend._patch.patch_qwen3_next_mtp  # noqa
+import vllm_ascend._310p.patch.patch_qwen3_next

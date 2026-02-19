@@ -278,6 +278,12 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         shared_out = self._shared_experts_part2(hidden_states, part1_out)
         return shared_out
 
+    def _shared_experts_part1(self, hidden_states: torch.Tensor):
+        return self._shared_experts(hidden_states)
+
+    def _shared_experts_part2(self, hidden_states: torch.Tensor, part1_out: torch.Tensor):
+        return part1_out
+
     def forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
     ):

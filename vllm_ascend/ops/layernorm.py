@@ -18,11 +18,12 @@
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
+from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method, is_310p
 
 
 class AscendRMSNorm(RMSNorm):
@@ -154,5 +155,26 @@ class AscendRMSNormGated(RMSNormGated):
         torch.nn.init.ones_(self.weight)
 
     def forward_oot(self, x, z=None):
+        if is_310p():
+            import torch_npu
+
+            x_shape = x.shape
+            x2 = x.reshape(-1, x.shape[-1]).contiguous()
+
+            if z is None:
+                y, _ = torch_npu.npu_rms_norm(x2, self.weight, self.eps)
+                return y.reshape(x_shape)
+
+            z2 = z.reshape(-1, z.shape[-1]).contiguous()
+            gate = F.silu(z2)
+
+            if self.norm_before_gate:
+                y, _ = torch_npu.npu_rms_norm(x2, self.weight, self.eps)
+                y = y * gate
+            else:
+                y, _ = torch_npu.npu_rms_norm(x2 * gate, self.weight, self.eps)
+
+            return y.reshape(x_shape)
+
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
         return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)

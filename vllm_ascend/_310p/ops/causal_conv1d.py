@@ -174,7 +174,7 @@ def causal_conv1d_update_pytorch(
     
     if isinstance(activation, bool):
         activation = "silu" if activation is True else None
-    elif activation activation is not None:
+    elif activation is not None:
         assert activation in ["silu", "swish"]
 
     original_x_dtype = x.dtype
