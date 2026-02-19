@@ -15,19 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import os
-
-# Disable Triton for 310P device before any vLLM imports
-# This must be done early to prevent Triton from being loaded
-try:
-    from vllm_ascend.envs import ASCEND_SOC_VERSION
-    
-    if ASCEND_SOC_VERSION and "310P" in ASCEND_SOC_VERSION:
-        os.environ["VLLM_USE_TRITON"] = "0"
-except (ImportError, AttributeError):
-    # If envs is not available yet, check via other methods
-    pass
-
 
 def register():
     """Register NPU platform."""
