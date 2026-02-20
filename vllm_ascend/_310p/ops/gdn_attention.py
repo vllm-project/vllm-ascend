@@ -77,10 +77,23 @@ def gdn_attention_core_impl(
     # vLLM ForwardContext does not expose a `model` attribute.
     try:
         layer = forward_context.no_compile_layers[prefix]
-        self_kv_cache = layer.kv_cache[forward_context.virtual_engine]
-        conv_state = self_kv_cache[0].transpose(-1, -2)
-        ssm_state = self_kv_cache[1]
         conv1d = layer.conv1d
+        conv_dim = conv1d.weight.size(0)
+        self_kv_cache = layer.kv_cache[forward_context.virtual_engine]
+        conv_state = self_kv_cache[0]
+        # Accept both cache layouts:
+        # 1) [num_blocks, state_len, dim] -> transpose to [num_blocks, dim, state_len]
+        # 2) [num_blocks, dim, state_len] -> keep as is
+        if conv_state.shape[-2] == conv_dim:
+            pass
+        elif conv_state.shape[-1] == conv_dim:
+            conv_state = conv_state.transpose(-1, -2)
+        else:
+            raise RuntimeError(
+                "Unexpected conv_state layout for 310P GDN attention: "
+                f"conv_state.shape={tuple(conv_state.shape)}, conv_dim={conv_dim}"
+            )
+        ssm_state = self_kv_cache[1]
         A_log = layer.A_log
         dt_bias = layer.dt_bias
         activation = layer.activation

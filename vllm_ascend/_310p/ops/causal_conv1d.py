@@ -101,37 +101,81 @@ def causal_conv1d_fn_pytorch(
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
-    
+
+    if query_start_loc is None:
+        raise RuntimeError("causal_conv1d_fn_pytorch requires query_start_loc for varlen inputs.")
+    if cache_indices is None:
+        raise RuntimeError("causal_conv1d_fn_pytorch requires cache_indices.")
+    if has_initial_state is None:
+        raise RuntimeError("causal_conv1d_fn_pytorch requires has_initial_state.")
+    if conv_states is None:
+        raise RuntimeError("causal_conv1d_fn_pytorch requires conv_states.")
+
     if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    out_ref = []
-    out_ref_b_b = []
-    seqlens = query_start_loc[1:] - query_start_loc[:-1]
-    seqlens = seqlens.tolist()
-    splits = torch.split(x, seqlens, dim=-1)
-    width = weight.shape[1]
+    # Normalize x to [dim, total_tokens]
+    if x.dim() == 3:
+        if x.shape[0] == 1:
+            x = x.squeeze(0)
+        elif x.shape[1] == 1:
+            x = x.squeeze(1).transpose(0, 1)
+        else:
+            raise RuntimeError(f"Unsupported x shape for causal_conv1d_fn_pytorch: {tuple(x.shape)}")
+    if x.dim() != 2:
+        raise RuntimeError(f"Unsupported x ndim for causal_conv1d_fn_pytorch: {x.dim()}")
 
-    for i in range(len(seqlens)):
-        x_s = splits[i]
-        if cache_indices[i] == PAD_SLOT_ID:
-            continue
-        out_ref_b_b.append(
-            causal_conv1d_ref_pytorch(
-                x_s,
-                weight,
-                bias,
-                activation=activation,
-                return_final_states=True,
-                final_states_out=conv_states[cache_indices[i]][..., : (width - 1)].unsqueeze(0),
-                initial_states=conv_states[cache_indices[i]][..., : (width - 1)] if has_initial_state[i] else None,
-            )
+    feature_dim = x.shape[0]
+    if weight.shape[0] != feature_dim and weight.shape[1] == feature_dim:
+        weight = weight.transpose(0, 1)
+    weight = weight.contiguous()
+    dim, width = weight.shape
+    if dim != feature_dim:
+        raise RuntimeError(
+            f"causal_conv1d_fn_pytorch: weight dim mismatch, "
+            f"x dim={feature_dim}, weight.shape={tuple(weight.shape)}"
         )
-    out_ref.append(torch.cat([t[0] for t in out_ref_b_b], dim=-1))
-    out_ref_tensor = torch.cat(out_ref, dim=0)
-    return out_ref_tensor
 
+    state_len = width - 1
+    if conv_states.shape[-2] != dim and conv_states.shape[-1] == dim:
+        conv_states = conv_states.transpose(-1, -2)
+    if conv_states.shape[-2] != dim:
+        raise RuntimeError(
+            f"causal_conv1d_fn_pytorch: conv_states dim mismatch, "
+            f"expected dim={dim}, conv_states.shape={tuple(conv_states.shape)}"
+        )
+    if conv_states.shape[-1] < state_len:
+        raise RuntimeError(
+            f"causal_conv1d_fn_pytorch: conv_states too short, "
+            f"need >= {state_len}, got {conv_states.shape[-1]}"
+        )
+
+    seqlens = (query_start_loc[1:] - query_start_loc[:-1]).tolist()
+    splits = torch.split(x, seqlens, dim=-1)
+
+    out_chunks = []
+    for i, x_s in enumerate(splits):
+        cache_idx = int(cache_indices[i].item())
+        if cache_idx == pad_slot_id:
+            continue
+
+        state = conv_states[cache_idx]
+        init_state = state[..., :state_len].unsqueeze(0) if bool(has_initial_state[i].item()) else None
+        out_ref, final_state = causal_conv1d_ref_pytorch(
+            x_s.unsqueeze(0),
+            weight,
+            bias,
+            activation=activation,
+            return_final_states=True,
+            initial_states=init_state,
+        )
+        state[..., :state_len].copy_(final_state.squeeze(0))
+        out_chunks.append(out_ref.squeeze(0))
+
+    if not out_chunks:
+        return x.new_zeros((dim, 0))
+    return torch.cat(out_chunks, dim=-1)
 
 def causal_conv1d_update_pytorch(
     x: torch.Tensor,
@@ -169,9 +213,6 @@ def causal_conv1d_update_pytorch(
     Returns:
         out: same shape as x
     """
-    weight = weight.transpose(0, 1).contiguous()
-    conv_state = conv_state.transpose(1, 2).contiguous()
-    
     if isinstance(activation, bool):
         activation = "silu" if activation is True else None
     elif activation is not None:
@@ -179,100 +220,115 @@ def causal_conv1d_update_pytorch(
 
     original_x_dtype = x.dtype
     x = x.to(conv_state.dtype)
-    unsqueeze = query_start_loc is None and x.dim() == 2
-    if unsqueeze:
-        x = x.unsqueeze(1)
+
+    feature_dim = x.shape[-1] if query_start_loc is None else x.shape[1]
+    if weight.shape[0] != feature_dim and weight.shape[1] == feature_dim:
+        weight = weight.transpose(0, 1)
+    weight = weight.contiguous()
+    dim, width = weight.shape
+    if dim != feature_dim:
+        raise RuntimeError(
+            f"causal_conv1d_update_pytorch: weight dim mismatch, "
+            f"feature_dim={feature_dim}, weight.shape={tuple(weight.shape)}"
+        )
+
+    if conv_state.shape[-2] != dim and conv_state.shape[-1] == dim:
+        # Accept both (..., dim, state_len) and (..., state_len, dim) inputs.
+        conv_state = conv_state.transpose(-1, -2)
+    if conv_state.shape[-2] != dim:
+        raise RuntimeError(
+            f"causal_conv1d_update_pytorch: conv_state dim mismatch, "
+            f"expected dim={dim}, conv_state.shape={tuple(conv_state.shape)}"
+        )
+
+    state_len = width - 1
+    if conv_state.shape[-1] < state_len:
+        raise RuntimeError(
+            f"causal_conv1d_update_pytorch: conv_state too short, "
+            f"need >= {state_len}, got {conv_state.shape[-1]}"
+        )
+
+    out = x.clone()
+
+    def _select_state(i: int) -> torch.Tensor | None:
+        if conv_state_indices is not None:
+            idx = int(conv_state_indices[i].item())
+            if idx == pad_slot_id:
+                return None
+            state = conv_state[idx]
+        else:
+            state = conv_state[i]
+
+        if initial_state_idx is not None:
+            init_idx = int(initial_state_idx[i].item())
+            if init_idx >= 0:
+                state = conv_state[init_idx]
+        return state
+
+    def _run_one(seq_tokens: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        # seq_tokens: [L, dim] -> [1, dim, L]
+        x_ref = seq_tokens.transpose(0, 1).unsqueeze(0)
+        init_state = state[..., :state_len].unsqueeze(0)
+        out_ref, final_state = causal_conv1d_ref_pytorch(
+            x_ref,
+            weight,
+            bias,
+            initial_states=init_state,
+            return_final_states=True,
+            activation=activation,
+        )
+        state[..., :state_len].copy_(final_state.squeeze(0))
+        # [1, dim, L] -> [L, dim]
+        return out_ref.squeeze(0).transpose(0, 1)
 
     if query_start_loc is None:
-        batch, seqlen, dim = x.shape
+        if x.dim() == 2:
+            batch = x.shape[0]
+            for i in range(batch):
+                state = _select_state(i)
+                if state is None:
+                    continue
+                seq_tokens = x[i : i + 1]
+                if num_accepted_tokens is not None:
+                    accepted = int(num_accepted_tokens[i].item())
+                    if accepted <= 0:
+                        continue
+                    seq_tokens = seq_tokens[:accepted]
+                out_i = _run_one(seq_tokens, state)
+                out[i : i + out_i.shape[0]] = out_i
+        else:
+            batch = x.shape[0]
+            for i in range(batch):
+                state = _select_state(i)
+                if state is None:
+                    continue
+                seq_tokens = x[i]
+                if num_accepted_tokens is not None:
+                    accepted = int(num_accepted_tokens[i].item())
+                    if accepted <= 0:
+                        continue
+                    seq_tokens = seq_tokens[:accepted]
+                out_i = _run_one(seq_tokens, state)
+                out[i, : out_i.shape[0]] = out_i
     else:
         assert conv_state_indices is not None
         batch = conv_state_indices.size(0)
-        dim = x.size(1)
-        seqlen = max_query_len
-
-    width, _ = weight.shape
-    num_cache_lines, state_len_total, _ = conv_state.size()
-
-    out = x
-
-    if query_start_loc is None:
         for i in range(batch):
-            x_i = x[i]
-            conv_state_i = conv_state[i]
-            
-            if conv_state_indices is not None:
-                idx = conv_state_indices[i].item()
-                if idx == pad_slot_id:
-                    continue
-                conv_state_i = conv_state[idx]
-            else:
-                conv_state_i = conv_state[i]
-            
-            if initial_state_idx is not None:
-                init_idx = initial_state_idx[i].item()
-                if init_idx >= 0:
-                    conv_state_i = conv_state[init_idx]
-            
-            if num_accepted_tokens is not None:
-                accepted = num_accepted_tokens[i].item()
-                if accepted > 0:
-                    x_i = x_i[:accepted]
-            
-            out_i = causal_conv1d_ref_pytorch(
-                x_i,
-                weight,
-                bias,
-                activation=activation,
-                return_final_states=True,
-                final_states_out=conv_state_i,
-                initial_states=conv_state_i,
-            )[0]
-            
-            out[i] = out_i
-    else:
-        for i in range(batch):
-            start = query_start_loc[i].item()
-            end = query_start_loc[i + 1].item()
-            seq_len = end - start
-            
-            if seq_len == 0:
+            start = int(query_start_loc[i].item())
+            end = int(query_start_loc[i + 1].item())
+            if end <= start:
                 continue
-            
-            x_i = x[start:end]
-            
-            if conv_state_indices is not None:
-                idx = conv_state_indices[i].item()
-                if idx == pad_slot_id:
-                    continue
-                conv_state_i = conv_state[idx]
-            else:
-                conv_state_i = conv_state[i]
-            
-            if initial_state_idx is not None:
-                init_idx = initial_state_idx[i].item()
-                if init_idx >= 0:
-                    conv_state_i = conv_state[init_idx]
-            
+            state = _select_state(i)
+            if state is None:
+                continue
+            seq_tokens = x[start:end]
             if num_accepted_tokens is not None:
-                accepted = num_accepted_tokens[i].item()
-                if accepted > 0:
-                    x_i = x_i[:accepted]
-            
-            out_i = causal_conv1d_ref_pytorch(
-                x_i,
-                weight,
-                bias,
-                activation=activation,
-                return_final_states=True,
-                final_states_out=conv_state_i,
-                initial_states=conv_state_i,
-            )[0]
-            
-            out[start:end] = out_i
+                accepted = int(num_accepted_tokens[i].item())
+                if accepted <= 0:
+                    continue
+                seq_tokens = seq_tokens[:accepted]
+            out_i = _run_one(seq_tokens, state)
+            out[start : start + out_i.shape[0]] = out_i
 
-    if unsqueeze:
-        out = out.squeeze(1)
+    return out.to(original_x_dtype)
 
-    out = out.to(original_x_dtype)
-    return out
