@@ -8,6 +8,7 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 UNIFIED_BUFFER_SIZE = 1572864
+MAX_BLK_BATCHES = 128
 
 
 @triton.jit
@@ -79,8 +80,9 @@ def fused_gdn_gating_patch(
         progs = num_cores
         FACTOR = 8 * num_heads
         row_per_core = triton.cdiv(batch, num_cores)
-        BLK_BATCHES = (
-            triton.next_power_of_2(triton.cdiv(UNIFIED_BUFFER_SIZE, FACTOR * BLK_HEADS) // a.element_size()) // 2
+        BLK_BATCHES = min(
+            triton.next_power_of_2(triton.cdiv(UNIFIED_BUFFER_SIZE, FACTOR * BLK_HEADS) // a.element_size()) // 2,
+            MAX_BLK_BATCHES,
         )
         ROW_ITER = triton.cdiv(row_per_core, BLK_BATCHES)
 
