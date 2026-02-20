@@ -321,7 +321,7 @@ class AscendFusedMoE(FusedMoE):
         hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            replace_allreduce=forward_context.sp_enabled,
+            replace_allreduce=forward_context.flash_comm_v1_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type,
         )
