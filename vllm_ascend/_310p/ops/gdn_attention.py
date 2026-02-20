@@ -73,23 +73,24 @@ def gdn_attention_core_impl(
     b = b[:num_actual_tokens]
     a = a[:num_actual_tokens]
 
-    # Get model instance from forward context
+    # Get layer instance from static forward context.
+    # vLLM ForwardContext does not expose a `model` attribute.
     try:
-        model = forward_context.model
-        self_kv_cache = model.kv_cache[forward_context.virtual_engine]
+        layer = forward_context.no_compile_layers[prefix]
+        self_kv_cache = layer.kv_cache[forward_context.virtual_engine]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
-        conv1d = model.conv1d
-        A_log = model.A_log
-        dt_bias = model.dt_bias
-        activation = model.activation
-    except AttributeError:
+        conv1d = layer.conv1d
+        A_log = layer.A_log
+        dt_bias = layer.dt_bias
+        activation = layer.activation
+    except (AttributeError, KeyError, TypeError) as exc:
         raise NotImplementedError(
             "GDN attention core implementation for 310P requires "
-            "proper model instance access. Please ensure that the model "
-            "is properly initialized and the forward context contains "
-            "the model instance."
-        )
+            "proper layer instance access. Please ensure that the layer "
+            "is registered in static_forward_context and forward context "
+            "is correctly initialized."
+        ) from exc
 
     # 1. Convolution sequence transformation
     conv_weights = conv1d.weight.view(conv1d.weight.size(0), conv1d.weight.size(2))
@@ -148,27 +149,9 @@ def gdn_attention_core_impl(
     else:
         mixed_qkv_non_spec = None
 
-    # Rearrange mixed_qkv into query, key, value
-    def rearrange_mixed_qkv(mixed_qkv):
-        if mixed_qkv is None:
-            return None, None, None
-        
-        batch = mixed_qkv.shape[0]
-        
-        # Split into q, k, v
-        # Need to determine split points based on shape
-        # This is a simplified version, actual implementation may need adjustment
-        num_qk_heads = mixed_qkv.shape[1] // 3
-        head_dim = mixed_qkv.shape[2]
-        
-        query = mixed_qkv[:, :num_qk_heads, :]
-        key = mixed_qkv[:, num_qk_heads:2*num_qk_heads, :]
-        value = mixed_qkv[:, 2*num_qk_heads:, :]
-        
-        return query, key, value
-
-    query_spec, key_spec, value_spec = rearrange_mixed_qkv(mixed_qkv_spec)
-    query_non_spec, key_non_spec, value_non_spec = rearrange_mixed_qkv(mixed_qkv_non_spec)
+    # Use the layer's native tensor layout logic from qwen3-next implementation.
+    query_spec, key_spec, value_spec = layer.rearrange_mixed_qkv(mixed_qkv_spec)
+    query_non_spec, key_non_spec, value_non_spec = layer.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
     if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
         g, beta = fused_gdn_gating_pytorch(A_log, a, b, dt_bias)
