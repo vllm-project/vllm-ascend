@@ -114,15 +114,14 @@ class NPUModelRunner310(NPUModelRunner):
         # Third pass: handle Mamba layers
         # FIX: Use the same size calculation as the main branch (model_runner_v1.py)
         # The main branch uses kv_cache_tensor.size from kv_cache_config.kv_cache_tensors
-        # instead of calculating page_size_bytes * num_blocks
         logger.info(f"[MambaCalc DEBUG] Starting Third pass for Mamba layers (FIXED version)")
         
         # Build a mapping from layer_name to kv_cache_tensor.size
-        # This mimics the main branch's approach in _allocate_kv_cache_tensors
+        # This follows the main branch's approach in _allocate_kv_cache_tensors
         mamba_layer_sizes = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             for layer_name in kv_cache_tensor.shared_by:
-                # Only process Mamba layers (those with "linear_attn" in the name)
+                # Mamba layers have "linear_attn" in their name
                 if "linear_attn" in layer_name:
                     mamba_layer_sizes[layer_name] = kv_cache_tensor.size
                     logger.info(f"[MambaCalc DEBUG] Found Mamba layer {layer_name} with size={kv_cache_tensor.size / 1024**3:.3f} GiB")
@@ -148,10 +147,16 @@ class NPUModelRunner310(NPUModelRunner):
                         logger.warning(f"[MambaCalc DEBUG] Layer {layer_name}: size={size / 1024**3:.3f} GiB (FALLBACK - not found in kv_cache_tensors)")
         
         # DEBUG: Print total Mamba size
-        total_mamba_size = sum(size for name, size in kv_cache_sizes.items() 
-                               if any(layer_name in name for layer_name in 
-                                     [g.layer_names for g in kv_cache_config.kv_cache_groups 
-                                      if isinstance(g.kv_cache_spec, MambaSpec)]))
+        # Collect all Mamba layer names from kv_cache_groups
+        mamba_layer_names = set()
+        for g in kv_cache_config.kv_cache_groups:
+            if isinstance(g.kv_cache_spec, MambaSpec):
+                for layer_name in g.layer_names:
+                    if layer_name not in self.runner_only_attn_layers:
+                        mamba_layer_names.add(layer_name)
+        
+        # Calculate total Mamba size
+        total_mamba_size = sum(size for name, size in kv_cache_sizes.items() if name in mamba_layer_names)
         logger.info(f"[MambaCalc DEBUG] Total Mamba KV cache size: {total_mamba_size / 1024**3:.3f} GiB")
 
         # Verification: ensure all layers are accounted for
