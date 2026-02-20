@@ -242,6 +242,16 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
+# ** Note: Qwen3.5 GatedDeltaNet (qwen3_5_text / qwen3_5_moe_text) **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   Qwen3_5GatedDeltaNet inherits from Qwen3NextGatedDeltaNet and does NOT
+#   override _forward_core. Therefore the patched _forward_core from
+#   patch_qwen3_next.py (Patch 10) is automatically inherited. The Qwen3.5
+#   forward() method uses separate projections (in_proj_qkv, in_proj_z,
+#   in_proj_b, in_proj_a) instead of combined ones, so
+#   fused_qkvzba_split_reshape_cat is not applicable and no additional
+#   patch file is needed for Qwen3.5 models.
+#
 # ** 11. File: worker/patch_v2_eagle.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
