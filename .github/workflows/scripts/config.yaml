@@ -33,6 +33,8 @@ e2e-singlecard:
   estimated_time: 103
 - name: tests/e2e/singlecard/test_qwen35_densemodel_lora.py
   estimated_time: 60
+- name: tests/e2e/singlecard/test_qwenvl.py
+  estimated_time: 541
 - name: tests/e2e/singlecard/test_models.py
   estimated_time: 291
 - name: tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
