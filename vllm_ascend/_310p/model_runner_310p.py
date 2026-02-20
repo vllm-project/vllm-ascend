@@ -18,20 +18,14 @@
 from __future__ import annotations
 
 import torch
-import torch_npu
 from vllm.logger import logger
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 class NPUModelRunner310(NPUModelRunner):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._acl_format = ACL_FORMAT_FRACTAL_NZ
-
     def initialize_kv_cache_tensors(
         self,
         kv_cache_config: KVCacheConfig,
@@ -68,28 +62,25 @@ class NPUModelRunner310(NPUModelRunner):
 
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
-        Allocate raw KV buffers for Mamba layers only.
+        Allocate one raw KV buffer per kv_cache_tensor and reuse it for all
+        layers in kv_cache_tensor.shared_by.
 
-        Attention cache on 310P must use FRACTAL_NZ memory format and will be
-        allocated in `_reshape_kv_cache_tensors`.
+        For hybrid models (e.g. Qwen3-Next), one shared buffer can be viewed as
+        both attention cache and mamba states, which avoids double allocation.
         """
-        mamba_layers = set()
-        for group in kv_cache_config.kv_cache_groups:
-            if isinstance(group.kv_cache_spec, MambaSpec):
-                for layer_name in group.layer_names:
-                    if layer_name not in self.runner_only_attn_layers:
-                        mamba_layers.add(layer_name)
-
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            shared_mamba_layers = [layer_name for layer_name in kv_cache_tensor.shared_by if layer_name in mamba_layers]
-            if not shared_mamba_layers:
-                continue
             tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
-            for layer_name in shared_mamba_layers:
+            for layer_name in kv_cache_tensor.shared_by:
                 kv_cache_raw_tensors[layer_name] = tensor
 
-        assert mamba_layers == set(kv_cache_raw_tensors.keys()), "Some mamba layers are not correctly initialized"
+        layer_names = set()
+        for group in kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                layer_names.add(layer_name)
+        assert layer_names == set(kv_cache_raw_tensors.keys()), "Some layers are not correctly initialized"
 
         return kv_cache_raw_tensors
 
@@ -101,16 +92,8 @@ class NPUModelRunner310(NPUModelRunner):
         """
         Reshape raw KV cache tensors to layer-specific views.
         """
-        layer_to_tensor_size: dict[str, int] = {}
-        layer_to_shared_key: dict[str, tuple[str, ...]] = {}
-        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            shared_key = tuple(sorted(kv_cache_tensor.shared_by))
-            for layer_name in kv_cache_tensor.shared_by:
-                layer_to_tensor_size[layer_name] = kv_cache_tensor.size
-                layer_to_shared_key[layer_name] = shared_key
-
-        attention_cache_by_shared_key: dict[tuple[str, ...], tuple[torch.Tensor, torch.Tensor]] = {}
         kv_caches: dict[str, torch.Tensor] = {}
+        has_attn, has_mamba = False, False
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -118,11 +101,13 @@ class NPUModelRunner310(NPUModelRunner):
                 if layer_name in self.runner_only_attn_layers:
                     continue
 
+                raw_tensor = kv_cache_raw_tensors[layer_name]
+                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                assert num_blocks >= kv_cache_config.num_blocks
+
                 if isinstance(kv_cache_spec, AttentionSpec):
-                    tensor_size = layer_to_tensor_size[layer_name]
-                    assert tensor_size % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = tensor_size // kv_cache_spec.page_size_bytes
-                    assert num_blocks >= kv_cache_config.num_blocks
+                    has_attn = True
 
                     if hasattr(attn_backend, "get_supported_kernel_block_sizes") and self.use_hybrid_blocks:
                         block_size = attn_backend.get_supported_kernel_block_sizes()[0]
@@ -141,32 +126,10 @@ class NPUModelRunner310(NPUModelRunner):
                             kv_cache_spec.head_size,
                         )
 
-                    shared_key = layer_to_shared_key[layer_name]
-                    if shared_key in attention_cache_by_shared_key:
-                        kv_caches[layer_name] = attention_cache_by_shared_key[shared_key]
-                        continue
-
                     dtype = kv_cache_spec.dtype
-                    cache_shape = kv_cache_shape[1:]
-                    k_cache = torch_npu.empty_with_format(
-                        size=cache_shape,
-                        dtype=dtype,
-                        device=self.device,
-                        acl_format=self._acl_format,
-                    )
-                    v_cache = torch_npu.empty_with_format(
-                        size=cache_shape,
-                        dtype=dtype,
-                        device=self.device,
-                        acl_format=self._acl_format,
-                    )
-                    attention_cache_by_shared_key[shared_key] = (k_cache, v_cache)
-                    kv_caches[layer_name] = (k_cache, v_cache)
+                    kv_caches[layer_name] = raw_tensor.view(dtype).view(kv_cache_shape)
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    raw_tensor = kv_cache_raw_tensors[layer_name]
-                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
-                    assert num_blocks >= kv_cache_config.num_blocks
+                    has_mamba = True
 
                     state_tensors = []
                     storage_offset_bytes = 0
@@ -189,12 +152,44 @@ class NPUModelRunner310(NPUModelRunner):
                 else:
                     raise ValueError("Unknown KV cache spec type.")
 
-        expected_layers = set()
+        if has_attn and has_mamba:
+            self._update_hybrid_attention_mamba_layout(kv_caches)
+
+        layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
-                if layer_name not in self.runner_only_attn_layers:
-                    expected_layers.add(layer_name)
-        assert expected_layers == set(kv_caches.keys()), "Some layers are not correctly initialized"
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                layer_names.add(layer_name)
+        assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
 
         return kv_caches
+
+    def _update_hybrid_attention_mamba_layout(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """
+        For hybrid attention+mamba sharing, reinterpret attention cache layout
+        from (2, num_blocks, ...) to interleaved block-major memory without
+        additional allocation.
+        """
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                continue
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                kv_cache = kv_caches[layer_name]
+                if not isinstance(kv_cache, torch.Tensor):
+                    continue
+                if kv_cache.shape[0] != 2:
+                    continue
+                assert kv_cache.shape[1] != 2, (
+                    "Fail to determine whether layout is (2, num_blocks, ...) "
+                    f"or (num_blocks, 2, ...) for tensor shape {kv_cache.shape}"
+                )
+                hidden_size = kv_cache.shape[2:].numel()
+                kv_cache.as_strided_(
+                    size=kv_cache.shape,
+                    stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
+                )
 
