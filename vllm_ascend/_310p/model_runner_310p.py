@@ -75,10 +75,27 @@ class NPUModelRunner310(NPUModelRunner):
         """
         # init kv cache tensors
         kv_cache_sizes: dict[str, int] = {}
+
+        # First pass: collect all Mamba and Attention layers from kv_cache_groups
+        # This ensures Mamba layers are correctly identified and not mistaken for Attention layers
+        mamba_layers = set()
+        for group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, MambaSpec):
+                for layer_name in group.layer_names:
+                    if layer_name not in self.runner_only_attn_layers:
+                        mamba_layers.add(layer_name)
+
+        # Second pass: process kv_cache_tensors, but skip Mamba layers
+        # They will be handled separately
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
+
+                # Skip Mamba layers - they will be handled in the third pass
+                if layer_name in mamba_layers:
+                    continue
+
                 if "linear_attn" in layer_name and layer_name not in kv_cache_sizes:
                     # for mamba linear attention
                     kv_cache_size = kv_cache_tensor.size
@@ -94,13 +111,28 @@ class NPUModelRunner310(NPUModelRunner):
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             kv_cache_sizes[layer_name_inner] = kv_tensor_size
 
+        # Third pass: handle Mamba layers
+        # Mamba layers use a different size calculation based on page_size_bytes and num_blocks
+        for group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, MambaSpec):
+                for layer_name in group.layer_names:
+                    if layer_name in self.runner_only_attn_layers:
+                        continue
+                    # For Mamba layers, use the correct size calculation:
+                    # page_size_bytes * num_blocks
+                    kv_cache_sizes[layer_name] = kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks
+
+        # Verification: ensure all layers are accounted for
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 layer_names.add(layer_name)
-        assert layer_names == set(kv_cache_sizes.keys()), "Some layers are not correctly initialized"
+
+        missing_layers = layer_names - set(kv_cache_sizes.keys())
+        assert not missing_layers, f"Some layers are not correctly initialized: {missing_layers}"
 
         return kv_cache_sizes
 
@@ -160,9 +192,7 @@ class NPUModelRunner310(NPUModelRunner):
                     kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     tensor_size = kv_cache_sizes[layer_name]
-                    dtype = kv_cache_spec.dtypes[0]
-                    tensor_element_size = torch.tensor([], dtype=dtype).element_size()
-                    raw_tensor = torch.zeros(tensor_size // tensor_element_size, dtype=dtype, device=self.device)
+                    raw_tensor = torch.zeros(tensor_size, dtype=torch.int8, device=self.device)
                     assert tensor_size is not None
                     assert tensor_size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = tensor_size // kv_cache_spec.page_size_bytes
@@ -177,7 +207,7 @@ class NPUModelRunner310(NPUModelRunner):
                         target_shape = (num_blocks, *shape)
 
                         target_idx += torch.prod(torch.tensor(target_shape)).item()
-                        tensor = raw_tensor[start_idx:target_idx].view(target_shape)
+                        tensor = raw_tensor.view(dtype)[start_idx:target_idx].view(target_shape)
                         start_idx = target_idx
                         state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
