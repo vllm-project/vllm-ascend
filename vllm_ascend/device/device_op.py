@@ -24,6 +24,18 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 class BaseDeviceAdaptor:
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
+        # Hybrid attention+mamba sharing can produce non-contiguous KV views.
+        # `_npu_reshape_and_cache` requires contiguous cache tensors, so fallback
+        # to scatter-based caching in this case.
+        if not key_cache.is_contiguous() or not value_cache.is_contiguous():
+            torch_npu.npu_scatter_pa_kv_cache(
+                key=key,
+                value=value.contiguous(),
+                key_cache=key_cache,
+                value_cache=value_cache,
+                slot_mapping=slot_mapping,
+            )
+            return
         torch_npu._npu_reshape_and_cache(
             key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
         )
