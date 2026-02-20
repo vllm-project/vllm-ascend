@@ -112,27 +112,40 @@ class NPUModelRunner310(NPUModelRunner):
                             kv_cache_sizes[layer_name_inner] = kv_tensor_size
 
         # Third pass: handle Mamba layers
-        # Mamba layers use a different size calculation based on page_size_bytes and num_blocks
-        # DEBUG: Print Mamba layer calculation details
-        logger.info(f"[MambaCalc DEBUG] Starting Third pass for Mamba layers")
-        logger.info(f"[MambaCalc DEBUG] kv_cache_config.num_blocks={kv_cache_config.num_blocks}")
+        # FIX: Use the same size calculation as the main branch (model_runner_v1.py)
+        # The main branch uses kv_cache_tensor.size from kv_cache_config.kv_cache_tensors
+        # instead of calculating page_size_bytes * num_blocks
+        logger.info(f"[MambaCalc DEBUG] Starting Third pass for Mamba layers (FIXED version)")
         
+        # Build a mapping from layer_name to kv_cache_tensor.size
+        # This mimics the main branch's approach in _allocate_kv_cache_tensors
+        mamba_layer_sizes = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            for layer_name in kv_cache_tensor.shared_by:
+                # Only process Mamba layers (those with "linear_attn" in the name)
+                if "linear_attn" in layer_name:
+                    mamba_layer_sizes[layer_name] = kv_cache_tensor.size
+                    logger.info(f"[MambaCalc DEBUG] Found Mamba layer {layer_name} with size={kv_cache_tensor.size / 1024**3:.3f} GiB")
+        
+        # Process Mamba layers using the sizes from kv_cache_tensors
         for group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = group.kv_cache_spec
             if isinstance(kv_cache_spec, MambaSpec):
-                logger.info(f"[MambaCalc DEBUG] Processing MambaSpec group with {len(group.layer_names)} layers")
-                logger.info(f"[MambaCalc DEBUG] kv_cache_spec.page_size_bytes={kv_cache_spec.page_size_bytes}")
-                logger.info(f"[MambaCalc DEBUG] Calculated size per layer: {kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks / 1024**3:.3f} GiB")
-                
                 for layer_name in group.layer_names:
                     if layer_name in self.runner_only_attn_layers:
                         logger.info(f"[MambaCalc DEBUG] Skipping layer {layer_name} (in runner_only_attn_layers)")
                         continue
-                    # For Mamba layers, use the correct size calculation:
-                    # page_size_bytes * num_blocks
-                    calculated_size = kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks
-                    kv_cache_sizes[layer_name] = calculated_size
-                    logger.info(f"[MambaCalc DEBUG] Layer {layer_name}: size={calculated_size / 1024**3:.3f} GiB")
+                    
+                    # Use the size from kv_cache_tensors (same as main branch)
+                    if layer_name in mamba_layer_sizes:
+                        size = mamba_layer_sizes[layer_name]
+                        kv_cache_sizes[layer_name] = size
+                        logger.info(f"[MambaCalc DEBUG] Layer {layer_name}: size={size / 1024**3:.3f} GiB (from kv_cache_tensors)")
+                    else:
+                        # Fallback to old calculation if not found (should not happen)
+                        size = kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks
+                        kv_cache_sizes[layer_name] = size
+                        logger.warning(f"[MambaCalc DEBUG] Layer {layer_name}: size={size / 1024**3:.3f} GiB (FALLBACK - not found in kv_cache_tensors)")
         
         # DEBUG: Print total Mamba size
         total_mamba_size = sum(size for name, size in kv_cache_sizes.items() 
