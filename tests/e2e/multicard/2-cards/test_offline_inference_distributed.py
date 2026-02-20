@@ -255,18 +255,18 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
     long_example_prompts = [
         "Hello " * (163839 - 500) + "Hello"
     ]
-    max_tokens = 500 
+    max_tokens = 500
     with VllmRunner("vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
                     tensor_parallel_size=2,
                     quantization="ascend",
                     enable_expert_parallel=True,
                     max_model_len=163840,
                     compilation_config={
-                        "cudagraph_capture_sizes": [3, 6, 9, 12],
+                        "cudagraph_capture_sizes": [2, 4, 6, 8, 10, 12],
                         "cudagraph_mode": "FULL_DECODE_ONLY"
                     },
                     speculative_config={
-                        "num_speculative_tokens": 2,
+                        "num_speculative_tokens": 1,
                         "method": "deepseek_mtp"
                     },
                     additional_config={
