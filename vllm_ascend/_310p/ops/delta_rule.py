@@ -18,6 +18,168 @@
 import torch
 
 
+def _maybe_l2norm(x: torch.Tensor, enabled: bool) -> torch.Tensor:
+    if not enabled:
+        return x
+    return x / (torch.sqrt(torch.sum(x * x, dim=-1, keepdim=True)) + 1e-6)
+
+
+def _expand_to_hv(x: torch.Tensor, hv: int) -> torch.Tensor:
+    """Expand [H, ...] to [HV, ...] for grouped-value-attention semantics."""
+    h = x.shape[0]
+    if h == hv:
+        return x
+    if hv % h != 0:
+        raise ValueError(f"Cannot expand head dim from {h} to {hv}.")
+    return x.repeat_interleave(hv // h, dim=0)
+
+
+def _infer_num_states(
+    default_n: int,
+    initial_state: torch.Tensor | None,
+    ssm_state_indices: torch.Tensor | None,
+) -> int:
+    if initial_state is not None:
+        return initial_state.shape[0]
+    if ssm_state_indices is None:
+        return default_n
+    nonneg = ssm_state_indices[ssm_state_indices >= 0]
+    if nonneg.numel() == 0:
+        return default_n
+    return int(nonneg.max().item()) + 1
+
+
+def _state_index(
+    seq_idx: int,
+    tok_idx: int,
+    ssm_state_indices: torch.Tensor | None,
+) -> int:
+    if ssm_state_indices is None:
+        return seq_idx
+    if ssm_state_indices.ndim == 1:
+        return int(ssm_state_indices[seq_idx].item())
+    return int(ssm_state_indices[seq_idx, tok_idx].item())
+
+
+def _run_recurrent_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None,
+    beta: torch.Tensor | None,
+    states: torch.Tensor,
+    scale: float,
+    cu_seqlens: torch.Tensor | None,
+    ssm_state_indices: torch.Tensor | None,
+    num_accepted_tokens: torch.Tensor | None,
+    use_qk_l2norm_in_kernel: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Reference PyTorch recurrence for GDN delta rule.
+
+    Shapes follow fla.ops conventions:
+    q,k: [B, T, H, K]
+    v:   [B, T, HV, V]
+    g,beta: [B, T, HV] (beta may also be [B, T, HV, V])
+    states: [N_state, HV, K, V]
+    """
+    B, T, H, Kdim = k.shape
+    HV = v.shape[2]
+
+    if cu_seqlens is not None and B != 1:
+        raise ValueError("Variable-length mode expects batch size B=1.")
+
+    out = torch.zeros_like(v)
+
+    if cu_seqlens is None:
+        seq_ranges = [(i, 0, T) for i in range(B)]
+    else:
+        n_seq = len(cu_seqlens) - 1
+        seq_ranges = [
+            (
+                i,
+                int(cu_seqlens[i].item()),
+                int(cu_seqlens[i + 1].item()),
+            )
+            for i in range(n_seq)
+        ]
+
+    for seq_idx, start, end in seq_ranges:
+        seq_len = end - start
+        if seq_len <= 0:
+            continue
+
+        if num_accepted_tokens is not None:
+            accepted = int(num_accepted_tokens[seq_idx].item())
+            seq_len = min(seq_len, accepted)
+
+        for rel_t in range(seq_len):
+            tok = start + rel_t
+
+            if cu_seqlens is None:
+                q_t = q[seq_idx, tok]
+                k_t = k[seq_idx, tok]
+                v_t = v[seq_idx, tok]
+                g_t = g[seq_idx, tok] if g is not None else None
+                beta_t = beta[seq_idx, tok] if beta is not None else None
+            else:
+                q_t = q[0, tok]
+                k_t = k[0, tok]
+                v_t = v[0, tok]
+                g_t = g[0, tok] if g is not None else None
+                beta_t = beta[0, tok] if beta is not None else None
+
+            state_idx = _state_index(seq_idx, rel_t, ssm_state_indices)
+            persist_state = state_idx >= 0
+            if persist_state:
+                if state_idx >= states.shape[0]:
+                    raise IndexError(
+                        f"state_idx {state_idx} out of range for states size {states.shape[0]}"
+                    )
+                h_t = states[state_idx]
+            else:
+                h_t = torch.zeros(HV, Kdim, v.shape[-1], dtype=q.dtype, device=q.device)
+
+            q_t = _maybe_l2norm(q_t, use_qk_l2norm_in_kernel)
+            k_t = _maybe_l2norm(k_t, use_qk_l2norm_in_kernel)
+            q_t = q_t * scale
+
+            q_hv = _expand_to_hv(q_t, HV)
+            k_hv = _expand_to_hv(k_t, HV)
+
+            if g_t is not None:
+                if g_t.ndim == 0:
+                    g_t = g_t.expand(HV)
+                elif g_t.shape[0] != HV:
+                    g_t = _expand_to_hv(g_t.unsqueeze(-1), HV).squeeze(-1)
+                h_t = h_t * torch.exp(g_t).view(HV, 1, 1)
+
+            v_t = v_t - torch.sum(h_t * k_hv.unsqueeze(-1), dim=1)
+
+            if beta_t is not None:
+                if beta_t.ndim == 1:
+                    if beta_t.shape[0] != HV:
+                        beta_t = _expand_to_hv(beta_t.unsqueeze(-1), HV).squeeze(-1)
+                    v_t = v_t * beta_t.view(HV, 1)
+                else:
+                    if beta_t.shape[0] != HV:
+                        beta_t = _expand_to_hv(beta_t, HV)
+                    v_t = v_t * beta_t
+
+            h_t = h_t + k_hv.unsqueeze(-1) * v_t.unsqueeze(-2)
+            o_t = torch.sum(h_t * q_hv.unsqueeze(-1), dim=1)
+
+            if cu_seqlens is None:
+                out[seq_idx, tok] = o_t
+            else:
+                out[0, tok] = o_t
+
+            if persist_state:
+                states[state_idx] = h_t
+
+    return out, states
+
+
 def chunk_gated_delta_rule_pytorch(
     q,
     k,
@@ -30,114 +192,38 @@ def chunk_gated_delta_rule_pytorch(
     head_first=False,
     use_qk_l2norm_in_kernel=False,
 ):
-    """
-    PyTorch implementation of chunk_gated_delta_rule.
-    This is a fallback implementation for 310P without Triton support.
-    
-    Args:
-        q: query tensor
-        k: key tensor
-        v: value tensor
-        g: gating tensor
-        beta: beta tensor
-        initial_state: initial state
-        output_final_state: whether to output final state
-        cu_seqlens: cumulative sequence lengths
-        head_first: whether head dimension is first
-        use_qk_l2norm_in_kernel: whether to use L2 normalization in kernel
-    
-    Returns:
-        o: output tensor
-        final_state: final state (if output_final_state=True)
-    """
-    if cu_seqlens is None:
-        B, T, H, K, V = *k.shape, v.shape[-1]
-        HV = v.shape[2]
-        N = B
-    else:
-        N = len(cu_seqlens) - 1
-        B, T, H, K = k.shape
-        V = v.shape[-1]
-        HV = v.shape[2]
-    
-    scale = K ** -0.5
-    
-    o = torch.zeros_like(v)
-    
+    """PyTorch fallback for chunk_gated_delta_rule with fla-compatible shapes."""
+    if head_first:
+        raise DeprecationWarning("head_first=True is not supported in 310P fallback.")
+
+    B, _, _, Kdim = k.shape
+    HV = v.shape[2]
+    Vdim = v.shape[-1]
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+
     if initial_state is not None:
-        h = initial_state.clone()
+        states = initial_state.clone()
     else:
-        h = torch.zeros(N, HV, K, V, dtype=q.dtype, device=q.device)
-    
-    if cu_seqlens is not None:
-        for i in range(N):
-            start = cu_seqlens[i].item()
-            end = cu_seqlens[i + 1].item()
-            seq_len = end - start
-            
-            if seq_len == 0:
-                continue
-            
-            q_seq = q[start:end]
-            k_seq = k[start:end]
-            v_seq = v[start:end]
-            g_seq = g[start:end] if g is not None else None
-            beta_seq = beta[start:end] if beta is not None else None
-            
-            for t in range(seq_len):
-                q_t = q_seq[t]
-                k_t = k_seq[t]
-                v_t = v_seq[t]
-                
-                if use_qk_l2norm_in_kernel:
-                    q_t = q_t / (torch.sqrt(torch.sum(q_t * q_t)) + 1e-6)
-                    k_t = k_t / (torch.sqrt(torch.sum(k_t * k_t)) + 1e-6)
-                
-                q_t = q_t * scale
-                
-                if g_seq is not None:
-                    g_t = g_seq[t]
-                    h[i] = h[i] * torch.exp(g_t)
-                
-                v_t = v_t - torch.sum(h[i] * k_t, dim=0)
-                
-                if beta_seq is not None:
-                    beta_t = beta_seq[t]
-                    v_t = v_t * beta_t
-                
-                h[i] = h[i] + k_t.unsqueeze(1) * v_t.unsqueeze(0)
-                
-                o[start + t] = torch.sum(h[i] * q_t, dim=0)
-    else:
-        for t in range(T):
-            q_t = q[:, t]
-            k_t = k[:, t]
-            v_t = v[:, t]
-            
-            if use_qk_l2norm_in_kernel:
-                q_t = q_t / (torch.sqrt(torch.sum(q_t * q_t, dim=-1, keepdim=True)) + 1e-6)
-                k_t = k_t / (torch.sqrt(torch.sum(k_t * k_t, dim=-1, keepdim=True)) + 1e-6)
-            
-            q_t = q_t * scale
-            
-            if g is not None:
-                g_t = g[:, t]
-                h = h * torch.exp(g_t.unsqueeze(-1).unsqueeze(-1))
-            
-            v_t = v_t - torch.sum(h * k_t.unsqueeze(-1), dim=1)
-            
-            if beta is not None:
-                beta_t = beta[:, t]
-                v_t = v_t * beta_t.unsqueeze(-1)
-            
-            h = h + k_t.unsqueeze(1) * v_t.unsqueeze.unsqueeze(0)
-            
-            o[:, t] = torch.sum(h * q_t.unsqueeze(-1), dim=1)
-    
+        states = torch.zeros(N, HV, Kdim, Vdim, dtype=q.dtype, device=q.device)
+
+    scale = Kdim ** -0.5
+    out, states = _run_recurrent_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        states=states,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=None,
+        num_accepted_tokens=None,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+    )
+
     if output_final_state:
-        return o, h
-    else:
-        return o, None
+        return out, states
+    return out, None
 
 
 def fused_recurrent_gated_delta_rule_pytorch(
@@ -153,107 +239,48 @@ def fused_recurrent_gated_delta_rule_pytorch(
     num_accepted_tokens=None,
     use_qk_l2norm_in_kernel=False,
 ):
-    """
-    PyTorch implementation of fused_recurrent_gated_delta_rule.
-    This is a fallback implementation for 310P without Triton support.
-    """
-    if cu_seqlens is None:
-        B, T, H, K, V = *k.shape, v.shape[-1]
-        HV = v.shape[2]
-        N = B
-    else:
-        N = len(cu_seqlens) - 1
-        B, T, H, K = k.shape
-        V = v.shape[-1]
-        HV = v.shape[2]
-    
-    scale = K ** -0.5
-    
-    o = torch.zeros_like(v)
-    
+    """PyTorch fallback for fused_recurrent_gated_delta_rule."""
+    B, _, _, Kdim = k.shape
+    HV = v.shape[2]
+    Vdim = v.shape[-1]
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+
+    n_states = _infer_num_states(N, initial_state, ssm_state_indices)
     if initial_state is not None:
-        if inplace_final_state:
-            h = initial_state
-        else:
-            h = initial_state.clone()
+        states = initial_state if inplace_final_state else initial_state.clone()
     else:
-        h = torch.zeros(N, HV, K, V, dtype=q.dtype, device=q.device)
-    
-    if cu_seqlens is not None:
-        for i in range(N):
-            start = cu_seqlens[i].item()
-            end = cu_seqlens[i + 1].item()
-            seq_len = end - start
-            
-            if seq_len == 0:
-                continue
-            
-            if ssm_state_indices is not None:
-                state_idx = ssm_state_indices[i].item()
-                if num_accepted_tokens is not None:
-                    accepted = num_accepted_tokens[i].item()
-                    seq_len = min(seq_len, accepted)
-            
-            q_seq = q[start:end]
-            k_seq = k[start:end]
-            v_seq = v[start:end]
-            g_seq = g[start:end] if g is not None else None
-            beta_seq = beta[start:end] if beta is not None else None
-            
-            for t in range(seq_len):
-                q_t = q_seq[t]
-                k_t = k_seq[t]
-                v_t = v_seq[t]
-                
-                if use_qk_l2norm_in_kernel:
-                    q_t = q_t / (torch.sqrt(torch.sum(q_t * q_t)) + 1e-6)
-                    k_t = k_t / (torch.sqrt(torch.sum(k_t * k_t)) + 1e-6)
-                
-                q_t = q_t * scale
-                
-                if g_seq is not None:
-                    g_t = g_seq[t]
-                    h[i] = h[i] * torch.exp(g_t)
-                
-                v_t = v_t - torch.sum(h[i] * k_t, dim=0)
-                
-                if beta_seq is not None:
-                    beta_t = beta_seq[t]
-                    v_t = v_t * beta_t
-                
-                h[i] = h[i] + k_t.unsqueeze(1) * v_t.unsqueeze(0)
-                
-                o[start + t] = torch.sum(h[i] * q_t, dim=0)
-    else:
-        for t in range(T):
-            q_t = q[:, t]
-            k_t = k[:, t]
-            v_t = v[:, t]
-            
-            if use_qk_l2norm_in_kernel:
-                q_t = q_t / (torch.sqrt(torch.sum(q_t * q_t, dim=-1, keepdim=True)) + 1e-6)
-                k_t = k_t / (torch.sqrt(torch.sum(k_t * k_t, dim=-1, keepdim=True)) + 1e-6)
-            
-            q_t = q_t * scale
-            
-            if g is not None:
-                g_t = g[:, t]
-                h = h * torch.exp(g_t.unsqueeze(-1).unsqueeze(-1))
-            
-            v_t = v_t - torch.sum(h * k_t.unsqueeze(-1), dim=1)
-            
-            if beta is not None:
-                beta_t = beta[:, t]
-                v_t = v_t * beta_t.unsqueeze(-1)
-            
-            h = h + k_t.unsqueeze(1) * v_t.unsqueeze(0)
-            
-            o[:, t] = torch.sum(h * q_t.unsqueeze(-1), dim=1)
-    
-    if inplace_final_state:
-        return o, h
-    else:
-        return o, h
+        states = torch.zeros(n_states, HV, Kdim, Vdim, dtype=q.dtype, device=q.device)
+
+    scale = Kdim ** -0.5
+    out, states = _run_recurrent_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        states=states,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=ssm_state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+    )
+
+    return out, states
+
+
+def _as_bth(x: torch.Tensor, B: int, T: int, H: int) -> torch.Tensor:
+    """Convert tensor to [B, T, H] for fallback math."""
+    if x.ndim == 3:
+        return x
+    if x.ndim == 2:
+        if B == 1 and x.shape == (T, H):
+            return x.unsqueeze(0)
+        if x.shape == (B * T, H):
+            return x.view(B, T, H)
+    if x.ndim == 1 and x.shape[0] == H:
+        return x.view(1, 1, H).expand(B, T, H)
+    raise ValueError(f"Unsupported shape for BTH conversion: {tuple(x.shape)}")
 
 
 def fused_sigmoid_gating_delta_rule_update_pytorch(
@@ -273,119 +300,40 @@ def fused_sigmoid_gating_delta_rule_update_pytorch(
     cu_seqlens=None,
 ):
     """
-    PyTorch implementation of fused_sigmoid_gating_delta_rule_update.
-    This is a fallback implementation for 310P without Triton support.
+    PyTorch fallback for fused_sigmoid_gating_delta_rule_update.
+
+    Implemented by constructing g/beta then calling recurrent fallback.
     """
-    B, T, H, K = k.shape
+    B, T, _, Kdim = k.shape
     HV = v.shape[2]
-    V = v.shape[-1]
-    N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    
+
     if scale is None:
-        scale = K ** -0.5
-    
-    o = torch.zeros_like(v)
-    
-    if initial_state_source is not None:
-        h = initial_state_source.clone()
-    else:
-        h = torch.zeros(N, HV, K, V, dtype=q.dtype, device=q.device)
-    
-    if cu_seqlens is not None:
-        for i in range(N):
-            start = cu_seqlens[i].item()
-            end = cu_seqlens[i + 1].item()
-            seq_len = end - start
-            
-            if seq_len == 0:
-                continue
-            
-            if initial_state_indices is not None:
-                state_idx = initial_state_indices[i].item()
-                if state_idx >= 0:
-                    h_i = h[state_idx].clone()
-                else:
-                    h_i = torch.zeros(HV, K, V, dtype=q.dtype, device=q.device)
-            else:
-                h_i = h[i].clone()
-            
-            q_seq = q[start:end]
-            k_seq = k[start:end]
-            v_seq = v[start:end]
-            a_seq = a[start:end]
-            b_seq = b[start:end]
-            
-            for t in range(seq_len):
-                q_t = q_seq[t]
-                k_t = k_seq[t]
-                v_t = v_seq[t]
-                a_t = a_seq[t]
-                b_t = b_seq[t]
-                
-                x = a_t + dt_bias
-                beta_x = softplus_beta * x
-                softplus_x = torch.where(
-                    beta_x <= softplus_threshold,
-                    (1.0 / softplus_beta) * torch.log1p(torch.exp(beta_x)),
-                    x,
-                )
-                g_t = -torch.exp(A_log) * softplus_x
-                
-                beta_t = 1.0 / (1.0 + torch.exp(-b_t))
-                
-                if use_qk_l2norm_in_kernel:
-                    q_t = q_t / (torch.sqrt(torch.sum(q_t * q_t)) + 1e-6)
-                    k_t = k_t / (torch.sqrt(torch.sum(k_t * k_t)) + 1e-6)
-                
-                q_t = q_t * scale
-                
-                h_i = h_i * torch.exp(g_t.unsqueeze(-1).unsqueeze(-1))
-                
-                v_t = v_t - torch.sum(h_i * k_t.unsqueeze(-1), dim=1)
-                
-                v_t = v_t * beta_t.unsqueeze(-1)
-                
-                h_i = h_i + k_t.unsqueeze(1) * v_t.unsqueeze(0)
-                
-                o[start + t] = torch.sum(h_i * q_t.unsqueeze(-1), dim=1)
-            
-            if initial_state_indices is not None:
-                state_idx = initial_state_indices[i].item()
-                if state_idx >= 0:
-                    h[state_idx] = h_i
-    else:
-        for t in range(T):
-            q_t = q[:, t]
-            k_t = k[:, t]
-            v_t = v[:, t]
-            a_t = a[:, t]
-            b_t = b[:, t]
-            
-            x = a_t + dt_bias
-            beta_x = softplus_beta * x
-            softplus_x = torch.where(
-                beta_x <= softplus_threshold,
-                (1.0 / softplus_beta) * torch.log1p(torch.exp(beta_x)),
-                x,
-            )
-            g_t = -torch.exp(A_log) * softplus_x
-            
-            beta_t = 1.0 / (1.0 + torch.exp(-b_t))
-            
-            if use_qk_l2norm_in_kernel:
-                q_t = q_t / (torch.sqrt(torch.sum(q_t * q_t, dim=-1, keepdim=True)) + 1e-6)
-                k_t = k_t / (torch.sqrt(torch.sum(k_t * k_t, dim=-1, keepdim=True)) + 1e-6)
-            
-            q_t = q_t * scale
-            
-            h = h * torch.exp(g_t.unsqueeze(-1).unsqueeze(-1))
-            
-            v_t = v_t - torch.sum(h * k_t.unsqueeze(-1), dim=1)
-            
-            v_t = v_t * beta_t.unsqueeze(-1)
-            
-            h = h + k_t.unsqueeze(1) * v_t.unsqueeze(0)
-            
-            o[:, t] = torch.sum(h * q_t.unsqueeze(-1), dim=1)
-    
-    return o
+        scale = Kdim ** -0.5
+
+    a_bth = _as_bth(a, B, T, HV)
+    b_bth = _as_bth(b, B, T, HV)
+
+    x = a_bth + dt_bias.view(1, 1, HV)
+    beta_x = softplus_beta * x
+    softplus_x = torch.where(
+        beta_x <= softplus_threshold,
+        (1.0 / softplus_beta) * torch.log1p(torch.exp(beta_x)),
+        x,
+    )
+    g = -torch.exp(A_log).view(1, 1, HV) * softplus_x
+    beta_tensor = torch.sigmoid(b_bth)
+
+    out, _ = fused_recurrent_gated_delta_rule_pytorch(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta_tensor,
+        initial_state=initial_state_source,
+        inplace_final_state=True,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=initial_state_indices,
+        num_accepted_tokens=None,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+    )
+    return out
