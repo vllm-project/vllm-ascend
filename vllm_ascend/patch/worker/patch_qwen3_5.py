@@ -17,28 +17,24 @@
 """
 Performance patch for Qwen3.5 GatedDeltaNet on Ascend NPU.
 
-Qwen3.5 uses 4 separate input projections:
-  in_proj_qkv  (hidden → key_dim*2 + value_dim)  — MergedColumnParallelLinear
-  in_proj_z    (hidden → value_dim)               — ColumnParallelLinear
-  in_proj_b    (hidden → num_v_heads)             — ColumnParallelLinear
-  in_proj_a    (hidden → num_v_heads)             — ColumnParallelLinear
+Qwen3.5 uses 4 separate input projections (4 GEMM calls per forward).
+This patch fuses them into 2 by modifying the weights of existing
+ColumnParallelLinear layers:
 
-This results in 4 GEMM calls per forward, each reading hidden_states from HBM.
-The b/a projections are especially wasteful: num_v_heads is tiny (e.g., 64)
-compared to hidden_size (e.g., 4096), giving extremely low compute utilization.
+  in_proj_qkv + in_proj_z → in_proj_qkv (weight extended)  — 1 GEMM
+  in_proj_b   + in_proj_a → in_proj_b   (weight extended)  — 1 GEMM
 
-This patch fuses them into 2 projections:
-  fused_qkvz   (hidden → key_dim*2 + value_dim*2)  — 1 GEMM
-  fused_ba     (hidden → num_v_heads*2)             — 1 GEMM
-
-Benefits:
-  - Halves the number of hidden_states HBM reads
-  - Eliminates 2 tiny, inefficient GEMM kernels
-  - Reduces kernel launch overhead
+Key design decisions:
+  - Weights are fused via register_forward_pre_hook (runs once before
+    first forward, before graph capture) — no lazy init in forward.
+  - Fused weights stay in existing ColumnParallelLinear layers, so the
+    custom op path (default_unquantized_gemm, MatmulAllReduceAddRMSNorm
+    fusion) is fully preserved.
+  - Forward uses a simple boolean flag (set in __init__) instead of
+    hasattr, making it graph mode compatible.
 """
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange
 
 try:
@@ -46,136 +42,142 @@ try:
 except ImportError:
     Qwen3_5GatedDeltaNet = None
 
-# Save original forward for fallback (quantized / LoRA models)
 if Qwen3_5GatedDeltaNet is not None:
-    _original_qwen3_5_forward = Qwen3_5GatedDeltaNet.forward
+    _original_init = Qwen3_5GatedDeltaNet.__init__
 
 
-class AscendQwen3_5GatedDeltaNet:
-    """Optimized Qwen3.5 GatedDeltaNet forward for Ascend NPU."""
+def _fusion_pre_hook(module, args):
+    """
+    Pre-forward hook: fuse projection weights into existing layers.
+    Runs once before the first forward call (during eager warmup,
+    before graph capture), then removes itself.
 
-    def _fuse_projections(self):
-        """
-        Fuse 4 separate projection weights into 2 fused weights.
-        Called lazily on first forward. Returns True if fusion succeeded.
+    Fusion:
+      in_proj_qkv.weight = cat([qkv_w, z_w])  → GEMM output includes z
+      in_proj_b.weight   = cat([b_w, a_w])     → GEMM output includes a
 
-        Fusion layout:
-          _fused_qkvz_weight = cat([in_proj_qkv.weight, in_proj_z.weight])
-          _fused_ba_weight   = cat([in_proj_b.weight,   in_proj_a.weight])
+    The fused weights stay inside ColumnParallelLinear, so the custom
+    op path (default_unquantized_gemm) is preserved.
+    """
+    if module._projections_fused:
+        module._fusion_hook_handle.remove()
+        return
 
-        After GEMM, output is split by recorded dimensions:
-          qkvz_out → mixed_qkv[:qkv_dim] + z[qkv_dim:]
-          ba_out   → b[:b_dim]            + a[b_dim:]
-        """
-        if hasattr(self, '_projections_fused'):
-            return self._projections_fused
+    try:
+        qkv_w = module.in_proj_qkv.weight
+        z_w = module.in_proj_z.weight
+        b_w = module.in_proj_b.weight
+        a_w = module.in_proj_a.weight
+    except AttributeError:
+        module._fusion_hook_handle.remove()
+        return
 
-        # Verify all projections have accessible weight tensors
-        modules = [self.in_proj_qkv, self.in_proj_z,
-                   self.in_proj_b, self.in_proj_a]
-        if not all(hasattr(m, 'weight') and m.weight is not None
-                   for m in modules):
-            self._projections_fused = False
-            return False
+    if not all(w.is_floating_point() for w in [qkv_w, z_w, b_w, a_w]):
+        module._fusion_hook_handle.remove()
+        return
 
-        qkv_w = self.in_proj_qkv.weight
-        z_w = self.in_proj_z.weight
-        b_w = self.in_proj_b.weight
-        a_w = self.in_proj_a.weight
+    # Record split dimensions before fusion
+    module._qkv_out_dim = qkv_w.shape[0]
+    module._b_out_dim = b_w.shape[0]
 
-        # Only fuse plain float weights (not quantized int4/int8)
-        if not all(w.is_floating_point() for w in [qkv_w, z_w, b_w, a_w]):
-            self._projections_fused = False
-            return False
+    # Fuse qkv + z → in_proj_qkv
+    fused_qkvz = torch.cat(
+        [qkv_w.data, z_w.data], dim=0,
+    ).contiguous()
+    module.in_proj_qkv.weight = torch.nn.Parameter(
+        fused_qkvz, requires_grad=False)
 
-        # Record split dimensions (after TP sharding)
-        self._qkv_out_dim = qkv_w.shape[0]
-        self._z_out_dim = z_w.shape[0]
-        self._b_out_dim = b_w.shape[0]
-        self._a_out_dim = a_w.shape[0]
+    # Fuse b + a → in_proj_b
+    fused_ba = torch.cat(
+        [b_w.data, a_w.data], dim=0,
+    ).contiguous()
+    module.in_proj_b.weight = torch.nn.Parameter(
+        fused_ba, requires_grad=False)
 
-        # Fuse qkv + z weights
-        self._fused_qkvz_weight = torch.cat(
-            [qkv_w.data, z_w.data], dim=0,
-        ).contiguous()
+    module._projections_fused = True
+    module._fusion_hook_handle.remove()
 
-        # Fuse b + a weights
-        self._fused_ba_weight = torch.cat(
-            [b_w.data, a_w.data], dim=0,
-        ).contiguous()
 
-        self._projections_fused = True
-        return True
+def _patched_init(self, *args, **kwargs):
+    """Override __init__ to set fusion flags and register pre-hook."""
+    _original_init(self, *args, **kwargs)
+    self._projections_fused = False
+    self._qkv_out_dim = 0
+    self._b_out_dim = 0
+    self._fusion_hook_handle = self.register_forward_pre_hook(
+        _fusion_pre_hook)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
-        """
-        Optimized forward: 2 GEMMs instead of 4.
 
-        Part 1: Fused projection
-          GEMM 1 (qkvz): hidden_states @ fused_qkvz_weight^T → split → mixed_qkv, z
-          GEMM 2 (ba):   hidden_states @ fused_ba_weight^T   → split → b, a
-        Part 2: Core attention (_forward_core inherited from patch_qwen3_next.py)
-        Part 3: RMSNormGated + output projection
-        """
-        # Lazy fusion on first call; fallback if fusion not possible
-        if not hasattr(self, '_projections_fused'):
-            if not self._fuse_projections():
-                return _original_qwen3_5_forward(self, hidden_states, output)
-        if not self._projections_fused:
-            return _original_qwen3_5_forward(self, hidden_states, output)
+def _fused_forward(
+    self,
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+):
+    """
+    Optimized forward: 2 GEMMs instead of 4.
 
-        num_tokens = hidden_states.size(0)
+    When fused (non-quantized):
+      GEMM 1: in_proj_qkv(x) → split → mixed_qkv, z
+      GEMM 2: in_proj_b(x)   → split → b, a
+    When not fused (quantized fallback):
+      GEMM 1-4: original 4 separate calls
+    """
+    num_tokens = hidden_states.size(0)
 
-        # ============================================================
-        # Part 1: Fused Input Projections (2 GEMMs instead of 4)
-        # ============================================================
+    if self._projections_fused:
+        # ==========================================================
+        # Fused: 2 GEMMs via ColumnParallelLinear (custom op preserved)
+        # ==========================================================
 
-        # GEMM 1: qkvz — fuses in_proj_qkv + in_proj_z
-        qkvz_out = F.linear(hidden_states, self._fused_qkvz_weight)
-        mixed_qkv = qkvz_out[:, :self._qkv_out_dim].contiguous()
-        z = qkvz_out[:, self._qkv_out_dim:].contiguous()
+        # GEMM 1: qkvz — in_proj_qkv now contains [qkv, z] weights
+        qkvz, _ = self.in_proj_qkv(hidden_states)
+        mixed_qkv = qkvz[:, :self._qkv_out_dim].contiguous()
+        z = qkvz[:, self._qkv_out_dim:].contiguous()
         z = z.reshape(z.size(0), -1, self.head_v_dim)
 
-        # GEMM 2: ba — fuses in_proj_b + in_proj_a
-        ba_out = F.linear(hidden_states, self._fused_ba_weight)
-        b = ba_out[:, :self._b_out_dim].contiguous()
-        a = ba_out[:, self._b_out_dim:].contiguous()
+        # GEMM 2: ba — in_proj_b now contains [b, a] weights
+        ba, _ = self.in_proj_b(hidden_states)
+        b = ba[:, :self._b_out_dim].contiguous()
+        a = ba[:, self._b_out_dim:].contiguous()
+    else:
+        # ==========================================================
+        # Fallback: 4 GEMMs (quantized models)
+        # ==========================================================
+        mixed_qkv, _ = self.in_proj_qkv(hidden_states)
+        z, _ = self.in_proj_z(hidden_states)
+        z = z.reshape(z.size(0), -1, self.head_v_dim)
+        b, _ = self.in_proj_b(hidden_states)
+        a, _ = self.in_proj_a(hidden_states)
 
-        # ============================================================
-        # Part 2: Core Attention (Custom Op)
-        # ============================================================
-        core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+    # ==============================================================
+    # Core Attention (_forward_core inherited from patch_qwen3_next)
+    # ==============================================================
+    core_attn_out = torch.zeros(
+        (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+        dtype=hidden_states.dtype,
+        device=hidden_states.device,
+    )
 
-        torch.ops.vllm.gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            self.prefix,
-        )
+    torch.ops.vllm.gdn_attention_core(
+        mixed_qkv,
+        b,
+        a,
+        core_attn_out,
+        self.prefix,
+    )
 
-        # ============================================================
-        # Part 3: Output Projection
-        # ============================================================
-        z_shape_og = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+    # ==============================================================
+    # Output Projection
+    # ==============================================================
+    z_shape_og = z.shape
+    core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+    z = z.reshape(-1, z.shape[-1])
+    core_attn_out = self.norm(core_attn_out, z)
+    core_attn_out = core_attn_out.reshape(z_shape_og)
+    core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+    output[:num_tokens], _ = self.out_proj(core_attn_out)
 
 
 if Qwen3_5GatedDeltaNet is not None:
-    Qwen3_5GatedDeltaNet._fuse_projections = (
-        AscendQwen3_5GatedDeltaNet._fuse_projections
-    )
-    Qwen3_5GatedDeltaNet.forward = AscendQwen3_5GatedDeltaNet.forward
+    Qwen3_5GatedDeltaNet.__init__ = _patched_init
+    Qwen3_5GatedDeltaNet.forward = _fused_forward
