@@ -113,15 +113,33 @@ class NPUModelRunner310(NPUModelRunner):
 
         # Third pass: handle Mamba layers
         # Mamba layers use a different size calculation based on page_size_bytes and num_blocks
+        # DEBUG: Print Mamba layer calculation details
+        logger.info(f"[MambaCalc DEBUG] Starting Third pass for Mamba layers")
+        logger.info(f"[MambaCalc DEBUG] kv_cache_config.num_blocks={kv_cache_config.num_blocks}")
+        
         for group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = group.kv_cache_spec
             if isinstance(kv_cache_spec, MambaSpec):
+                logger.info(f"[MambaCalc DEBUG] Processing MambaSpec group with {len(group.layer_names)} layers")
+                logger.info(f"[MambaCalc DEBUG] kv_cache_spec.page_size_bytes={kv_cache_spec.page_size_bytes}")
+                logger.info(f"[MambaCalc DEBUG] Calculated size per layer: {kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks / 1024**3:.3f} GiB")
+                
                 for layer_name in group.layer_names:
                     if layer_name in self.runner_only_attn_layers:
+                        logger.info(f"[MambaCalc DEBUG] Skipping layer {layer_name} (in runner_only_attn_layers)")
                         continue
                     # For Mamba layers, use the correct size calculation:
                     # page_size_bytes * num_blocks
-                    kv_cache_sizes[layer_name] = kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks
+                    calculated_size = kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks
+                    kv_cache_sizes[layer_name] = calculated_size
+                    logger.info(f"[MambaCalc DEBUG] Layer {layer_name}: size={calculated_size / 1024**3:.3f} GiB")
+        
+        # DEBUG: Print total Mamba size
+        total_mamba_size = sum(size for name, size in kv_cache_sizes.items() 
+                               if any(layer_name in name for layer_name in 
+                                     [g.layer_names for g in kv_cache_config.kv_cache_groups 
+                                      if isinstance(g.kv_cache_spec, MambaSpec)]))
+        logger.info(f"[MambaCalc DEBUG] Total Mamba KV cache size: {total_mamba_size / 1024**3:.3f} GiB")
 
         # Verification: ensure all layers are accounted for
         layer_names = set()
@@ -192,10 +210,28 @@ class NPUModelRunner310(NPUModelRunner):
                     kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     tensor_size = kv_cache_sizes[layer_name]
+                    logger.info(f"[MambaSpec DEBUG] layer_name={layer_name}, tensor_size={tensor_size / 1024**3:.3f} GiB")
+                    logger.info(f"[MambaSpec DEBUG] kv_cache_spec.shapes={kv_cache_spec.shapes}")
+                    logger.info(f"[MambaSpec DEBUG] kv_cache_spec.dtypes={kv_cache_spec.dtypes}")
+                    logger.info(f"[MambaSpec DEBUG] kv_cache_spec.page_size_bytes={kv_cache_spec.page_size_bytes}")
+                    logger.info(f"[MambaSpec DEBUG] kv_cache_config.num_blocks={kv_cache_config.num_blocks}")
+                    # 获取NPU显存使用情况
+                    try:
+                        total_memory = torch.npu.get_device_properties(self.device).total_memory
+                        allocated_memory = torch.npu.memory_allocated(self.device)
+                        reserved_memory = torch.npu.memory_reserved(self.device)
+                        free_memory = total_memory - allocated_memory
+                        logger.info(f"[MambaSpec DEBUG] NPU Memory: total={total_memory / 1024**3:.3f} GiB, "
+                                    f"allocated={allocated_memory / 1024**3:.3f} GiB, "
+                                    f"reserved={reserved_memory / 1024**3:.3f} GiB, "
+                                    f"free={free_memory / 1024**3:.3f} GiB")
+                    except Exception as e:
+                        logger.warning(f"[MambaSpec DEBUG] Failed to get NPU memory info: {e}")
                     raw_tensor = torch.zeros(tensor_size, dtype=torch.int8, device=self.device)
                     assert tensor_size is not None
                     assert tensor_size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = tensor_size // kv_cache_spec.page_size_bytes
+                    logger.info(f"[MambaSpec DEBUG] num_blocks={num_blocks}")
                     assert num_blocks >= kv_cache_config.num_blocks
 
                     state_tensors = []
@@ -208,6 +244,7 @@ class NPUModelRunner310(NPUModelRunner):
 
                         target_idx += torch.prod(torch.tensor(target_shape)).item()
                         tensor = raw_tensor.view(dtype)[start_idx:target_idx].view(target_shape)
+                        logger.info(f"[MambaSpec DEBUG] Created state tensor: shape={target_shape}, dtype={dtype}")
                         start_idx = target_idx
                         state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
