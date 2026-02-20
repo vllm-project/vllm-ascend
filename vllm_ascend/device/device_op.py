@@ -16,28 +16,78 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import torch
 import torch_npu
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 class BaseDeviceAdaptor:
+    @staticmethod
+    def _reshape_and_cache_fallback(key, value, key_cache, value_cache, slot_mapping):
+        """
+        Fallback path for non-contiguous KV cache tensors.
+
+        This is used when hybrid attention+mamba sharing makes K/V cache views
+        non-contiguous and backend fused scatter ops are unavailable (e.g. 310P).
+        """
+        slots = slot_mapping.reshape(-1).to(dtype=torch.long)
+        valid = slots >= 0
+        if not torch.any(valid):
+            return
+
+        if not bool(valid.all()):
+            key = key[valid]
+            value = value[valid]
+            slots = slots[valid]
+
+        # 310P cache layout: [num_blocks, hidden_dim/16, block_size, 16]
+        if key_cache.ndim == 4 and key_cache.shape[-1] == 16:
+            block_size = key_cache.shape[2]
+            block_idx = torch.div(slots, block_size, rounding_mode="floor")
+            token_idx = torch.remainder(slots, block_size)
+
+            key_flat = key.reshape(key.shape[0], -1)
+            value_flat = value.reshape(value.shape[0], -1)
+            if key_flat.shape[-1] % 16 != 0 or value_flat.shape[-1] % 16 != 0:
+                raise RuntimeError(
+                    "Fallback reshape_and_cache expects hidden size divisible by 16 "
+                    f"for 310P layout, got key={key_flat.shape[-1]}, value={value_flat.shape[-1]}."
+                )
+            key_fmt = key_flat.view(key_flat.shape[0], -1, 16)
+            value_fmt = value_flat.view(value_flat.shape[0], -1, 16)
+
+            key_cache[block_idx, :, token_idx, :] = key_fmt
+            value_cache[block_idx, :, token_idx, :] = value_fmt
+            return
+
+        # Default cache layout: [num_blocks, block_size, num_kv_heads, head_size]
+        if key_cache.ndim == 4 and value_cache.ndim == 4:
+            block_size = key_cache.shape[1]
+            block_idx = torch.div(slots, block_size, rounding_mode="floor")
+            token_idx = torch.remainder(slots, block_size)
+            key_cache[block_idx, token_idx, :, :] = key
+            value_cache[block_idx, token_idx, :, :] = value
+            return
+
+        raise RuntimeError(
+            "Unsupported non-contiguous KV cache layout in fallback path: "
+            f"key_cache shape={tuple(key_cache.shape)}, value_cache shape={tuple(value_cache.shape)}"
+        )
+
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         # Hybrid attention+mamba sharing can produce non-contiguous KV views.
-        # `_npu_reshape_and_cache` requires contiguous cache tensors, so fallback
-        # to scatter-based caching in this case.
+        # `_npu_reshape_and_cache` requires contiguous cache tensors.
         if not key_cache.is_contiguous() or not value_cache.is_contiguous():
-            torch_npu.npu_scatter_pa_kv_cache(
-                key=key,
-                value=value.contiguous(),
-                key_cache=key_cache,
-                value_cache=value_cache,
-                slot_mapping=slot_mapping,
-            )
+            cls._reshape_and_cache_fallback(key, value, key_cache, value_cache, slot_mapping)
             return
         torch_npu._npu_reshape_and_cache(
-            key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
+            key=key.contiguous(),
+            value=value.contiguous(),
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_indices=slot_mapping,
         )
 
 
