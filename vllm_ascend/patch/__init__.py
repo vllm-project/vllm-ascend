@@ -246,11 +246,25 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   Qwen3_5GatedDeltaNet inherits from Qwen3NextGatedDeltaNet and does NOT
 #   override _forward_core. Therefore the patched _forward_core from
-#   patch_qwen3_next.py (Patch 10) is automatically inherited. The Qwen3.5
-#   forward() method uses separate projections (in_proj_qkv, in_proj_z,
-#   in_proj_b, in_proj_a) instead of combined ones, so
-#   fused_qkvzba_split_reshape_cat is not applicable and no additional
-#   patch file is needed for Qwen3.5 models.
+#   patch_qwen3_next.py (Patch 10) is automatically inherited.
+#
+# ** Patch 10.1: File: worker/patch_qwen3_5.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `Qwen3_5GatedDeltaNet.forward`
+#    Why:
+#       Qwen3.5 uses 4 separate projections (in_proj_qkv, in_proj_z,
+#       in_proj_b, in_proj_a), resulting in 4 GEMM calls per forward.
+#       The b/a projections (output dim = num_v_heads, e.g. 64) are
+#       extremely small GEMMs with very low NPU compute utilization.
+#    How:
+#       Fuse weights into 2 projections after model loading:
+#         fused_qkvz = cat(in_proj_qkv.weight, in_proj_z.weight)
+#         fused_ba   = cat(in_proj_b.weight,   in_proj_a.weight)
+#       Use F.linear with fused weights (2 GEMMs), then split outputs.
+#       Falls back to original forward for quantized models.
+#    Future Plan:
+#       Further optimize with fused_qkvzba_split_reshape_cat Triton
+#       kernel after implementing weight interleaving.
 #
 # ** 11. File: worker/patch_v2_eagle.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
