@@ -1,7 +1,7 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass # type: ignore
+from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group, tensor_model_parallel_all_reduce
