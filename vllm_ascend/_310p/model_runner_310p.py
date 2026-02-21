@@ -178,25 +178,13 @@ class NPUModelRunner310(NPUModelRunner):
         from (2, num_blocks, ...) to interleaved block-major memory without
         additional allocation.
         """
-        for group in self._kv_cache_spec_attn_group_iterator():
-            kv_cache_spec = group.kv_cache_spec
-            if not isinstance(kv_cache_spec, AttentionSpec):
-                continue
-            for layer_name in group.layer_names:
-                if layer_name in self.runner_only_attn_layers:
-                    continue
-                kv_cache = kv_caches[layer_name]
-                if not isinstance(kv_cache, torch.Tensor):
-                    continue
-                if kv_cache.shape[0] != 2:
-                    continue
-                assert kv_cache.shape[1] != 2, (
-                    "Fail to determine whether layout is (2, num_blocks, ...) "
-                    f"or (num_blocks, 2, ...) for tensor shape {kv_cache.shape}"
-                )
-                hidden_size = kv_cache.shape[2:].numel()
-                kv_cache.as_strided_(
-                    size=kv_cache.shape,
-                    stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
-                )
+        # NOTE: 310P paged-attention operators are strict about contiguous
+        # key/value cache tensors. Interleaved attention layout makes
+        # key_cache/value_cache non-contiguous and leads to setup failures.
+        # Keep original contiguous layout on 310P.
+        logger.warning(
+            "Skip _update_hybrid_attention_mamba_layout on 310P: "
+            "keep attention KV cache contiguous for paged-attention."
+        )
+        return
 
