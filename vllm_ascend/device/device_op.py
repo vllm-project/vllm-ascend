@@ -24,6 +24,7 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 logger = init_logger(__name__)
 _RESHAPE_CACHE_DEBUG_ONCE_PRINTED = False
+_RESHAPE_CACHE_FORCE_FALLBACK_ON_310P = True
 
 
 def _tensor_meta(name, tensor):
@@ -102,6 +103,23 @@ class BaseDeviceAdaptor:
             logger.warning("[RAC_DEBUG_ONCE] %s", _tensor_meta("value_cache", value_cache))
             logger.warning("[RAC_DEBUG_ONCE] %s", _tensor_meta("slot_mapping", slot_mapping))
 
+        # 310P path: kv cache is typically FRACTAL-NZ-like 4D layout whose
+        # setup with `_npu_reshape_and_cache` is unstable for several model
+        # signatures (e.g. qwen3-next). Prefer deterministic PyTorch fallback
+        # to ensure correctness and avoid worker crashes.
+        if (
+            _RESHAPE_CACHE_FORCE_FALLBACK_ON_310P
+            and key_cache.ndim == 4
+            and value_cache.ndim == 4
+            and key_cache.shape[-1] == 16
+            and value_cache.shape[-1] == 16
+        ):
+            logger.warning(
+                "[RAC_DEBUG_ONCE] force fallback writer for 310P KV cache layout."
+            )
+            cls._reshape_and_cache_fallback(key, value, key_cache, value_cache, slot_mapping)
+            return
+
         # Hybrid attention+mamba sharing can produce non-contiguous KV views.
         # `_npu_reshape_and_cache` requires contiguous cache tensors.
         if not key_cache.is_contiguous() or not value_cache.is_contiguous():
@@ -117,7 +135,7 @@ class BaseDeviceAdaptor:
                 slot_indices=slot_mapping,
             )
         except Exception:
-            logger.exception(
+            logger.warning(
                 "[RAC_DEBUG_ERR] _npu_reshape_and_cache failed with: %s | %s | %s | %s | %s",
                 _tensor_meta("key", key),
                 _tensor_meta("value", value),
