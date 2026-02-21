@@ -153,7 +153,14 @@ class NPUModelRunner310(NPUModelRunner):
                     raise ValueError("Unknown KV cache spec type.")
 
         if has_attn and has_mamba:
-            self._update_hybrid_attention_mamba_layout(kv_caches)
+            # 310P paged-attention kernels are strict about contiguous K/V cache
+            # tensors. Interleaved layout makes key_cache/value_cache non-contiguous
+            # and triggers operator setup failures. Keep attention cache in its
+            # native contiguous layout on 310P.
+            logger.warning(
+                "Skip hybrid attention+mamba interleaved KV layout on 310P "
+                "to keep paged-attention cache contiguous."
+            )
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
