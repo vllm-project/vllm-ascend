@@ -17,7 +17,9 @@
 
 from typing import Any
 
+import torch
 import torch_npu
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
@@ -32,6 +34,21 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
     AscendMetadata,
 )
+
+logger = init_logger(__name__)
+_PA310_DEBUG_ONCE_PRINTED = False
+
+
+def _tensor_meta(name: str, tensor: Any) -> str:
+    if tensor is None:
+        return f"{name}=None"
+    if not isinstance(tensor, torch.Tensor):
+        return f"{name}=<{type(tensor).__name__}>"
+    return (
+        f"{name}(shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+        f"device={tensor.device}, stride={tuple(tensor.stride())}, "
+        f"contiguous={tensor.is_contiguous()})"
+    )
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -86,6 +103,45 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     optimized for the Ascend 310P architecture.
     """
 
+    def _log_pa_inputs_once(
+        self,
+        query: Any,
+        attn_metadata: AscendMetadata,
+        output: Any | None,
+        phase: str,
+    ) -> None:
+        global _PA310_DEBUG_ONCE_PRINTED
+        if _PA310_DEBUG_ONCE_PRINTED:
+            return
+        _PA310_DEBUG_ONCE_PRINTED = True
+
+        state = getattr(attn_metadata, "attn_state", None)
+        block_tables = getattr(attn_metadata, "block_tables", None)
+        seq_lens = getattr(attn_metadata, "seq_lens", None)
+        slot_mapping = getattr(attn_metadata, "slot_mapping", None)
+
+        logger.warning(
+            "[PA310_DEBUG_ONCE] phase=%s, state=%s, num_heads=%s, num_kv_heads=%s, "
+            "head_size=%s, scale=%s, num_actual_tokens=%s, num_decode_tokens=%s, "
+            "num_prefill_tokens=%s",
+            phase,
+            state,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_size,
+            self.scale,
+            getattr(attn_metadata, "num_actual_tokens", None),
+            getattr(attn_metadata, "num_decode_tokens", None),
+            getattr(attn_metadata, "num_prefill_tokens", None),
+        )
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("query", query))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("output", output))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("key_cache", self.key_cache))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("value_cache", self.value_cache))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("block_tables", block_tables))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("seq_lens", seq_lens))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("slot_mapping", slot_mapping))
+
     def forward_paged_attention(
         self,
         query: Any,
@@ -106,6 +162,12 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         Returns:
             Any: The result of the attention operation.
         """
+        self._log_pa_inputs_once(
+            query=query,
+            attn_metadata=attn_metadata,
+            output=output,
+            phase="decode_paged_attention",
+        )
         if attn_metadata.seq_lens.device != query.device:
             attn_metadata.seq_lens = attn_metadata.seq_lens.to(
                 device=query.device,
@@ -167,6 +229,12 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             attn_metadata (AscendMetadata): Metadata containing start locations and block tables.
             output: The output tensor.
         """
+        self._log_pa_inputs_once(
+            query=query,
+            attn_metadata=attn_metadata,
+            output=output,
+            phase="chunked_prefill_splitfuse",
+        )
         num_actual_tokens = int(attn_metadata.num_actual_tokens)
         query = query[:num_actual_tokens]
         output = output[:num_actual_tokens]
