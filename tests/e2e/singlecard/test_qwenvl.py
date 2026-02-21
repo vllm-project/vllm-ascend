@@ -144,9 +144,9 @@ EXPECTED_BEAM_SEARCH_OUTPUTS = [
     ],
 ]
 
-QWEN2VL_MODEL_PATH = "/model/Qwen2-VL-2B-Instruct"
-QWEN25VL_MODEL_PATH = "/model/Qwen2.5-VL-3B-Instruct"
-QWEN3VL_MODEL_PATH = "/model/Qwen3-VL-4B-Instruct"
+QWEN2VL_MODEL_PATH = "vllm-ascend/Qwen2-VL-2B-Instruct"
+QWEN25VL_MODEL_PATH = "vllm-ascend/Qwen2.5-VL-3B-Instruct"
+QWEN3VL_MODEL_PATH = "vllm-ascend/Qwen3-VL-4B-Instruct"
 
 
 @wait_until_npu_memory_free()
