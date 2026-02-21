@@ -18,8 +18,24 @@
 
 import torch
 import torch_npu
+from vllm.logger import init_logger
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+logger = init_logger(__name__)
+_RESHAPE_CACHE_DEBUG_ONCE_PRINTED = False
+
+
+def _tensor_meta(name, tensor):
+    if tensor is None:
+        return f"{name}=None"
+    if not isinstance(tensor, torch.Tensor):
+        return f"{name}=<{type(tensor).__name__}>"
+    return (
+        f"{name}(shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+        f"device={tensor.device}, stride={tuple(tensor.stride())}, "
+        f"contiguous={tensor.is_contiguous()})"
+    )
 
 
 class BaseDeviceAdaptor:
@@ -77,18 +93,42 @@ class BaseDeviceAdaptor:
 
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
+        global _RESHAPE_CACHE_DEBUG_ONCE_PRINTED
+        if not _RESHAPE_CACHE_DEBUG_ONCE_PRINTED:
+            _RESHAPE_CACHE_DEBUG_ONCE_PRINTED = True
+            logger.warning("[RAC_DEBUG_ONCE] %s", _tensor_meta("key", key))
+            logger.warning("[RAC_DEBUG_ONCE] %s", _tensor_meta("value", value))
+            logger.warning("[RAC_DEBUG_ONCE] %s", _tensor_meta("key_cache", key_cache))
+            logger.warning("[RAC_DEBUG_ONCE] %s", _tensor_meta("value_cache", value_cache))
+            logger.warning("[RAC_DEBUG_ONCE] %s", _tensor_meta("slot_mapping", slot_mapping))
+
         # Hybrid attention+mamba sharing can produce non-contiguous KV views.
         # `_npu_reshape_and_cache` requires contiguous cache tensors.
         if not key_cache.is_contiguous() or not value_cache.is_contiguous():
+            logger.warning("[RAC_DEBUG_ONCE] non-contiguous cache detected, using pytorch fallback writer.")
             cls._reshape_and_cache_fallback(key, value, key_cache, value_cache, slot_mapping)
             return
-        torch_npu._npu_reshape_and_cache(
-            key=key.contiguous(),
-            value=value.contiguous(),
-            key_cache=key_cache,
-            value_cache=value_cache,
-            slot_indices=slot_mapping,
-        )
+        try:
+            torch_npu._npu_reshape_and_cache(
+                key=key.contiguous(),
+                value=value.contiguous(),
+                key_cache=key_cache,
+                value_cache=value_cache,
+                slot_indices=slot_mapping,
+            )
+        except Exception:
+            logger.exception(
+                "[RAC_DEBUG_ERR] _npu_reshape_and_cache failed with: %s | %s | %s | %s | %s",
+                _tensor_meta("key", key),
+                _tensor_meta("value", value),
+                _tensor_meta("key_cache", key_cache),
+                _tensor_meta("value_cache", value_cache),
+                _tensor_meta("slot_mapping", slot_mapping),
+            )
+            logger.warning(
+                "[RAC_DEBUG_ERR] fallback to pytorch reshape_and_cache writer after setup failure."
+            )
+            cls._reshape_and_cache_fallback(key, value, key_cache, value_cache, slot_mapping)
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
