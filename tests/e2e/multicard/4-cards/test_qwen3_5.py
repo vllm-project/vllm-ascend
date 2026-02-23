@@ -25,7 +25,7 @@ def test_qwen3_5_distributed_mp_tp4():
         "Hello, my name is",
     ] * 4
     max_tokens = 5
-    with VllmRunner("Qwen/Qwen3.5-xxx",
+    with VllmRunner("Qwen/Qwen3.5-397B-A17B",
                     tensor_parallel_size=4,
                     cudagraph_capture_sizes=[1, 2, 4, 8],
                     max_model_len=4096,
@@ -40,7 +40,7 @@ def test_qwen3_5_distributed_mp_full_decode_only_tp4():
         "Hello, my name is",
     ] * 4
     max_tokens = 5
-    with VllmRunner("Qwen/Qwen3.5-xxx",
+    with VllmRunner("Qwen/Qwen3.5-397B-A17B",
                     tensor_parallel_size=4,
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,

@@ -30,7 +30,7 @@ from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-MODELS = ["Qwen/Qwen3.5-xxx"]
+MODELS = ["Qwen/Qwen3.5-397B-A17B"]
 
 
 @pytest.mark.parametrize("model_name", MODELS)
