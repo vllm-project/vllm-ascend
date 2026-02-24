@@ -16,6 +16,7 @@ class SpecDcodeType(enum.Enum):
     MEDUSA = 6
     DRAFT_MODEL = 7
 
+
 class Proposer:
     def __init__(self, vllm_config: VllmConfig, device: torch.device = None, runner=None):
         pass
