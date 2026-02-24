@@ -1927,11 +1927,15 @@ class NPUModelRunner(GPUModelRunner):
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
-            maybe_pcp_full_tokens = (
-                num_tokens_padded
-                if self.pcp_size == 1
-                else num_tokens * self.pcp_size - sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
-            )
+            if self.pcp_size > 1:
+                total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
+                if self.pcp_manager.pcp_use_hybrid_attn:
+                    assert num_scheduled_tokens_padded is not None
+                    maybe_pcp_full_tokens = sum(num_scheduled_tokens_padded) * self.pcp_size - total_num_pcp_pads
+                else:
+                    maybe_pcp_full_tokens = num_tokens * self.pcp_size - total_num_pcp_pads
+            else:
+                maybe_pcp_full_tokens = num_tokens_padded
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 blk_table_tensor = torch.zeros(
                     (num_reqs_padded, 1),
@@ -1944,15 +1948,6 @@ class NPUModelRunner(GPUModelRunner):
                     device=self.device,
                 )
             else:
-                if self.pcp_size > 1:
-                    total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
-                    if self.pcp_manager.pcp_use_hybrid_attn:
-                        assert num_scheduled_tokens_padded is not None
-                        maybe_pcp_full_tokens = sum(num_scheduled_tokens_padded) * self.pcp_size - total_num_pcp_pads
-                    else:
-                        maybe_pcp_full_tokens = num_tokens * self.pcp_size - total_num_pcp_pads
-                else:
-                    maybe_pcp_full_tokens = num_tokens_padded
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
                 maybe_num_reqs_padded = num_reqs_padded * self.decode_token_per_req if self.use_cp else num_reqs_padded

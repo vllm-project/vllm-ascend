@@ -62,7 +62,7 @@ def test_models_pcp_dcp_basic():
                     max_model_len=1024,
                     tensor_parallel_size=2,
                     prefill_context_parallel_size=2,
-                    decode_context_parallel_size=2,
+                    decode_context_parallel_size=1,
                     max_num_batched_tokens=1024,
                     enable_expert_parallel=True,
                     block_size=128) as runner:
