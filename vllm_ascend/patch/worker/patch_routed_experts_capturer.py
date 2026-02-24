@@ -63,4 +63,6 @@ def init_buffer(
     )
 
 
+# Patch for _device_buffer's initialization(device="cuda" -> device=current_platform.device_name).
+# TODO Remove this patch when pr(https://github.com/vllm-project/vllm/pull/34336) is merged.
 RoutedExpertsCapturer.init_buffer = init_buffer

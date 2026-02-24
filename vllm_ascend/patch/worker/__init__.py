@@ -34,7 +34,5 @@ import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
 import vllm_ascend.patch.worker.patch_v2_eagle  # noqa
 import vllm_ascend.patch.worker.patch_v2_uva  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
-
-# TODO remove this patch when pr: https://github.com/vllm-project/vllm/pull/34336 is merged
 import vllm_ascend.patch.worker.patch_routed_experts_capturer  # noqa
 import vllm_ascend.patch.worker.patch_npugraph_ex_triton  # noqa
