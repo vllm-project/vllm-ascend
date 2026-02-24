@@ -68,7 +68,7 @@ class EplbWorker:
 
         update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
-        logger.info("EPLB Process compute complete")
+        logger.debug("EPLB Process compute complete")
 
         packed_update_info = self.pack_update_info(update_info)
 
