@@ -22,6 +22,9 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
+import vllm_ascend.envs as envs_ascend
+from vllm_ascend.quantization.methods.base import QuantType
+
 
 class VllmEplbAdaptor:
     def __init__(self, model, **args):
@@ -59,12 +62,19 @@ class VllmEplbAdaptor:
     def init_expert_param_per_layer(self):
         self.param_dict = dict()
         if self.model.quant_config is not None:
-            self.expert_weight_names = [
-                "w13_weight_list",
-                "w2_weight_list",
-                "w13_weight_scale_fp32_list",
-                "w2_weight_scale_list",
-            ]
+            quant_type = self.model.model.layers[self.num_dense_layers].mlp.experts.quant_type
+            if quant_type == QuantType.W8A8:
+                self.expert_weight_names = [
+                    "w13_weight_list",
+                    "w2_weight_list",
+                    "w13_weight_scale_fp32_list",
+                    "w2_weight_scale_list",
+                ]
+                if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+                    self.expert_weight_names.append("fused_w1_scale_list")
+                    self.expert_weight_names.append("fused_w2_scale_list")
+            else:
+                raise ValueError(f"EPLB not support {quant_type}")
         else:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
 
