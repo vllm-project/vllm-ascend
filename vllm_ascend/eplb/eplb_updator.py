@@ -156,7 +156,7 @@ class EplbUpdator:
         return moe_load
 
     def compute_and_set_moe_load_list(self):
-        local_load_list = self.adaptor.get_rank_expert_workload_list()
+        local_load_list = self.adaptor.get_rank_expert_workload()
         dist.all_gather_into_tensor(self._gather_buffer, local_load_list)
 
         moe_load_list = self._gather_buffer.permute(1, 0, 2, 3)
