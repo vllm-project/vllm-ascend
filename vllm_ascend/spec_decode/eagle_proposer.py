@@ -1152,7 +1152,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
         common_attn_metadata: CommonAttentionMetadata,
         spec_decode_metadata: SpecDecodeMetadata,
         valid_sampled_tokens_count: torch.Tensor,
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
+    ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding
         It updates the common_attn_metadata for speculative decoding,

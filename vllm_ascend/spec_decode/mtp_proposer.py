@@ -172,6 +172,7 @@ class MtpProposer(EagleProposer):
         num_decode_reqs=0,
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
+        num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Currently, both GLM and DS encounter issues when enabling the fullgraph mode and running on EagleProposer.
         # Therefore, we temporarily bypass this problem by adding a conditional check for fullgraph.
