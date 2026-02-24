@@ -17,6 +17,7 @@
 from collections.abc import Callable
 
 import torch
+import torch.nn.functional as F
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
@@ -250,6 +251,22 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
         self._gate = gate
+
+    def _shared_experts_part1(self, hidden_states: torch.Tensor):
+        """Execute gate_up projection for shared experts."""
+        shared_gate_up, _ = self._shared_experts.gate_up_proj(hidden_states)  # type: ignore
+        return shared_gate_up
+
+    def _shared_experts_part2(self, hidden_states: torch.Tensor, shared_gate_up: torch.Tensor):
+        """Execute activation and down projection for shared experts."""
+        shared_act = self._shared_experts.act_fn(shared_gate_up)  # type: ignore
+        shared_out, _ = self._shared_experts.down_proj(shared_act)  # type: ignore
+
+        # Qwen3-Next specific gating mechanism.
+        if hasattr(self._shared_experts, "expert_gate") and self._shared_experts.expert_gate is not None:
+            gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
+            shared_out = F.sigmoid(gate_out) * shared_out
+        return shared_out
 
     def forward(
         self,

@@ -494,8 +494,8 @@ class NPUPlatform(Platform):
                 False,
                 False,
             ): "vllm_ascend._310p.attention.attention_v1.AscendAttentionBackend310",
-            # TODO If MLA/SFA is supported in the future, consider implementing the logic described in these comments.
-            # (True, False): "...AscendMLABackend310",
+            (True, False): "vllm_ascend._310p.attention.mla_v1.AscendMLABackend310",
+            # TODO If SFA is supported in the future, consider implementing the logic described in these comments.
             # (True, True):  "...AscendSFABackend310",
         }
 

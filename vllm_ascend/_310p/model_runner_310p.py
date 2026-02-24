@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch_npu
 from vllm.logger import logger
@@ -30,6 +32,9 @@ class NPUModelRunner310(NPUModelRunner):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
+        # For MLA on 310P, ND format is safer for memory footprint; NZ may
+        # inflate allocations due to padding/alignment.
+        self._mla_kv_cache_format = os.getenv("VLLM_ASCEND_310P_MLA_KV_CACHE_FORMAT", "ND").upper()
 
     def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
@@ -46,8 +51,8 @@ class NPUModelRunner310(NPUModelRunner):
             raise ValueError("KV cache transfer is not supported for 310P.")
         if self.use_sparse:
             raise ValueError("Deepseek Sparse Attention is not supported for 310P.")
-        if self.model_config.use_mla:
-            raise ValueError("MLAAttention is not supported for 310P.")
+        # MLA is now supported on 310P via software implementation.
+
         # Initialize the memory size for KV cache
         kv_cache_size = self._calculate_kv_cache_tensors_size(kv_cache_config)
         # Allocate and reshape KV cache Tensors
@@ -62,7 +67,7 @@ class NPUModelRunner310(NPUModelRunner):
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches)
         return kv_caches
 
-    def _calculate_kv_cache_tensors_size(self, kv_cache_config: KVCacheConfig) -> dict[str, int]:
+    def _calculate_kv_cache_tensors_size(self, kv_cache_config: KVCacheConfig) -> dict[str, int | tuple[int, int]]:
         """
         Initializes the KV cache size. The buffer needs to be reshaped to the desired shape before being used by
         the models.
@@ -73,24 +78,32 @@ class NPUModelRunner310(NPUModelRunner):
             dict[str, int]: A map between layer names to their
             corresponding memory buffer size.
         """
-        # init kv cache tensors
-        kv_cache_sizes: dict[str, int] = {}
+        kv_cache_sizes: dict[str, int | tuple[int, int]] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
                 if "linear_attn" in layer_name and layer_name not in kv_cache_sizes:
-                    # for mamba linear attention
                     kv_cache_size = kv_cache_tensor.size
                     for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
                         if "linear_attn" in layer_name_inner:
                             kv_cache_sizes[layer_name_inner] = kv_cache_size
                 elif "attn" in layer_name and layer_name not in kv_cache_sizes:
-                    kv_tensor_split_factor = 2
-                    kv_tensor_size = int(kv_cache_tensor.size // kv_tensor_split_factor)
+                    if self.model_config.use_mla:
+                        head_size = (
+                            self.model_config.hf_text_config.qk_rope_head_dim
+                            + self.model_config.hf_text_config.kv_lora_rank
+                        )
+                        k_tensor_split_factor = head_size / self.model_config.hf_text_config.kv_lora_rank
+                        v_tensor_split_factor = head_size / self.model_config.hf_text_config.qk_rope_head_dim
+                        kv_tensor_size = (
+                            int(kv_cache_tensor.size // k_tensor_split_factor),
+                            int(kv_cache_tensor.size // v_tensor_split_factor),
+                        )
+                    else:
+                        kv_tensor_split_factor = 2
+                        kv_tensor_size = int(kv_cache_tensor.size // kv_tensor_split_factor)
                     for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             kv_cache_sizes[layer_name_inner] = kv_tensor_size
 
@@ -107,7 +120,7 @@ class NPUModelRunner310(NPUModelRunner):
     def _allocate_kv_cache_and_reshape_tensors(
         self,
         kv_cache_config: KVCacheConfig,
-        kv_cache_sizes: dict[str, int],
+        kv_cache_sizes: dict[str, int | tuple[int, int]],
     ) -> dict[str, torch.Tensor]:
         """
         Allocate the KV cache tensors to the desired shape and dtype.
@@ -129,14 +142,18 @@ class NPUModelRunner310(NPUModelRunner):
                 if isinstance(kv_cache_spec, AttentionSpec):
                     kv_tensor_size = kv_cache_sizes[layer_name]
                     assert kv_tensor_size is not None
-                    sum_page_size_bytes = kv_tensor_size * 2
+                    if isinstance(kv_tensor_size, tuple):
+                        k_tensor_size, v_tensor_size = kv_tensor_size
+                    else:
+                        k_tensor_size = kv_tensor_size
+                        v_tensor_size = kv_tensor_size
+                    sum_page_size_bytes = k_tensor_size + v_tensor_size
                     assert sum_page_size_bytes % kv_cache_spec.page_size_bytes == 0
                     num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
 
                     if hasattr(attn_backend, "get_supported_kernel_block_sizes") and self.use_hybrid_blocks:
                         block_size = attn_backend.get_supported_kernel_block_sizes()[0]
-
                         block_size_chunk = kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks * block_size_chunk,
@@ -145,18 +162,55 @@ class NPUModelRunner310(NPUModelRunner):
                             kv_cache_spec.head_size,
                         )
                     else:
-                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                            num_blocks, kv_cache_spec.block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                            num_blocks,
+                            kv_cache_spec.block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size,
                         )
                     dtype = kv_cache_spec.dtype
-                    k_shape = kv_cache_shape[1:]
-                    v_shape = k_shape
-                    k_cache = torch_npu.empty_with_format(
-                        size=k_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
-                    )
-                    v_cache = torch_npu.empty_with_format(
-                        size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
-                    )
+                    if self.model_config.use_mla:
+                        mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
+                        k_shape = [
+                            mla_num_blocks,
+                            mla_block_size,
+                            num_kv_heads,
+                            self.model_config.hf_text_config.kv_lora_rank,
+                        ]
+                        v_shape = [
+                            mla_num_blocks,
+                            mla_block_size,
+                            num_kv_heads,
+                            self.model_config.hf_text_config.qk_rope_head_dim,
+                        ]
+                    else:
+                        k_shape = kv_cache_shape[1:]
+                        v_shape = k_shape
+
+                    if self.model_config.use_mla and self._mla_kv_cache_format == "ND":
+                        k_cache = torch.empty(size=k_shape, dtype=dtype, device=self.device)
+                        v_cache = torch.empty(size=v_shape, dtype=dtype, device=self.device)
+                    elif self.model_config.use_mla and self._mla_kv_cache_format == "ND_KPE_ONLY":
+                        k_cache = torch_npu.empty_with_format(
+                            size=k_shape,
+                            dtype=dtype,
+                            device=self.device,
+                            acl_format=self._acl_format,
+                        )
+                        v_cache = torch.empty(size=v_shape, dtype=dtype, device=self.device)
+                    else:
+                        k_cache = torch_npu.empty_with_format(
+                            size=k_shape,
+                            dtype=dtype,
+                            device=self.device,
+                            acl_format=self._acl_format,
+                        )
+                        v_cache = torch_npu.empty_with_format(
+                            size=v_shape,
+                            dtype=dtype,
+                            device=self.device,
+                            acl_format=self._acl_format,
+                        )
                     kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     tensor_size = kv_cache_sizes[layer_name]
@@ -172,10 +226,7 @@ class NPUModelRunner310(NPUModelRunner):
                     target_idx = 0
                     start_idx = 0
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                        # normally, there is conv state and ssm state in this loop. And there is only
-                        # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
-
                         target_idx += torch.prod(torch.tensor(target_shape)).item()
                         tensor = raw_tensor[start_idx:target_idx].view(target_shape)
                         start_idx = target_idx
