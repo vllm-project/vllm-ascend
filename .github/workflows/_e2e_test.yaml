@@ -162,6 +162,16 @@ jobs:
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
 
+
+      - name: Upload timing data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timing-data-singlecard-light-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 30
+
   e2e-full:
     name: singlecard-full
     if: ${{ inputs.type == 'full' }}
@@ -254,6 +264,15 @@ jobs:
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
 
+      - name: Upload timing data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timing-data-singlecard-full-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 30
+
   e2e-2-cards-light:
     name: multicard-2-light
     if: ${{ inputs.type == 'light' }}
@@ -344,6 +363,16 @@ jobs:
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-2card-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
 
+
+      - name: Upload timing data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timing-data-2card-light-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 30
+
   e2e-2-cards-full:
     name: multicard-2-full
     if: ${{ inputs.type == 'full' }}
@@ -433,6 +462,16 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-2-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+
+
+      - name: Upload timing data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timing-data-2card-full-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Run vllm-project/vllm-ascend test (non triton)
         if: ${{ inputs.type == 'full' && matrix.part == 0 }}
@@ -531,6 +570,16 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
           python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-4-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+
+
+      - name: Upload timing data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timing-data-4card-full-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 30
 
   e2e_310p:
     name: 310p singlecard

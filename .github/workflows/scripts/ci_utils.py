@@ -28,9 +28,40 @@ class TestFile:
     is_skipped: bool = False
 
 
+def _write_timing_report(
+    timing_records: list[dict],
+    elapsed_total: float,
+    report_path: str,
+) -> None:
+    """Write a Markdown timing report for all test files."""
+    lines = [
+        "# Test Timing Report",
+        "",
+        f"**Total elapsed: {elapsed_total:.2f}s**",
+        "",
+        "| Test File | Status | Elapsed (s) | Estimated (s) | Diff (s) |",
+        "|-----------|--------|------------:|---------------:|---------:|",
+    ]
+    for record in timing_records:
+        name = record["name"]
+        status = "PASSED" if record["passed"] else "FAILED"
+        elapsed = record["elapsed"]
+        estimated = record["estimated"]
+        diff = elapsed - estimated
+        diff_str = f"+{diff:.0f}" if diff >= 0 else f"{diff:.0f}"
+        lines.append(f"| `{name}` | {status} | {elapsed:.0f} | {estimated:.0f} | {diff_str} |")
+
+    report_dir = os.path.dirname(os.path.abspath(report_path))
+    os.makedirs(report_dir, exist_ok=True)
+    with open(report_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    logger.info(f"Timing report written to: {report_path}")
+
+
 def run_e2e_files(
     files: list[TestFile],
     continue_on_error: bool = False,
+    report_path: str | None = None,
 ):
     """
     Run a list of test files.
@@ -39,11 +70,13 @@ def run_e2e_files(
         files: List of TestFile objects to run
         continue_on_error: If True, continue running remaining tests even if one fails.
                           If False, stop at first failure (default behavior for PR tests).
+        report_path: If provided, write a Markdown timing report to this path.
     """
     tic = time.perf_counter()
     success = True
     passed_tests = []
     failed_tests = []
+    timing_records = []
 
     for i, file in enumerate(files):
         filename, estimated_time = file.name, file.estimated_time
@@ -70,9 +103,11 @@ def run_e2e_files(
 
         if ret_code == 0:
             passed_tests.append(filename)
+            timing_records.append({"name": filename, "passed": True, "elapsed": elapsed, "estimated": estimated_time})
         else:
             logger.info(f"\n{Colors.FAIL}✗ FAILED: {filename} returned exit code {ret_code}{Colors.ENDC}\n")
             failed_tests.append((filename, f"exit code {ret_code}"))
+            timing_records.append({"name": filename, "passed": False, "elapsed": elapsed, "estimated": estimated_time})
             success = False
             if not continue_on_error:
                 break
@@ -98,4 +133,7 @@ def run_e2e_files(
             logger.info(f"  {test} ({reason})")
     logger.info(f"{'=' * 60}\n")
 
-    return 0 if success else -1
+    if report_path is not None:
+        _write_timing_report(timing_records, elapsed_total, report_path)
+
+    return (0 if success else -1), timing_records
