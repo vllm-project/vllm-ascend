@@ -77,20 +77,15 @@ def chunk_gated_delta_rule_fwd(
             cu_seqlens=cu_seqlens,
             num_decodes=num_decodes,
         )
-        if get_pcp_group().rank_in_group == 0:
-            first_final_state = final_state
-        else:
-            first_final_state = torch.empty_like(final_state)
-        get_pcp_group().broadcast(first_final_state, src=0)
-
+        all_final_state = get_pcp_group().all_gather(final_state.unsqueeze(0), 0)
         final_chunk_indices = prepare_final_chunk_indices(cu_seqlens, 64)
         final_h_update = h_update[:, final_chunk_indices, :, :, :]
         all_final_h_update = get_pcp_group().all_gather(final_h_update, 0)
 
         updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
-        updated_state[0, ...] = first_final_state
+        updated_state[0, ...] = all_final_state[0]
         for i in range(1, get_pcp_group().world_size):
-            updated_final_state = final_state + torch.matmul(all_final_h_update[i, ...], updated_state[i - 1, ...])
+            updated_final_state = all_final_state[i] + torch.matmul(all_final_h_update[i, ...], updated_state[i - 1, ...])
             updated_state[i, ...] = updated_final_state
 
         final_state = updated_state[-1, ...]
