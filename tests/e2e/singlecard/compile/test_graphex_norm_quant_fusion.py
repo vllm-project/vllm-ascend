@@ -215,6 +215,7 @@ def register_pattern_safe(pattern_class, vllm_config, eps, pattern_key):
     try:
         # Import the required pass class
         from torch._inductor.pattern_matcher import PatternMatcherPass
+
         pm_pass = PatternMatcherPass()
         pattern.register(pm_pass)
         _registered_patterns.add(pattern_key)
@@ -243,7 +244,7 @@ def test_rmsnorm_quant_fusion(
     sp_enable: bool,
 ):
     # Check if fusion operator is available
-    if not hasattr(torch.ops.npu, 'npu_add_rms_norm_quant'):
+    if not hasattr(torch.ops.npu, "npu_add_rms_norm_quant"):
         pytest.skip("Fusion operator npu_add_rms_norm_quant not available, skipping test")
 
     vllm_config = VllmConfig(model_config=ModelConfig(dtype=dtype))
@@ -266,7 +267,7 @@ def test_rmsnorm_quant_fusion(
             if not enable_custom_op():
                 pytest.skip("Custom ops not available, skipping bias test")
             # Check if the bias operator exists
-            if not hasattr(torch.ops._C_ascend, 'npu_add_rms_norm_bias'):
+            if not hasattr(torch.ops._C_ascend, "npu_add_rms_norm_bias"):
                 pytest.skip("Operator npu_add_rms_norm_bias not available, skipping bias test")
             if sp_enable:
                 model = ModelSPWithBias(hidden_size, dtype, eps, device="npu")
@@ -281,13 +282,11 @@ def test_rmsnorm_quant_fusion(
         else:
             # The non-bias patterns currently use npu_add_rms_norm_bias in their pattern matching
             # so we need to skip if it's not available
-            if not hasattr(torch.ops._C_ascend, 'npu_add_rms_norm_bias'):
+            if not hasattr(torch.ops._C_ascend, "npu_add_rms_norm_bias"):
                 pytest.skip("Operator npu_add_rms_norm_bias not available, skipping test")
             if sp_enable:
                 model = ModelSPWithoutBias(hidden_size, dtype, eps, device="npu")
-                register_pattern_safe(
-                    AddRMSNormQuantSPPattern, vllm_config, eps, "GraphEXAddRMSNormQuantSPPattern"
-                )
+                register_pattern_safe(AddRMSNormQuantSPPattern, vllm_config, eps, "GraphEXAddRMSNormQuantSPPattern")
             else:
                 model = ModelWithoutBias(hidden_size, dtype, eps, device="npu")
                 register_pattern_safe(AddRMSNormQuantPattern, vllm_config, eps, "GraphEXAddRMSNormQuantPattern")
@@ -302,5 +301,9 @@ def test_rmsnorm_quant_fusion(
             compiled_out, compiled_res = compiled_model(x)
 
             # Verify output shapes are correct
-            assert compiled_out.shape == (num_tokens, hidden_size), f"Expected shape {(num_tokens, hidden_size)}, got {compiled_out.shape}"
-            assert compiled_res.shape == (num_tokens, hidden_size), f"Expected shape {(num_tokens, hidden_size)}, got {compiled_res.shape}"
+            assert compiled_out.shape == (num_tokens, hidden_size), (
+                f"Expected shape {(num_tokens, hidden_size)}, got {compiled_out.shape}"
+            )
+            assert compiled_res.shape == (num_tokens, hidden_size), (
+                f"Expected shape {(num_tokens, hidden_size)}, got {compiled_res.shape}"
+            )

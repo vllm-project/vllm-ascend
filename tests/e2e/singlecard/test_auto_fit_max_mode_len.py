@@ -42,6 +42,7 @@ def new_kv_cache_spec(
         attention_chunk_size=attention_chunk_size,
     )
 
+
 def test_auto_fit_max_model_len():
     """Test that max_model_len=-1 auto-fits to available NPU memory."""
     # Create config with original_max_model_len=-1 to trigger auto-fit
@@ -59,9 +60,7 @@ def test_auto_fit_max_model_len():
 
     # With enough memory, max_model_len stays at the derived max
     large_available_memory = mem_per_block_per_layer * 2 * 1024  # plenty of memory
-    _kv_cache_configs = get_kv_cache_configs(
-        vllm_config, [kv_cache_specs], [large_available_memory]
-    )
+    _kv_cache_configs = get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
     assert vllm_config.model_config.max_model_len == 1024
 
     # Reset for next test
@@ -73,9 +72,7 @@ def test_auto_fit_max_model_len():
     # Need memory for at least max_model_len tokens
     # 32 blocks worth of memory for 2 layers = can fit 32*16=512 tokens
     limited_memory = mem_per_block_per_layer * 2 * 32
-    _kv_cache_configs = get_kv_cache_configs(
-        vllm_config, [kv_cache_specs], [limited_memory]
-    )
+    _kv_cache_configs = get_kv_cache_configs(vllm_config, [kv_cache_specs], [limited_memory])
     # Should be reduced to fit in memory
     assert vllm_config.model_config.max_model_len < 1024
     assert vllm_config.model_config.max_model_len > 0
@@ -94,7 +91,5 @@ def test_auto_fit_max_model_len_not_triggered():
     }
 
     # This should work normally without auto-fit
-    _kv_cache_configs = get_kv_cache_configs(
-        vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
-    )
+    _kv_cache_configs = get_kv_cache_configs(vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32])
     assert vllm_config.model_config.max_model_len == 16
