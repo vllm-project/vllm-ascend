@@ -22,6 +22,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -165,15 +166,25 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
 
+    def _get_model(self) -> nn.Module:
+        """
+        Default method to call get_model(). Can be overridden by subclasses which
+        need to customize model loading.
+        """
+        from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("eagle_head"):
+            model = get_model(vllm_config=self.vllm_config,
+                              model_config=self.vllm_config.
+                              speculative_config.draft_model_config,
+            )
+        return model
+
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
         target_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
 
         self.model = self._get_model()
-        # with self.maybe_eager_context:
-        #     self.model = get_model(vllm_config=self.vllm_config,
-        #                            model_config=self.vllm_config.
-        #                            speculative_config.draft_model_config)
 
         indexer_layers = get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys()
         draft_attn_layer = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
@@ -181,7 +192,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
         draft_attn_layer_names = draft_attn_layer - target_attn_layer_names
         draft_indexer_layer_names = indexer_layers - target_indexer_layer_names
         draft_attn_layer_names = draft_attn_layer_names - draft_indexer_layer_names
-        # assert len(draft_attn_layer_names) == 1
+
         self.attn_layer_names = list(sorted(draft_attn_layer_names))
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
