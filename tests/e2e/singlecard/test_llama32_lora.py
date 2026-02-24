@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
+from unittest.mock import patch
 
+import pytest
 import vllm
 import vllm.config
 from vllm.lora.request import LoRARequest
-from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
 from vllm_ascend.utils import enable_custom_op
@@ -53,17 +53,12 @@ def do_sample(
         PROMPT_TEMPLATE.format(context="How many candidates are there?"),
         PROMPT_TEMPLATE.format(context="Count the number of candidates."),
         PROMPT_TEMPLATE.format(
-            context=
-            "Which poll resource provided the most number of candidate information?"  # noqa: E501
+            context="Which poll resource provided the most number of candidate information?"  # noqa: E501
         ),
-        PROMPT_TEMPLATE.format(
-            context=
-            "Return the poll resource associated with the most candidates."),
+        PROMPT_TEMPLATE.format(context="Return the poll resource associated with the most candidates."),
     ]
 
-    sampling_params = vllm.SamplingParams(temperature=0,
-                                          max_tokens=64,
-                                          stop=["<|im_end|>"])
+    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64, stop=["<|im_end|>"])
     if tensorizer_config_dict is not None:
         outputs = llm.generate(
             prompts,
@@ -73,14 +68,15 @@ def do_sample(
                 lora_id,
                 lora_path,
                 tensorizer_config_dict=tensorizer_config_dict,
-            ) if lora_id else None,
+            )
+            if lora_id
+            else None,
         )
     else:
         outputs = llm.generate(
             prompts,
             sampling_params,
-            lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-            if lora_id else None,
+            lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None,
         )
 
     generated_texts: list[str] = []
@@ -92,33 +88,40 @@ def do_sample(
     return generated_texts
 
 
-def generate_and_test(llm,
-                      llama32_lora_files,
-                      tensorizer_config_dict: dict | None = None):
+def generate_and_test(llm, llama32_lora_files, tensorizer_config_dict: dict | None = None):
     print("lora adapter created")
     print("lora 1")
-    assert (do_sample(
-        llm,
-        llama32_lora_files,
-        tensorizer_config_dict=tensorizer_config_dict,
-        lora_id=1,
-    ) == EXPECTED_LORA_OUTPUT)
+    assert (
+        do_sample(
+            llm,
+            llama32_lora_files,
+            tensorizer_config_dict=tensorizer_config_dict,
+            lora_id=1,
+        )
+        == EXPECTED_LORA_OUTPUT
+    )
 
     print("lora 2")
-    assert (do_sample(
-        llm,
-        llama32_lora_files,
-        tensorizer_config_dict=tensorizer_config_dict,
-        lora_id=2,
-    ) == EXPECTED_LORA_OUTPUT)
+    assert (
+        do_sample(
+            llm,
+            llama32_lora_files,
+            tensorizer_config_dict=tensorizer_config_dict,
+            lora_id=2,
+        )
+        == EXPECTED_LORA_OUTPUT
+    )
 
     print("base model")
-    assert (do_sample(
-        llm,
-        llama32_lora_files,
-        tensorizer_config_dict=tensorizer_config_dict,
-        lora_id=0,
-    ) == EXPECTED_BASE_MODEL_OUTPUT)
+    assert (
+        do_sample(
+            llm,
+            llama32_lora_files,
+            tensorizer_config_dict=tensorizer_config_dict,
+            lora_id=0,
+        )
+        == EXPECTED_BASE_MODEL_OUTPUT
+    )
 
     print("removing lora")
 
