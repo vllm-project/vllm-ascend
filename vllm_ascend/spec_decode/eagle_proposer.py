@@ -306,6 +306,12 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
                     self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
                 )
 
+    def get_model(self) -> nn.Module:        
+        # get raw model out of the aclgraph wrapper.        
+        if isinstance(self.model, ACLGraphWrapper):           
+            return self.model.unwrap()        
+        return self.model
+
     def shallow_copy_metadata(self, attn_metadata):
         # Currently, new objects will be assigned to the lists in attn_metadata
         # when update. So we can use the shallow copy.
