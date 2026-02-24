@@ -24,6 +24,8 @@ _SHARD_WEIGHT: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
+_DYNAMIC_EPLB: GroupCoordinator | None = None
+
 
 def init_ascend_model_parallel(
     parallel_config: ParallelConfig,
@@ -84,6 +86,12 @@ def init_ascend_model_parallel(
     group_ranks = [x.tolist() for x in group_ranks]
 
     _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
+
+    if get_ascend_config().eplb_config.dynamic_eplb:
+        global _DYNAMIC_EPLB
+        _DYNAMIC_EPLB = init_model_parallel_group(
+            group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
+        )
 
     # Initialize fine-grained TP process groups on Ascend for four components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
@@ -265,6 +273,11 @@ def get_fc3_quant_x_group() -> GroupCoordinator:
     return _FC3_QUANT_X
 
 
+def get_dynamic_eplb_group() -> GroupCoordinator:
+    assert _DYNAMIC_EPLB is not None, "fc3 quant x group is not initialized"
+    return _DYNAMIC_EPLB
+
+
 def destroy_ascend_model_parallel():
     global _MC2
     if _MC2:
@@ -315,3 +328,8 @@ def destroy_ascend_model_parallel():
     if _FC3_QUANT_X:
         _FC3_QUANT_X.destroy()
     _FC3_QUANT_X = None
+
+    global _DYNAMIC_EPLB
+    if _DYNAMIC_EPLB:
+        _DYNAMIC_EPLB.destroy()
+    _DYNAMIC_EPLB = None
