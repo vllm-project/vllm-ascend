@@ -352,7 +352,7 @@ class TestMtpProposer:
 
         expected_sample_indices = torch.tensor([5, 13, 22], dtype=torch.int32)
         assert torch.equal(token_indices_to_sample, expected_sample_indices)
-        assert torch.equal(num_rejected_tokens_gpu, common_attn_metadata.query_start_loc[1:] - 1- token_indices_to_sample)
+        assert torch.equal(num_rejected_tokens_gpu, spec_common_attn_metadata.query_start_loc[1:] - 1- token_indices_to_sample)
 
         assert isinstance(spec_common_attn_metadata,
                           AscendCommonAttentionMetadata)
