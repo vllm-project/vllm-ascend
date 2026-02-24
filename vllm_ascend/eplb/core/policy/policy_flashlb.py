@@ -8,8 +8,8 @@ from typing import Any
 import numpy as np
 import torch
 from numba import njit  # type: ignore
-from scipy import stats # type: ignore
-from scipy.optimize import linear_sum_assignment # type: ignore
+from scipy import stats  # type: ignore
+from scipy.optimize import linear_sum_assignment  # type: ignore
 
 from .policy_abstract import DynamicConfig, EplbPolicy
 
