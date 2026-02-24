@@ -47,7 +47,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 "Please pass 'draft_tensor_parallel_size' in the speculative_config."
             )
 
-    @override
     def _get_model(self) -> nn.Module:
         # Draft models may be quantized or on different parallelism,
         # so we load them with a modified vllm config
