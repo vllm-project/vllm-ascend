@@ -168,7 +168,6 @@ def test_llama_qwen3_eagle_correctness(
                         "draft_tensor_parallel_size":
                         draft_tensor_parallel_size,
                         "max_model_len": 128,
-                        "draft_vocab_size": 128256,
                     },
                     compilation_config=CompilationConfig(
                         cudagraph_mode="FULL_DECODE_ONLY",
