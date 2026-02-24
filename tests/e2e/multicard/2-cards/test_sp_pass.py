@@ -28,6 +28,7 @@ def test_qwen3_vl_sp_tp2(model: str) -> None:
                 "cudagraph_mode": "FULL_DECODE_ONLY",
                 "pass_config": {"enable_sp": False}
             },
+            additional_config={"npugraph_ex_config": {"enable": False}}
     ) as runner:
         no_sp_outputs = runner.model.generate(prompts, sampling_params)
 
@@ -40,7 +41,7 @@ def test_qwen3_vl_sp_tp2(model: str) -> None:
                 "cudagraph_mode": "FULL_DECODE_ONLY",
                 "pass_config": {"enable_sp": True}
             },
-            additional_config={"sp_threshold": 10}
+            additional_config={"sp_threshold": 10, "npugraph_ex_config": {"enable": False}}
     ) as runner:
         sp_outputs = runner.model.generate(
             prompts, sampling_params)

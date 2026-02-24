@@ -1,13 +1,17 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
+
+from vllm_ascend.utils import is_moe_model, vllm_version_is
+
+if vllm_version_is("0.15.0"):
+    from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
+else:
+    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.logger import logger
-
-from vllm_ascend.utils import is_moe_model
 
 SP_THRESHOLD = 1000
 
@@ -72,7 +76,7 @@ class AscendMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             residual: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             x = self._all_reduce(input)
-            result, _, residual = torch.ops.npu.npu_add_rms_norm(x, residual, weight, self.eps)
+            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(x, residual, weight, None, self.eps)
 
             return result, residual
 
@@ -83,7 +87,9 @@ class AscendMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
             residual = torch.ops.vllm.maybe_chunk_residual(reduce_scatter, residual)
-            result, _, residual = torch.ops.npu.npu_add_rms_norm(reduce_scatter, residual, weight, self.eps)
+            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                reduce_scatter, residual, weight, None, self.eps
+            )
             all_gather = self._all_gather(result)
             return all_gather, residual
 
@@ -107,7 +113,7 @@ class AscendLastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             residual: torch.Tensor,
         ) -> torch.Tensor:
             x = self._all_reduce(input)
-            result, _, _ = torch.ops.npu.npu_add_rms_norm(x, residual, weight, self.eps)
+            result, _, _ = torch.ops._C_ascend.npu_add_rms_norm_bias(x, residual, weight, None, self.eps)
 
             return result
 
@@ -118,7 +124,7 @@ class AscendLastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> torch.Tensor:
             reduce_scatter = self._reduce_scatter(input)
             residual = torch.ops.vllm.maybe_chunk_residual(reduce_scatter, residual)
-            result, _, _ = torch.ops.npu.npu_add_rms_norm(reduce_scatter, residual, weight, self.eps)
+            result, _, _ = torch.ops._C_ascend.npu_add_rms_norm_bias(reduce_scatter, residual, weight, None, self.eps)
             all_gather = self._all_gather(result)
             return all_gather
 
@@ -145,7 +151,7 @@ class AscendQwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper)
         ) -> tuple[torch.Tensor, torch.Tensor]:
             x = self._all_reduce(input)
             add_ = x + deepstack_input_embeds
-            result, _, residual = torch.ops.npu.npu_add_rms_norm(add_, residual, weight, self.eps)
+            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(add_, residual, weight, None, self.eps)
 
             return result, residual
 
@@ -159,7 +165,7 @@ class AscendQwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper)
             chunk = deepstack_input_embeds.chunk(self.tp_size)[self.tp_rank]
             add_ = reduce_scatter + chunk
             residual = torch.ops.vllm.maybe_chunk_residual(reduce_scatter, residual)
-            result, _, residual = torch.ops.npu.npu_add_rms_norm(add_, residual, weight, self.eps)
+            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(add_, residual, weight, None, self.eps)
             all_gather = self._all_gather(result)
             return all_gather, residual
 

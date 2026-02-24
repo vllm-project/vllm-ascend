@@ -194,6 +194,7 @@ class NPUPlatform(Platform):
                 if not isinstance(ascend_compilation_config, dict)
                 else ascend_compilation_config
             )
+        ascend_config.update_compilation_config()
 
         npugraph_ex_config = ascend_config.npugraph_ex_config
         if npugraph_ex_config and npugraph_ex_config.fuse_allreduce_rms:
