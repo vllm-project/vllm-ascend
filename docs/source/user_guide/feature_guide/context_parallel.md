@@ -9,7 +9,7 @@ This guide shows how to use Context Parallel, a long sequence inference optimiza
 Context parallel mainly solves the problem of serving long context requests. As prefill and decode present quite different characteristics and have quite different SLO (service level objectives), we need to implement context parallel separately for them. The major considerations are:
 
 - For long context prefill, we can use context parallel to reduce TTFT (time to first token) by amortizing the computation time of the prefill across query tokens.
-- For long context decode, we can use context parallel to reduce KV cache duplication and offer more space for KV cache to increase the batchsize (and hence the throughput).
+- For long context decode, we can use context parallel to reduce KV cache duplication and offer more space for KV cache to increase the batch size (and hence the throughput).
 
 To learn more about the theory and implementation details of context parallel, please refer to the [context parallel developer guide](../../developer_guide/feature_guide/context_parallel.md).
 
@@ -54,19 +54,19 @@ You can enable `PCP` and `DCP` by `prefill_context_parallel_size` and `decode_co
         --prefill-context-parallel-size 2 \
     ```
 
-The total world_size is `tensor_parallel_size` * `prefill_context_parallel_size`, so the examples above need 4 NPUs for each.
+The total world size is `tensor_parallel_size` * `prefill_context_parallel_size`, so the examples above need 4 NPUs for each.
 
 ## Constraints
 
 - While using DCP, the following constraints must be met:
-    - For MLA based model, such as Deepseek-R1:
+    - For MLA-based model, such as DeepSeek-R1:
         - `tensor_parallel_size >= decode_context_parallel_size`
         - `tensor_parallel_size % decode_context_parallel_size == 0`
-    - For GQA based model, such as Qwen3-235B:
+    - For GQA-based model, such as Qwen3-235B:
         - `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`
         - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`
 
-- While using Context Parallel in KV cache transfer needed scenario (e.g. KV pooling, PD-disaggregation), to simplify KV cache transmission, `cp_kv_cache_interleave_size` must be set to the same value of KV cache `block_size`(default: 128), which specify cp to split KV cache in a block-interleave style. For example:
+- While using Context Parallel in KV cache transfer-needed scenario (e.g. KV pooling, PD disaggregation), to simplify KV cache transmission, `cp_kv_cache_interleave_size` must be set to the same value of KV cache `block_size`(default: 128), which specifies CP to split KV cache in a block-interleave style. For example:
 
     ```shell
     vllm serve deepseek-ai/DeepSeek-V2-Lite \
@@ -79,7 +79,7 @@ The total world_size is `tensor_parallel_size` * `prefill_context_parallel_size`
 
 ## Experimental Results
 
-To evaluate the effectiveness of Context Parallel in in long sequence LLM inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy PD-disaggregate instances in the environment of 64 cards Ascend 910C*64G (A3), the configuration and performance data are as follows.
+To evaluate the effectiveness of Context Parallel in long sequence LLM inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy PD disaggregate instances in the environment of 64 cards Ascend 910C*64G (A3), the configuration and performance data are as follows.
 
 - DeepSeek-R1-W8A8:
 
