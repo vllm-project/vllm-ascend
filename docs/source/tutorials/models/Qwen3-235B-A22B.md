@@ -113,8 +113,8 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --quantization ascend \
 --served-model-name qwen3 \
 --max-num-seqs 32 \
---max-model-len 133000 \
---max-num-batched-tokens 8096 \
+--max-model-len 131072 \
+--max-num-batched-tokens 8192 \
 --enable-expert-parallel \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
@@ -374,7 +374,7 @@ vllm bench serve --model qwen3 \
 --dataset-name random \
 --random-input-len 3584 \
 --random-output-len 1536 \
---num-prompts 800 \
+--num-prompts 8 \
 --max-concurrency 160 \
 --request-rate 24 \
 --host 0.0.0.0 \
@@ -607,7 +607,7 @@ vllm bench serve --model qwen3 \
 --dataset-name random \
 --random-input-len 3584 \
 --random-output-len 1536 \
---num-prompts 2880 \
+--num-prompts 8 \
 --max-concurrency 576 \
 --request-rate 8 \
 --host 0.0.0.0 \
