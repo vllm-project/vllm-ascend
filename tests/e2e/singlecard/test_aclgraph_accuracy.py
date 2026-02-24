@@ -18,9 +18,8 @@
 # ruff: noqa: E501
 
 import os
-from vllm_ascend.utils import vllm_version_is
-from tests.e2e.singlecard.utils import (PROMPTS_LONG, PROMPTS_SHORT,
-                                        LLMTestCase, gen_and_valid)
+import pytest
+from tests.e2e.singlecard.utils import PROMPTS_LONG, PROMPTS_SHORT, LLMTestCase, gen_and_valid
 
 CASE_QWEN_ACLGRAPH = LLMTestCase(
     model="Qwen/Qwen3-0.6B",
@@ -38,10 +37,10 @@ CASE_DS_ACLGRAPH = LLMTestCase(
     quantization="ascend",
     prompts=PROMPTS_SHORT,
     golden_answers=[
-        '\nI am a 20 year old female, and I have been suffering from depression for 3 years now. I have been on medication for 2',
-        ' a man who has been in the public eye for decades. He has been a senator, a governor, and a businessman. He has also been married to the',
-        ' Paris, which is also the largest city in the country. The city is located on the River Seine and is known for its beautiful architecture, museums, and art',
-        ' here, and it’s not what you think.\nThe future of AI is here, and it’s not what you think.\nThe future of'
+        "\nI am a 20 year old female, and I have been suffering from depression for 3 years now. I have been on medication for 2",
+        " a man who has been in the public eye for decades. He has been a senator, a governor, and a businessman. He has also been married to the",
+        " Paris, which is also the largest city in the country. The city is located on the River Seine and is known for its beautiful architecture, museums, and art",
+        " here, and it’s not what you think.\nThe future of AI is here, and it’s not what you think.\nThe future of",
     ],
 )
 
