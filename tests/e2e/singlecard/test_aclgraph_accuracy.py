@@ -18,7 +18,9 @@
 # ruff: noqa: E501
 
 import os
+
 import pytest
+
 from tests.e2e.singlecard.utils import PROMPTS_LONG, PROMPTS_SHORT, LLMTestCase, gen_and_valid
 
 CASE_QWEN_ACLGRAPH = LLMTestCase(
