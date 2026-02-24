@@ -111,6 +111,8 @@ class MoECommMethod(ABC):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str = "silu",
+        w1_bias: torch.Tensor = None,
+        w2_bias: torch.Tensor = None,
         apply_router_weight_on_input: bool = False,
         use_int8_w8a8: bool = False,
         use_int4_w4a8: bool = False,
@@ -181,6 +183,9 @@ class MoECommMethod(ABC):
             w1_scale=w1_scale,
             w2=w2,
             w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            activation=activation,
             group_list=dispatch_results.group_list,
             dynamic_scale=dispatch_results.dynamic_scale,
             group_list_type=dispatch_results.group_list_type,
@@ -303,6 +308,13 @@ class FusedMC2CommImpl(MoECommMethod):
     Communication and Computation parallelism on Ascend devices.
     """
 
+    def __init__(self, moe_config):
+        super().__init__(moe_config)
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
+        else:
+            self.expert_token_nums = None
+
     def _get_token_dispatcher(self):
         return TokenDispatcherWithMC2()
 
@@ -317,6 +329,8 @@ class FusedMC2CommImpl(MoECommMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str = "silu",
+        w1_bias: torch.Tensor = None,
+        w2_bias: torch.Tensor = None,
         apply_router_weight_on_input: bool = False,
         use_int8_w8a8: bool = False,
         use_int4_w4a8: bool = False,
@@ -350,7 +364,6 @@ class FusedMC2CommImpl(MoECommMethod):
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
             out = torch.empty_like(hidden_states)
-            expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=hidden_states,
                 weight1=w1,
@@ -362,9 +375,9 @@ class FusedMC2CommImpl(MoECommMethod):
                 group=self.token_dispatcher.moe_all_to_all_group_name,
                 max_output_size=65536,
                 out=out,
-                expert_token_nums=expert_token_nums,
+                expert_token_nums=self.expert_token_nums,
             )
-            expert_tokens = expert_token_nums
+            expert_tokens = self.expert_token_nums
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert expert_map is not None, "expert_map cannot be None."
             group_list_type = 1

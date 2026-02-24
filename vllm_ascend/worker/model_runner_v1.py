@@ -1197,8 +1197,10 @@ class NPUModelRunner(GPUModelRunner):
                 model_kwargs,
                 ec_connector_output,
             ) = self._preprocess(scheduler_output, num_tokens_padded, intermediate_tensors)
+
             # update global cos, sin
             update_cos_sin(positions)
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -2388,7 +2390,7 @@ class NPUModelRunner(GPUModelRunner):
         to be reshaped to the desired shape before being used by the models.
 
         NOTE: To support prefill disaggregation, we need to split kvcache tensor into
-        k_cahce and v cache, and the addr of both are aligned by 2M
+        k_cache and v cache, and the addr of both are aligned by 2M
 
         Args:
             kv_cache_config: The KV cache config
