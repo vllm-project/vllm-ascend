@@ -152,11 +152,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.moe_expert_num,
-            "global_bs": 0 if self.a5_need_extra_args else self.global_bs,
+            "global_bs": self.global_bs,
             "expert_token_nums_type": 0,
         }
-        if self.a5_need_extra_args:
-            kwargs_mc2["comm_alg"] = "ccu"
 
         stage1_kwargs = {
             "scales": None,
@@ -287,12 +285,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                     "tp_rank_id": 0,
                 }
             )
-        if self.a5_need_extra_args:
-            stage3_kwargs.update(
-                {
-                    "comm_alg": "ccu",
-                }
-            )
+
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
 
