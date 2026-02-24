@@ -22,11 +22,12 @@ import vllm.envs as envs
 from vllm.logger import logger
 
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 
 
 class EplbUpdator:
-    def __init__(self, eplb_config, loader, eplb_process: EplbProcess, process):
+    def __init__(self, eplb_config, loader: D2DExpertWeightLoader, eplb_process: EplbProcess, process):
         self.eplb_config = eplb_config
         self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
@@ -42,6 +43,7 @@ class EplbUpdator:
         self.device = local_load.device
         shape = (self.world_size, *local_load.shape)
         self._gather_buffer = torch.empty(shape, dtype=local_load.dtype, device=self.device)
+        self.eplb_loader.num_layers = self.adaptor.num_dense_layers + self.adaptor.num_moe_layers
 
     def init_eplb(self, expert_map_path, process):
         self.rank_id = dist.get_rank()
@@ -75,7 +77,6 @@ class EplbUpdator:
         if self.cur_iterations == (
             self.expert_heat_collection_interval + self.algorithm_execution_interval + self.num_moe_layers
         ):
-            logger.info("Finish expert parallel load balancing.")
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(self.shared_dict["expert_maps"], self.expert_map_record_path)
 
