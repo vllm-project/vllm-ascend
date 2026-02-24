@@ -1,5 +1,7 @@
 import argparse
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import tabulate
@@ -193,6 +195,18 @@ def main():
         default=True,
         help="Continue running remaining tests even if one fails (useful for nightly tests)",
     )
+    arg_parser.add_argument(
+        "--timing-report",
+        type=str,
+        default="test_timing_report.md",
+        help="Path to write the per-test timing Markdown report (default: test_timing_report.md)",
+    )
+    arg_parser.add_argument(
+        "--timing-report-json",
+        type=str,
+        default="test_timing_data.json",
+        help="Path to write the per-test timing JSON data for CI aggregation (default: test_timing_data.json)",
+    )
     args = arg_parser.parse_args()
     print(f"{args=}")
 
@@ -226,10 +240,32 @@ def main():
 
     print(msg, flush=True)
 
-    exit_code = run_e2e_files(
+    exit_code, timing_records = run_e2e_files(
         files,
         continue_on_error=args.continue_on_error,
+        report_path=args.timing_report,
     )
+
+    # Write JSON timing data with full metadata for CI aggregation.
+    # Only include passed tests to avoid skewing estimated_time with failure data.
+    if args.timing_report_json:
+        passed_records = [r for r in timing_records if r.get("passed")]
+        timing_data = {
+            "suite": args.suite,
+            "partition_id": args.auto_partition_id,
+            "partition_size": args.auto_partition_size,
+            "commit_sha": os.environ.get("GITHUB_SHA", ""),
+            "github_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tests": passed_records,
+        }
+        with open(args.timing_report_json, "w") as f:
+            json.dump(timing_data, f, indent=2)
+        print(
+            f"JSON timing data written to: {args.timing_report_json} "
+            f"({len(passed_records)}/{len(timing_records)} passed tests included)",
+            flush=True,
+        )
 
     # Print tests again at the end for visibility
     msg = "\n" + tabulate.tabulate(rows, headers=headers, tablefmt="psql") + "\n"
