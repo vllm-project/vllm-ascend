@@ -307,11 +307,15 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    if activation == "swigluoai":
+    # apply_moe_activation expects `str`, but `activation` can be None.
+    # Default to "silu" to match fused_moe default behavior.
+    act: str = activation or "silu"
+
+    if act == "swigluoai":
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     else:
-        gate_up_out = apply_moe_activation(activation, gate_up_out)
+        gate_up_out = apply_moe_activation(act, gate_up_out)
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
