@@ -19,10 +19,10 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -174,9 +174,9 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
         from vllm.compilation.backends import set_model_tag
 
         with set_model_tag("eagle_head"):
-            model = get_model(vllm_config=self.vllm_config,
-                              model_config=self.vllm_config.
-                              speculative_config.draft_model_config,
+            model = get_model(
+                vllm_config=self.vllm_config,
+                model_config=self.vllm_config.speculative_config.draft_model_config,
             )
         return model
 
