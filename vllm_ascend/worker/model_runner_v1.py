@@ -387,9 +387,15 @@ class NPUModelRunner(GPUModelRunner):
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
-        self.drafter: NgramProposer | EagleProposer | DraftModelProposer | MtpProposer | SuffixDecodingProposer | MedusaProposer | None = (
-            None
-        )
+        self.drafter: (
+            NgramProposer
+            | EagleProposer
+            | DraftModelProposer
+            | MtpProposer
+            | SuffixDecodingProposer
+            | MedusaProposer
+            | None
+        ) = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -925,7 +931,7 @@ class NPUModelRunner(GPUModelRunner):
                 draft_token_ids = self.drafter.generate_token_ids(
                     valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
                 )
-            elif (self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()):
+            elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
                 common_attn_metadata = spec_decode_common_attn_metadata
                 sampled_token_ids = valid_sampled_token_ids
 
@@ -1040,7 +1046,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_decode_reqs=num_decode_reqs,
                     scheduler_output=scheduler_output,
                     num_scheduled_tokens=num_scheduled_tokens,
-                    num_rejected_tokens_gpu=num_rejected_tokens_gpu
+                    num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 )
 
             else:
@@ -1755,8 +1761,8 @@ class NPUModelRunner(GPUModelRunner):
         has_lora = len(self.input_batch.lora_id_to_lora_request) > 0 if force_has_lora is None else force_has_lora
 
         # ruff: noqa: E731
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,

@@ -24,7 +24,7 @@ def prepare_inputs_padded_kernel(
     valid_sampled_tokens_count_ptr,  # [num_reqs]
     query_start_loc_gpu_ptr,  # [num_reqs + 1]
     token_indices_to_sample_ptr,  # [num_reqs] (output)
-    num_rejected_tokens_gpu_ptr, 
+    num_rejected_tokens_gpu_ptr,
     num_reqs,  # tl.int32
     BLOCK_SIZE: tl.constexpr,
 ):

@@ -19,7 +19,6 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
@@ -29,19 +28,17 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer as VllmSpecDecodeBaseProposer
+
+# from vllm.v1.spec_decode.eagle import EagleProposer as VllmEagleProposer
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+
 # from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
     compute_new_slot_mapping,
-    create_vllm_config_for_draft_model,
-    eagle_prepare_inputs_padded_kernel,
-    eagle_prepare_next_token_padded_kernel,
     extend_all_queries_by_N,
 )
-
-from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer as VllmSpecDecodeBaseProposer
-# from vllm.v1.spec_decode.eagle import EagleProposer as VllmEagleProposer
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
@@ -157,9 +154,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
 
         self._runnable = self._run_merged_draft
         if self.uses_mrope:
-            self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens + 1), dtype=torch.int32, device=device
-            )
+            self.mrope_positions = torch.zeros((3, self.max_num_tokens + 1), dtype=torch.int32, device=device)
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions = torch.zeros(
                 (self.uses_xdrope_dim, self.max_num_tokens + 1),
@@ -168,28 +163,20 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             )
         else:
             # RoPE need (max_num_tokens,)
-            self.positions = torch.zeros(
-                self.max_num_tokens, dtype=torch.int32, device=device
-            )
-    
-    def load_model(self, model: nn.Module) -> None:
-        target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config,
-                                        AttentionLayerBase).keys())
-        target_indexer_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config,
-                                        DeepseekV32IndexerCache).keys())
+            self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
 
-        self.model =  self._get_model()
+    def load_model(self, model: nn.Module) -> None:
+        target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
+        target_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
+
+        self.model = self._get_model()
         # with self.maybe_eager_context:
         #     self.model = get_model(vllm_config=self.vllm_config,
         #                            model_config=self.vllm_config.
         #                            speculative_config.draft_model_config)
 
-        indexer_layers = get_layers_from_vllm_config(
-            self.vllm_config, DeepseekV32IndexerCache).keys()
-        draft_attn_layer = get_layers_from_vllm_config(
-            self.vllm_config, AttentionLayerBase).keys()
+        indexer_layers = get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys()
+        draft_attn_layer = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
 
         draft_attn_layer_names = draft_attn_layer - target_attn_layer_names
         draft_indexer_layer_names = indexer_layers - target_indexer_layer_names
@@ -198,43 +185,36 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
         self.attn_layer_names = list(sorted(draft_attn_layer_names))
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
-            self.piece_all_attn_layer_name.append([
-                name for name in self.attn_layer_names])
+            self.piece_all_attn_layer_name.append([name for name in self.attn_layer_names])
         self.attn_layer_names = list(sorted(draft_attn_layer_names))
 
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
-            self.piece_all_attn_layer_name.append([
-                name for name in self.attn_layer_names])
+            self.piece_all_attn_layer_name.append([name for name in self.attn_layer_names])
 
         if supports_multimodal(model):
             # handle multimodality
             if self.get_model_name(model) in [
-                    "Qwen2_5_VLForConditionalGeneration",
-                    "Qwen3VLForConditionalGeneration",
+                "Qwen2_5_VLForConditionalGeneration",
+                "Qwen3VLForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = model.config.image_token_id
-            elif self.get_model_name(
-                    model) == "PixtralForConditionalGeneration":
-                self.model.config.image_token_index = (
-                    model.config.vision_config.image_token_id)
+            elif self.get_model_name(model) == "PixtralForConditionalGeneration":
+                self.model.config.image_token_index = model.config.vision_config.image_token_id
             else:
-                self.model.config.image_token_index = (
-                    model.config.image_token_index)
+                self.model.config.image_token_index = model.config.image_token_index
             target_language_model = model.get_language_model()
         else:
             target_language_model = model
 
         # share embed_tokens with the target model if needed
         self._maybe_share_embeddings(target_language_model)
-        self._maybe_share_lm_head(target_language_model)
+        self._maybe_share_lm_head(model)
 
         if self.parallel_drafting and self.pass_hidden_states_to_model:
             assert self.parallel_drafting_hidden_state_tensor is not None
             self.parallel_drafting_hidden_state_tensor.copy_(
-                self.model.combine_hidden_states(
-                    self.model.mask_hidden.view(3 * self.hidden_size)
-                )
+                self.model.combine_hidden_states(self.model.mask_hidden.view(3 * self.hidden_size))
                 if self.eagle3_use_aux_hidden_state
                 else self.model.mask_hidden.view(self.hidden_size)
             )
@@ -252,9 +232,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             elif hasattr(target_language_model.model, "embedding"):
                 target_embed_tokens = target_language_model.model.embedding
             else:
-                raise AttributeError(
-                    "Target model does not have 'embed_tokens' or 'embedding' attribute"
-                )
+                raise AttributeError("Target model does not have 'embed_tokens' or 'embedding' attribute")
             # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
             # check if mtp model use main model's embedding and LMhead
             share_embeddings = False
@@ -291,10 +269,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             else:
                 # MTP model
                 share_embeddings = True
-                logger.info(
-                    "Detected MTP model. "
-                    "Sharing target model embedding weights with the draft model."
-                )
+                logger.info("Detected MTP model. Sharing target model embedding weights with the draft model.")
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
@@ -302,12 +277,12 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
                 self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
-                "Since PP > 1 or other reasons the model head loaded its own vocab embedding" \
+                "Since PP > 1 or other reasons the model head loaded its own vocab embedding"
                 " weights instead of sharing them with the target model."
             )
-    
+
     # share lm_head with the target model if needed
-    def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
+    def _maybe_share_lm_head(self, model: nn.Module) -> None:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
         if self.method == "eagle" and hasattr(model, "lm_head"):
@@ -317,24 +292,19 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             else:
                 self.model.lm_head = model.lm_head
 
-        if self.method == "mtp" and \
-            self.vllm_config.model_config.is_deepseek_mla:
+        if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
-                if torch.equal(layer_module.shared_head.head.weight,
-                               model.lm_head.weight):
+                if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
-        ) and self.use_cuda_graph:
+        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()
             if self.method == "mtp":
-                self.model = ACLGraphWrapper(self.model,
-                                             self.vllm_config,
-                                             runtime_mode=CUDAGraphMode.FULL)
+                self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
             else:
-                self._runnable = ACLGraphWrapper(self._run_merged_draft,
-                                                 self.vllm_config,
-                                                 runtime_mode=CUDAGraphMode.FULL)
+                self._runnable = ACLGraphWrapper(
+                    self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+                )
 
     def shallow_copy_metadata(self, attn_metadata):
         # Currently, new objects will be assigned to the lists in attn_metadata
@@ -428,7 +398,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
-                token_indices_to_sample=self.token_indices_to_sample[:batch_size*self.extra_slots_per_request], 
+                token_indices_to_sample=self.token_indices_to_sample[: batch_size * self.extra_slots_per_request],
                 # The target_position's address is same as the model_positions's
                 target_positions=model_positions,
                 inputs_embeds=None,
@@ -471,16 +441,14 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        num_tokens, token_indices_to_sample, common_attn_metadata = (
-            self.set_inputs_first_pass(
-                target_token_ids=target_token_ids,
-                next_token_ids=next_token_ids,
-                target_positions=target_positions,
-                target_hidden_states=target_hidden_states,
-                token_indices_to_sample=token_indices_to_sample,
-                cad=common_attn_metadata,
-                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
-            )
+        num_tokens, token_indices_to_sample, common_attn_metadata = self.set_inputs_first_pass(
+            target_token_ids=target_token_ids,
+            next_token_ids=next_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            token_indices_to_sample=token_indices_to_sample,
+            cad=common_attn_metadata,
+            num_rejected_tokens_gpu=num_rejected_tokens_gpu,
         )
 
         if self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
@@ -613,7 +581,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
         # `model_hidden_states` represent the speculative model inputs.
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
-        
+
         model_kwargs = {
             "input_ids": model_input_ids,
             "positions": model_positions,
@@ -641,7 +609,9 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             max_num_reqs_across_dp = (
                 self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
             )
-            token_indices_to_sample = nn.functional.pad(token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices))
+            token_indices_to_sample = nn.functional.pad(
+                token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices)
+            )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
         logits = self.model.compute_logits(sample_hidden_states)
@@ -820,9 +790,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             # preallocated buffers self.input_ids, self.positions.
             batch_size = cad.batch_size()
             total_num_input_tokens = target_token_ids.shape[0]
-            total_num_output_tokens = total_num_input_tokens + (
-                self.net_num_new_slots_per_request * batch_size
-            )
+            total_num_output_tokens = total_num_input_tokens + (self.net_num_new_slots_per_request * batch_size)
 
             query_start_loc = cad.query_start_loc
             query_end_loc = cad.query_start_loc[1:] - 1
@@ -852,10 +820,8 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             # Copy returned tensors into pre-allocated buffers
             self.input_ids[:total_num_output_tokens].copy_(out_input_ids)
             self.positions[:total_num_output_tokens].copy_(out_positions)
-            self.is_rejected_token_mask[:total_num_output_tokens].copy_(
-                out_is_rejected_token_mask)
-            self.is_masked_token_mask[:total_num_output_tokens].copy_(
-                out_is_masked_token_mask)
+            self.is_rejected_token_mask[:total_num_output_tokens].copy_(out_is_rejected_token_mask)
+            self.is_masked_token_mask[:total_num_output_tokens].copy_(out_is_masked_token_mask)
             if self.pass_hidden_states_to_model:
                 assert self.parallel_drafting_hidden_state_tensor is not None
                 self.hidden_states[out_hidden_state_mapping] = target_hidden_states
@@ -879,9 +845,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             new_slot_mapping = compute_new_slot_mapping(
                 cad=cad,
                 new_positions=self.positions[:total_num_output_tokens],
-                is_rejected_token_mask=self.is_rejected_token_mask[
-                    :total_num_output_tokens
-                ],
+                is_rejected_token_mask=self.is_rejected_token_mask[:total_num_output_tokens],
                 block_size=builder.kv_cache_spec.block_size,
                 num_new_tokens=self.net_num_new_slots_per_request,
                 max_model_len=self.max_model_len,
@@ -896,7 +860,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             )
 
             return total_num_output_tokens, token_indices_to_sample, new_cad
-    
+
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model")
 
@@ -1202,9 +1166,7 @@ class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
             device = valid_sampled_tokens_count.device
 
             token_indices_to_sample = torch.empty((num_reqs,), dtype=torch.int32, device=device)
-            num_rejected_tokens_gpu = torch.empty(
-            (num_reqs,), dtype=torch.int32, device=device
-            )
+            num_rejected_tokens_gpu = torch.empty((num_reqs,), dtype=torch.int32, device=device)
             num_blocks_needed = triton.cdiv(num_reqs, _PREPARE_INPUTS_BLOCK_SIZE)
             num_vector_core = get_vectorcore_num()
             grid_size = min(num_blocks_needed, num_vector_core)
