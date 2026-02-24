@@ -130,8 +130,8 @@ def jsq_placement(X, pieces, M, stage_weights):
                 score = 0.0
                 for s in range(n_stage):
                     tmp_sj = loads[s, j] + w[s]
-                    numer_sj = tmp_sj if tmp_sj > stage_max[s] else stage_max[s]
-                    score += stage_weights[s] * (numer_sj / denom[s])
+                    number_sj = tmp_sj if tmp_sj > stage_max[s] else stage_max[s]
+                    score += stage_weights[s] * (number_sj / denom[s])
                 if score < best_val:
                     best_val = score
                     best_j = j
