@@ -148,34 +148,26 @@ class MoECommMethod(ABC):
             **kwargs
         )
 
+        dispatch_kwargs = {
+            "hidden_states": hidden_states,
+            "topk_weights": topk_weights,
+            "topk_ids": topk_ids,
+            "expert_map": expert_map,
+            "global_redundant_expert_num": self.moe_config.global_redundant_expert_num,
+            "mc2_mask": mc2_mask,
+            "apply_router_weight_on_input": apply_router_weight_on_input,
+            "dynamic_eplb": dynamic_eplb,
+            "pertoken_scale": pertoken_scale,
+        }
+
         if isinstance(self.token_dispatcher, TokenDispatcherWithMC2):
-            dispatch_results = self.token_dispatcher.token_dispatch(
-                hidden_states=hidden_states,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                expert_map=expert_map,
-                global_redundant_expert_num=self.moe_config.global_redundant_expert_num,
-                mc2_mask=mc2_mask,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                with_quant=dispatch_with_quant,
-                dynamic_eplb=dynamic_eplb,
-                pertoken_scale=pertoken_scale,
-                comm_quant_mode=kwargs.get("comm_quant_mode"),
-                y_dtype=act_quant_type if use_mxfp_quant else None,
-            )
+            dispatch_kwargs["with_quant"] = dispatch_with_quant
+            dispatch_kwargs["comm_quant_mode"] = kwargs.get("comm_quant_mode")
+            dispatch_kwargs["y_dtype"] = act_quant_type if use_mxfp_quant else None
         else:
-            dispatch_results = self.token_dispatcher.token_dispatch(
-                hidden_states=hidden_states,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                expert_map=expert_map,
-                global_redundant_expert_num=self.moe_config.global_redundant_expert_num,
-                mc2_mask=mc2_mask,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                with_quant=use_int8_w8a8 or use_int4_w4a8,
-                dynamic_eplb=dynamic_eplb,
-                pertoken_scale=pertoken_scale,
-            )
+            dispatch_kwargs["with_quant"] = use_int8_w8a8 or use_int4_w4a8
+
+        dispatch_results = self.token_dispatcher.token_dispatch(**dispatch_kwargs)
 
         mlp_output = unified_apply_mlp(
             hidden_states=dispatch_results.hidden_states,
