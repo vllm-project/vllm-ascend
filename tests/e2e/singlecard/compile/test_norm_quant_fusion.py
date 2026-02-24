@@ -34,10 +34,7 @@ from vllm_ascend.compilation.passes.norm_quant_fusion_pass import \
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.15.0"):
-    from vllm.compilation.fx_utils import OpOverload  # type: ignore
-else:
-    from vllm.compilation.passes.fx_utils import OpOverload
+from vllm.compilation.passes.fx_utils import OpOverload
 
 
 # Cache backend to avoid duplicate pattern registration

@@ -524,18 +524,13 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
         )
 
-    from vllm_ascend.utils import vllm_version_is
-
     # Get architecture name for logging
     # For multimodal models, use text_config architecture; otherwise use main architecture
-    if vllm_version_is("0.15.0"):
-        arch_name = vllm_config.model_config.architectures[0]
+    # Access architecture from hf_text_config to avoid recursion when calling with_hf_config
+    if hf_config and hasattr(hf_config, "architectures") and hf_config.architectures:
+        arch_name = hf_config.architectures[0]
     else:
-        # Access architecture from hf_text_config to avoid recursion when calling with_hf_config
-        if hf_config and hasattr(hf_config, "architectures") and hf_config.architectures:
-            arch_name = hf_config.architectures[0]
-        else:
-            arch_name = vllm_config.model_config.architectures[0]
+        arch_name = vllm_config.model_config.architectures[0]
 
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):

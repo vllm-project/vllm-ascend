@@ -24,10 +24,7 @@ from vllm.config import get_current_vllm_config
 from vllm_ascend.compilation.compiler_interface import compile_fx
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.15.0"):
-    from vllm.compilation.fx_utils import OpOverload  # type: ignore
-else:
-    from vllm.compilation.passes.fx_utils import OpOverload
+from vllm.compilation.passes.fx_utils import OpOverload
 
 
 class TestBackend:

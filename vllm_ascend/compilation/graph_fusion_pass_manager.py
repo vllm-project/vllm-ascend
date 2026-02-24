@@ -21,7 +21,7 @@ from vllm.config import VllmConfig
 
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.15.0"):
+if vllm_version_is(""):
     from vllm.compilation.inductor_pass import get_pass_context  # type: ignore
     from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
 else:
