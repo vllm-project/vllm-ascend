@@ -17,9 +17,11 @@
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch_npu
 from vllm.logger import logger
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
@@ -185,3 +187,97 @@ class NPUModelRunner310(NPUModelRunner):
                     raise ValueError("Unknown KV cache spec type.")
 
         return kv_caches
+
+    # Override this function because of tensor.copy_(other) accuracy issue.
+    # TODO: This override will be removed after tensor.copy_(other) accuracy issue is resolved.
+    def _prepare_input_ids(
+        self,
+        scheduler_output: SchedulerOutput,
+        total_num_scheduled_tokens: int,
+        cu_num_tokens: np.ndarray,
+    ) -> None:
+        """Prepare the input IDs for the current batch.
+
+        Carefully handles the `prev_sampled_token_ids` which can be cached
+        from the previous engine iteration, in which case those tokens on the
+        GPU need to be copied into the corresponding slots into input_ids."""
+
+        if self.input_batch.prev_sampled_token_ids is None:
+            # Normal scheduling case
+            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            if self.enable_prompt_embeds:
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+            return
+
+        # Async scheduling case, where some decode requests from the previous
+        # iteration won't have entries in input_ids_cpu and need to be copied
+        # on the NPU from prev_sampled_token_ids.
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        assert prev_req_id_to_index is not None
+        sample_flattened_indices: list[int] = []
+        spec_flattened_indices: list[int] = []
+        prev_common_req_indices: list[int] = []
+        prev_draft_token_indices: list[int] = []
+        indices_match = True
+        max_flattened_index = -1
+        total_num_spec_tokens = 0
+        scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+
+        for req_id, cur_index in self.input_batch.req_id_to_index.items():
+            if (prev_index := prev_req_id_to_index.get(req_id)) is not None:
+                prev_common_req_indices.append(prev_index)
+                draft_len = len(scheduled_spec_tokens.get(req_id, ()))
+                total_num_spec_tokens += draft_len
+                flattened_index = cu_num_tokens[cur_index].item() - 1
+                sample_flattened_indices.append(flattened_index - draft_len)
+                spec_flattened_indices.extend(range(flattened_index - draft_len + 1, flattened_index + 1))
+                start = prev_index * self.num_spec_tokens
+                prev_draft_token_indices.extend(range(start, start + draft_len))
+                indices_match &= prev_index == flattened_index
+                max_flattened_index = max(max_flattened_index, flattened_index)
+        num_commmon_tokens = len(sample_flattened_indices)
+        total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
+        if num_commmon_tokens < total_without_spec:
+            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            if self.enable_prompt_embeds:
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+        if num_commmon_tokens == 0:
+            return
+        if indices_match and max_flattened_index == (num_commmon_tokens - 1):
+            # NOTE: Override the copy_ function here
+            indices = torch.arange(num_commmon_tokens, device=self.input_ids.gpu.device)
+            source = self.input_batch.prev_sampled_token_ids[:num_commmon_tokens, 0]
+            self.input_ids.gpu.index_copy_(0, indices, source)
+            if self.enable_prompt_embeds:
+                self.is_token_ids.gpu[:num_commmon_tokens] = True
+            return
+        # Upload the index tensors asynchronously so the scatter can be non-blocking.
+        sampled_tokens_index_tensor = torch.tensor(
+            sample_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+        prev_common_req_indices_tensor = torch.tensor(
+            prev_common_req_indices, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+        self.input_ids.gpu.scatter_(
+            dim=0,
+            index=sampled_tokens_index_tensor,
+            src=self.input_batch.prev_sampled_token_ids[prev_common_req_indices_tensor, 0],
+        )
+        # Scatter the draft tokens after the sampled tokens are scattered.
+        if self._draft_token_ids is None or not spec_flattened_indices:
+            return
+        assert isinstance(self._draft_token_ids, torch.Tensor)
+        draft_tokens_index_tensor = torch.tensor(
+            spec_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+        prev_draft_token_indices_tensor = torch.tensor(
+            prev_draft_token_indices, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+        draft_token_ids = self._draft_token_ids.to(dtype=torch.int32)
+        self.input_ids.gpu.scatter_(
+            dim=0,
+            index=draft_tokens_index_tensor,
+            src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
+        )
