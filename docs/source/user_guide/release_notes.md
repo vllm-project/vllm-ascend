@@ -108,7 +108,7 @@ Many custom ops and triton kernels were added in this release to speed up model 
 
 ### Known Issue
 
-- Due the upgrade of `transformers` package, some models quantization weight, such as `qwen2.5vl`, `gemma3`, `minimax`, may not work. We'll fix it in the next post release. [#6302](https://github.com/vllm-project/vllm-ascend/pull/6302)
+- Due to the upgrade of `transformers` package, some models quantization weight, such as `qwen2.5vl`, `gemma3`, `minimax`, may not work. We'll fix it in the next post release. [#6302](https://github.com/vllm-project/vllm-ascend/pull/6302)
 - The performance of `Qwen3-32B` will not be good with 128K input case, it's suggested to enable pcp&dcp feature for this case. This will be improved in the next CANN release.
 - The performance of `Qwen3-235B`, `Qwen3-480B` under prefill-decode scenario and EP=32 scenario is not good as expect. We'll improve it in the next post release.
 - When deploy deepseek3.1 under prefill-decode scenario, please make sure the tp size for decode node is great than 1. `TP=1` doesn't work. This will be fixed in the next CANN release.
@@ -144,7 +144,7 @@ This is the first release candidate of v0.14.0 for vLLM Ascend. Please follow th
 
 - model runner v2 support triton of penalty. [#5854](https://github.com/vllm-project/vllm-ascend/pull/5854)
 - model runner v2 support eagle spec decoding. [#5840](https://github.com/vllm-project/vllm-ascend/pull/5840)
-- Fix multi-modal inference OOM issues by setting `expandable_segments:True` by default. [#5855](https://github.com/vllm-project/vllm-ascend/pull/5855)
+- Fix multimodal inference OOM issues by setting `expandable_segments:True` by default. [#5855](https://github.com/vllm-project/vllm-ascend/pull/5855)
 - `VLLM_ASCEND_ENABLE_MLAPO` is set to `True` by default. It's enabled automatically on decode node in PD deployment case. Please note that this feature will cost more memory. If you are memory sensitive, please set it to False. [#5952](https://github.com/vllm-project/vllm-ascend/pull/5952)
 - SSL config can be set to kv_extra_config for PD deployment with mooncake layerwise connector. [#5875](https://github.com/vllm-project/vllm-ascend/pull/5875)
 - support `--max_model_len=auto`. [#6193](https://github.com/vllm-project/vllm-ascend/pull/6193)
@@ -341,7 +341,7 @@ This is the first release candidate of v0.12.0 for vLLM Ascend. We landed lots o
 - [Experimental] [KV cache pool](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/feature_guide/KV_Cache_Pool_Guide.html) feature is added
 - [Experimental] A new graph mode `xlite` is introduced. It performs good with some models. Following the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html#using-xlitegraph) to start using it.
 - LLMdatadist kv connector is removed. Please use mooncake connector instead.
-- Ascend scheduler is removed. `--additional-config {"ascend_scheudler": {"enabled": true}` doesn't work anymore.
+- Ascend scheduler is removed. `--additional-config {"ascend_scheduler": {"enabled": true}` doesn't work anymore.
 - Torchair graph mode is removed. `--additional-config {"torchair_graph_config": {"enabled": true}}` doesn't work anymore. Please use aclgraph instead.
 - `VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION` env is removed. This feature is stable enough. We enable it by default now.
 - speculative decode method `Ngram` is back now.
@@ -636,8 +636,8 @@ This is the 3rd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 - Fix incorrect req block length in ascend scheduler [#2394](https://github.com/vllm-project/vllm-ascend/pull/2394)
 - Fix header include issue in rope [#2398](https://github.com/vllm-project/vllm-ascend/pull/2398)
 - Fix mtp config bug [#2412](https://github.com/vllm-project/vllm-ascend/pull/2412)
-- Fix error info and adapt `attn_metedata` refactor [#2402](https://github.com/vllm-project/vllm-ascend/pull/2402)
-- Fix torchair runtime error caused by configuration mismtaches and `.kv_cache_bytes` file missing [#2312](https://github.com/vllm-project/vllm-ascend/pull/2312)
+- Fix error info and adapt `attn_metadata` refactor [#2402](https://github.com/vllm-project/vllm-ascend/pull/2402)
+- Fix torchair runtime error caused by configuration mismatches and `.kv_cache_bytes` file missing [#2312](https://github.com/vllm-project/vllm-ascend/pull/2312)
 - Move `with_prefill` allreduce from cpu to npu [#2230](https://github.com/vllm-project/vllm-ascend/pull/2230)
 
 ### Docs
@@ -670,7 +670,7 @@ This is the 1st release candidate of v0.10.0 for vLLM Ascend. Please follow the 
 ### Others
 
 - Bug fixes:
-    - Fix functional problem of multi-modality models like Qwen2-audio with Aclgraph. [#1803](https://github.com/vllm-project/vllm-ascend/pull/1803)
+    - Fix functional problem of multimodality models like Qwen2-audio with Aclgraph. [#1803](https://github.com/vllm-project/vllm-ascend/pull/1803)
     - Fix the process group creating error with external launch scenario. [#1681](https://github.com/vllm-project/vllm-ascend/pull/1681)
     - Fix the functional problem with guided decoding. [#2022](https://github.com/vllm-project/vllm-ascend/pull/2022)
     - Fix the accuracy issue with common MoE models in DP scenario. [#1856](https://github.com/vllm-project/vllm-ascend/pull/1856)
@@ -953,7 +953,7 @@ This is the 1st release candidate of v0.9.0 for vllm-ascend. Please follow the [
 ### Models
 
 - Qwen2.5 VL works with V1 Engine now. [#736](https://github.com/vllm-project/vllm-ascend/pull/736)
-- LLama4 works now. [#740](https://github.com/vllm-project/vllm-ascend/pull/740)
+- Llama4 works now. [#740](https://github.com/vllm-project/vllm-ascend/pull/740)
 - A new kind of DeepSeek model called dual-batch overlap(DBO) is added. Please set `VLLM_ASCEND_ENABLE_DBO=1` to use it. [#941](https://github.com/vllm-project/vllm-ascend/pull/941)
 
 ### Others
@@ -1090,7 +1090,7 @@ This is the first release candidate of v0.8.4 for vllm-ascend. Please follow the
 
 - A new communicator `pyhccl` is added. It's used for call CANN HCCL library directly instead of using `torch.distribute`. More usage of it will be added in the next release [#503](https://github.com/vllm-project/vllm-ascend/pull/503)
 - The custom ops build is enabled by default. You should install the packages like `gcc`, `cmake` first to build `vllm-ascend` from source. Set `COMPILE_CUSTOM_KERNELS=0` environment to disable the compilation if you don't need it. [#466](https://github.com/vllm-project/vllm-ascend/pull/466)
-- The custom op `rotay embedding` is enabled by default now to improve the performance. [#555](https://github.com/vllm-project/vllm-ascend/pull/555)
+- The custom op `rotary embedding` is enabled by default now to improve the performance. [#555](https://github.com/vllm-project/vllm-ascend/pull/555)
 
 ## v0.7.3rc2 - 2025.03.29
 

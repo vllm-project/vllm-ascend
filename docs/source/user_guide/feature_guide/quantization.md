@@ -8,7 +8,7 @@ Model quantization is a technique that reduces model size and computational over
 >
 > You can choose to convert the model yourself or use the quantized model we uploaded.
 > See <https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8>.
-> Before you quantize a model, ensure that the RAM size is enough.
+> Before you quantize a model, ensure sufficient RAM is available.
 
 ## Quantization Tools
 
@@ -154,8 +154,6 @@ python -m vllm.entrypoints.api_server \
     --trust-remote-code \
     --quantization ascend
 ```
-
-The above commands are for reference only. For more details, consult the [official guide](../../tutorials/index.md).
 
 ## References
 

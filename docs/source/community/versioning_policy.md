@@ -56,7 +56,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
 |-------------|--------------|------------------|-------------|--------------------|
-|     main    | d7e17aaacd5ed1b4b4be6bcfef3a1b7cbc84fc9a, v0.15.0 tag | >= 3.10, < 3.12   | 8.5.0 | 2.9.0 / 2.9.0 |
+|     main    | 9562912cead1f11e8540fb91306c5cbda66f0007, v0.15.0 tag | >= 3.10, < 3.12   | 8.5.0 | 2.9.0 / 2.9.0 |
 
 ## Release cadence
 
@@ -141,7 +141,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 ### Backward compatibility
 
-For main branch, vLLM Ascend should works with vLLM main branch and latest 1 or 2 releases. To ensure backward compatibility, do as follows:
+For main branch, vLLM Ascend should work with vLLM main branch and latest 1 or 2 releases. To ensure backward compatibility, do as follows:
 
 - Both main branch and target vLLM release, such as the vLLM main branch and vLLM 0.8.4, are tested by Ascend E2E CI.
 - To make sure that code changes are compatible with the latest 1 or 2 vLLM releases, vLLM Ascend introduces a version check mechanism inside the code. It checks the version of the installed vLLM package first to decide which code logic to use. If users hit the `InvalidVersion` error, it may indicate that they have installed a dev or editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use.

@@ -32,7 +32,7 @@ Install additional dependencies if you need to visualize the captured data.
 
 ## 2. Collecting Data with `msprobe`
 
-We generally follow a coarse-to-fine strategy when capturing data. First identify the token where the issue shows up, and then decide which range needs to be sampled around that token. The typical workflow is described below.
+We generally follow a coarse-to-fine strategy when capturing data. First, identify the token where the issue shows up, and then decide which range needs to be sampled around that token. The typical workflow is described below.
 
 ### 2.1 Prepare the dump configuration file
 
@@ -42,7 +42,7 @@ Create a `config.json` that can be parsed by `PrecisionDebugger` and place it in
 |:---:|:----|:---:|
 | `task` | Type of dump task. Common PyTorch values include `"statistics"` and `"tensor"`. A statistics task collects tensor statistics (mean, variance, max, min, etc.) while a tensor task captures arbitrary tensors. | Yes |
 | `dump_path` | Directory where dump results are stored. When omitted, `msprobe` uses its default path. | No |
-| `rank` | Ranks to sample. An empty list collects every rank. For single-card tasks you must set this field to `[]`. | No |
+| `rank` | Ranks to sample. An empty list collects every rank. For single-card tasks, you must set this field to `[]`. | No |
 | `step` | Token iteration(s) to sample. An empty list means every iteration. | No |
 | `level` | Dump level string (`"L0"`, `"L1"`, or `"mix"`). `L0` targets `nn.Module`, `L1` targets `torch.api`, and `mix` collects both. | Yes |
 | `async_dump` | Whether to enable asynchronous dump (supported for PyTorch `statistics`/`tensor` tasks). Defaults to `false`. | No |
@@ -51,7 +51,7 @@ Create a `config.json` that can be parsed by `PrecisionDebugger` and place it in
 
 To restrict the operators that are captured, configure the `list` block:
 
-- `scope` (list[str]): In PyTorch pynative scenarios this field restricts the dump range. Provide two module or API names that follow the tool's naming convention to lock a range; only data between the two names will be dumped. Examples:
+- `scope` (list[str]): In PyTorch PyNative scenarios this field restricts the dump range. Provide two module or API names that follow the tool's naming convention to lock a range; only data between the two names will be dumped. Examples:
 
   ```json
   "scope": ["Module.conv1.Conv2d.forward.0", "Module.fc2.Linear.forward.0"]

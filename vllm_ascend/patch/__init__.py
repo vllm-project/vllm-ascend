@@ -112,20 +112,6 @@
 #       Remove this patch when the refactor of all2all manager is done.
 #       Remove this patch when vLLM support all_reduce as customop.
 #
-# ** 2. File: worker/patch_minicpm.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.minicpm.MiniCPMAttention.forward`
-#    Why:
-#       The forward func of MiniCPMAttention in vllm do a datatype convert
-#       (original datatype --> float32) to ensure the precision on cuda.
-#       However float32 is not supported in cann rope op, thus we keep this patch
-#    How：
-#       Removed the dtype convert operations in forward
-#    Related PR (if no, explain why):
-#       NO, only for npu due to rope op.
-#    Future Plan:
-#       Keep this patch in vllm-ascend.
-#
 # ** 3. File: worker/patch_multimodal_merge.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.utils._merge_multimodal_embeddings`
@@ -263,3 +249,26 @@
 #       make unquantized_gemm as a customop.
 #    Future Plan:
 #       Remove this patch when vLLM support the operator as customop.
+#
+# ** 13. File: worker/patch_npugraph_ex_triton.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `torchair.core._concrete_graph.ValuePack`,
+#      `torchair.npu_fx_compiler._unpack_meta`,
+#      `torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu`
+#    Why:
+#       In the Triton scenario, npugraph_ex backend needs to process the value pack of the input parameters.
+#    How：
+#       Supplement the relevant processing logic through patches.
+#    Related PR (if no, explain why):
+#       https://gitcode.com/Ascend/torchair/pull/2575
+#    Future Plan:
+#       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
+# ** 14. File: worker/patch_v2_uva.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.states.UvaBuffer`
+#    Why:
+#       ASCEND NPUs do not support UVA yet, so we need to wrap it in vLLM.
+#    How：
+#       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
+#    Future Plan:
+#       Remove this patch when NPU support UVA.
