@@ -110,6 +110,15 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(self.platform.get_device_name(device_id), device_name)
         mock_get_device_name.assert_called_once_with(0)
 
+    @patch("torch.npu.get_device_properties")
+    def test_get_device_uuid(self, mock_get_device_properties):
+        device_id = 0
+        device_properties = MagicMock()
+        device_properties.uuid = "01020304-0000-0000-0000-01020304"
+        mock_get_device_properties.return_value = device_properties
+        self.assertEqual(self.platform.get_device_uuid(device_id), device_properties.uuid)
+        mock_get_device_properties.assert_called_once_with(0)        
+
     @patch("torch.inference_mode")
     def test_inference_mode(self, mock_inference_mode):
         mock_inference_mode.return_value = None

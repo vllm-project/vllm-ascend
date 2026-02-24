@@ -21,7 +21,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Model weight in BF16 not found now.
 - `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### Verify Multi-node Communication(Optional)
 
@@ -390,7 +390,7 @@ We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node environm
 
 Before you start, please
 
-1. prepare the script `launch_online_dp.py` on each node.
+1. prepare the script `launch_online_dp.py` on each node:
 
     ```python
     import argparse
@@ -905,7 +905,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 ## Function Call
