@@ -26,6 +26,11 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.quantization.mxfp_compat import (
+    FLOAT8_E8M0FNU_DTYPE,
+    ensure_mxfp8_linear_available,
+    ensure_mxfp8_moe_available,
+)
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
@@ -43,6 +48,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     model_dtype = None
 
     def __init__(self):
+        ensure_mxfp8_linear_available("W8A8_MXFP8 linear quantization")
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
@@ -72,9 +78,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             quantized_x,
             layer.weight,
             layer.weight_scale,
-            scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             pertoken_scale=pertoken_scale,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+            pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             bias=bias,
             output_dtype=output_dtype,
             group_sizes=[1, 1, self.group_size],
@@ -97,6 +103,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.MXFP8
 
     def __init__(self):
+        ensure_mxfp8_moe_available("W8A8_MXFP8 MoE quantization")
         self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
@@ -197,8 +204,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             use_mxfp_quant=True,
             act_quant_type=torch.float8_e4m3fn,
             weight_quant_type=torch.float8_e4m3fn,
-            scale_type=torch_npu.float8_e8m0fnu,
-            per_token_scale_type=torch_npu.float8_e8m0fnu,
+            scale_type=FLOAT8_E8M0FNU_DTYPE,
+            per_token_scale_type=FLOAT8_E8M0FNU_DTYPE,
         )
 
     def process_weights_after_loading(self, layer):

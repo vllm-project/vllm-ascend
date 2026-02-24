@@ -1,5 +1,11 @@
 import torch
-import torch_npu
+
+from vllm_ascend.quantization.mxfp_compat import (
+    FLOAT4_E2M1FN_X2_DTYPE,
+    FLOAT8_E8M0FNU_DTYPE,
+    ensure_mxfp4_dtype_available,
+    ensure_mxfp8_scale_dtype_available,
+)
 
 
 class QuantTypeMapping:
@@ -7,20 +13,20 @@ class QuantTypeMapping:
         "W8A8_MXFP8": {
             "act_quant_type": torch.float8_e4m3fn,
             "weight_quant_type": None,
-            "scale_dtype": torch_npu.float8_e8m0fnu,
-            "per_token_scale_dtype": torch_npu.float8_e8m0fnu,
+            "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+            "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
         },
         "W4A4_MXFP4": {
-            "act_quant_type": torch_npu.float4_e2m1fn_x2,
-            "weight_quant_type": torch_npu.float4_e2m1fn_x2,
-            "scale_dtype": torch_npu.float8_e8m0fnu,
-            "per_token_scale_dtype": torch_npu.float8_e8m0fnu,
+            "act_quant_type": FLOAT4_E2M1FN_X2_DTYPE,
+            "weight_quant_type": FLOAT4_E2M1FN_X2_DTYPE,
+            "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+            "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
         },
         "W4A8_MXFP": {
             "act_quant_type": torch.float8_e4m3fn,
-            "weight_quant_type": torch_npu.float4_e2m1fn_x2,
-            "scale_dtype": torch_npu.float8_e8m0fnu,
-            "per_token_scale_dtype": torch_npu.float8_e8m0fnu,
+            "weight_quant_type": FLOAT4_E2M1FN_X2_DTYPE,
+            "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+            "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
         },
     }
 
@@ -47,6 +53,11 @@ def parse_mxfp_quant_params(**kwargs):
 
 
 def parse_quant_moe_down_proj_params(rollback_quant_type, parsed_round_mode):
+    if rollback_quant_type == "W4A4_MXFP4":
+        ensure_mxfp4_dtype_available("W4A4_MXFP4 quantization")
+    elif rollback_quant_type in ("W8A8_MXFP8", "W4A8_MXFP"):
+        ensure_mxfp8_scale_dtype_available(f"{rollback_quant_type} quantization")
+
     quant_type_mapping = QuantTypeMapping.get_quant_settings()
     cur_rollback_quant_config = quant_type_mapping[rollback_quant_type]
     if rollback_quant_type in ["W4A4_MXFP4"]:  # w4a4mxfp4 round mode support round、rint

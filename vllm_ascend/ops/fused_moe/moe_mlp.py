@@ -24,6 +24,12 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
+from vllm_ascend.quantization.mxfp_compat import (
+    FLOAT4_E2M1FN_X2_DTYPE,
+    FLOAT8_E8M0FNU_DTYPE,
+    HIFLOAT8_DTYPE,
+    ensure_mxfp8_moe_available,
+)
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
@@ -68,10 +74,12 @@ def cumsum_group_list(
 
 
 def get_mxfp_quant_extra_args(act_quant_type, weight_quant_type, scale_type, per_token_scale_type):
-    x_dtype = act_quant_type if act_quant_type in [torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8] else None
-    weight_dtype = weight_quant_type if weight_quant_type in [torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8] else None
-    scale_dtype = scale_type if scale_type in [torch_npu.float8_e8m0fnu] else None
-    per_token_scale_dtype = per_token_scale_type if per_token_scale_type in [torch_npu.float8_e8m0fnu] else None
+    quant_dtypes = tuple(dtype for dtype in (FLOAT4_E2M1FN_X2_DTYPE, HIFLOAT8_DTYPE) if dtype is not None)
+    scale_dtypes = tuple(dtype for dtype in (FLOAT8_E8M0FNU_DTYPE,) if dtype is not None)
+    x_dtype = act_quant_type if act_quant_type in quant_dtypes else None
+    weight_dtype = weight_quant_type if weight_quant_type in quant_dtypes else None
+    scale_dtype = scale_type if scale_type in scale_dtypes else None
+    per_token_scale_dtype = per_token_scale_type if per_token_scale_type in scale_dtypes else None
     return x_dtype, weight_dtype, scale_dtype, per_token_scale_dtype
 
 
@@ -87,6 +95,8 @@ def mxfp_quant_apply_mlp(
     fusion: bool = False,
     **kwargs,
 ) -> torch.Tensor:
+    ensure_mxfp8_moe_available("MXFP MoE MLP path")
+
     act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
     weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)
     scale_type = kwargs.get("scale_type")
@@ -126,8 +136,8 @@ def mxfp_quant_apply_mlp(
         quant_mode=2,
         dequant_dtype=torch.float32,
         quant_dtype=torch.float8_e4m3fn,
-        weight_scale_dtype=torch_npu.float8_e8m0fnu,
-        x_scale_dtype=torch_npu.float8_e8m0fnu,
+        weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+        x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
     )
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
