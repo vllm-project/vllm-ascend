@@ -8,8 +8,8 @@ from typing import Any
 import numpy as np
 import torch
 from numba import njit  # type: ignore
-from scipy import stats
-from scipy.optimize import linear_sum_assignment
+from scipy import stats # type: ignore
+from scipy.optimize import linear_sum_assignment # type: ignore
 
 from .policy_abstract import DynamicConfig, EplbPolicy
 
@@ -272,7 +272,7 @@ def lpt_deployment(
 
 
 @njit(fastmath=True, cache=True)
-def compute_score(val_data: np.ndarray, simulated_replicas: np.ndarray, simulated_deployment: np.ndarray) -> float:
+def compute_score(val_data: np.ndarray, simulated_replicas: np.ndarray, simulated_deployment: np.ndarray) -> np.float32:
     """
     Calculate load balance score: (max_device_load * num_devices) / total_load
     Lower score means better load balance
@@ -889,7 +889,7 @@ class FlashLB(EplbPolicy):
         return final_deployment, deployed_replicas, final_par
 
     def rebalance_experts(
-        self, current_expert_table: list[np.ndarray] | np.ndarray, expert_workload: list[np.ndarray] | np.ndarray
+        self, current_expert_table: torch.Tensor, expert_workload: torch.Tensor
     ) -> tuple[bool, np.ndarray, np.ndarray]:
         """
         Main expert rebalance entry point
