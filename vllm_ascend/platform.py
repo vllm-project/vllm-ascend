@@ -195,10 +195,10 @@ class NPUPlatform(Platform):
             )
 
             if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
-                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THREHOLD
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
 
                 new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
-                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THREHOLD)
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
                 logger.debug(
@@ -208,10 +208,10 @@ class NPUPlatform(Platform):
 
         npugraph_ex_config = ascend_config.npugraph_ex_config
         if npugraph_ex_config and npugraph_ex_config.fuse_allreduce_rms:
-            from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THREHOLD
+            from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
 
             new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
-            new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THREHOLD)
+            new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
             new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
             vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
             logger.debug(
@@ -558,7 +558,7 @@ class NPUPlatform(Platform):
         Args:
             attn_metadata (dict[str, Any]): attention metadata for all layers.
             vllm_config (VllmConfig): configuration of vllm.
-            dp_metadata (DpMetada): metadata for data parallelism.
+            dp_metadata (Dpmetadata): metadata for data parallelism.
                 lack of typehint because of circular import.
             virtual_engine (int, optional): index of virtual engine. Defaults to 0.
             num_tokens (int | None, optional): number of tokens. Defaults to None.
