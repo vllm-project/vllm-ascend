@@ -166,6 +166,14 @@ class NPUPlatform(Platform):
         return torch.npu.get_device_name(device_id)
 
     @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        if not torch.npu.is_availble():
+            raise RuntimeError("NPU is unavailable!")
+        device_props = torch.npu.get_device_properties(device_id)
+        if hasattr(device_props, "uuid"):
+            return device_props.uuid
+
+    @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
 
