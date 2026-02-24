@@ -800,7 +800,7 @@ class FlashLB(EplbPolicy):
             load_balance_score: Load balance score (lower is better)
         """
         num_experts = mu.shape[0]
-        num_available_replicas = num_total_replicas - num_experts  # Fix typo: avalaible -> available
+        num_available_replicas = num_total_replicas - num_experts
 
         # Fallback to basic LPT if tree depth is 1
         if deep <= 1:
