@@ -19,20 +19,16 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     prompts = [
         PROMPT_TEMPLATE.format(query="How many singers do we have?"),
         PROMPT_TEMPLATE.format(
-            query=
-            "What is the average, minimum, and maximum age of all singers from France?"  # noqa: E501
+            query="What is the average, minimum, and maximum age of all singers from France?"  # noqa: E501
         ),
         PROMPT_TEMPLATE.format(
-            query=
-            "What are all distinct countries where singers above age 20 are from?"  # noqa: E501
+            query="What are all distinct countries where singers above age 20 are from?"  # noqa: E501
         ),
     ]
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=32)
     outputs = llm.generate(
-        prompts,
-        sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None)
+        prompts, sampling_params, lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None
+    )
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -45,16 +41,15 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 
 def test_ilama_lora(ilama_lora_files):
     with VllmRunner(
-            MODEL_PATH,
-            enable_lora=True,
-            dtype="half",
-            max_loras=4,
-            max_model_len=1024,
-            cudagraph_capture_sizes=[1, 2, 4, 8],
-            max_num_seqs=16,
-            enforce_eager=True,
+        MODEL_PATH,
+        enable_lora=True,
+        dtype="half",
+        max_loras=4,
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_num_seqs=16,
+        enforce_eager=True,
     ) as vllm_model:
-
         output1 = do_sample(vllm_model.model, ilama_lora_files, lora_id=1)
         for i in range(len(EXPECTED_LORA_OUTPUT)):
             assert output1[i] == EXPECTED_LORA_OUTPUT[i]

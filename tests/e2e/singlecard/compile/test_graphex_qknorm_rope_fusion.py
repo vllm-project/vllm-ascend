@@ -201,6 +201,7 @@ def test_rmsnorm_quant_fusion(
                 vllm_config=vllm_config, head_dim=head_dim, num_heads=num_heads, num_kv_heads=num_kv_heads, eps=eps
             )
         from torch._inductor.pattern_matcher import PatternMatcherPass
+
         pm_pass = PatternMatcherPass()
         fusion_pattern.register(pm_pass)
         model = model.to("npu")
