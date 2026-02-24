@@ -856,7 +856,7 @@ python load_balance_proxy_server_example.py \
       141.61.39.181 \
       141.61.39.181 \
       141.61.39.181 \
-    --decode-ports \
+    --decoder-ports \
       9100 9101 9102 9103 \
       9100 9101 9102 9103 \
 ```
