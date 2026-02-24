@@ -830,6 +830,37 @@ python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-s
 python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
 ```
 
+### Request Forwarding
+
+To set up request forwarding, run the following script on any machine :download:`load_balance_proxy_server_example.py <examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py>`
+
+```shell
+unset http_proxy
+unset https_proxy
+
+python load_balance_proxy_server_example.py \
+    --port 8000 \
+    --host 0.0.0.0 \
+    --prefiller-hosts \
+       141.61.39.105 \
+       141.61.39.113 \
+    --prefiller-ports \
+       9100 \
+       9100 \
+    --decoder-hosts \
+      141.61.39.117 \
+      141.61.39.117 \
+      141.61.39.117 \
+      141.61.39.117 \
+      141.61.39.181 \
+      141.61.39.181 \
+      141.61.39.181 \
+      141.61.39.181 \
+    --decode-ports \
+      9100 9101 9102 9103 \
+      9100 9101 9102 9103 \
+```
+
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
