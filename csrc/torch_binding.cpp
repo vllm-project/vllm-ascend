@@ -35,6 +35,7 @@
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
 
+#include <iostream>
 namespace vllm_ascend {
 const int64_t INT4_NUMS_IN_INT32 = 8;
 void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
@@ -1273,6 +1274,36 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
 }
 
+at::Tensor matmul_gelu_impl(const at::Tensor &x, const at::Tensor &weight, const at::Tensor &bias)
+{
+    TORCH_CHECK(x.dim() == 2, "The x should be 2D");
+    TORCH_CHECK(weight.dim() == 2, "The weight should be 2D");
+    TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
+    TORCH_CHECK(weight.sizes()[0] == bias.sizes()[0] || weight.sizes()[1] == bias.sizes()[0], "The weight first or second dim should be same as bias first dim");
+    TORCH_CHECK(x.sizes()[1] == weight.sizes()[1] || x.sizes()[1] == weight.sizes()[0], "The x second dim should be same as weight first or second dim");
+    TORCH_CHECK(
+        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
+        "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
+        x.scalar_type());
+     TORCH_CHECK(
+        x.scalar_type() == weight.scalar_type() && x.scalar_type() == bias.scalar_type(),
+        "The dtype of x, weight and bias should be same");
+
+	int m = x.sizes()[0];
+	int n = bias.sizes()[0];
+	auto options = x.options();
+
+    at::Tensor gelu_output = at::empty({m,n}, x.options());
+    EXEC_NPU_CMD(
+        aclnnMatmulGelu,
+        x,
+        weight,
+        bias,
+		gelu_output);
+    return gelu_output;
+}
+
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -1438,4 +1469,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor expert_idx, Tensor out)"
         );
     ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
+    ops.def("matmul_gelu(Tensor x, Tensor weight, Tensor bias) -> Tensor");
+    ops.impl("matmul_gelu", torch::kPrivateUse1,&vllm_ascend::matmul_gelu_impl);
 }

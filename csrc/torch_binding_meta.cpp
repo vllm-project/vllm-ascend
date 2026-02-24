@@ -403,6 +403,52 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
 }
+
+at::Tensor matmul_gelu_meta(const at::Tensor &x, const at::Tensor &weight, const at::Tensor &bias)
+{
+    TORCH_CHECK(x.dim() == 2, "The x should be 2D");
+    TORCH_CHECK(weight.dim() == 2, "The weight should be 2D");
+    TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
+    TORCH_CHECK(weight.sizes()[0] == bias.sizes()[0] || weight.sizes()[1] == bias.sizes()[0], "The weight first or second dim should be same as bias first dim");
+    TORCH_CHECK(x.sizes()[1] == weight.sizes()[1] || x.sizes()[1] == weight.sizes()[0], "The x second dim should be same as weight first or second dim");
+    TORCH_CHECK(
+        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
+        "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
+        x.scalar_type());
+     TORCH_CHECK(
+        x.scalar_type() == weight.scalar_type() && x.scalar_type() == bias.scalar_type(),
+        "The dtype of x, weight and bias should be same");
+
+    // Use symbolic dimensions to maintain dynamic shape information
+    auto m = x.sym_size(0);
+    auto n = bias.sym_size(0);
+    c10::SymDimVector new_shape;
+    new_shape.push_back(m);
+    new_shape.push_back(n);
+    at::Tensor gelu_output = at::empty_symint(new_shape, x.options());
+    return gelu_output;
+}
+
+//at::Tensor matmul_gelu_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &bias)
+//{
+////    TORCH_CHECK(x.dim() == 2, "The x should be 2D");
+////    TORCH_CHECK(weight.dim() == 2, "The weight should be 2D");
+////    TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
+////    TORCH_CHECK(weight.sizes()[0] == bias.sizes()[0] || weight.sizes()[1] == bias.sizes()[0], "The weight first or second dim should be same as bias first dim");
+////    TORCH_CHECK(x.sizes()[1] == weight.sizes()[1] || x.sizes()[1] == weight.sizes()[0], "The x second dim should be same as weight first or second dim");
+////    TORCH_CHECK(
+////        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
+////        "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
+////        x.scalar_type());
+////     TORCH_CHECK(
+////        x.scalar_type() == weight.scalar_type() && x.scalar_type() == bias.scalar_type(),
+////        "The dtype of x, weight and bias should be same");
+//	auto m = x.sizes()[0];
+//	auto n = bias.sizes()[0];
+//    at::Tensor gelu_output = at::empty({m, n}, x.options());
+//    return gelu_output;
+//}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -441,5 +487,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_moe_init_routing_custom", &vllm_ascend::meta::npu_moe_init_routing_custom_meta);
     // Moe_gating_top_k
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
+    // matmul_gelu
+    ops.impl("matmul_gelu", &vllm_ascend::meta::matmul_gelu_meta);
 }
 }
