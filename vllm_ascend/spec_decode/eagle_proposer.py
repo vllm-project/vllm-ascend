@@ -29,12 +29,8 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer as VllmSpecDecodeBaseProposer
-
-# from vllm.v1.spec_decode.eagle import EagleProposer as VllmEagleProposer
+from vllm.v1.spec_decode.eagle import EagleProposer as VllmEagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-
-# from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
     compute_new_slot_mapping,
@@ -88,11 +84,11 @@ def split_inputs_tp_to_sp(hidden_states, out):
     return out[:padded_num_tokens_per_rank]
 
 
-class SpecDecodeBaseProposer(VllmSpecDecodeBaseProposer):
+class SpecDecodeBaseProposer(VllmEagleProposer):
     _runnable: ACLGraphWrapper | Callable
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
-        super().__init__(vllm_config, device, pass_hidden_states_to_model, runner)
+        super().__init__(vllm_config, device, runner)
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
