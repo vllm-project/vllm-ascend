@@ -47,7 +47,7 @@ class NpuGraphEXPassManager:
         for pass_ in self.passes:
             if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
-        graph.recompile()
+        graph.recompiler()
         return graph
 
     def add(self, pass_: VllmInductorPass):
