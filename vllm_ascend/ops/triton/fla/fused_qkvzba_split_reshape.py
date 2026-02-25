@@ -11,7 +11,10 @@
 # mypy: ignore-errors
 import torch
 from vllm.triton_utils import tl, triton
+
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+MAX_ROWS_PER_ITER = 64
 
 
 @triton.jit(do_not_specialize=["total_rows", "rows_per_vec"])
@@ -35,6 +38,19 @@ def fused_qkvzba_split_reshape_cat_kernel(
     BA_OUT_ROW_STRIDE: tl.constexpr,
     ROWS_PER_ITER: tl.constexpr,
 ):
+    """
+    Fused kernel to split and reshape mixed QKVZ and BA tensors.
+
+    This kernel performs the following transformations:
+    - Input mixed_qkvz: [num_tokens, num_heads_qk * (Q + K + V + Z)] where each
+      head block contains [Q(HEAD_QK), K(HEAD_QK), V(V_DIM_PER_QK), Z(V_DIM_PER_QK)]
+    - Input mixed_ba: [num_tokens, num_heads_qk * (B + A)] where each head block
+      contains [B(V_HEADS_PER_QK), A(V_HEADS_PER_QK)]
+    - Output mixed_qkv: [num_tokens, Q_all | K_all | V_all] concatenated by type
+    - Output z: [num_tokens, num_heads_v, head_v]
+    - Output b, a: [num_tokens, num_heads_v]
+    """
+    # Each vector core processes a contiguous chunk of rows
     vec_id = tl.program_id(0)
 
     V_HEADS_PER_QK: tl.constexpr = NUM_HEADS_V // NUM_HEADS_QK
@@ -52,27 +68,39 @@ def fused_qkvzba_split_reshape_cat_kernel(
 
     iter_count = (row_end - row_start + ROWS_PER_ITER - 1) // ROWS_PER_ITER
 
+    # ========== Main Iteration Loop ==========
     for _ in tl.range(iter_count):
         row_indices = tl.arange(0, ROWS_PER_ITER) + row_offset
         row_mask = row_indices < row_end
 
+        # ========== Head Iteration Loop ==========
+        # Iterate over each Q/K head group to extract and rearrange data
         for head_id in tl.static_range(NUM_HEADS_QK):
+            # Byte offset to the current head's data block in mixed_qkvz
             src_head_offset = head_id * QKVZ_DIM_T
 
-            # Q
+            # ----- Q (Query) Extraction -----
+            # Source layout: mixed_qkvz[row, head_id * QKVZ_DIM_T + 0:HEAD_QK]
+            # Dest layout: mixed_qkv[row, head_id * HEAD_QK : (head_id+1) * HEAD_QK]
             q_range = tl.arange(0, HEAD_QK)
             q_src = row_indices[:, None] * QKVZ_ROW_STRIDE + src_head_offset + q_range[None, :]
             q_dst = row_indices[:, None] * QKV_ROW_STRIDE + head_id * HEAD_QK + q_range[None, :]
             q_data = tl.load(mixed_qkvz + q_src, mask=row_mask[:, None])
             tl.store(mixed_qkv + q_dst, q_data, mask=row_mask[:, None])
 
-            # K
+            # ----- K (Key) Extraction -----
+            # Source layout: mixed_qkvz[row, head_id * QKVZ_DIM_T + HEAD_QK : +HEAD_QK]
+            # Dest layout: mixed_qkv[row, Q_TOTAL + head_id * HEAD_QK : ...]
+            # K is stored after Q in the source; in dest, K starts after all Q heads
             k_src = row_indices[:, None] * QKVZ_ROW_STRIDE + src_head_offset + HEAD_QK + q_range[None, :]
             k_dst = row_indices[:, None] * QKV_ROW_STRIDE + Q_TOTAL + head_id * HEAD_QK + q_range[None, :]
             k_data = tl.load(mixed_qkvz + k_src, mask=row_mask[:, None])
             tl.store(mixed_qkv + k_dst, k_data, mask=row_mask[:, None])
 
-            # V
+            # ----- V (Value) Extraction -----
+            # Source layout: mixed_qkvz[row, head_id * QKVZ_DIM_T + HEAD_QK*2 : +V_DIM_PER_QK]
+            # Dest layout: mixed_qkv[row, Q_TOTAL + K_TOTAL + head_id * V_DIM_PER_QK : ...]
+            # V follows Q and K in source; in dest, V starts after all Q and K heads
             v_range = tl.arange(0, V_DIM_PER_QK)
             v_src = row_indices[:, None] * QKVZ_ROW_STRIDE + src_head_offset + HEAD_QK * 2 + v_range[None, :]
             v_dst = (
@@ -81,7 +109,10 @@ def fused_qkvzba_split_reshape_cat_kernel(
             v_data = tl.load(mixed_qkvz + v_src, mask=row_mask[:, None])
             tl.store(mixed_qkv + v_dst, v_data, mask=row_mask[:, None])
 
-            # Z
+            # ----- Z Extraction -----
+            # Source layout: mixed_qkvz[row, head_id * QKVZ_DIM_T + HEAD_QK*2 + V_DIM_PER_QK : ...]
+            # Dest layout: z[row, head_id * V_DIM_PER_QK : (head_id+1) * V_DIM_PER_QK]
+            # Z follows V in source; output z is reshaped to [batch, num_heads_v, head_v]
             z_src = (
                 row_indices[:, None] * QKVZ_ROW_STRIDE + src_head_offset + HEAD_QK * 2 + V_DIM_PER_QK + v_range[None, :]
             )
@@ -89,7 +120,9 @@ def fused_qkvzba_split_reshape_cat_kernel(
             z_data = tl.load(mixed_qkvz + z_src, mask=row_mask[:, None])
             tl.store(z + z_dst, z_data, mask=row_mask[:, None])
 
-            # B
+            # ----- B Extraction -----
+            # Source layout: mixed_ba[row, head_id * BA_DIM_T : +V_HEADS_PER_QK]
+            # Dest layout: b[row, head_id * V_HEADS_PER_QK : (head_id+1) * V_HEADS_PER_QK]
             b_range = tl.arange(0, V_HEADS_PER_QK)
             ba_head_offset = head_id * BA_DIM_T
             b_src = row_indices[:, None] * BA_ROW_STRIDE + ba_head_offset + b_range[None, :]
@@ -97,7 +130,10 @@ def fused_qkvzba_split_reshape_cat_kernel(
             b_data = tl.load(mixed_ba + b_src, mask=row_mask[:, None])
             tl.store(b + b_dst, b_data, mask=row_mask[:, None])
 
-            # A
+            # ----- A Extraction -----
+            # Source layout: mixed_ba[row, head_id * BA_DIM_T + V_HEADS_PER_QK : ...]
+            # Dest layout: a[row, head_id * V_HEADS_PER_QK : ...] (same as b_dst)
+            # A follows B in source; output layout is same as B
             a_src = row_indices[:, None] * BA_ROW_STRIDE + ba_head_offset + V_HEADS_PER_QK + b_range[None, :]
             a_data = tl.load(mixed_ba + a_src, mask=row_mask[:, None])
             tl.store(a + b_dst, a_data, mask=row_mask[:, None])
@@ -163,7 +199,7 @@ def fused_qkvzba_split_reshape_cat(
 
     rows_per_iter = max(1, ub_size // elements_per_row)
     rows_per_iter = triton.next_power_of_2(rows_per_iter)
-    rows_per_iter = min(rows_per_iter, rows_per_vec, 64)
+    rows_per_iter = min(rows_per_iter, rows_per_vec, MAX_ROWS_PER_ITER)
 
     grid = (grid_size, 1)
     fused_qkvzba_split_reshape_cat_kernel[grid](
