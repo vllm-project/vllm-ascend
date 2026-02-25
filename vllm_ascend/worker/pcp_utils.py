@@ -451,8 +451,8 @@ class PCPManager:
     def get_logits_indices(
         self,
         cu_num_tokens: np.ndarray,
-        tokens_original,
-        num_reqs,
+        tokens_original: list[int],
+        num_reqs: int,
     ):
         if not self.pcp_use_hybrid_attn:
             logits_indices = (
@@ -460,7 +460,6 @@ class PCPManager:
                 - self.num_pcp_pads_cpu_tensor[: self.num_reqs]
                 - 1
             )
-            return logits_indices
         else:
             tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
             num_prefill_reqs = (tokens_original_tensor > self.decode_threshold).sum().item()
@@ -469,6 +468,7 @@ class PCPManager:
             pad_len = tokens_original_tensor.shape[0] - num_decode_reqs
             tokens_logits = tokens_original_tensor + F.pad(decode_pads, (0, pad_len), value=0)
             logits_indices = torch.cumsum(tokens_logits, dim=0) - 1
+        return logits_indices
 
     def get_padded_slot_mapping(self, num_tokens: int, num_tokens_padded: int, slot_mapping: torch.Tensor):
         # After pcp allgather and restore, there are padded tokens in kv,
