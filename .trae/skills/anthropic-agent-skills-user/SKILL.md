@@ -90,7 +90,7 @@ wait_for_server() {
     local pid=$1
     echo "Waiting for server to start..."
     local retries=0
-    local max_retries=60
+    local max_retries=120 # 20 minutes (10s * 120) for large models
     while ! curl -s http://localhost:8000/health > /dev/null; do
         if ! kill -0 $pid 2>/dev/null; then
             echo "Server process $pid has terminated unexpectedly."
