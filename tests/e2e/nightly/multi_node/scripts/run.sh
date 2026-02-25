@@ -10,6 +10,15 @@ NC="\033[0m" # No Color
 
 # Configuration
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+# cann and atb environment setup
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/cann-8.5.0/share/info/ascendnpu-ir/bin/set_env.sh
+
+set +eu
+source /usr/local/Ascend/nnal/atb/set_env.sh
+set -eu
+
 # Home path for aisbench
 export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
 
@@ -18,7 +27,9 @@ export VLLM_LOGGING_LEVEL="INFO"
 # Reduce glog verbosity for mooncake
 export GLOG_minloglevel=1
 # Set transformers to offline mode to avoid downloading models during tests
-export TRANSFORMERS_OFFLINE="1"
+export HF_HUB_OFFLINE="1"
+# Default is 600s
+export VLLM_ENGINE_READY_TIMEOUT_S=1800
 
 # Function to print section headers
 print_section() {

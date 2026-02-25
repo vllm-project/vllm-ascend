@@ -198,7 +198,7 @@ class build_and_install_aclnn(Command):
         try:
             print("Running bash build_aclnn.sh ...")
             subprocess.check_call(["bash", "csrc/build_aclnn.sh", ROOT_DIR, envs.SOC_VERSION])
-            print("buid_aclnn.sh executed successfully!")
+            print("build_aclnn.sh executed successfully!")
         except subprocess.CalledProcessError as e:
             print(f"Error running build_aclnn.sh: {e}")
             raise SystemExit(e.returncode)
@@ -334,6 +334,8 @@ class cmake_build_ext(build_ext):
         )
 
     def build_extensions(self) -> None:
+        if not envs.COMPILE_CUSTOM_KERNELS:
+            return
         # Ensure that CMake is present and working
         try:
             subprocess.check_output(["cmake", "--version"])
@@ -423,7 +425,9 @@ except LookupError:
     # only checks out the commit. In this case, we set a dummy version.
     VERSION = "0.0.0"
 
-ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
+ext_modules = []
+if envs.COMPILE_CUSTOM_KERNELS:
+    ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
 
 
 def get_path(*filepath) -> str:

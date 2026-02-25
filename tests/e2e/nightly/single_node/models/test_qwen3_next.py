@@ -4,7 +4,7 @@ from typing import Any
 
 import openai
 import pytest
-from vllm.utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
@@ -27,10 +27,10 @@ api_keyword_args = {
 }
 
 batch_size_dict = {
-    "linux-aarch64-a2-4": 64,
+    "linux-aarch64-a2b3-4": 64,
     "linux-aarch64-a3-4": 64,
 }
-VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
+VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2b3-4")
 performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
 
 aisbench_cases = [{

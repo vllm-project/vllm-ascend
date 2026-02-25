@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -30,19 +30,7 @@ NC="\033[0m" # No Color
 REPO_ROOT=`pwd`
 GITHUB_PROXY=${GITHUB_PROXY:-"https://github.com"}
 GOVER=1.23.8
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# Define a function to handle the git clone operation
-clone_repo_if_not_exists() {
-    local repo_dir=$1
-    local repo_url=$2
-
-    if [ ! -d "$repo_dir" ]; then
-        git clone --depth 1 "$repo_url"
-    else
-        echo "Directory $repo_dir already exists, skipping clone."
-    fi
-}
+YALANTINGLIBS_VERSION=0.5.6
 
 # Function to print section headers
 print_section() {
@@ -67,9 +55,6 @@ check_success() {
     fi
 }
 
-if [ $(id -u) -ne 0 ]; then
-        print_error "Require root permission, try sudo ./dependencies.sh"
-fi
 
 # Parse command line arguments
 SKIP_CONFIRM=false
@@ -109,6 +94,18 @@ if [ "$SKIP_CONFIRM" = false ]; then
     fi
 fi
 
+# Define a function to handle the git clone operation
+clone_repo_if_not_exists() {
+    local repo_dir=$1
+    local repo_url=$2
+
+    if [ ! -d "$repo_dir" ]; then
+        git clone --depth 1 "$repo_url"
+    else
+        echo "Directory $repo_dir already exists, skipping clone."
+    fi
+}
+
 
 # Update package lists
 print_section "Updating package lists"
@@ -126,6 +123,7 @@ if command -v apt-get &> /dev/null; then
             cmake \
             git \
             wget \
+            unzip \
             libibverbs-dev \
             libgoogle-glog-dev \
             libgtest-dev \
@@ -155,6 +153,7 @@ elif command -v yum &> /dev/null; then
         gcc-c++ \
         make \
         cmake \
+        unzip \
         git \
         wget \
         libibverbs-devel \
@@ -205,19 +204,29 @@ cd "${REPO_ROOT}/thirdparties"
 check_success "Failed to change to thirdparties directory"
 
 # Check if yalantinglibs is already installed
-if [ -d "yalantinglibs" ]; then
-    echo -e "${YELLOW}yalantinglibs directory already exists. Removing for fresh install...${NC}"
-    rm -rf yalantinglibs
+if [ -d "yalantinglibs-${YALANTINGLIBS_VERSION}" ]; then
+    echo -e "${YELLOW}yalantinglibs-${YALANTINGLIBS_VERSION} directory already exists. Removing for fresh install...${NC}"
+    rm -rf yalantinglibs-${YALANTINGLIBS_VERSION}
     check_success "Failed to remove existing yalantinglibs directory"
 fi
 
-# Clone yalantinglibs
-echo "Cloning yalantinglibs from ${GITHUB_PROXY}/alibaba/yalantinglibs.git"
-git clone -b 0.5.5 --depth 1 ${GITHUB_PROXY}/alibaba/yalantinglibs.git
-check_success "Failed to clone yalantinglibs"
+# Download yalantinglibs
+YALANTINGLIBS_ZIPFILE="yalantinglibs-${YALANTINGLIBS_VERSION}.zip"
+echo "Downloading yalantinglibs ${YALANTINGLIBS_VERSION} from ${GITHUB_PROXY}/alibaba/yalantinglibs/archive/refs/tags/${YALANTINGLIBS_VERSION}.zip"
+wget -q --show-progress -O ${YALANTINGLIBS_ZIPFILE} ${GITHUB_PROXY}/alibaba/yalantinglibs/archive/refs/tags/${YALANTINGLIBS_VERSION}.zip
+check_success "Failed to download yalantinglibs"
+
+# Extract yalantinglibs
+echo "Extracting yalantinglibs..."
+unzip -q ${YALANTINGLIBS_ZIPFILE}
+check_success "Failed to extract yalantinglibs"
+
+# Clean up downloaded ZIP file
+rm -f ${YALANTINGLIBS_ZIPFILE}
+check_success "Failed to clean up downloaded ZIP file"
 
 # Build and install yalantinglibs
-cd yalantinglibs
+cd yalantinglibs-${YALANTINGLIBS_VERSION}
 check_success "Failed to change to yalantinglibs directory"
 
 mkdir -p build

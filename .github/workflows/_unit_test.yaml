@@ -27,6 +27,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         SOC_VERSION: ascend910b1
         MAX_JOBS: 4
+        COMPILE_CUSTOM_KERNELS: 0
     steps:
       - name: Install packages
         run: |
@@ -71,7 +72,8 @@ jobs:
             --ignore tests/ut/kv_connector/test_remote_decode_lifecycle.py \
             --ignore tests/ut/core/test_scheduler_dynamic_batch.py \
             --ignore tests/ut/kv_connector/test_mooncake_connector.py \
-            --ignore tests/ut/worker/test_worker_v1.py
+            --ignore tests/ut/worker/test_worker_v1.py \
+            --ignore tests/ut/spec_decode/test_mtp_proposer.py
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged

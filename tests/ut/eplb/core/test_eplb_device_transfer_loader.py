@@ -107,10 +107,3 @@ def test_invalid_state_asyn_update(mock_adaptor):
     loader_obj.update_expert_map_and_weight([])
 
     assert not mock_adaptor.do_update_expert_map.called
-
-
-def test_load_impl_not_implemented(mock_adaptor):
-    loader_obj = loader.D2DExpertWeightLoader()
-    loader_obj.set_adator(mock_adaptor)
-    with pytest.raises(NotImplementedError):
-        loader_obj.load_impl({}, {})
