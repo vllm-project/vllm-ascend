@@ -83,3 +83,28 @@ jobs:
           # Run real test
           echo "Test:"
           /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
+
+  single-node-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        test_script: [test_deepseek_v3_2_inference.sh, test_qwen3_inference.sh]
+    name: single-node-${{ matrix.test_script }}
+    runs-on: linux-aarch64-a3-16
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3
+      options: --user root
+    steps:
+      - name: Check NPU/CANN and git info
+        run: |
+          echo "====> Print NPU/CANN info"
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Run tests/e2e/doctests/single_node/${{ matrix.test_script }}
+        run: |
+          echo "Running ${{ matrix.test_script }}..."
+          bash tests/e2e/doctests/single_node/${{ matrix.test_script }}
