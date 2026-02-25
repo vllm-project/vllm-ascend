@@ -29,6 +29,9 @@ class AscendPCPMetadata:
     pcp_padded_tokens_fla: int = 0
     pcp_enter_fa_restore_idx: torch.Tensor = None
     pcp_allgather_restore_idx: list[int] = field(default_factory=list)
+    block_table_cp: torch.Tensor = None
+    valid_block_ids: torch.Tensor = None
+    prefill_q_cum_seqlens: torch.Tensor = None
 
 
 @dataclass
