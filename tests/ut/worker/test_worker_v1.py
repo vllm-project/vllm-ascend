@@ -70,7 +70,7 @@ class TestNPUWorker(TestBase):
         # Setup mock behavior
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_cpu_binding = False
+        mock_ascend_config.enable_cpu_binding = True
         mock_get_ascend_config.return_value = mock_ascend_config
 
         # Import and create NPUWorker instance
@@ -125,7 +125,7 @@ class TestNPUWorker(TestBase):
         self.model_config_mock.trust_remote_code = True
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_cpu_binding = False
+        mock_ascend_config.enable_cpu_binding = True
         mock_get_ascend_config.return_value = mock_ascend_config
 
         # Create NPUWorker instance
@@ -168,7 +168,7 @@ class TestNPUWorker(TestBase):
         self.cache_config_mock.cache_dtype = "float32"
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_cpu_binding = False
+        mock_ascend_config.enable_cpu_binding = True
         mock_get_ascend_config.return_value = mock_ascend_config
 
         # Create NPUWorker instance
