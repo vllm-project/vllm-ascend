@@ -38,24 +38,19 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_cases = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "top_k": 20,
-    "baseline": 95,
-    "threshold": 5
-}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("mode", MODES)
-async def test_models(model: str, mode: str) -> None:
+def config():
     port = get_open_port()
+    aisbench_cases = [{
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/gsm8k-lite",
+        "request_conf": "vllm_api_general_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+        "max_out_len": 32768,
+        "batch_size": 32,
+        "top_k": 20,
+        "baseline": 95,
+        "threshold": 5
+    }]
     env_dict = {
         "OMP_NUM_THREADS": "10",
         "OMP_PROC_BIND": "false",
@@ -72,11 +67,19 @@ async def test_models(model: str, mode: str) -> None:
         "8192", "--max-num-seqs", "12", "--trust-remote-code",
         "--gpu-memory-utilization", "0.9"
     ]
+    return port, aisbench_cases, env_dict, compilation_config, server_args
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("mode", MODES)
+async def test_models(model: str, mode: str) -> None:
+    port, aisbench_cases, env_dict, compilation_config, server_args = config()
     if mode == "piecewise":
         compilation_config["cudagraph_mode"] = "PIECEWISE"
     server_args.extend(
         ["--compilation-config",
-         json.dumps(compilation_config)])
+            json.dumps(compilation_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }

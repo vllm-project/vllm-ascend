@@ -171,7 +171,7 @@ class HCCLLibrary:
     path_to_library_cache: dict[str, Any] = {}
 
     # class attribute to store the mapping from library path
-    # to the correspongding directory
+    # to the corresponding directory
     path_to_dict_mapping: dict[str, dict[str, Any]] = {}
 
     def __init__(self, so_file: str | None = None):
