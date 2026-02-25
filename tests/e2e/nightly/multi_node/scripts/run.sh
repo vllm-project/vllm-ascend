@@ -28,6 +28,8 @@ export VLLM_LOGGING_LEVEL="INFO"
 export GLOG_minloglevel=1
 # Set transformers to offline mode to avoid downloading models during tests
 export HF_HUB_OFFLINE="1"
+# Default is 600s
+export VLLM_ENGINE_READY_TIMEOUT_S=1800
 
 # Function to print section headers
 print_section() {
