@@ -24,7 +24,7 @@ class TestAscendConfig(unittest.TestCase):
         from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
         if vllm_version_is("0.16.0"):
             moe_parallel_config = FusedMoEParallelConfig(
-                2, 0, 1, 2, 1, 1, 1, 1, True, "hccl", enable_eplb=True)
+                2, 0, 1, 2, 1, 1, 1, 1, True, "hccl", is_sequence_parallel=True, enable_eplb=True)
             moe_config = FusedMoEConfig(
                 num_experts=8,
                 experts_per_token=8,
