@@ -278,6 +278,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
             --seed 1024 \
             --served-model-name dsv3 \
@@ -353,6 +354,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
             --seed 1024 \
             --served-model-name dsv3 \
@@ -574,7 +576,7 @@ python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-s
 
 ### Request Forwarding
 
-To set up request forwarding, run the following script on any machine :download:`load_balance_proxy_server_example.py <examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py>`
+To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.13.0/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 ```shell
 unset http_proxy
