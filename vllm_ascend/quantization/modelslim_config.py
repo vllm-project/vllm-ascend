@@ -54,6 +54,10 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "language_model.lm_head.": "lm_head.",
         "language_model.model.": "model.language_model.",
     },
+    "kimi_k25": {
+        "mm_projector.linear_1": "mm_projector.proj.0",
+        "mm_projector.linear_2": "mm_projector.proj.2",
+    },
 }
 
 # key: model_type
@@ -388,8 +392,9 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         from vllm.model_executor.layers.attention import Attention
 
-        if prefix.startswith("language_model"):
-            prefix = prefix.split(".", 1)[-1]
+        if model_type != "kimi_k2":
+            if prefix.startswith("language_model"):
+                prefix = prefix.split(".", 1)[-1]
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
