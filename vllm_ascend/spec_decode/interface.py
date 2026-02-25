@@ -35,7 +35,7 @@ class Proposer:
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor=None,
     ):
-        """Called by dummy_run in modle_runner"""
+        """Called by dummy_run in model_runner"""
         raise NotImplementedError
 
     def generate_token_ids(
