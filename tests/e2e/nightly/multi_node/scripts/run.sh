@@ -104,8 +104,6 @@ check_npu_info() {
 
 check_and_config() {
     echo "====> Configure mirrors and git proxy"
-    # Fix me(Potabk): Currently, there have some issues with accessing GitHub via https://gh-proxy.test.osinfra.cn in certain regions.
-    # We should switch to a more stable proxy for now until the network proxy is stable enough.
     git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
@@ -138,24 +136,28 @@ install_extra_components() {
 
 checkout_src() {
     echo "====> Checkout source code"
+    mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
+    pip uninstall -y vllm vllm-ascend || true
+    rm -rf "$WORKSPACE/vllm" "$WORKSPACE/vllm-ascend"
 
-    # ---- vllm-ascend ----
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
         echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
-        git clone "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
+        git clone --depth 1 "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
         cd "$WORKSPACE/vllm-ascend"
-        git fetch --all
-        git checkout "$VLLM_ASCEND_REF"
+        PR_REF=$(git ls-remote origin 'refs/pull/*/head' | grep "^${VLLM_ASCEND_REF}" | awk '{print $2}' | head -1)
+        if [ -n "$PR_REF" ]; then
+            git fetch --depth 1 origin "$PR_REF"
+            git checkout FETCH_HEAD
+        else
+            git fetch origin '+refs/pull/*/head:refs/remotes/pull/*' 2>/dev/null || true
+            git checkout "$VLLM_ASCEND_REF"
+        fi
     fi
 
-    # ---- vllm ----
     if [ ! -d "$WORKSPACE/vllm" ]; then
         echo "Cloning vllm version/ref: $VLLM_VERSION"
-        git clone https://github.com/vllm-project/vllm.git "$WORKSPACE/vllm"
-        cd "$WORKSPACE/vllm"
-        git fetch --all
-        git checkout "$VLLM_VERSION"
+        git clone --depth 1 --branch "$VLLM_VERSION" https://github.com/vllm-project/vllm.git "$WORKSPACE/vllm"
     fi
 }
 
@@ -164,18 +166,6 @@ install_vllm() {
     VLLM_TARGET_DEVICE=empty pip install -e "$WORKSPACE/vllm"
     pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
     pip install -e "$WORKSPACE/vllm-ascend"
-}
-
-install_sys_dependencies() {
-    echo "====> Install system dependencies for PR test"
-    cd "$WORKSPACE/vllm-ascend"
-    
-    apt-get install -y $(cat packages.txt)
-    
-    apt-get install -y gcc g++ cmake libnuma-dev clang-15
-    
-    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 }
 
 install_aisbench() {
@@ -237,7 +227,6 @@ main() {
     check_npu_info
     check_and_config
     if [[ "$IS_PR_TEST" == "true" ]]; then
-        install_sys_dependencies
         checkout_src
         install_vllm
         install_aisbench
