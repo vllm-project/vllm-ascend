@@ -120,12 +120,11 @@ class PCPManager:
         self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type == "qwen3_next"
 
         self.pcp_pads_logits_hybrid_attn = torch.ones(self.max_num_reqs, dtype=torch.int32) * (self.pcp_world_size - 1)
-        self.pcp_padded_slot_mapping = torch.zeros(
-            self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32, device=self.device
-        )
-        self.num_actual_tokens_pcp_padded = 0
         self.pcp_padded_tokens_fla = 0
         self.pcp_padded_tokens_length = 0
+        self.num_scheduled_tokens_padded = None
+        self.max_num_tokens_across_pcp = 0
+        self.pcp_tokens_padded = None
 
     def _get_cumsum_and_arange(
         self,
@@ -167,7 +166,7 @@ class PCPManager:
         self,
         num_scheduled_tokens: np.ndarray,
         arange_np: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, int]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Update token counts and positions for Prefill Context Parallelism (PCP).
 
@@ -197,17 +196,13 @@ class PCPManager:
                        efficient batched arange operations.
 
         Returns:
-            Tuple (pcp_tokens, pcp_positions, pcp_tokens_padded, max_num_tokens_across_pcp):
+            Tuple (pcp_tokens, pcp_positions):
             - pcp_tokens: number of tokens per request that this PCP rank will
                           actually process (after splitting / replication).
                           For hybrid-attention model: number of unpadded tokens
                           per requests
             - pcp_positions: flattened positions for those tokens on this rank,
                              used to build the positions buffer for the model.
-            - tokens_padded: specifically used in hybrid-attention model, number of
-                             padded tokens per request
-            - max_num_tokens_across_pcp: max number of scheduled padded tokens
-                                         across all pcp ranks
         Example:
         >>> Assume tokens = [1, 5, 8], pcp_world_size = 2. After _update_tokens_for_pcp.
         >>> pcp_rank = 0 get ([1, 4, 4], [0, 0, 1, 6, 7, 0, 1, 6, 7])
@@ -436,8 +431,10 @@ class PCPManager:
                 self.total_num_sampled_tokens_pcp = num_scheduled_tokens[: self.num_reqs].sum()
             else:
                 self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_reqs].sum()
-
-            return num_padded_scheduled_tokens, positions_linear, pcp_tokens[: self.num_reqs], max_scheduled_tokens
+            self.max_num_tokens_across_pcp = max_scheduled_tokens
+            self.pcp_tokens_padded = pcp_tokens[: self.num_reqs]
+            self.num_scheduled_tokens_padded = np.array(self.pcp_tokens_padded, dtype=np.int32)
+            return num_padded_scheduled_tokens, positions_linear
         else:
             # Build the restore index used after allgather.
             all_positions_lst = [
@@ -449,14 +446,32 @@ class PCPManager:
 
             self.pcp_tokens[: self.num_reqs] = pcp_tokens[: self.num_reqs]
             self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_reqs].sum()
-            return pcp_tokens[: self.num_reqs], positions, None, 0
+            return pcp_tokens[: self.num_reqs], positions
 
-    def get_logits_indices(self, cu_num_tokens: np.ndarray):
-        return torch.from_numpy(cu_num_tokens) * self.pcp_world_size - self.num_pcp_pads_cpu_tensor[: self.num_reqs] - 1
+    def get_logits_indices(
+        self,
+        cu_num_tokens: np.ndarray,
+        tokens_original,
+        num_reqs,
+    ):
+        if not self.pcp_use_hybrid_attn:
+            logits_indices = torch.from_numpy(cu_num_tokens) * self.pcp_world_size - self.num_pcp_pads_cpu_tensor[: self.num_reqs] - 1
+            return logits_indices
+        else:
+            tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
+            num_prefill_reqs = (tokens_original_tensor > self.decode_threshold).sum().item()
+            num_decode_reqs = num_reqs - num_prefill_reqs
+            decode_pads = self.pcp_pads_logits_hybrid_attn[:num_decode_reqs]
+            pad_len = tokens_original_tensor.shape[0] - num_decode_reqs
+            tokens_logits = tokens_original_tensor + F.pad(decode_pads, (0, pad_len), value=0)
+            logits_indices = torch.cumsum(tokens_logits, dim=0) - 1
 
     def get_padded_slot_mapping(self, num_tokens: int, num_tokens_padded: int, slot_mapping: torch.Tensor):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
+        if self.pcp_use_hybrid_attn:
+            assert self.num_scheduled_tokens_padded is not None
+            num_tokens = sum(self.num_scheduled_tokens_padded)
         pcp_padded_slot_mapping = (
             self.pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
             if not self.pcp_use_hybrid_attn
@@ -697,7 +712,9 @@ class PCPManager:
         num_reqs: int,
     ):
         from vllm_ascend.attention.utils import AscendPrefillContextParallelMetadata
-
+        if self.pcp_use_hybrid_attn:
+            assert self.num_scheduled_tokens_padded is not None
+            total_num_scheduled_tokens = sum(self.num_scheduled_tokens_padded)
         query_lens_new = (
             self.query_lens_pcp_full.cpu[:num_reqs]
             if self.pcp_world_size > 1 and self.speculative_config
