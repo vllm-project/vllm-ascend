@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -122,3 +123,57 @@ class TestMaybeAutoDetectQuantization(TestBase):
         maybe_auto_detect_quantization(vllm_config)
         self.assertEqual(vllm_config.model_config.quantization,
                          ASCEND_QUANTIZATION_METHOD)
+
+    @patch("vllm_ascend.quantization.utils.detect_quantization_method",
+           return_value=ASCEND_QUANTIZATION_METHOD)
+    def test_auto_detect_sets_quantization_and_logs_info(self, mock_detect):
+        """When no --quantization is specified but ModelSlim config is found,
+        the method should auto-set quantization and emit an INFO log."""
+        vllm_config = self._make_vllm_config(
+            model_path="/fake/quant_model", quantization=None)
+
+        with self.assertLogs("vllm_ascend.quantization.utils",
+                             level=logging.INFO) as cm:
+            maybe_auto_detect_quantization(vllm_config)
+
+        self.assertEqual(vllm_config.model_config.quantization,
+                         ASCEND_QUANTIZATION_METHOD)
+        log_output = "\n".join(cm.output)
+        self.assertIn("Auto-detected quantization method", log_output)
+        self.assertIn(ASCEND_QUANTIZATION_METHOD, log_output)
+        self.assertIn("/fake/quant_model", log_output)
+
+    @patch("vllm_ascend.quantization.utils.detect_quantization_method",
+           return_value=ASCEND_QUANTIZATION_METHOD)
+    def test_user_mismatch_logs_warning(self, mock_detect):
+        """When user specifies a different method than auto-detected,
+        a WARNING should be emitted and user's choice should be respected."""
+        vllm_config = self._make_vllm_config(
+            model_path="/fake/quant_model",
+            quantization=COMPRESSED_TENSORS_METHOD)
+
+        with self.assertLogs("vllm_ascend.quantization.utils",
+                             level=logging.WARNING) as cm:
+            maybe_auto_detect_quantization(vllm_config)
+
+        # User's choice is respected
+        self.assertEqual(vllm_config.model_config.quantization,
+                         COMPRESSED_TENSORS_METHOD)
+        log_output = "\n".join(cm.output)
+        self.assertIn("Auto-detected quantization method", log_output)
+        self.assertIn(ASCEND_QUANTIZATION_METHOD, log_output)
+        self.assertIn(COMPRESSED_TENSORS_METHOD, log_output)
+
+    @patch("vllm_ascend.quantization.utils.detect_quantization_method",
+           return_value=None)
+    def test_no_detection_emits_no_log(self, mock_detect):
+        """When no quantization is detected, no log should be emitted."""
+        vllm_config = self._make_vllm_config(quantization=None)
+        logger_name = "vllm_ascend.quantization.utils"
+
+        with self.assertRaises(AssertionError):
+            # assertLogs raises AssertionError when no logs are emitted
+            with self.assertLogs(logger_name, level=logging.DEBUG):
+                maybe_auto_detect_quantization(vllm_config)
+
+        self.assertIsNone(vllm_config.model_config.quantization)
