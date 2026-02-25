@@ -601,8 +601,8 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if self.pcp_size > 1:
-            num_scheduled_tokens[:num_reqs], position_pcp = (
-                self.pcp_manager.update_tokens_for_pcp(num_scheduled_tokens[:num_reqs], self.arange_np)
+            num_scheduled_tokens[:num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
+                num_scheduled_tokens[:num_reqs], self.arange_np
             )
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
@@ -1267,7 +1267,7 @@ class NPUModelRunner(GPUModelRunner):
                 batch_descriptor=batch_desc,
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
                 model_instance=self.model,
-                max_tokens_across_pcp= 0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
+                max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
                 skip_compiled=has_encoder_input,
             ),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
