@@ -7,7 +7,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.ops.fused_moe.moe_comm_method import (AllGatherCommImpl,
                                                        AlltoAllCommImpl,
                                                        MC2CommImpl)
-from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
+from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.ops.fused_moe.token_dispatcher import (TokenCombineResult,
                                                         TokenDispatchResult)
 
