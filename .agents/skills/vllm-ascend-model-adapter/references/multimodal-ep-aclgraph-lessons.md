@@ -5,6 +5,7 @@ This note captures practical patterns that repeatedly matter for VL checkpoints 
 ## 1) Out-of-box feature expectation
 
 Try best to validate key features by default:
+
 - ACLGraph
 - MTP
 - multimodal (if model supports VL)
@@ -25,9 +26,9 @@ For non-MoE models, EP/flashcomm1 should be marked not-applicable.
 ## 3) EP + graph startup expectations
 
 - Startup latency is much higher than eager due to:
-  - compile warmup
-  - graph capture rounds
-  - multimodal encoder profiling
+    - compile warmup
+    - graph capture rounds
+    - multimodal encoder profiling
 - Do not treat slow startup as failure unless logs show hard errors.
 
 ## 4) Always distinguish two max lengths
@@ -46,12 +47,14 @@ Report both values explicitly.
 ## 6) Feature-status semantics
 
 Use four categories:
+
 - ✅ supported and verified
 - ❌ framework-level unsupported
 - ⚠️ checkpoint missing (weights/config do not provide feature)
 - N/A not-applicable (for example EP/flashcomm1 on non-MoE models)
 
 Typical examples:
+
 - flashcomm1 on non-MoE VL models is often N/A or ❌ depending on framework gate.
 - MTP may be ⚠️ checkpoint missing even if framework has code paths.
 

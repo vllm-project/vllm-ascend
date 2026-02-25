@@ -10,13 +10,15 @@
 ## 2) FP8 checkpoint on NPU
 
 Common symptom:
+
 - `fp8 quantization is currently not supported in npu`.
 
 Recommended pattern:
+
 - do not force fp8 execution kernels on NPU;
 - dequantize fp8 weights to bf16 during loading using paired tensors:
-  - `*.weight`
-  - `*.weight_scale_inv`
+    - `*.weight`
+    - `*.weight_scale_inv`
 - keep strict unpaired scale/weight checks to avoid silent corruption.
 
 ## 3) Typical real-only risks (dummy may not expose)
@@ -28,9 +30,11 @@ Recommended pattern:
 ## 4) KV replication + TP pitfalls
 
 Typical symptom:
+
 - shape mismatch like `128 vs 64` when `tp_size > num_key_value_heads`.
 
 Recommended pattern:
+
 - detect KV-head replication explicitly;
 - use local norm/shard loader path for replicated KV heads;
 - avoid assuming uniform divisibility for all head dimensions.
@@ -38,6 +42,7 @@ Recommended pattern:
 ## 5) ACLGraph stability for fp8-origin checkpoints
 
 Recommended pattern:
+
 - prefer `HCCL_OP_EXPANSION_MODE=AIV` when using graph mode;
 - keep practical capture sizes and re-test from small, stable shapes;
 - use `--enforce-eager` only as temporary isolation fallback.
@@ -45,6 +50,7 @@ Recommended pattern:
 ## 6) Reporting discipline
 
 Always report both:
+
 - what dummy validated (fast gate), and
 - what only real weights validated (mandatory gate).
 

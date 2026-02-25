@@ -21,8 +21,8 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 
 - Never upgrade `transformers`.
 - Primary implementation roots are fixed by Dockerfile:
-  - `/vllm-workspace/vllm`
-  - `/vllm-workspace/vllm-ascend`
+    - `/vllm-workspace/vllm`
+    - `/vllm-workspace/vllm-ascend`
 - Start `vllm serve` from `/workspace` with direct command by default.
 - Default API port is `8000` unless user explicitly asks otherwise.
 - Feature-first default: try best to validate ACLGraph / EP / flashcomm1 / MTP / multimodal out-of-box.
@@ -57,10 +57,10 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 
 - Reuse existing vLLM architecture if compatible.
 - If architecture is missing or incompatible, implement native support:
-  - add model adapter under `vllm/model_executor/models/`;
-  - add processor under `vllm/transformers_utils/processors/` when needed;
-  - register architecture in `vllm/model_executor/models/registry.py`;
-  - implement explicit weight loading/remap rules (including fp8 scale pairing, KV/QK norm sharding, rope variants).
+    - add model adapter under `vllm/model_executor/models/`;
+    - add processor under `vllm/transformers_utils/processors/` when needed;
+    - register architecture in `vllm/model_executor/models/registry.py`;
+    - implement explicit weight loading/remap rules (including fp8 scale pairing, KV/QK norm sharding, rope variants).
 - If remote code needs newer transformers symbols, do not upgrade dependency.
 - If unavoidable, copy required modeling files from sibling transformers source and keep scope explicit.
 - If failure is backend-specific (kernel/op/platform), patch minimal required code in `/vllm-workspace/vllm-ascend`.
@@ -79,19 +79,19 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 - Goal: fast validate architecture path / operator path / API path.
 - Do not treat `Application startup complete` as pass by itself; request smoke is mandatory.
 - Require at least:
-  - startup readiness (`/v1/models` 200),
-  - one text request 200,
-  - if VL model, one text+image request 200,
-  - ACLGraph evidence where expected.
+    - startup readiness (`/v1/models` 200),
+    - one text request 200,
+    - if VL model, one text+image request 200,
+    - ACLGraph evidence where expected.
 
 #### Stage B: real-weight mandatory gate (must pass before sign-off)
 
 - Remove `--load-format dummy` and validate with real checkpoint.
 - Goal: validate real-only risks:
-  - weight key mapping,
-  - fp8/fp4 dequantization path,
-  - KV/QK norm sharding with real tensor shapes,
-  - load-time/runtime stability.
+    - weight key mapping,
+    - fp8/fp4 dequantization path,
+    - KV/QK norm sharding with real tensor shapes,
+    - load-time/runtime stability.
 - Require HTTP 200 and non-empty output before declaring success.
 - Do not pass Stage B on startup-only evidence.
 

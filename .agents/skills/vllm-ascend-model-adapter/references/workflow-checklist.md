@@ -1,9 +1,27 @@
 # Workflow Checklist
 
+## 0) Environment prerequisites
+
+Set these once per session. Defaults match the official vllm-ascend Docker image.
+
+```bash
+# --- configurable paths (adjust if your layout differs) ---
+VLLM_SRC=/vllm-workspace/vllm              # vLLM source root
+VLLM_ASCEND_SRC=/vllm-workspace/vllm-ascend # vllm-ascend source root
+WORK_DIR=/workspace                         # directory to run vllm serve from
+MODEL_ROOT=/models                          # parent directory of model checkpoints
+```
+
+Expected environment:
+
+- Hardware: Ascend A2 or A3 server
+- Software: official vllm-ascend Docker image (see `./Dockerfile` for full contents)
+- TP=16 typical for A3 (16-NPU), TP=8 typical for A2 (8-NPU)
+
 ## 1) Fast triage commands
 
 ```bash
-MODEL_PATH=/models/<model-name>
+MODEL_PATH=${MODEL_ROOT}/<model-name>
 echo "MODEL_PATH=$MODEL_PATH"
 
 # model inventory
@@ -23,8 +41,8 @@ ls -la "$MODEL_PATH"/*.py 2>/dev/null || true
 
 ```bash
 # implementation roots (fixed by Dockerfile)
-cd /vllm-workspace/vllm && git status -s
-cd /vllm-workspace/vllm-ascend && git status -s
+cd "$VLLM_SRC" && git status -s
+cd "$VLLM_ASCEND_SRC" && git status -s
 
 # runtime import source check (expect vllm-workspace path)
 python - <<'PY'
@@ -33,7 +51,7 @@ print(vllm.__file__)
 PY
 
 # direct-run working directory
-cd /workspace && pwd
+cd "$WORK_DIR" && pwd
 
 # delivery root (current repo)
 cd <current-repo>
@@ -53,15 +71,15 @@ netstat -ltnp 2>/dev/null | rg ':8000' || true
 When user explicitly requests reset:
 
 ```bash
-cd /vllm-workspace/vllm && git reset --hard && git clean -fd
-cd /vllm-workspace/vllm-ascend && git reset --hard && git clean -fd
+cd "$VLLM_SRC" && git reset --hard && git clean -fd
+cd "$VLLM_ASCEND_SRC" && git reset --hard && git clean -fd
 ```
 
 ## 4) New model onboarding checklist
 
 ```bash
 # architecture mapping check in vLLM
-rg -n "<ArchitectureClass>|registry" /vllm-workspace/vllm/vllm/model_executor/models/registry.py
+rg -n "<ArchitectureClass>|registry" "$VLLM_SRC"/vllm/model_executor/models/registry.py
 
 # optional: inspect model config and weight index quickly
 cat "$MODEL_PATH/config.json"
@@ -70,27 +88,27 @@ cat "$MODEL_PATH"/*index*.json 2>/dev/null || true
 
 If architecture is missing/incompatible, minimally do:
 
-1. Add model adapter under `/vllm-workspace/vllm/vllm/model_executor/models/<new_model>.py`.
-2. Add processor under `/vllm-workspace/vllm/vllm/transformers_utils/processors/<new_model>.py` when needed.
-3. Register architecture in `/vllm-workspace/vllm/vllm/model_executor/models/registry.py`.
+1. Add model adapter under `$VLLM_SRC/vllm/model_executor/models/<new_model>.py`.
+2. Add processor under `$VLLM_SRC/vllm/transformers_utils/processors/<new_model>.py` when needed.
+3. Register architecture in `$VLLM_SRC/vllm/model_executor/models/registry.py`.
 4. Add explicit loader/remap rules for checkpoint key patterns (qkv/norm/rope/fp8 scales).
-5. Touch `/vllm-workspace/vllm-ascend` only when backend-specific errors are confirmed.
+5. Touch `$VLLM_ASCEND_SRC` only when backend-specific errors are confirmed.
 
 ## 5) Typical implementation touch points
 
-- `/vllm-workspace/vllm/vllm/model_executor/models/<new_model>.py`
-- `/vllm-workspace/vllm/vllm/transformers_utils/processors/<new_model>.py`
-- `/vllm-workspace/vllm/vllm/model_executor/models/registry.py`
-- `/vllm-workspace/vllm-ascend/vllm_ascend/...` (only if backend behavior requires it)
+- `$VLLM_SRC/vllm/model_executor/models/<new_model>.py`
+- `$VLLM_SRC/vllm/transformers_utils/processors/<new_model>.py`
+- `$VLLM_SRC/vllm/model_executor/models/registry.py`
+- `$VLLM_ASCEND_SRC/vllm_ascend/...` (only if backend behavior requires it)
 
 ## 6) Syntax sanity checks
 
 ```bash
 python -m py_compile \
-  /vllm-workspace/vllm/vllm/model_executor/models/<new_model>.py
+  "$VLLM_SRC"/vllm/model_executor/models/<new_model>.py
 
 python -m py_compile \
-  /vllm-workspace/vllm/vllm/transformers_utils/processors/<new_model>.py 2>/dev/null || true
+  "$VLLM_SRC"/vllm/transformers_utils/processors/<new_model>.py 2>/dev/null || true
 ```
 
 ## 7) Two-stage serve templates (direct run, default `:8000`)
@@ -98,8 +116,8 @@ python -m py_compile \
 ### Stage A: dummy fast gate (first try)
 
 ```bash
-cd /workspace
-MODEL_PATH=/models/<model-name>
+cd "$WORK_DIR"
+MODEL_PATH=${MODEL_ROOT}/<model-name>
 
 HCCL_OP_EXPANSION_MODE=AIV \
 VLLM_ASCEND_ENABLE_FLASHCOMM1=0 \
@@ -108,7 +126,7 @@ vllm serve "$MODEL_PATH" \
   --trust-remote-code \
   --dtype bfloat16 \
   --max-model-len <practical-max-len-or-131072> \
-  --tensor-parallel-size 16 \
+  --tensor-parallel-size <TP-size> \
   --max-num-seqs 16 \
   --load-format dummy \
   --port 8000
@@ -210,6 +228,7 @@ git commit -sm "<message>"
 ```
 
 Confirm:
+
 - one signed commit only
 - Chinese analysis + Chinese runbook present
 - feature status matrix included with pass/fail reason
