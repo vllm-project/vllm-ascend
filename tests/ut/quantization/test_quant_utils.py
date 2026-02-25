@@ -124,9 +124,12 @@ class TestMaybeAutoDetectQuantization(TestBase):
         self.assertEqual(vllm_config.model_config.quantization,
                          ASCEND_QUANTIZATION_METHOD)
 
+    @patch("vllm.config.VllmConfig._get_quantization_config",
+           return_value=MagicMock())
     @patch("vllm_ascend.quantization.utils.detect_quantization_method",
            return_value=ASCEND_QUANTIZATION_METHOD)
-    def test_auto_detect_sets_quantization_and_logs_info(self, mock_detect):
+    def test_auto_detect_sets_quantization_and_logs_info(
+            self, mock_detect, mock_get_quant_config):
         """When no --quantization is specified but ModelSlim config is found,
         the method should auto-set quantization and emit an INFO log."""
         vllm_config = self._make_vllm_config(
