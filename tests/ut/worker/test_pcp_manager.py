@@ -146,7 +146,7 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
     arange_np = np.arange(10000)
     num_scheduled_tokens = np.array(tokens)
     pcp_manager.init_batch_info(num_scheduled_tokens, num_reqs)
-    pcp_tokens_result, positions_result, _, _ = pcp_manager.update_tokens_for_pcp(
+    pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(
         num_scheduled_tokens, arange_np)
 
     assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), \
