@@ -359,3 +359,78 @@ def test_causal_conv1d_update_with_batch_gather(batch_size, with_padding, dim,
     assert torch.equal(conv_state[unused_states_bool],
                        conv_state_for_padding_test[unused_states_bool])
     assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("itype", [torch.bfloat16])
+@pytest.mark.parametrize("silu_activation", [True])
+@pytest.mark.parametrize("has_bias", [False])
+@pytest.mark.parametrize("seqlen", [1])
+@pytest.mark.parametrize("width", [4])
+@pytest.mark.parametrize("dim", [4096])
+@pytest.mark.parametrize("with_padding", [True])
+@pytest.mark.parametrize("batch_size", [64])
+def test_ascend_causal_conv1d_update_with_batch_gather(batch_size, with_padding, dim,
+                                                width, seqlen, has_bias,
+                                                silu_activation, itype):
+    enable_custom_op()
+    device = "npu"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
+
+    padding = 5 if with_padding else 0
+    padded_batch_size = batch_size + padding
+    # total_entries = number of cache line
+    total_entries = 10 * batch_size
+
+    # x will be (batch, dim, seqlen) with contiguous along dim-axis
+    x = torch.randn(padded_batch_size, seqlen, dim, device=device,
+                    dtype=itype)
+
+    x_ref = x.clone()
+
+    conv_state_indices = torch.randperm(total_entries)[:batch_size].to(
+        dtype=torch.int32, device=device)
+    unused_states_bool = torch.ones(total_entries,
+                                    dtype=torch.bool,
+                                    device=device)
+    unused_states_bool[conv_state_indices] = False
+    padded_state_indices = torch.concat(
+        [
+            conv_state_indices,
+            torch.as_tensor(
+                [PAD_SLOT_ID] * padding, dtype=torch.int32, device=device),
+        ],
+        dim=0,
+    )
+
+    # conv_state will be (cache_lines, dim, state_len)
+    # with contiguous along dim-axis
+    conv_state = torch.randn(total_entries,
+                             width - 1,
+                             dim,
+                             device=device,
+                             dtype=itype).transpose(1, 2)
+
+    conv_state_for_padding_test = conv_state.clone()
+
+    weight = torch.randn(dim, width, device=device, dtype=itype)
+    bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
+    conv_state_ref = conv_state[conv_state_indices, :].detach().clone()
+    activation = None if not silu_activation else "silu"
+
+    conv_state_T = conv_state.transpose(-1, -2)
+    weight_T = weight.transpose(0, 1)
+
+    out = torch.ops._C_ascend.npu_causal_conv1d_update(
+        x,
+        weight_T,
+        conv_state_T,
+        padded_state_indices,
+        bias,
+        None,
+        None,
+        activation,
+        PAD_SLOT_ID,
+    )
+
