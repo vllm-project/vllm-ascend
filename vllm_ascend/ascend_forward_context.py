@@ -19,7 +19,6 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
-    vllm_version_is,
 )
 
 
@@ -152,10 +151,6 @@ def set_ascend_forward_context(
                 mc2_mask[:num_actual_tokens] = True
                 mc2_mask[num_actual_tokens:] = False
                 forward_context.mc2_mask = mc2_mask
-
-        if is_draft_model and vllm_version_is("0.15.0"):
-            forward_context.remaining_moe_layers = None
-
         try:
             yield
         finally:

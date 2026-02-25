@@ -25,6 +25,7 @@ from torch import nn
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -32,11 +33,6 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("v0.15.0"):
-    from vllm.attention.layer import MLAAttention  # type: ignore
-else:
-    from vllm.model_executor.layers.attention import MLAAttention
 
 
 class IndexerWrapper(nn.Module):
@@ -126,7 +122,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             o_proj=mla_modules.o_proj,
         )
 
-        if not vllm_version_is("v0.15.0"):
+        if not vllm_version_is("v0.16.0"):
             original_process_weights = self.mla_attn.process_weights_after_loading
 
             def wrapped_process_weights(act_dtype: torch.dtype):

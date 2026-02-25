@@ -130,7 +130,7 @@ class MtpProposer(EagleProposer):
                 is_draft_model=True,
                 in_profile_run=is_profile,
             ):
-                if not vllm_version_is("v0.15.0"):
+                if not vllm_version_is("v0.16.0"):
                     # Reset MOE layer index for each MTP step iteration
                     forward_context = get_forward_context()
                     if forward_context is not None:
@@ -340,7 +340,7 @@ class MtpProposer(EagleProposer):
                 num_actual_tokens=num_tokens,
                 is_draft_model=True,
             ):
-                if not vllm_version_is("v0.15.0"):
+                if not vllm_version_is("v0.16.0"):
                     # Reset MOE layer index for each MTP step to match all_moe_layers registration
                     forward_context = get_forward_context()
                     if forward_context is not None:
