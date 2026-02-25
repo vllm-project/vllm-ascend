@@ -88,7 +88,7 @@ def npugraph_ex_compile(
         # that can trigger the compilation of static kernel. If this configuration is
         # not applied, new shapes will trigger the compilation of static kernels,
         # affecting program execution.
-        num_spec_tokens = vllm_config.speculative_config.num_speculative_token if vllm_config.speculative_config else 0
+        num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
         uniform_decode_query_len = num_spec_tokens + 1
         max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
         decode_cudagraph_batch_sizes = [

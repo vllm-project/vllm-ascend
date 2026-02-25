@@ -751,8 +751,9 @@ CATLASS_DEVICE
         ExpertTokenNums.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.ptrExpertTokenNums));
         AscendC::GlobalTensor<int32_t> LcalCumsumMM;
         LcalCumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrcumsumMM + (params.EP - 1) * params.expertPerRank * sizeof(int32_t)));
-        CopyGMToGM(ExpertTokenNums, LcalCumsumMM, params.expertPerRank, params.ubMoveNum);
-        AscendC::SyncAll<true>();
+        if (coreIdx == 0) {
+            CopyGMToGM(ExpertTokenNums, LcalCumsumMM, params.expertPerRank, params.ubMoveNum);
+        }
 
         uint32_t curGroupOffset = 0;
         int32_t prevSumBeforeRank = 0;

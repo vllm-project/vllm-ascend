@@ -1099,6 +1099,10 @@ class NPUModelRunner(GPUModelRunner):
                         "logprobs for prompt tokens, tokens, please disable "
                         "it when the requests need prompt logprobs"
                     )
+
+                if self.dynamic_eplb:
+                    self.eplb_updator.forward_before()
+
                 num_reqs = self.input_batch.num_reqs
                 req_ids = self.input_batch.req_ids
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
@@ -1197,8 +1201,13 @@ class NPUModelRunner(GPUModelRunner):
                 model_kwargs,
                 ec_connector_output,
             ) = self._preprocess(scheduler_output, num_tokens_padded, intermediate_tensors)
+
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
+
             # update global cos, sin
             update_cos_sin(positions)
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -2070,6 +2079,9 @@ class NPUModelRunner(GPUModelRunner):
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
 
+        if not is_profile and self.dynamic_eplb:
+            self.eplb_updator.forward_before()
+
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
@@ -2308,7 +2320,7 @@ class NPUModelRunner(GPUModelRunner):
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
-                model_register(self.model, self.model_config)
+                model_register(self.model)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 with get_tp_context(self.drafter):
@@ -2388,7 +2400,7 @@ class NPUModelRunner(GPUModelRunner):
         to be reshaped to the desired shape before being used by the models.
 
         NOTE: To support prefill disaggregation, we need to split kvcache tensor into
-        k_cahce and v cache, and the addr of both are aligned by 2M
+        k_cache and v cache, and the addr of both are aligned by 2M
 
         Args:
             kv_cache_config: The KV cache config
