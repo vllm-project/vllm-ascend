@@ -511,8 +511,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     ):
         AscendFusedMoE.__init__(self, **kwargs)
 
-        if not vllm_version_is("0.16.0"):
-            self._routed_input_transform = routed_input_transform
+        self._routed_input_transform = routed_input_transform
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
