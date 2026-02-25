@@ -26,6 +26,9 @@ class AscendPCPMetadata:
     tail_attn_nomask_seqlens: torch.Tensor = None
     q_full_idx: torch.Tensor = None
     pcp_allgather_restore_idx: list[int] | None = None
+    block_table_cp: torch.Tensor = None
+    valid_block_ids: torch.Tensor = None
+    prefill_q_cum_seqlens: torch.Tensor = None
 
 
 @dataclass
