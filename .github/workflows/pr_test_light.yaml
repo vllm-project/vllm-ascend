@@ -41,9 +41,9 @@ jobs:
   lint:
     uses: ./.github/workflows/_pre_commit.yml
     with:
-      vllm: v0.15.0
+      vllm: 83b47f67b1dfad505606070ae4d9f83e50ad4ebd
   changes:
-    runs-on: linux-aarch64-a2-0
+    runs-on: linux-aarch64-a2b3-0
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
@@ -87,19 +87,19 @@ jobs:
     if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     strategy:
       matrix:
-        vllm_version: [v0.15.0]
+        vllm_version: [83b47f67b1dfad505606070ae4d9f83e50ad4ebd, v0.15.0]
     uses: ./.github/workflows/_unit_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-amd64-cpu-8-hk
-      image: quay.nju.edu.cn/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
+      image: quay.nju.edu.cn/ascend/cann:8.5.0-910b-ubuntu22.04-py3.11
       type: pr
 
   e2e-light:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [v0.15.0]
+        vllm_version: [83b47f67b1dfad505606070ae4d9f83e50ad4ebd, v0.15.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
@@ -107,7 +107,6 @@ jobs:
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      runner: linux-aarch64-a2
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
       contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
       type: light

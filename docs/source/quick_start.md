@@ -99,7 +99,7 @@ There are two ways to start vLLM on Ascend NPU:
 :::::{tab-set}
 ::::{tab-item} Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing).
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inference).
 
 Try to run below Python script directly or use `python3` shell to generate texts:
 
@@ -114,7 +114,7 @@ prompts = [
 ]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 # The first run will take about 3-5 mins (10 MB/s) to download models
-llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+llm = LLM(model="Qwen/Qwen3-0.6B")
 
 outputs = llm.generate(prompts, sampling_params)
 
@@ -130,13 +130,13 @@ for output in outputs:
 
 vLLM can also be deployed as a server that implements the OpenAI API protocol. Run
 the following command to start the vLLM server with the
-[Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) model:
+[Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) model:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
 # Deploy vLLM server (The first run will take about 3-5 mins (10 MB/s) to download models)
-vllm serve Qwen/Qwen2.5-0.5B-Instruct &
+vllm serve Qwen/Qwen3-0.6B &
 ```
 
 If you see a log as below:
@@ -166,7 +166,7 @@ You can also query the model with input prompts:
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "model": "Qwen/Qwen3-0.6B",
         "prompt": "Beijing is a",
         "max_completion_tokens": 5,
         "temperature": 0

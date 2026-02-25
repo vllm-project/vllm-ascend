@@ -23,11 +23,12 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        | Triton Ascend |
 |-------------|-------------------|-----------------|-------------|---------------------------------|---------------|
-| v0.14.0rc1  | v0.14.0/v0.14.1   | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0         |
+| v0.14.0rc1  | v0.14.1           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0         |
+| v0.13.0     | v0.13.0           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.8.0.post2            | 3.2.0         |
 | v0.13.0rc2  | v0.13.0           | >= 3.10, < 3.12 | 8.5.0       | 2.8.0  / 2.8.0.post1            | 3.2.0         |
 | v0.13.0rc1  | v0.13.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  |               |
-| v0.11.0     | v0.11.0           | >= 3.9 , < 3.12 | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |               |
 | v0.12.0rc1  | v0.12.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  |               |
+| v0.11.0     | v0.11.0           | >= 3.9 , < 3.12 | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |               |
 | v0.11.0rc3  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |               |
 | v0.11.0rc2  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC2     | 2.7.1 / 2.7.1                   |               |
 | v0.11.0rc1  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC1     | 2.7.1 / 2.7.1                   |               |
@@ -55,7 +56,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
 |-------------|--------------|------------------|-------------|--------------------|
-|     main    | v0.15.0 tag | >= 3.10, < 3.12   | 8.5.0 | 2.9.0 / 2.9.0 |
+|     main    | 83b47f67b1dfad505606070ae4d9f83e50ad4ebd, v0.15.0 tag | >= 3.10, < 3.12   | 8.5.0 | 2.9.0 / 2.9.0 |
 
 ## Release cadence
 
@@ -63,6 +64,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.02.06 | v0.13.0 Final release, v0.13.0            |
 | 2026.01.26 | Release candidates, v0.14.0rc1            |
 | 2026.01.24 | Release candidates, v0.13.0rc2            |
 | 2025.12.27 | Release candidates, v0.13.0rc1            |
@@ -139,7 +141,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 ### Backward compatibility
 
-For main branch, vLLM Ascend should works with vLLM main branch and latest 1 or 2 releases. To ensure backward compatibility, do as follows:
+For main branch, vLLM Ascend should work with vLLM main branch and latest 1 or 2 releases. To ensure backward compatibility, do as follows:
 
 - Both main branch and target vLLM release, such as the vLLM main branch and vLLM 0.8.4, are tested by Ascend E2E CI.
 - To make sure that code changes are compatible with the latest 1 or 2 vLLM releases, vLLM Ascend introduces a version check mechanism inside the code. It checks the version of the installed vLLM package first to decide which code logic to use. If users hit the `InvalidVersion` error, it may indicate that they have installed a dev or editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use.

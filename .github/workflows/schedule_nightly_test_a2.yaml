@@ -50,19 +50,19 @@ jobs:
       matrix:
         test_config:
           - name: qwen3-next
-            os: linux-aarch64-a2-4
+            os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
           - name: qwen3-32b
-            os: linux-aarch64-a2-4
+            os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_32b.py
           - name: qwen3-32b-in8-a2
-            os: linux-aarch64-a2-4
+            os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_32b_int8.py
           - name: test_custom_op
-            os: linux-aarch64-a2-1
+            os: linux-aarch64-a2b3-1
             tests: tests/e2e/nightly/single_node/ops/singlecard_ops
           - name: test_custom_op_multi_card
-            os: linux-aarch64-a2-4
+            os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
@@ -108,26 +108,26 @@ jobs:
       fail-fast: false
       matrix:
         test_config:
-          - os: linux-aarch64-a2-1
+          - os: linux-aarch64-a2b3-1
             model_list:
               - Qwen3-8B
               - Qwen2-Audio-7B-Instruct
               - Qwen3-8B-W8A8
               - Qwen3-VL-8B-Instruct
               - Qwen2.5-Omni-7B
-          - os: linux-aarch64-a2-1
+          - os: linux-aarch64-a2b3-1
             model_list:
               - ERNIE-4.5-21B-A3B-PT
               - InternVL3_5-8B-hf
               - Molmo-7B-D-0924
               - Llama-3.2-3B-Instruct
               - llava-onevision-qwen2-0.5b-ov-hf
-          - os: linux-aarch64-a2-2
+          - os: linux-aarch64-a2b3-2
             model_list:
               - Qwen3-30B-A3B
               - Qwen3-VL-30B-A3B-Instruct
               - Qwen3-30B-A3B-W8A8
-          - os: linux-aarch64-a2-4
+          - os: linux-aarch64-a2b3-4
             model_list:
               - Qwen3-Next-80B-A3B-Instruct
               - Qwen3-Omni-30B-A3B-Instruct
@@ -138,3 +138,49 @@ jobs:
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11'
       upload: false
+
+  doc-test:
+    name: doc-test
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    strategy:
+      # Each version should be tested
+      fail-fast: false
+      matrix:
+        vllm_version: [releases-v0.13.0, releases-v0.13.0-openeuler, main, main-openeuler]
+    runs-on: linux-aarch64-a2b3-1
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_version }}
+    steps:
+      - name: Check NPU/CANN and git info
+        run: |
+          echo "====> Print NPU/CANN info"
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+          echo "====> Print vllm-ascend git info"
+          cd /vllm-workspace/vllm-ascend
+          git --no-pager log -1 || true
+          echo "====> Print vllm git info"
+          cd /vllm-workspace/vllm
+          git --no-pager log -1 || true
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Run vllm-ascend/tests/e2e/run_doctests.sh
+        run: |
+          # PWD: /__w/vllm-ascend/vllm-ascend
+          # Make sure e2e tests are latest
+          echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
+          rm -rf /vllm-workspace/vllm-ascend/tests/e2e
+          mkdir -p /vllm-workspace/vllm-ascend/tests
+          # Overwrite e2e and examples
+          cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
+          cp -r examples /vllm-workspace/vllm-ascend/
+
+          # Simulate container to enter directory
+          cd /workspace
+
+          # Run real test
+          echo "Test:"
+          /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh

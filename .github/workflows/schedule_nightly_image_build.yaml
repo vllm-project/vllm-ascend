@@ -22,9 +22,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          ref: releases/v0.13.0
 
       - name: Show build target
         run: |
@@ -49,7 +46,7 @@ jobs:
           docker build \
             --network host \
             --platform linux/arm64 \
-            -f .github/Dockerfile.nightly.${TARGET} \
+            -f .github/workflows/dockerfiles/Dockerfile.nightly.${TARGET} \
             --build-arg CANN_VERSION="8.5.0" \
             --build-arg UBUNTU_VERSION="22.04" \
             --build-arg PYTHON_VERSION="3.11" \
