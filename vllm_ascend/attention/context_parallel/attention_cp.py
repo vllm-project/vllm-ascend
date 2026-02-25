@@ -117,7 +117,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
         block_table = common_attn_metadata.block_table_tensor
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        self.num_decodes_flatten = query_lens[: num_decodes].sum().item()
+        self.num_decodes_flatten = query_lens[:num_decodes].sum().item()
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata

@@ -812,7 +812,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # For the overlay of the PCP feature and the eagle3, attn_state needs to be recovered
         # TODO: Resolved the conflict between the sunset of attn_state and the PCP that requires this interface.
-        if attn_state==AscendAttentionState.SpecDecoding and self.speculative_config.method != "mtp":
+        if attn_state == AscendAttentionState.SpecDecoding and self.speculative_config.method != "mtp":
             self.attn_state = AscendAttentionState.ChunkedPrefill  # type: ignore
         else:
             self.attn_state = attn_state  # type: ignore
@@ -1276,8 +1276,10 @@ class NPUModelRunner(GPUModelRunner):
                 # ignores the padding from CUDA Graph.
                 hidden_states = self.pcp_manager.get_restore_hidden_states(hidden_states)
                 if aux_hidden_states is not None:
-                    aux_hidden_states = [self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp) 
-                                         for aux_hidden_states_pcp in aux_hidden_states]
+                    aux_hidden_states = [
+                        self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp) 
+                        for aux_hidden_states_pcp in aux_hidden_states
+                    ]
 
             if not self.broadcast_pp_output:
                 # Common case.

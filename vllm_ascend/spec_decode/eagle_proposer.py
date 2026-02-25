@@ -329,11 +329,10 @@ class EagleProposer(VllmEagleProposer):
             )
             if self.pcp_size * self.dcp_size > 1:
                 # update long_seq related params and flatten block_table
-                common_attn_metadata.prefill_context_parallel_metadata = \
-                    self.runner.pcp_manager.long_seq_metadata
-                common_attn_metadata.block_table_tensor = \
-                    self.runner.input_batch.block_table[0].get_device_tensor()[
-                        :num_reqs * self.decode_threshold]
+                common_attn_metadata.prefill_context_parallel_metadata = self.runner.pcp_manager.long_seq_metadata
+                common_attn_metadata.block_table_tensor = self.runner.input_batch.block_table[0].get_device_tensor()[
+                    : num_reqs * self.decode_threshold
+                ]
 
             builder = self.runner.attn_groups[0][0].get_metadata_builder()
             # update the tensor's address for each step.
@@ -351,7 +350,7 @@ class EagleProposer(VllmEagleProposer):
 
         model_positions = self._get_positions(num_tokens)
 
-        batch_size = num_tokens // (self.num_speculative_tokens + 1) # if not is_profile else self.runner.max_num_reqs
+        batch_size = num_tokens // (self.num_speculative_tokens + 1)  # if not is_profile else self.runner.max_num_reqs
         if is_profile:
             batch_size = min(batch_size, self.runner.max_num_reqs)
 
@@ -444,20 +443,16 @@ class EagleProposer(VllmEagleProposer):
             num_tokens_d_padded = num_tokens_d * self.pcp_size
             input_ids_d = self.input_ids[:num_tokens_d]
             input_ids_p = self.input_ids[num_tokens_d:num_tokens]
-            target_hidden_states_d_padded = \
-                target_hidden_states[:num_tokens_d_padded]
+            target_hidden_states_d_padded = target_hidden_states[:num_tokens_d_padded]
             if num_tokens_d:
                 # remove padding (from pcp all-gather) in decode part
-                mask_start_loc = torch.cat([
-                    torch.tensor([0], dtype=torch.int32),
-                    torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1]
-                ])
+                mask_start_loc = torch.cat(
+                    [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1]]
+                )
                 mask_len = query_lens_d
                 mask = []
                 for req_id in range(num_decode_reqs):
-                    mask += list(
-                        range(mask_start_loc[req_id],
-                              mask_start_loc[req_id] + mask_len[req_id]))
+                    mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
                 target_hidden_states_d = target_hidden_states_d_padded[mask]
             else:
                 target_hidden_states_d = target_hidden_states_d_padded
@@ -465,38 +460,27 @@ class EagleProposer(VllmEagleProposer):
             req_scheduled_tokens_p = {}
             for i, req_id in enumerate(self.runner.input_batch.req_ids):
                 if i >= num_decode_reqs:
-                    req_scheduled_tokens_p[req_id] = \
-                        req_scheduled_tokens[req_id]
-            (num_tokens_p, input_ids_p, target_hidden_states_p,
-             max_query_len_p, seq_lens_p, cu_num_tokens_p) = \
-                self._split_pcp_input(
-                    req_scheduled_tokens_p, input_ids_p, target_hidden_states_p)
+                    req_scheduled_tokens_p[req_id] = req_scheduled_tokens[req_id]
+            (num_tokens_p, input_ids_p, target_hidden_states_p, max_query_len_p, seq_lens_p, cu_num_tokens_p) = (
+                self._split_pcp_input(req_scheduled_tokens_p, input_ids_p, target_hidden_states_p)
+            )
             num_tokens = num_tokens_d + num_tokens_p
             target_positions = target_positions[:num_tokens]
-            self.input_ids[:num_tokens].copy_(
-                torch.cat([input_ids_d, input_ids_p], dim=0))
-            target_hidden_states = torch.cat(
-                [target_hidden_states_d, target_hidden_states_p], dim=0)
+            self.input_ids[:num_tokens].copy_(torch.cat([input_ids_d, input_ids_p], dim=0))
+            target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
             # 2. update sample_indices according to main model
             if num_decode_reqs:
-                last_token_indices[:num_decode_reqs] = \
-                    self.runner.logits_indices[last_token_indices[:num_decode_reqs]]
+                last_token_indices[:num_decode_reqs] = self.runner.logits_indices[last_token_indices[:num_decode_reqs]]
             if num_prefill_reqs:
-                last_token_indices[-num_prefill_reqs:] = \
-                    self.runner.logits_indices[-num_prefill_reqs:]
+                last_token_indices[-num_prefill_reqs:] = self.runner.logits_indices[-num_prefill_reqs:]
                 # 3. update attn_metadata params that may be influenced by pcp
                 common_attn_metadata.num_actual_tokens = num_tokens
-                common_attn_metadata.max_query_len = max(
-                    self.decode_threshold, max_query_len_p)
+                common_attn_metadata.max_query_len = max(self.decode_threshold, max_query_len_p)
                 common_attn_metadata.seq_lens[-num_prefill_reqs:] = seq_lens_p
-                common_attn_metadata.seq_lens_cpu[
-                    -num_prefill_reqs:] = seq_lens_p
-                query_start_loc_p = cu_num_tokens_p[1:] + \
-                    common_attn_metadata.query_start_loc[num_decode_reqs].item()
-                common_attn_metadata.query_start_loc[-num_prefill_reqs:] = \
-                    query_start_loc_p
-                common_attn_metadata.query_start_loc_cpu[-num_prefill_reqs:] = \
-                    query_start_loc_p
+                common_attn_metadata.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
+                query_start_loc_p = cu_num_tokens_p[1:] + common_attn_metadata.query_start_loc[num_decode_reqs].item()
+                common_attn_metadata.query_start_loc[-num_prefill_reqs:] = query_start_loc_p
+                common_attn_metadata.query_start_loc_cpu[-num_prefill_reqs:] = query_start_loc_p
         if self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[num_tokens]
         else:
@@ -558,47 +542,49 @@ class EagleProposer(VllmEagleProposer):
         attn_metadata_i = per_layer_attn_metadata[self.attn_layer_names[0]]
         if self.pcp_size * self.dcp_size > 1:
             if self.num_speculative_tokens > 1 and not attn_metadata_i.num_prefills:
-                positions = target_positions[ori_last_token_indices]
                 # For pcp/dcp, tokens are split across different cp ranks,
                 # so we can not simply update slot_mapping by += 1.
                 # Instead, we pre-allocate mtp slot_mapping in model_runner
                 # (_generate_pcp_mtp_input), and use updated slot_indices
                 # to get corresponding slot_mapping in each step.
-                num_reject_tokens = torch.tensor(
-                    self.runner.pcp_manager.cu_num_tokens_pcp_full,
-                    dtype=torch.int32).to(self.device) - ori_last_token_indices - 1
-                num_accept_tokens = \
-                    query_lens_d.to(self.device) - num_reject_tokens
+                num_reject_tokens = (
+                    torch.tensor(self.runner.pcp_manager.cu_num_tokens_pcp_full, dtype=torch.int32).to(self.device) 
+                    - ori_last_token_indices 
+                    - 1
+                )
+                num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
                 ori_seq_len = attn_metadata_i.seq_lens[:batch_size].clone()
                 mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
                 # slot_mapping index base offset:
                 # scheduled tokens + pre-allocated mtp tokens + accepted tokens
-                slot_idx_base = (torch.cat([
-                    torch.tensor([0], dtype=torch.int32, device=self.device),
-                    (torch.cumsum(query_lens_d, dim=0)[:-1] * self.pcp_size).to(
-                        self.device)
-                ]) + torch.arange(num_decode_reqs, device=self.device) *
-                                (self.num_speculative_tokens - 1) * self.pcp_size
-                                + (num_accept_tokens - 1) * self.pcp_size)
+                slot_idx_base = (
+                    torch.cat(
+                        [
+                            torch.tensor([0], dtype=torch.int32, device=self.device),
+                            (torch.cumsum(query_lens_d, dim=0)[:-1] * self.pcp_size).to(self.device),
+                        ]
+                    )
+                    + torch.arange(num_decode_reqs, device=self.device)
+                    * (self.num_speculative_tokens - 1)
+                    * self.pcp_size
+                    + (num_accept_tokens - 1) * self.pcp_size
+                )
                 slot_indices_list = []
                 for req_id in range(num_decode_reqs):
                     slot_indices_list.append(
-                        torch.arange(slot_idx_base[req_id],
-                                    slot_idx_base[req_id] + self.pcp_size,
-                                    device=self.device))
+                        torch.arange(slot_idx_base[req_id], slot_idx_base[req_id] + self.pcp_size, device=self.device)
+                    )
                 slot_indices = torch.cat(slot_indices_list, dim=0)
 
                 # fold block_table (restore it to original size before flattened)
-                block_indices = torch.cat([
-                    torch.tensor([0], dtype=torch.int32),
-                    torch.cumsum(query_lens_d, dim=0)[:-1]
-                ])
-                common_attn_metadata.block_table_tensor[:
-                                                        batch_size] = common_attn_metadata.block_table_tensor[
-                                                            block_indices]
-                common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:
-                                                                                                batch_size]
+                block_indices = torch.cat(
+                    [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d, dim=0)[:-1]]
+                )
+                common_attn_metadata.block_table_tensor[:batch_size] = common_attn_metadata.block_table_tensor[
+                    block_indices
+                ]
+                common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
 
                 # Copy the old attn_metadata and update
                 for draft_step in range(1, self.num_speculative_tokens):
@@ -713,8 +699,8 @@ class EagleProposer(VllmEagleProposer):
             hidden_states = hidden_states[:num_tokens]
             hidden_states = get_pcp_group().all_gather(hidden_states, 0)
             hidden_states = torch.index_select(
-                hidden_states, 0, self.runner.pcp_manager.
-                pcp_allgather_restore_idx.gpu[:hidden_states.shape[0]])
+                hidden_states, 0, self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[:hidden_states.shape[0]]
+            )
             last_hidden_states = hidden_states  # TODO: check it
 
         num_indices = last_token_indices.shape[0]
@@ -872,9 +858,9 @@ class EagleProposer(VllmEagleProposer):
         input_batch_size,
         used_update_positions,
         aclgraph_runtime_mode,
-        ori_seq_len = None,
-        slot_indices = None,
-        mtp_slot_mapping = None,
+        ori_seq_len=None,
+        slot_indices=None,
+        mtp_slot_mapping=None,
     ):
         assert draft_step > 0
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
@@ -958,13 +944,11 @@ class EagleProposer(VllmEagleProposer):
                 self.dcp_size,
                 self.runner.parallel_config.cp_kv_cache_interleave_size,
             )
-            cp_seq_len = \
-                num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank]
+            cp_seq_len = num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank]
             # update slot_mapping
             slot_indices += self.pcp_size
             slot_mapping = mtp_slot_mapping[slot_indices]
-            common_attn_metadata.slot_mapping[:batch_size *
-                                                self.pcp_size] = slot_mapping
+            common_attn_metadata.slot_mapping[: batch_size * self.pcp_size] = slot_mapping
         else:
             block_size = attn_metadata_builder.kv_cache_spec.block_size
 
