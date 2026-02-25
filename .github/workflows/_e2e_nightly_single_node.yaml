@@ -27,10 +27,6 @@ on:
         required: false
         type: string
         default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
-      base_image:
-        required: false
-        type: string
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
       tests:
         required: true
         type: string
@@ -68,7 +64,7 @@ jobs:
     if: ${{ inputs.is_run }}
     timeout-minutes: 600
     container:
-      image: ${{ inputs.is_pr_test && inputs.base_image || inputs.image }}
+      image: ${{ inputs.image }}
     env:
       HF_HUB_OFFLINE: 1
       VLLM_USE_MODELSCOPE: True
@@ -78,24 +74,11 @@ jobs:
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
       
-      - name: Config mirrors
+      - name: uninstall vlm vllm-ascend and remove code (if pr test)
         if: ${{ inputs.is_pr_test }}
         run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
-          apt-get update -y
-          apt install git -y
-          mkdir -p /vllm-workspace
-
-      - name: Install system dependencies
-        if: ${{ inputs.is_pr_test }}
-        run: |
-          apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
-
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip uninstall -y vllm vllm-ascend || true
+          rm -rf /vllm-workspace/vllm /vllm-workspace/vllm-ascend
 
       - name: Checkout vllm-project/vllm repo
         if: ${{ inputs.is_pr_test }}

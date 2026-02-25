@@ -16,11 +16,6 @@ on:
         type: string
         description: base image for pods
         default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
-      base_image:
-        required: false
-        type: string
-        description: base image for pods
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
       config_file_path:
         required: true
         type: string
@@ -153,7 +148,7 @@ jobs:
 
             size="${{ inputs.size }}"
             replicas="${{ inputs.replicas }}"
-            image="${{ inputs.is_pr_test && inputs.base_image || inputs.image }}"
+            image="${{ inputs.image }}"
             config_file_path="${{ inputs.config_file_path }}"
             fail_tag=FAIL_TAG_"${{ inputs.config_file_path }}"
             is_pr_test="${{ inputs.is_pr_test }}"
