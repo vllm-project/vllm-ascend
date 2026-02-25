@@ -29,6 +29,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
+    record_failed_blocks,
 )
 
 backend_map = {
@@ -71,6 +72,8 @@ class KVPoolWorker:
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        self._invalid_block_ids: set[int] = set()
+        self._invalid_block_ids_lock = threading.Lock()
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
@@ -227,6 +230,8 @@ class KVPoolWorker:
                 self.dcp_size,
                 ready_event,
                 self.get_event,
+                self._invalid_block_ids,
+                self._invalid_block_ids_lock,
             )
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -248,7 +253,14 @@ class KVPoolWorker:
             if self.load_async:
                 ready_event = threading.Event()
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
-                    self.m_store, self.token_database, self.block_size, self.tp_rank, self.dcp_size, ready_event
+                    self.m_store,
+                    self.token_database,
+                    self.block_size,
+                    self.tp_rank,
+                    self.dcp_size,
+                    ready_event,
+                    self._invalid_block_ids,
+                    self._invalid_block_ids_lock,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -281,22 +293,32 @@ class KVPoolWorker:
                     addr_list = []
                     size_list = []
                     key_list = []
+                    block_id_list = []
                     mask_num = request.load_spec.vllm_cached_tokens // self.block_size * self.block_size
                     for start, end, key in self.token_database.process_tokens(
                         token_len, request.block_hashes, mask_num
                     ):
-                        addr, size, _ = self.token_database.prepare_value(start, end, request.block_ids)
+                        addr, size, block_id = self.token_database.prepare_value(start, end, request.block_ids)
                         key_list.append(key.to_string())
                         addr_list.append(addr)
                         size_list.append(size)
-                    key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-                    addr_list_c = (
-                        addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-                    )
-                    size_list_c = (
-                        size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-                    )
-                    self.m_store.get(key_list_c, addr_list_c, size_list_c)
+                        block_id_list.append(block_id)
+                    offset = self.tp_rank % len(key_list)
+                    key_list_c = key_list[offset:] + key_list[:offset]
+                    addr_list_c = addr_list[offset:] + addr_list[:offset]
+                    size_list_c = size_list[offset:] + size_list[:offset]
+                    block_id_list_c = block_id_list[offset:] + block_id_list[:offset]
+
+                    ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+
+                    if ret is not None and any(r != 0 for r in ret):
+                        missing_block_ids = record_failed_blocks(
+                            block_id_list_c,
+                            ret,
+                        )
+                        self._invalid_block_ids.update(missing_block_ids)
+                    elif ret is None:
+                        self._invalid_block_ids.update(block_id_list_c)
 
     def wait_for_layer_load(self) -> None:
         for layerwise_retriever in self.layerwise_retrievers:
@@ -305,6 +327,12 @@ class KVPoolWorker:
                 assert ret_token_mask is not None
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 logger.debug(f"Retrieved {num_retrieved_tokens} tokens")
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        with self._invalid_block_ids_lock:
+            invalid_blocks = self._invalid_block_ids.copy()
+            self._invalid_block_ids.clear()
+        return invalid_blocks
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         if self.current_layer == 0:
