@@ -14,7 +14,7 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla, update_cos_sin
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.utils import lmhead_tp_enable, vllm_version_is
 
@@ -329,6 +329,7 @@ class MtpProposer(EagleProposer):
         for layer_name in self.attn_layer_names:
             attn_metadata[layer_name] = attn_metadata_mtp
 
+        update_cos_sin(self._get_positions(num_input_tokens))
         for step in range(self.num_speculative_tokens):
             with set_ascend_forward_context(
                 attn_metadata,
