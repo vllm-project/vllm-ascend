@@ -54,7 +54,6 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
                     distributed_executor_backend="mp",
                     disable_log_stats=False,
                     speculative_config={
-                        "cudagraph_mode": "FULL_DECODE_ONLY",
                         "method": "qwen3_next_mtp",
                         "num_speculative_tokens": 3,
                     },
