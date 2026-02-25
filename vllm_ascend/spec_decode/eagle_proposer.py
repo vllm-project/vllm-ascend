@@ -548,8 +548,8 @@ class EagleProposer(VllmEagleProposer):
                 # (_generate_pcp_mtp_input), and use updated slot_indices
                 # to get corresponding slot_mapping in each step.
                 num_reject_tokens = (
-                    torch.tensor(self.runner.pcp_manager.cu_num_tokens_pcp_full, dtype=torch.int32).to(self.device) 
-                    - ori_last_token_indices 
+                    torch.tensor(self.runner.pcp_manager.cu_num_tokens_pcp_full, dtype=torch.int32).to(self.device)
+                    - ori_last_token_indices
                     - 1
                 )
                 num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
@@ -699,7 +699,7 @@ class EagleProposer(VllmEagleProposer):
             hidden_states = hidden_states[:num_tokens]
             hidden_states = get_pcp_group().all_gather(hidden_states, 0)
             hidden_states = torch.index_select(
-                hidden_states, 0, self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[:hidden_states.shape[0]]
+                hidden_states, 0, self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
             )
             last_hidden_states = hidden_states  # TODO: check it
 

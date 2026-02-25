@@ -1277,7 +1277,7 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = self.pcp_manager.get_restore_hidden_states(hidden_states)
                 if aux_hidden_states is not None:
                     aux_hidden_states = [
-                        self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp) 
+                        self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
 
