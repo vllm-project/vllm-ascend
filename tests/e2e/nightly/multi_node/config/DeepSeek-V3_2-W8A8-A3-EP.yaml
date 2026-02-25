@@ -25,8 +25,6 @@ disaggregated_prefill:
   decoder_host_index: [2, 3]
 
 
-
-
 deployment:
   -
     envs:
@@ -150,7 +148,7 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30200",
-          "engine_id": "2",
+          "engine_id": "1",
           "kv_connector_extra_config": {
                       "use_ascend_direct": true,
                       "prefill": {
@@ -198,7 +196,7 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30200",
-          "engine_id": "2",
+          "engine_id": "1",
           "kv_connector_extra_config": {
                       "use_ascend_direct": true,
                       "prefill": {
