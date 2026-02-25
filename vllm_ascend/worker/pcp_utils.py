@@ -281,7 +281,6 @@ class PCPManager:
               contiguous (unpadded) `tokens` arange instead (handled after).
             """
             positions = np.zeros(len(pcp_head_chunk_mask), dtype=np.int32)
-
             head_start_loc = positions_start_loc + rank * pcp_chunk_sizes
             tail_start_loc = positions_start_loc + (2 * self.pcp_world_size - rank - 1) * pcp_chunk_sizes
             # Fill head positions using chunk arange offset by head_start_loc.
@@ -466,7 +465,10 @@ class PCPManager:
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[: num_tokens * self.pcp_world_size]
         pcp_padded_slot_mapping.fill_(-1)
         pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping
-        return pcp_padded_slot_mapping.clone()
+        if self.pcp_use_hybrid_attn:
+            return pcp_padded_slot_mapping.clone()
+        else:
+            return pcp_padded_slot_mapping
 
     def get_restore_hidden_states(
         self,
@@ -888,13 +890,12 @@ class PCPManager:
                     long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
                         : sum(num_scheduled_tokens) - num_decodes
                     ]
-                long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[
-                    : num_actual_tokens_pcp_padded // self.pcp_world_size - num_decodes
-                ]
-                long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
-                    : sum(pcp_unpad_mask) + num_decodes * (self.pcp_world_size - 1)
-                ]
-
+                    long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[
+                        : num_actual_tokens_pcp_padded // self.pcp_world_size - num_decodes
+                    ]
+                    long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
+                        : sum(pcp_unpad_mask) + num_decodes * (self.pcp_world_size - 1)
+                    ]
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
                 long_seq_metadata.q_full_idx = self.q_full_idx

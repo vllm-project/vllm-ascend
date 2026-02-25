@@ -65,6 +65,7 @@ def test_models_pcp_dcp_basic():
                     decode_context_parallel_size=1,
                     max_num_batched_tokens=1024,
                     enable_expert_parallel=True,
+                    gpu_memory_utilization=0.8,
                     block_size=128) as runner:
         runner.model.generate(prompts, sampling_params)
 

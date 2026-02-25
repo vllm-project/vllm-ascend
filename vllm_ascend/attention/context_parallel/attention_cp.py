@@ -492,7 +492,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         v_tail_nomask = torch.index_select(value, 0, kv_with_q_tail_nomask_idx)
         k_tail_mask = torch.index_select(key, 0, kv_with_q_tail_mask_idx)
         v_tail_mask = torch.index_select(value, 0, kv_with_q_tail_mask_idx)
-
         return (
             {
                 "q": q_head,
