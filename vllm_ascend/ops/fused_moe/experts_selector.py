@@ -59,6 +59,9 @@ def select_experts(hidden_states: torch.Tensor,
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
     # prefetch w1_w3_proj.weight preprocess
+    # print(f"ttg start select_experts, mix_placement:  {mix_placement}， "
+    #       f"num_shared_experts: {num_shared_experts}, "
+    #       f"global_num_experts: {global_num_experts}", flush=True)
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
@@ -117,6 +120,7 @@ def select_experts(hidden_states: torch.Tensor,
         topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)
         topk_weights = torch.cat([topk_weights, pad_shared_expert_weights],
                                  dim=1)
+        print(f"ttg finish select_experts", flush=True)
     return topk_weights, topk_ids
 
 

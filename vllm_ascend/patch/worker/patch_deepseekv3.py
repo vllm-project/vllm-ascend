@@ -1,4 +1,5 @@
 import typing
+from typing import Optional
 from collections.abc import Callable, Iterable
 
 import torch
@@ -6,9 +7,12 @@ import vllm
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import ParallelConfig
+from vllm.config import get_current_vllm_config
+from vllm.forward_context import get_forward_context
 from vllm.distributed import (get_ep_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
+from vllm.distributed.parallel_state import set_substitute_tp
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
     SharedFusedMoE
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -47,23 +51,30 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
         self.n_shared_experts: int = config.n_shared_experts
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        print(f"ttg AscendDeepseekV2MoE init", flush=True)
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
                              "Only silu is supported for now.")
 
-        self.gate = ReplicatedLinear(
-            config.hidden_size,
-            config.n_routed_experts,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.gate",
-        )
-        if config.topk_method == "noaux_tc":
-            self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts, dtype=torch.float32))
+        vllm_config = get_current_vllm_config()
+        self.afd_config = getattr(vllm_config, "afd_config", None)
+        if self.afd_config is None or not self.afd_config.compute_gate_on_attention:
+            self.gate = ReplicatedLinear(
+                config.hidden_size,
+                config.n_routed_experts,
+                bias=False,
+                quant_config=None,
+                prefix=f"{prefix}.gate",
+            )
+            if config.topk_method == "noaux_tc":
+                self.gate.e_score_correction_bias = nn.Parameter(
+                    torch.empty(config.n_routed_experts, dtype=torch.float32))
+            else:
+                self.gate.e_score_correction_bias = None
         else:
-            self.gate.e_score_correction_bias = None
+            self.gate = None
+        self.connector_name = self.afd_config.afd_connector if self.afd_config is not None else None
 
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config
@@ -80,11 +91,13 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
 
         ascend_config = get_ascend_config()
         mix_placement = getattr(ascend_config, "mix_placement", False)
+        self.mix_placement = mix_placement
         if (config.n_shared_experts is None or mix_placement):
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
 
+            set_substitute_tp(1)
             self.shared_experts = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -94,6 +107,7 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
+            set_substitute_tp(0)
 
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
@@ -113,7 +127,8 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
             # aiter applies routed_scaling_factor internally
             routed_scaling_factor=1.0
             if not mix_placement else self.routed_scaling_factor,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
+            e_score_correction_bias=self.gate.e_score_correction_bias \
+            if self.gate is not None else None,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
@@ -158,6 +173,63 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
                 final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_dim)
 
+    def afd_forward(
+            self,
+            hidden_states: torch.Tensor,
+            router_logits: Optional[torch.Tensor] = None,
+            group_list: Optional[torch.Tensor] = None,
+            dynamic_scales: Optional[torch.Tensor] = None,
+            topk_weights: Optional[torch.Tensor] = None,
+            topk_ids: Optional[torch.Tensor] = None,
+            row_idx: Optional[torch.Tensor] = None,
+            x_active_mask: Optional[torch.Tensor] = None,
+            cam_p2p_ep_name: Optional[str] = "",
+    ) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+        set_substitute_tp(1)
+
+        forward_ctx = get_forward_context()
+        afd_connector = forward_ctx.afd_metadata.afd_connector
+        fused_moe_out = afd_connector.compute_moe(
+            experts=self.experts,
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            group_list=group_list,
+            dynamic_scales=dynamic_scales,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            row_idx=row_idx,
+            x_active_mask=x_active_mask,
+            cam_p2p_ep_name=cam_p2p_ep_name,
+            connector_name=self.connector_name
+            )
+
+        shared_output, final_hidden_states = fused_moe_out
+
+        # Fix FP16 overflow
+        # See DeepseekV2DecoderLayer for more details.
+        if hidden_states.dtype != torch.float16:
+            final_hidden_states *= self.routed_scaling_factor
+        elif self.shared_experts is not None:
+            assert shared_output is not None
+            shared_output *= (1. / self.routed_scaling_factor)
+
+        if self.shared_experts is not None:
+            assert shared_output is not None
+            final_hidden_states += shared_output
+
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0)
+            final_hidden_states = final_hidden_states[:num_tokens]
+        elif self.tp_size > 1:
+            final_hidden_states = (
+                self.experts.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states))
+
+        set_substitute_tp(0)
+        return final_hidden_states.view(num_tokens, hidden_dim)
+
 
 class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
@@ -173,19 +245,62 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
         mix_placement = getattr(ascend_config, "mix_placement", False)
 
+        if self.afd_role == "attention":
+            vllm_config = get_current_vllm_config()
+            num_redundant_experts = (
+                vllm_config.parallel_config.eplb_config.num_redundant_experts
+            )
+        else:
+            num_redundant_experts = self.num_redundant_experts
+
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts +
             (self.config.n_shared_experts if mix_placement else 0),
-            num_redundant_experts=self.num_redundant_experts,
+            num_redundant_experts=num_redundant_experts,
         )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            set_substitute_tp(0)
+            if "shared_experts" in name:
+                set_substitute_tp(1)
             if "rotary_emb.inv_freq" in name:
+                continue
+
+            if (self.afd_role == "attention" and
+                    self.afd_config is not None and
+                    self.afd_config.compute_gate_on_attention and
+                    ("mlp.gate.weight" in name or "mlp.gate.e_score_correction_bias" in name)):
+                mapped_name = name.replace(".mlp.gate", ".gate")
+                if mapped_name in params_dict:
+                    param = params_dict[mapped_name]
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(mapped_name)
+                    continue
+
+            if self.afd_role == "attention" and self.is_moe_weight(name):
+                # We need to distinguish between MoE layer weights and Dense layer weights.
+                # Dense layers (before first_k_dense_replace) are initialized in Attention role.
+                import re
+                layer_match = re.search(r"model\.layers\.(\d+)\.", name)
+                if layer_match:
+                    layer_idx = int(layer_match.group(1))
+                    if layer_idx < self.config.first_k_dense_replace:
+                         # This is a dense layer, not an MoE layer, so we should not skip it
+                         pass
+                    else:
+                        continue
+                else:
+                    continue
+
+            if (self.afd_role == "ffn" and
+                    self.afd_config.compute_gate_on_attention and
+                    ("mlp.gate.weight" in name or "mlp.gate.e_score_correction_bias" in name)):
                 continue
 
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
@@ -257,6 +372,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                             continue
 
                         is_expert_weight = True
+                        if self.afd_role is not None and self.afd_role == "attention":
+                            continue
                         name_mapped = chunk_name.replace(
                             weight_name, param_name)
 
@@ -282,6 +399,12 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                 loaded_params.add(name_mapped)
                             break
                     else:
+                        if (
+                            self.afd_role == "ffn"
+                            and not self.is_moe_weight(name)
+                            and not self.is_common_weight(name)
+                        ):
+                            continue
                         if is_expert_weight:
                             continue
                         if name.endswith(".bias") and name not in params_dict:
@@ -300,6 +423,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                         weight_loader(param, loaded_weight)
             if not is_fuse_shared_experts_layer:
                 loaded_params.add(name)
+        set_substitute_tp(0)
         return loaded_params
 
 

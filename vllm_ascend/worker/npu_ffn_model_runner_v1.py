@@ -313,7 +313,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                    force_attention: bool = False,
                    uniform_decode: bool = False,
                    **kwargs):
-        
+        print(f'ttg wait recv ubatch')
         is_ubatch = self.connector.recv_is_ubatch()
         print(f'is_ubatch in _dummy_run is {is_ubatch}')
         
@@ -412,13 +412,19 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                       f'ubatch_idx is {ubatch_idx}', flush=True)
 
                 hidden_states = recv_output.hidden_states
+                # print(f"ttg finish recv hidden_states", flush=True)
                 dynamic_scales = recv_output.dynamic_scales
+                # print(f"ttg finish recv dynamic_scales", flush=True)
                 group_list = recv_output.group_list
                 topk_weights = recv_output.topk_weights
                 topk_ids = recv_output.topk_ids
                 router_logits = recv_output.router_logits
                 row_idx = recv_output.row_idx
                 x_active_mask = recv_output.x_active_mask
+                # print(f"ttg finish recv x_active_mask", flush=True)
+                # print(f"ttg ffn_forward group_list.shape: {group_list.shape}, group_list: {group_list}, "
+                #       f"topk_ids.shape: {topk_ids.shape}, topk_ids: {topk_ids}, "
+                #       f"topk_weights.shape: {topk_weights.shape}", flush=True)
 
                 # Construct AFDMetadata to ensure afd_forward takes the correct branch
                 afd_metadata = AFDMetadata(
@@ -429,6 +435,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     afd_tokens_lens=[],
                     num_of_stages=1
                 )
+                # print(f"ttg finish create afd_metadata", flush=True)
 
                 with set_ascend_forward_context(
                             attn_metadata=None,
@@ -437,6 +444,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                             aclgraph_runtime_mode=aclgraph_runtime_mode,
                             model_instance=self.model,
                             afd_metadata=afd_metadata):
+                        # print(f"ttg finish create afd_metadata", flush=True)
                         rank_ffn_output = self._run_ffn_computation(
                             hidden_states=hidden_states,
                             layer_idx=layer_idx,

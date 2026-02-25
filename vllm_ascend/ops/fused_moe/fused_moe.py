@@ -770,7 +770,10 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             forward_context = get_forward_context()
             forward_context.afd_dynamic_scale = dynamic_scale
 
-        shared_out = self._shared_experts(hidden_states)
+        if self._shared_experts is None:
+            shared_out = None
+        else:
+            shared_out = self._shared_experts(hidden_states)
 
         if connector_name == "camp2pconnector":
             w1 = layer.w13_weight.to(torch.int8)
@@ -796,6 +799,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             )
             return shared_out, mlp_output
         from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
+
+        print(f"ttg afd_m2n_ffn_compute w1.shape: {layer.w13_weight.shape}, "
+              f"w2.shape: {layer.w2_weight.shape}")
 
         permuted_hidden_states, expert_tokens = hidden_states, group_list
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
