@@ -62,6 +62,7 @@ _CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
+_DYNAMIC_EPLB_BUFFER_SIZE = 1  # num_experts * num_layers * 64 byte
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
@@ -524,6 +525,13 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
         )
 
+    from vllm_ascend.utils import vllm_version_is
+
+    if vllm_version_is("0.15.0"):
+        arch_name = vllm_config.model_config.architectures[0]
+    else:
+        arch_name = vllm_config.model_config.architecture
+
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
@@ -535,10 +543,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
         sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
-
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
-            vllm_config.model_config.architectures[0],
+            arch_name,
             num_hidden_layers,
             len(original_sizes),
             len(
@@ -550,7 +557,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         compilation_config.cudagraph_capture_sizes = original_sizes
         logger.info(
             "No adjustment needed for ACL graph batch sizes: %s model (layers: %d) with %d sizes",
-            vllm_config.model_config.architectures[0],
+            arch_name,
             num_hidden_layers,
             len(original_sizes),
         )
@@ -907,6 +914,7 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
         return None
     hccl_config_map = {
         "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
+        "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 

@@ -198,6 +198,8 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             out=output,
         )
 
+        return output
+
     def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
         """
         Main dispatch method for attention operations.
@@ -218,22 +220,19 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             NotImplementedError: If the attention state is not supported on 310P.
         """
         state = attn_metadata.attn_state
-
-        if state == AscendAttentionState.DecodeOnly:
-            return self.forward_paged_attention(query, attn_metadata, output)
-
+        # Condition for PrefillNoCache: No previous tokens have been processed yet
         if state == AscendAttentionState.PrefillNoCache:
-            out = self.forward_prefill_310(query, key, value, attn_metadata, output)
-            return out
-
-        if state == AscendAttentionState.ChunkedPrefill:
-            self.forward_chunked_prefill_310(query, attn_metadata, output)
-            return output
-
-        raise NotImplementedError(
-            f"{self.__class__.__name__}.forward_impl: 310P only supports "
-            f"{AscendAttentionState.DecodeOnly.name}, "
-            f"{AscendAttentionState.PrefillNoCache.name}, "
-            f"{AscendAttentionState.ChunkedPrefill.name}, "
-            f"got {state!r}."
-        )
+            output = self.forward_prefill_310(query, key, value, attn_metadata, output)
+        # Condition for DecodeOnly: Pure decoding phase where each request generates one token
+        elif state == AscendAttentionState.DecodeOnly:
+            output = self.forward_paged_attention(query, attn_metadata, output)
+        # Condition for ChunkedPrefill:
+        # 1. During speculative decoding scenarios (except mtp)
+        # 2. Processing large prefill requests in chunks
+        # Condition for PrefillCacheHit: Indicates prefill with some cached tokens already processed
+        elif state in [AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit]:
+            output = self.forward_chunked_prefill_310(query, attn_metadata, output)
+        # Condition for SpecDecoding: Specified for mtp, which is not supported yet.
+        else:
+            raise NotImplementedError(f"AscendAttentionState: {state} is not supported for 310P currently.")
+        return output
