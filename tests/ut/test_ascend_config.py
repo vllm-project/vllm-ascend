@@ -67,7 +67,7 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
 
         npugraph_ex_config = ascend_config.npugraph_ex_config
-        self.assertFalse(npugraph_ex_config.enable)
+        self.assertTrue(npugraph_ex_config.enable)
         self.assertFalse(npugraph_ex_config.enable_static_kernel)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config

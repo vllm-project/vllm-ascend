@@ -12,6 +12,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 
@@ -29,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
 )
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 backend_map = {
     "mooncake": {
@@ -74,6 +76,7 @@ class KVPoolWorker:
             "consumer_is_to_put", False
         )
         self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
+        self.original_block_size = vllm_config.cache_config.block_size
         self.block_size = vllm_config.cache_config.block_size
 
         if self.pcp_size > 1:
@@ -92,6 +95,12 @@ class KVPoolWorker:
             self.put_step = self.tp_size // self.num_kv_head
             self.head_or_tp_rank = self.tp_rank // self.put_step
         else:
+            self.head_or_tp_rank = self.tp_rank
+            self.put_step = 1
+
+        soc_version = get_ascend_device_type()
+        # be removed later
+        if self.backend == "mooncake" and soc_version in {AscendDeviceType.A3}:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
 
@@ -138,14 +147,13 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        # be removed later
-        if self.backend == "mooncake":
-            self.head_or_tp_rank = self.tp_rank
-            self.put_step = 1
-
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config
         )
+        kv_event_config = vllm_config.kv_events_config
+        self.enable_kv_events = False
+        if kv_event_config and kv_event_config.enable_kv_cache_events:
+            self.enable_kv_events = True
 
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
@@ -209,6 +217,7 @@ class KVPoolWorker:
                     self.put_step,
                     ready_event_sending,
                     self.num_layers,
+                    self.enable_kv_events,
                 )
                 self.kv_send_thread.start()
             ready_event = threading.Event()
@@ -235,6 +244,7 @@ class KVPoolWorker:
                     self.put_step,
                     self.kv_role,
                     ready_event_sending,
+                    self.enable_kv_events,
                 )
                 self.kv_send_thread.start()
             if self.load_async:
@@ -564,7 +574,7 @@ class KVPoolWorker:
             # all tokens where found, return the maximal end
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
-            return start
+            return 0
         return end
 
     def lookup_scheduler(
@@ -621,7 +631,7 @@ class KVPoolWorker:
         # all tokens where found, return the maximal end
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
-            return start
+            return 0
         return end
 
     def check_all_layers_exists(self, res: list[int], num_layers: int) -> list[int]:
@@ -641,3 +651,10 @@ class KVPoolWorker:
             return min(idx for row in arr for idx, val in enumerate(row) if val != 1)
         except ValueError:
             return -1
+
+    def get_kv_events(self) -> list[BlockStored]:
+        if self.enable_kv_events and self.kv_send_thread is not None:
+            # collect store kv events form sending thread
+            events = self.kv_send_thread.get_kv_events()
+            return events
+        return []
