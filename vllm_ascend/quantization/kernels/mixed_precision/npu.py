@@ -7,6 +7,7 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKer
 from vllm.scalar_type import scalar_types
 
 from vllm_ascend.quantization.utils import unpack_from_int32
+from vllm_ascend.utils import maybe_trans_nz
 
 
 class AscendwNa16LinearKernel(MPLinearKernel):
@@ -59,6 +60,64 @@ class AscendwNa16LinearKernel(MPLinearKernel):
             x=x,
             weight=layer.weight_packed,
             antiquant_scale=layer.weight_scale,
+            antiquant_offset=None,
+            antiquant_group_size=self.config.group_size,
+            bias=bias,
+        )
+        return output
+
+
+class AscendW4A8LinearKernel(MPLinearKernel):
+    SUPPORTED_QUANT_TYPES = [scalar_types.int4]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 0
+
+    @classmethod
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        if not torch.npu.is_available():
+            return False, "Ascend W4A8 only supported on NPU devices"
+        if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
+            return False, f"Unsupported quant type {c.weight_type}"
+        if c.full_weight_shape[0] % c.group_size != 0:
+            return (
+                False,
+                f"Group size ({c.group_size}) does not evenly divide "
+                f"the number of input features ({c.full_weight_shape[0]})",
+            )
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        weight = getattr(layer, self.w_q_name).data
+        weight = weight.transpose(0, 1).contiguous()
+        weight = maybe_trans_nz(weight)
+
+        # Pack int4 values (stored as int8 in [-8, 7]) into NPU int4pack format.
+        weight = torch_npu.npu_quantize(
+            weight.to(torch.float32),
+            torch.tensor([1.0]).npu(),
+            None,
+            torch.quint4x2,
+            -1,
+            False,
+        )
+        getattr(layer, self.w_q_name).data = weight
+
+        scale = getattr(layer, self.w_s_name).data
+        getattr(layer, self.w_s_name).data = scale.contiguous().to(torch.float32)
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        weight, scale, _, _ = self._get_weight_params(layer)
+        output = torch_npu.npu_weight_quant_batchmatmul(
+            x=x,
+            weight=weight,
+            antiquant_scale=scale.to(x.dtype),
             antiquant_offset=None,
             antiquant_group_size=self.config.group_size,
             bias=bias,
