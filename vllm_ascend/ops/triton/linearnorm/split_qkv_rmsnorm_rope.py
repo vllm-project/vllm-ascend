@@ -620,7 +620,7 @@ def split_qkv_rmsnorm_rope_impl(
             factor = 5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 4 + q_head_num * rope_dim
             batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
         else:
-            factor = 5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 2 + q_head_num * rope_dim * 0.5
+            factor = 5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 2 + q_head_num * rope_dim // 2
             batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
         batch_size_per_iter_per_vec = min(batch_size_per_iter_per_vec, batch_size_per_vec)
         qk_head_num_sum = int(q_head_num + kv_head_num)
