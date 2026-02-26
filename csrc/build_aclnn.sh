@@ -13,6 +13,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     # ASCEND910B (A2) series
     # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
+    rm -rf ${ROOT_DIR}/csrc/third_party/catlass
     CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
     if [[ ! -d "${CATLASS_PATH}" ]]; then
         echo "dependency catlass is missing, try to fetch it..."
@@ -30,6 +31,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     # ASCEND910C (A3) series
     # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
+    rm -rf ${ROOT_DIR}/csrc/third_party/catlass
     CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
     if [[ ! -d "${CATLASS_PATH}" ]]; then
         echo "dependency catlass is missing, try to fetch it..."
