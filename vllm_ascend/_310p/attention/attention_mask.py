@@ -26,17 +26,19 @@ class AttentionMaskBuilder310:
     chunked_prefill_attn_mask = None
     max_seqlen = 2048
 
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, max_seqlen: int):
         """
         Initializes the AttentionMaskBuilder for the 310P device.
 
         Args:
             device (torch.device): The device on which tensors will be allocated.
+            max_seqlen (int): Maximum number of tokens to be processed in a single iteration.
         """
+        AttentionMaskBuilder310.max_seqlen = max_seqlen
         self.attn_mask_cache = None
         self.device = device
         self.swa_mask = None
-        self._seq_len_cached = 0
+        self.max_seqlen = max_seqlen
 
     @staticmethod
     def gen_causal_additive_mask(max_seq_len: int, device: torch.device):
@@ -147,8 +149,7 @@ class AttentionMaskBuilder310:
         Returns:
             torch.Tensor: The cached causal mask in ACL_FORMAT_FRACTAL_NZ.
         """
-        if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
+        if self.attn_mask_cache is None:
             attn_mask = self.gen_causal_additive_mask(max_seq_len, self.device)
             self.attn_mask_cache = torch_npu.npu_format_cast(nd_to_nz_2d(attn_mask), ACL_FORMAT_FRACTAL_NZ)
-            self._seq_len_cached = max_seq_len
         return self.attn_mask_cache
