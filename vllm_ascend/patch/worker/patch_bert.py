@@ -16,6 +16,8 @@
 #
 
 import torch
+from torch import nn
+
 from vllm.model_executor.models import bert
 
 # aclgraph does not support shift operator for now
@@ -36,6 +38,44 @@ def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
 
     return token_type_ids
 
+class AscendBertOutput(nn.Module):
+    def forward(
+            self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        hidden_states, _ = self.dense(hidden_states)
+        hidden_states = torch.ops._C_ascend.add_layer_norm(hidden_states,
+                                                           input_tensor,
+                                                           self.LayerNorm.weight,
+                                                           self.LayerNorm.bias,
+                                                           self.LayerNorm.eps)[0]
+        return hidden_states
+
+
+class AscendBertSelfOutput(nn.Module):
+    def forward(
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        hidden_states, _ = self.dense(hidden_states)
+        hidden_states = torch.ops._C_ascend.add_layer_norm(hidden_states,
+                                                           input_tensor,
+                                                           self.LayerNorm.weight,
+                                                           self.LayerNorm.bias,
+                                                           self.LayerNorm.eps)[0]
+        return hidden_states
+
+class AscendBertIntermediate(nn.Module):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.intermediate_act_fn, nn.GELU):
+            hidden_states = torch.ops._C_ascend.matmul_gelu(hidden_states, self.dense.weight, self.dense.bias)
+        else:
+            hidden_states, _ = self.dense(hidden_states)
+            hidden_states = self.intermediate_act_fn(hidden_states)
+        return hidden_states
 
 bert._encode_token_type_ids = _encode_token_type_ids
 bert._decode_token_type_ids = _decode_token_type_ids
+
+bert.BertOutput.forward = AscendBertOutput.forward
+bert.BertSelfOutput.forward = AscendBertSelfOutput.forward
+bert.BertIntermediate.forward = AscendBertIntermediate.forward
+
