@@ -41,11 +41,9 @@ def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
 class AscendBertOutput(nn.Module):
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.dense(hidden_states)
-        hidden_states = torch.ops._C_ascend.add_layer_norm(hidden_states,
-                                                           input_tensor,
-                                                           self.LayerNorm.weight,
-                                                           self.LayerNorm.bias,
-                                                           self.LayerNorm.eps)[0]
+        hidden_states = torch.ops._C_ascend.add_layer_norm(
+        hidden_states, input_tensor, self.LayerNorm.weight, self.LayerNorm.bias, self.LayerNorm.eps
+        )[0]
         return hidden_states
 
 
