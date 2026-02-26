@@ -22,6 +22,7 @@ set -eo errexit
 . $(dirname "$0")/common.sh
 
 export VLLM_USE_MODELSCOPE=true
+export MODELSCOPE_HUB_FILE_LOCK=false
 
 _info "====> Start Quickstart test"
 . "${SCRIPT_DIR}/doctests/001-quickstart-test.sh"
