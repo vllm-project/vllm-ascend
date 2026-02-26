@@ -1,3 +1,35 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#from collections.abc import Iterable
+
+import torch
+import torch.nn as nn
+import torch_npu
+import sys
+from torch.nn import functional as F
+from typing import Optional
+from transformers.activations import ACT2FN
+from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.modeling_outputs import BaseModelOutput
+from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import(
+    Qwen3OmniMoePreTrainedModel, SinusoidsPositionEmbedding, _get_feat_extract_output_lengths
+)
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeAudioEncoderConfig
+from transformers.utils import auto_docstring
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
     Qwen3OmniMoeThinkerForConditionalGeneration
 )
@@ -19,19 +51,6 @@ Qwen3OmniMoeThinkerForConditionalGeneration.packed_modules_mapping = {
     "gate_up_proj": ["gate_proj", "up_proj"],
 }
 
-import torch
-import torch.nn as nn
-import torch_npu
-import sys
-from torch.nn import functional as F
-from typing import Optional
-from transformers.activations import ACT2FN
-from transformers.modeling_utils import PreTrainedModel
-from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_outputs import BaseModelOutput
-from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoePreTrainedModel, SinusoidsPositionEmbedding, _get_feat_extract_output_lengths
-from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeAudioEncoderConfig
-from transformers.utils import auto_docstring
 
 class NPUQwen3OmniMoeAudioAttention(nn.Module):
     def __init__(self, config, quant_config=None, prefix=''):
@@ -195,32 +214,22 @@ class NPUQwen3OmniMoeAudioEncoder(Qwen3OmniMoePreTrainedModel):
             dtype=torch.long,
             device=feature_lens.device,
         )
-        # print("[debug] --------------------- chunk_lengths", chunk_lengths)
 
 
         tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
 
-        # print("[debug] tail_chunk_index", tail_chunk_index)
         chunk_lengths[tail_chunk_index] = feature_lens % (self.n_window * 2)
         chunk_lengths[chunk_lengths == 0] = self.n_window * 2
 
         chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
         padded_feature = nn.utils.rnn.pad_sequence(chunk_list, batch_first=True).transpose(1, 2)
-        feature_lens_after_cnn = _get_feat_extract_output_lengths(chunk_lengths) # CPU or triton
-        # print("[debug] feature_lens_after_cnn", feature_lens_after_cnn)
-        padded_mask_after_cnn = torch.ones((feature_lens_after_cnn.shape[0], 13), dtype=torch.bool, device=padded_feature.device)
+        feature_lens_after_cnn = _get_feat_extract_output_lengths(chunk_lengths)
+        padded_mask_after_cnn = torch.ones((feature_lens_after_cnn.shape[0], 13),
+        dtype=torch.bool, device=padded_feature.device)
         for idx in tail_chunk_index:
             padded_mask_after_cnn[idx, feature_lens_after_cnn[idx]:] = False
 
-        # padded_mask_after_cnn_bak = nn.utils.rnn.pad_sequence(
-        # padded_mask_after_cnn = nn.utils.rnn.pad_sequence( 
-        #     [torch.ones(length, dtype=torch.bool, device=padded_feature.device) for length in feature_lens_after_cnn], # 重构, chunk_lengths是定长？
-        #     batch_first=True,
-        # )
-        # print("[debug] compare", (padded_mask_after_cnn_bak - padded_mask_after_cnn).max(), (padded_mask_after_cnn_bak - padded_mask_after_cnn).min())
-        # print("[debug] padded_mask_after_cnn", padded_mask_after_cnn, padded_mask_after_cnn.shape)
         padded_feature = padded_feature.unsqueeze(1)
-        # Split to chunk to avoid OOM during convolution
         padded_embeds = []
         for chunk in padded_feature.split(self.conv_chunksize, dim=0):
             padded_embed = F.gelu(self.conv2d1(chunk))
@@ -311,7 +320,6 @@ class NPUQwen3OmniMoeAudioEncoder(Qwen3OmniMoePreTrainedModel):
         return input_lengths, output_lengths
 
 def _apply_transformers_audio_encoder_patch():
-    """替换 transformers 中的 Qwen3OmniMoeAudioEncoder 为 NPU 优化版"""
     if not hasattr(torch, 'npu') or not torch.npu.is_available():
         print("[vLLM-Ascend] NPU not available, skipping audio encoder patch.")
         return
@@ -415,7 +423,6 @@ def _apply_vllm_audio_encoder_patch():
             print(f"[vLLM-Ascend] Original Qwen3OmniMoeAudioEncoder ID: {id(original)}", file=sys.stderr)
             thinker_module.Qwen3OmniMoeAudioEncoder = NPUQwen3OmniMoeAudioEncoder
             print(f"[vLLM-Ascend] New Qwen3OmniMoeAudioEncoder ID: {id(NPUQwen3OmniMoeAudioEncoder)}", file=sys.stderr)
-            print(f"[vLLM-Ascend] Now thinker_module.Qwen3OmniMoeAudioEncoder ID: {id(thinker_module.Qwen3OmniMoeAudioEncoder)}", file=sys.stderr)
         else:
             print("[vLLM-Ascend] thinker_module has no Qwen3OmniMoeAudioEncoder attribute", file=sys.stderr)
             print("Available in thinker_module:", dir(thinker_module), file=sys.stderr)
