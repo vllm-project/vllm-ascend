@@ -462,7 +462,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                         "to have the same precision."
                     )
         else:
-            is_skipped = self.quant_description[prefix + ".weight"] == "FLOAT"
+            is_skipped = any(key.startswith(prefix) and key.endswith('.weight') and value == "FLOAT" for key, value in self.quant_description.items())
 
         assert is_skipped is not None
         return is_skipped
