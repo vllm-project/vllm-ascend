@@ -439,7 +439,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HEAD_DIM),
             strides=(1, 1, 1),
         )
-        
+
         if BIAS:
             normalized_values_tmp1 = (normalized_values_tmp1 * k_weight_values + k_bias_values).to(tl.bfloat16)
         else:
