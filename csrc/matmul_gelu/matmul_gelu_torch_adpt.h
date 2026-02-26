@@ -18,7 +18,7 @@
 #define MATMUL_GELU_TORCH_ADPT_H
 namespace vllm_ascend {
 
-at::Tensor matmul_gelu_impl(const at::Tensor &x, const at::Tensor &weight, const at::Tensor &bias)
+at::Tensor matmul_gelu(const at::Tensor &x, const at::Tensor &weight, const at::Tensor &bias)
 {
     TORCH_CHECK(x.dim() == 2, "The x should be 2D");
     TORCH_CHECK(weight.dim() == 2, "The weight should be 2D");
@@ -27,7 +27,7 @@ at::Tensor matmul_gelu_impl(const at::Tensor &x, const at::Tensor &weight, const
     TORCH_CHECK(x.sizes()[1] == weight.sizes()[1] || x.sizes()[1] == weight.sizes()[0], "The x second dim should be same as weight first or second dim");
     TORCH_CHECK(
         x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat,
-        "float16、float32 tensor expected but got a tensor with dtype: ",
+        "float16 or float32 tensor expected but got a tensor with dtype: ",
         x.scalar_type());
      TORCH_CHECK(
         x.scalar_type() == weight.scalar_type() && x.scalar_type() == bias.scalar_type(),
@@ -45,5 +45,7 @@ at::Tensor matmul_gelu_impl(const at::Tensor &x, const at::Tensor &weight, const
         bias,
 		gelu_output);
     return gelu_output;
+}
+
 }
 #endif
