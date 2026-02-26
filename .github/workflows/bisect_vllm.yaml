@@ -67,7 +67,7 @@ jobs:
           # ---- PR-trigger defaults (edit here) ----
           DEFAULT_TEST_CMD="pytest -sv tests/e2e/singlecard/test_llama32_lora.py; pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py; pytest -sv tests/ut/spec_decode/test_eagle_proposer.py; pytest -sv tests/e2e/singlecard/test_models.py; pytest -sv tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py"
           DEFAULT_GOOD_COMMIT=""
-          DEFAULT_BAD_COMMIT="0916e7960bddf565c33153d2cf753e799de105b7"
+          DEFAULT_BAD_COMMIT=""
           # ---- end defaults ----
 
           INPUT_TEST_CMD="${{ inputs.test_cmd }}"

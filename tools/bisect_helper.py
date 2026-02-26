@@ -47,8 +47,8 @@ _E2E_SYS_DEPS = (
 _E2E_VLLM_INSTALL = "VLLM_TARGET_DEVICE=empty pip install -e ."
 _E2E_ASCEND_INSTALL = (
     "export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi"
-    " && pip install -r requirements-dev.txt"
-    " && pip install -v -e ."
+    " && pip install --no-cache-dir -r requirements-dev.txt"
+    " && pip install --no-cache-dir -v -e ."
 )
 _E2E_CONTAINER_ENV = {
     "VLLM_LOGGING_LEVEL": "ERROR",
