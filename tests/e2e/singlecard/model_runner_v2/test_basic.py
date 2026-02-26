@@ -47,9 +47,9 @@ def test_qwen3_dense_eager_mode(
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=enforce_eager,
+        model,
+        max_model_len=1024,
+        enforce_eager=enforce_eager,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
 
@@ -74,14 +74,14 @@ def test_egale_spec_decoding(
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=enforce_eager,
-            async_scheduling=True,
-            speculative_config={
-                "model": eagle_model,
-                "method": "eagle",
-                "num_speculative_tokens": 3,
-            },
+        model,
+        max_model_len=1024,
+        enforce_eager=enforce_eager,
+        async_scheduling=True,
+        speculative_config={
+            "model": eagle_model,
+            "method": "eagle",
+            "num_speculative_tokens": 3,
+        },
     ) as runner:
         runner.model.generate(prompts, sampling_params)

@@ -30,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
 )
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 backend_map = {
     "mooncake": {
@@ -97,6 +98,12 @@ class KVPoolWorker:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
 
+        soc_version = get_ascend_device_type()
+        # be removed later
+        if self.backend == "mooncake" and soc_version in {AscendDeviceType.A3}:
+            self.head_or_tp_rank = self.tp_rank
+            self.put_step = 1
+
         self.metadata = KeyMetadata(
             model_config.model.rstrip("/").split("/")[-1],
             self.head_or_tp_rank,
@@ -139,11 +146,6 @@ class KVPoolWorker:
         assert backend_path is not None and backend_name is not None
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
-
-        # be removed later
-        if self.backend == "mooncake":
-            self.head_or_tp_rank = self.tp_rank
-            self.put_step = 1
 
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config
@@ -572,7 +574,7 @@ class KVPoolWorker:
             # all tokens where found, return the maximal end
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
-            return start
+            return 0
         return end
 
     def lookup_scheduler(
@@ -629,7 +631,7 @@ class KVPoolWorker:
         # all tokens where found, return the maximal end
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
-            return start
+            return 0
         return end
 
     def check_all_layers_exists(self, res: list[int], num_layers: int) -> list[int]:

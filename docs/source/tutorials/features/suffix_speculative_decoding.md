@@ -15,7 +15,7 @@ This document provides step-by-step guidance on how to deploy and benchmark the 
 | Comprehensive Examination      | agieval          |
 | Multi-turn Dialogue            | sharegpt         |
 
-The benchmarking tool used in this tutorial is AISbench, which supports performance testing for all the datasets listed above. The final section of this tutorial presents a performance comparison between enabling and disabling Suffix Decoding under the condition of satisfying an SLO TPOT < 50ms across different datasets and concurrency levels. Validations demonstrate that the Qwen3-32B model achieves a throughput improvement of approximately 20% to 80% on various real-world datasets when Suffix Decoding is enabled.
+The benchmarking tool used in this tutorial is AISBench, which supports performance testing for all the datasets listed above. The final section of this tutorial presents a performance comparison between enabling and disabling Suffix Decoding under the condition of satisfying an SLO TPOT < 50ms across different datasets and concurrency levels. Validations demonstrate that the Qwen3-32B model achieves a throughput improvement of approximately 20% to 80% on various real-world datasets when Suffix Decoding is enabled.
 
 ## **Download vllm-ascend Image**
 
@@ -71,14 +71,14 @@ pip install arctic-inference
 
 ## **vLLM Instance Deployment**
 
-Use the following command to start the container service instance. Speculative inference is enabled via the `--speculative-config` parameter, where `method` is set to`suffix`. For this test, `num_speculative_tokens` is uniformly set to`3`.
+Use the following command to start the container service instance. Speculative inference is enabled via the `--speculative-config` parameter, where `method` is set to `suffix`. For this test, `num_speculative_tokens` is uniformly set to `3`.
 
 ```bash
-# set the NPU device number
+# set the NPU device number:
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 # Set the operator dispatch pipeline level to 1 and disable manual memory control in ACLGraph
 export TASK_QUEUE_ENABLE=1
-# Enable the AIVector core to directly schedule ROCE communication
+# Enable the AIVector core to directly schedule ROCE communication.
 export HCCL_OP_EXPANSION_MODE="AIV"
 # Enable MLP prefetch for better performance.
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1

@@ -21,18 +21,21 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
 
+from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 
 
 class EplbUpdator:
-    def __init__(self, eplb_config, loader, eplb_process: EplbProcess, process):
+    def __init__(self, eplb_config, loader: D2DExpertWeightLoader, eplb_process: EplbProcess, process):
         self.eplb_config = eplb_config
         self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
         self.eplb_process = eplb_process
         self.shared_dict = self.eplb_process.shared_dict
         self.moe_imbalance_dict: dict[int, float] = {}
+        self.comm_group = get_dynamic_eplb_group()
 
     def set_adaptor(self, adaptor: VllmEplbAdaptor):
         self.adaptor = adaptor
@@ -40,8 +43,7 @@ class EplbUpdator:
         local_load = self.adaptor.get_rank_expert_workload()
         self.world_size = dist.get_world_size()
         self.device = local_load.device
-        shape = (self.world_size, *local_load.shape)
-        self._gather_buffer = torch.empty(shape, dtype=local_load.dtype, device=self.device)
+        self.eplb_loader.num_layers = self.adaptor.num_dense_layers + self.adaptor.num_moe_layers
 
     def init_eplb(self, expert_map_path, process):
         self.rank_id = dist.get_rank()
@@ -75,7 +77,6 @@ class EplbUpdator:
         if self.cur_iterations == (
             self.expert_heat_collection_interval + self.algorithm_execution_interval + self.num_moe_layers
         ):
-            logger.info("Finish expert parallel load balancing.")
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(self.shared_dict["expert_maps"], self.expert_map_record_path)
 
@@ -133,9 +134,8 @@ class EplbUpdator:
 
     def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload()
-        dist.all_gather_into_tensor(self._gather_buffer, local_load)
+        moe_load = self.comm_group.all_gather(local_load, dim=0).reshape(-1, self.world_size, *local_load.shape[1:])
 
-        moe_load = self._gather_buffer.permute(1, 0, 2)
         self.shared_dict["moe_load"] = moe_load.cpu()
         logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
 
@@ -182,17 +182,16 @@ class EplbUpdator:
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)
-        self_rank = dist.get_rank()
 
         comm_op_list = []
 
         for dst_rank in range(self.world_size):
-            if dst_rank == self_rank:
+            if dst_rank == self.rank_id:
                 continue
             comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank))
 
         for src_rank in range(self.world_size):
-            if src_rank == self_rank:
+            if src_rank == self.rank_id:
                 continue
             comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank))
         if comm_op_list:

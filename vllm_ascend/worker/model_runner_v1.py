@@ -129,6 +129,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -373,6 +374,7 @@ class NPUModelRunner(GPUModelRunner):
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
+        self.cpu_slot_mapping = None
 
     @property
     def use_cp(self) -> bool:
@@ -1050,6 +1052,12 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self.vllm_config.model_config.enable_return_routed_experts:
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                capturer.clear_buffer()
+            else:
+                logger.warning("RoutedExpertsCapturer is not initialized.")
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
@@ -1099,6 +1107,10 @@ class NPUModelRunner(GPUModelRunner):
                         "logprobs for prompt tokens, tokens, please disable "
                         "it when the requests need prompt logprobs"
                     )
+
+                if self.dynamic_eplb:
+                    self.eplb_updator.forward_before()
+
                 num_reqs = self.input_batch.num_reqs
                 req_ids = self.input_batch.req_ids
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
@@ -1197,6 +1209,9 @@ class NPUModelRunner(GPUModelRunner):
                 model_kwargs,
                 ec_connector_output,
             ) = self._preprocess(scheduler_output, num_tokens_padded, intermediate_tensors)
+
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
 
             # update global cos, sin
             update_cos_sin(positions)
@@ -1318,7 +1333,7 @@ class NPUModelRunner(GPUModelRunner):
             self.kv_connector_output = kv_connector_output
         return None
 
-    @torch.inference_mode
+    @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
@@ -1366,6 +1381,9 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+
+        if self.need_accepted_tokens:
+            self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -1418,6 +1436,14 @@ class NPUModelRunner(GPUModelRunner):
 
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
+
+        if self.model_config.enable_return_routed_experts:
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                capturer.save_captured_experts(indices=self.cpu_slot_mapping)
+            else:
+                logger.warning("RoutedExpertsCapturer is not initialized.")
+
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
@@ -1467,8 +1493,6 @@ class NPUModelRunner(GPUModelRunner):
             logits,
             sampling_metadata,
         )
-        if self.need_accepted_tokens:  # TODO remove this if
-            self._update_states_after_model_execute(sampler_output.sampled_token_ids)
         return sampler_output
 
     # TODO: remove this func after eagle_proposer is refactored and
@@ -1894,6 +1918,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens_padded,
                     slot_mapping,
                 )
+            if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
+                self.cpu_slot_mapping = slot_mapping.cpu().numpy()
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
@@ -2071,6 +2097,9 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens_list[-1] += num_tokens % num_reqs
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
+
+        if not is_profile and self.dynamic_eplb:
+            self.eplb_updator.forward_before()
 
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
@@ -2320,6 +2349,7 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
+        self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
         # wrap the model with full graph wrapper if needed.
@@ -2351,6 +2381,9 @@ class NPUModelRunner(GPUModelRunner):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
+
+        if self.model_config.enable_return_routed_experts:
+            self.init_routed_experts_capturer()
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
@@ -2390,7 +2423,7 @@ class NPUModelRunner(GPUModelRunner):
         to be reshaped to the desired shape before being used by the models.
 
         NOTE: To support prefill disaggregation, we need to split kvcache tensor into
-        k_cahce and v cache, and the addr of both are aligned by 2M
+        k_cache and v cache, and the addr of both are aligned by 2M
 
         Args:
             kv_cache_config: The KV cache config

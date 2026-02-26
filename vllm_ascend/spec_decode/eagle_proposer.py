@@ -417,6 +417,21 @@ class EagleProposer(VllmEagleProposer):
         self.input_ids[last_token_indices] = next_token_ids
         if self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[num_tokens]
+            if not (
+                self.speculative_config.disable_padded_drafter_batch
+                and self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+            ):
+                # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
+                # should have been done in model runner but not. For example, at prefill stage, target model
+                # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
+                # while draft model is run in graph model, which means we should pad the `query_start_loc`.
+                # Need to be fixed in the future.
+                num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                    num_input_tokens, common_attn_metadata.num_reqs, common_attn_metadata.num_reqs
+                )
+                common_attn_metadata.num_reqs = num_reqs_padded
+                common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
+                common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
         else:
             num_input_tokens = num_tokens
 
@@ -941,7 +956,7 @@ class EagleProposer(VllmEagleProposer):
         # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
         # [0, 1, 0, 1, 2, 3, 0, 1, 2]
         #  _r1_  ____r2____  ___r3__
-        token_offests = self.token_arange_np[:total_num_tokens] - new_query_start_locs_expanded
+        token_offsets = self.token_arange_np[:total_num_tokens] - new_query_start_locs_expanded
 
         # Expand starting positions to match token pattern
         # [0, q1, q1 + q2] ->
@@ -952,7 +967,7 @@ class EagleProposer(VllmEagleProposer):
         # [0, 1,                                // req 1
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
         #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
-        token_indices_np = token_offests + old_query_start_locs_expanded
+        token_indices_np = token_offsets + old_query_start_locs_expanded
         token_indices = torch.from_numpy(token_indices_np).to(device, non_blocking=True)
 
         common_attn_metadata.slot_mapping[: token_indices.shape[0]].copy_(

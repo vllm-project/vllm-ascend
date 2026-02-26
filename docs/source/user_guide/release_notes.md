@@ -8,32 +8,32 @@ This is the final release of v0.13.0 for vLLM Ascend. Please follow the [officia
 
 **Model Support**
 
-- **DeepSeek-R1 & DeepSeek-V3.2**: Performance optimizations, and async scheduling enhancements. [#3631](https://github.com/vllm-project/vllm-ascend/pull/3631) [#3900](https://github.com/vllm-project/vllm-ascend/pull/3900) [#3908](https://github.com/vllm-project/vllm-ascend/pull/3908) [#4191](https://github.com/vllm-project/vllm-ascend/pull/4191) [#4805](https://github.com/vllm-project/vllm-ascend/pull/4805)
-- **Qwen3-Next**: Full support for Qwen3-Next series including 80B-A3B-Instruct with full graph mode, MTP, quantization (W8A8), NZ optimization, and chunked prefill. Fixed multiple accuracy and stability issues. [#3450](https://github.com/vllm-project/vllm-ascend/pull/3450) [#3572](https://github.com/vllm-project/vllm-ascend/pull/3572) [#3428](https://github.com/vllm-project/vllm-ascend/pull/3428) [#3918](https://github.com/vllm-project/vllm-ascend/pull/3918) [#4058](https://github.com/vllm-project/vllm-ascend/pull/4058) [#4245](https://github.com/vllm-project/vllm-ascend/pull/4245) [#4070](https://github.com/vllm-project/vllm-ascend/pull/4070) [#4477](https://github.com/vllm-project/vllm-ascend/pull/4477) [#4770](https://github.com/vllm-project/vllm-ascend/pull/4770)
+- **DeepSeek-R1 & DeepSeek-V3.2**: [Experimental]Performance optimizations, and async scheduling enhancements. [#3631](https://github.com/vllm-project/vllm-ascend/pull/3631) [#3900](https://github.com/vllm-project/vllm-ascend/pull/3900) [#3908](https://github.com/vllm-project/vllm-ascend/pull/3908) [#4191](https://github.com/vllm-project/vllm-ascend/pull/4191) [#4805](https://github.com/vllm-project/vllm-ascend/pull/4805)
+- **Qwen3-Next**: [Experimental]Full support for Qwen3-Next series including 80B-A3B-Instruct with full graph mode, MTP, quantization (W8A8), NZ optimization, and chunked prefill. Fixed multiple accuracy and stability issues. [#3450](https://github.com/vllm-project/vllm-ascend/pull/3450) [#3572](https://github.com/vllm-project/vllm-ascend/pull/3572) [#3428](https://github.com/vllm-project/vllm-ascend/pull/3428) [#3918](https://github.com/vllm-project/vllm-ascend/pull/3918) [#4058](https://github.com/vllm-project/vllm-ascend/pull/4058) [#4245](https://github.com/vllm-project/vllm-ascend/pull/4245) [#4070](https://github.com/vllm-project/vllm-ascend/pull/4070) [#4477](https://github.com/vllm-project/vllm-ascend/pull/4477) [#4770](https://github.com/vllm-project/vllm-ascend/pull/4770)
 - **InternVL**: Added support for InternVL models with comprehensive e2e tests and accuracy evaluation. [#3796](https://github.com/vllm-project/vllm-ascend/pull/3796) [#3964](https://github.com/vllm-project/vllm-ascend/pull/3964)
-- **LongCat-Flash**: Added support for LongCat-Flash model. [#3833](https://github.com/vllm-project/vllm-ascend/pull/3833)
-- **minimax_m2**: Added support for minimax_m2 model. [#5624](https://github.com/vllm-project/vllm-ascend/pull/5624)
-- **Whisper & Cross-Attention**: Added support for cross-attention and Whisper models. [#5592](https://github.com/vllm-project/vllm-ascend/pull/5592)
-- **Pooling Models**: Added support for pooling models with PCP adaptation and fixed multiple pooling-related bugs. [#3122](https://github.com/vllm-project/vllm-ascend/pull/3122) [#4143](https://github.com/vllm-project/vllm-ascend/pull/4143) [#6056](https://github.com/vllm-project/vllm-ascend/pull/6056) [#6057](https://github.com/vllm-project/vllm-ascend/pull/6057) [#6146](https://github.com/vllm-project/vllm-ascend/pull/6146)
-- **PanguUltraMoE**: Added support for PanguUltraMoE model. [#4615](https://github.com/vllm-project/vllm-ascend/pull/4615)
+- **LongCat-Flash**: [Experimental]Added support for LongCat-Flash model. [#3833](https://github.com/vllm-project/vllm-ascend/pull/3833)
+- **minimax_m2**: [Experimental]Added support for minimax_m2 model. [#5624](https://github.com/vllm-project/vllm-ascend/pull/5624)
+- **Whisper & Cross-Attention**: [Experimental]Added support for cross-attention and Whisper models. [#5592](https://github.com/vllm-project/vllm-ascend/pull/5592)
+- **Pooling Models**: [Experimental]Added support for pooling models with PCP adaptation and fixed multiple pooling-related bugs. [#3122](https://github.com/vllm-project/vllm-ascend/pull/3122) [#4143](https://github.com/vllm-project/vllm-ascend/pull/4143) [#6056](https://github.com/vllm-project/vllm-ascend/pull/6056) [#6057](https://github.com/vllm-project/vllm-ascend/pull/6057) [#6146](https://github.com/vllm-project/vllm-ascend/pull/6146)
+- **PanguUltraMoE**: [Experimental]Added support for PanguUltraMoE model. [#4615](https://github.com/vllm-project/vllm-ascend/pull/4615)
 
 **Core Features**
 
 - **Context Parallel (PCP/DCP)**: [Experimental] Added comprehensive support for Prefill Context Parallel (PCP) and Decode Context Parallel (DCP) with ACLGraph, MTP, chunked prefill, MLAPO, and Mooncake connector integration. This is an experimental feature - feedback welcome. [#3260](https://github.com/vllm-project/vllm-ascend/pull/3260) [#3731](https://github.com/vllm-project/vllm-ascend/pull/3731) [#3801](https://github.com/vllm-project/vllm-ascend/pull/3801) [#3980](https://github.com/vllm-project/vllm-ascend/pull/3980) [#4066](https://github.com/vllm-project/vllm-ascend/pull/4066) [#4098](https://github.com/vllm-project/vllm-ascend/pull/4098) [#4183](https://github.com/vllm-project/vllm-ascend/pull/4183) [#5672](https://github.com/vllm-project/vllm-ascend/pull/5672)
-- **Full Graph Mode (ACLGraph)**: Enhanced full graph mode with GQA support, memory optimizations, unified logic between ACLGraph and Torchair, and improved stability. [#3560](https://github.com/vllm-project/vllm-ascend/pull/3560) [#3970](https://github.com/vllm-project/vllm-ascend/pull/3970) [#3812](https://github.com/vllm-project/vllm-ascend/pull/3812) [#3879](https://github.com/vllm-project/vllm-ascend/pull/3879) [#3888](https://github.com/vllm-project/vllm-ascend/pull/3888) [#3894](https://github.com/vllm-project/vllm-ascend/pull/3894) [#5118](https://github.com/vllm-project/vllm-ascend/pull/5118)
+- **Full Graph Mode (ACLGraph)**: [Experimental]Enhanced full graph mode with GQA support, memory optimizations, unified logic between ACLGraph and Torchair, and improved stability. [#3560](https://github.com/vllm-project/vllm-ascend/pull/3560) [#3970](https://github.com/vllm-project/vllm-ascend/pull/3970) [#3812](https://github.com/vllm-project/vllm-ascend/pull/3812) [#3879](https://github.com/vllm-project/vllm-ascend/pull/3879) [#3888](https://github.com/vllm-project/vllm-ascend/pull/3888) [#3894](https://github.com/vllm-project/vllm-ascend/pull/3894) [#5118](https://github.com/vllm-project/vllm-ascend/pull/5118)
 - **Multi-Token Prediction (MTP)**: Significantly improved MTP support with chunked prefill for DeepSeek, quantization support, full graph mode, PCP/DCP integration, and async scheduling. MTP now works in most cases and is recommended for use. [#2711](https://github.com/vllm-project/vllm-ascend/pull/2711) [#2713](https://github.com/vllm-project/vllm-ascend/pull/2713) [#3620](https://github.com/vllm-project/vllm-ascend/pull/3620) [#3845](https://github.com/vllm-project/vllm-ascend/pull/3845) [#3910](https://github.com/vllm-project/vllm-ascend/pull/3910) [#3915](https://github.com/vllm-project/vllm-ascend/pull/3915) [#4102](https://github.com/vllm-project/vllm-ascend/pull/4102) [#4111](https://github.com/vllm-project/vllm-ascend/pull/4111) [#4770](https://github.com/vllm-project/vllm-ascend/pull/4770) [#5477](https://github.com/vllm-project/vllm-ascend/pull/5477)
 - **Eagle Speculative Decoding**: Eagle spec decode now works with full graph mode and is more stable. [#5118](https://github.com/vllm-project/vllm-ascend/pull/5118) [#4893](https://github.com/vllm-project/vllm-ascend/pull/4893) [#5804](https://github.com/vllm-project/vllm-ascend/pull/5804)
 - **PD Disaggregation**: Set ADXL engine as default backend for disaggregated prefill with improved performance and stability. Added support for KV NZ feature for DeepSeek decode node. [#3761](https://github.com/vllm-project/vllm-ascend/pull/3761) [#3950](https://github.com/vllm-project/vllm-ascend/pull/3950) [#5008](https://github.com/vllm-project/vllm-ascend/pull/5008) [#3072](https://github.com/vllm-project/vllm-ascend/pull/3072)
 - **KV Pool & Mooncake**: Enhanced KV pool with Mooncake connector support for PCP/DCP, multiple input suffixes, and improved performance of Layerwise Connector. [#3690](https://github.com/vllm-project/vllm-ascend/pull/3690) [#3752](https://github.com/vllm-project/vllm-ascend/pull/3752) [#3849](https://github.com/vllm-project/vllm-ascend/pull/3849) [#4183](https://github.com/vllm-project/vllm-ascend/pull/4183) [#5303](https://github.com/vllm-project/vllm-ascend/pull/5303)
-- **EPLB (Elastic Prefill Load Balancing)**: EPLB is now more stable with many bug fixes. Mix placement now works. [#6086](https://github.com/vllm-project/vllm-ascend/pull/6086)
+- **EPLB (Elastic Prefill Load Balancing)**: [Experimental]EPLB is now more stable with many bug fixes. Mix placement now works. [#6086](https://github.com/vllm-project/vllm-ascend/pull/6086)
 - **Full Decode Only Mode**: Added support for Qwen3-Next and DeepSeekv32 in full_decode_only mode with bug fixes. [#3949](https://github.com/vllm-project/vllm-ascend/pull/3949) [#3986](https://github.com/vllm-project/vllm-ascend/pull/3986) [#3763](https://github.com/vllm-project/vllm-ascend/pull/3763)
-- **Model Runner V2**: Added basic support for Model Runner V2, the next generation of vLLM. It will be used by default in future releases. [#5210](https://github.com/vllm-project/vllm-ascend/pull/5210)
+- **Model Runner V2**: [Experimental]Added basic support for Model Runner V2, the next generation of vLLM. It will be used by default in future releases. [#5210](https://github.com/vllm-project/vllm-ascend/pull/5210)
 
 ### Features
 
-- **W8A16 Quantization**: Added new W8A16 quantization method support. [#4541](https://github.com/vllm-project/vllm-ascend/pull/4541)
-- **UCM Connector**: Added UCMConnector for KV Cache Offloading. [#4411](https://github.com/vllm-project/vllm-ascend/pull/4411)
-- **Batch Invariant**: Implemented basic framework for batch invariant feature. [#5517](https://github.com/vllm-project/vllm-ascend/pull/5517)
+- **W8A16 Quantization**: [Experimental]Added new W8A16 quantization method support. [#4541](https://github.com/vllm-project/vllm-ascend/pull/4541)
+- **UCM Connector**: [Experimental]Added UCMConnector for KV Cache Offloading. [#4411](https://github.com/vllm-project/vllm-ascend/pull/4411)
+- **Batch Invariant**: [Experimental]Implemented basic framework for batch invariant feature. [#5517](https://github.com/vllm-project/vllm-ascend/pull/5517)
 - **Sampling**: Enhanced sampling with async_scheduler and disable_padded_drafter_batch support in Eagle. [#4893](https://github.com/vllm-project/vllm-ascend/pull/4893)
 
 ### Hardware and Operator Support
@@ -53,13 +53,13 @@ This is the final release of v0.13.0 for vLLM Ascend. Please follow the [officia
 
 Many custom ops and triton kernels were added in this release to speed up model performance:
 
-- **DeepSeek Performance**: Improved performance for DeepSeek V3.2 by eliminating HD synchronization in async scheduling and optimizing memory usage for MTP. [#4805](https://github.com/vllm-project/vllm-ascend/pull/4805) [#2713](https://github.com/vllm-project/vllm-ascend/pull/2713)
-- **Qwen3-Next Performance**: Improved performance with Triton ops and optimizations. [#5664](https://github.com/vllm-project/vllm-ascend/pull/5664) [#5984](https://github.com/vllm-project/vllm-ascend/pull/5984) [#5765](https://github.com/vllm-project/vllm-ascend/pull/5765)
+- **DeepSeek Performance**: [Experimental]Improved performance for DeepSeek V3.2 by eliminating HD synchronization in async scheduling and optimizing memory usage for MTP. [#4805](https://github.com/vllm-project/vllm-ascend/pull/4805) [#2713](https://github.com/vllm-project/vllm-ascend/pull/2713)
+- **Qwen3-Next Performance**: [Experimental]Improved performance with Triton ops and optimizations. [#5664](https://github.com/vllm-project/vllm-ascend/pull/5664) [#5984](https://github.com/vllm-project/vllm-ascend/pull/5984) [#5765](https://github.com/vllm-project/vllm-ascend/pull/5765)
 - **FlashComm**: Enhanced FlashComm v2 optimization with o_shared linear and communication domain fixes. [#3232](https://github.com/vllm-project/vllm-ascend/pull/3232) [#4188](https://github.com/vllm-project/vllm-ascend/pull/4188) [#4458](https://github.com/vllm-project/vllm-ascend/pull/4458) [#5848](https://github.com/vllm-project/vllm-ascend/pull/5848)
 - **MoE Optimization**: Optimized all2allv for MoE models and enhanced all-reduce skipping logic. [#3738](https://github.com/vllm-project/vllm-ascend/pull/3738) [#5329](https://github.com/vllm-project/vllm-ascend/pull/5329)
 - **Attention Optimization**: Moved attention update stream out of loop, converted BSND to TND format for long sequence optimization, and removed transpose step after attention switching to transpose_batchmatmul. [#3848](https://github.com/vllm-project/vllm-ascend/pull/3848) [#3778](https://github.com/vllm-project/vllm-ascend/pull/3778) [#5390](https://github.com/vllm-project/vllm-ascend/pull/5390)
 - **Quantization Performance**: Moved quantization before allgather in Allgather EP. [#3420](https://github.com/vllm-project/vllm-ascend/pull/3420)
-- **Layerwise Connector**: Improved performance of Layerwise Connector. [#5303](https://github.com/vllm-project/vllm-ascend/pull/5303)
+- **Layerwise Connector**: [Experimental]Improved performance of Layerwise Connector. [#5303](https://github.com/vllm-project/vllm-ascend/pull/5303)
 - **Prefix Cache**: Improved performance of prefix cache features. [#4022](https://github.com/vllm-project/vllm-ascend/pull/4022)
 - **Async Scheduling**: Fixed async copy and eliminated hangs in async scheduling. [#4113](https://github.com/vllm-project/vllm-ascend/pull/4113) [#4233](https://github.com/vllm-project/vllm-ascend/pull/4233)
 - **Memory Operations**: Removed redundant D2H operations and deleted redundant operations in model_runner. [#4063](https://github.com/vllm-project/vllm-ascend/pull/4063) [#3677](https://github.com/vllm-project/vllm-ascend/pull/3677)
@@ -108,7 +108,7 @@ Many custom ops and triton kernels were added in this release to speed up model 
 
 ### Known Issue
 
-- Due the upgrade of `transformers` package, some models quantization weight, such as `qwen2.5vl`, `gemma3`, `minimax`, may not work. We'll fix it in the next post release. [#6302](https://github.com/vllm-project/vllm-ascend/pull/6302)
+- Due to the upgrade of `transformers` package, some models quantization weight, such as `qwen2.5vl`, `gemma3`, `minimax`, may not work. We'll fix it in the next post release. [#6302](https://github.com/vllm-project/vllm-ascend/pull/6302)
 - The performance of `Qwen3-32B` will not be good with 128K input case, it's suggested to enable pcp&dcp feature for this case. This will be improved in the next CANN release.
 - The performance of `Qwen3-235B`, `Qwen3-480B` under prefill-decode scenario and EP=32 scenario is not good as expect. We'll improve it in the next post release.
 - When deploy deepseek3.1 under prefill-decode scenario, please make sure the tp size for decode node is great than 1. `TP=1` doesn't work. This will be fixed in the next CANN release.
@@ -144,7 +144,7 @@ This is the first release candidate of v0.14.0 for vLLM Ascend. Please follow th
 
 - model runner v2 support triton of penalty. [#5854](https://github.com/vllm-project/vllm-ascend/pull/5854)
 - model runner v2 support eagle spec decoding. [#5840](https://github.com/vllm-project/vllm-ascend/pull/5840)
-- Fix multi-modal inference OOM issues by setting `expandable_segments:True` by default. [#5855](https://github.com/vllm-project/vllm-ascend/pull/5855)
+- Fix multimodal inference OOM issues by setting `expandable_segments:True` by default. [#5855](https://github.com/vllm-project/vllm-ascend/pull/5855)
 - `VLLM_ASCEND_ENABLE_MLAPO` is set to `True` by default. It's enabled automatically on decode node in PD deployment case. Please note that this feature will cost more memory. If you are memory sensitive, please set it to False. [#5952](https://github.com/vllm-project/vllm-ascend/pull/5952)
 - SSL config can be set to kv_extra_config for PD deployment with mooncake layerwise connector. [#5875](https://github.com/vllm-project/vllm-ascend/pull/5875)
 - support `--max_model_len=auto`. [#6193](https://github.com/vllm-project/vllm-ascend/pull/6193)
@@ -636,7 +636,7 @@ This is the 3rd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 - Fix incorrect req block length in ascend scheduler [#2394](https://github.com/vllm-project/vllm-ascend/pull/2394)
 - Fix header include issue in rope [#2398](https://github.com/vllm-project/vllm-ascend/pull/2398)
 - Fix mtp config bug [#2412](https://github.com/vllm-project/vllm-ascend/pull/2412)
-- Fix error info and adapt `attn_metedata` refactor [#2402](https://github.com/vllm-project/vllm-ascend/pull/2402)
+- Fix error info and adapt `attn_metadata` refactor [#2402](https://github.com/vllm-project/vllm-ascend/pull/2402)
 - Fix torchair runtime error caused by configuration mismatches and `.kv_cache_bytes` file missing [#2312](https://github.com/vllm-project/vllm-ascend/pull/2312)
 - Move `with_prefill` allreduce from cpu to npu [#2230](https://github.com/vllm-project/vllm-ascend/pull/2230)
 
@@ -670,7 +670,7 @@ This is the 1st release candidate of v0.10.0 for vLLM Ascend. Please follow the 
 ### Others
 
 - Bug fixes:
-    - Fix functional problem of multi-modality models like Qwen2-audio with Aclgraph. [#1803](https://github.com/vllm-project/vllm-ascend/pull/1803)
+    - Fix functional problem of multimodality models like Qwen2-audio with Aclgraph. [#1803](https://github.com/vllm-project/vllm-ascend/pull/1803)
     - Fix the process group creating error with external launch scenario. [#1681](https://github.com/vllm-project/vllm-ascend/pull/1681)
     - Fix the functional problem with guided decoding. [#2022](https://github.com/vllm-project/vllm-ascend/pull/2022)
     - Fix the accuracy issue with common MoE models in DP scenario. [#1856](https://github.com/vllm-project/vllm-ascend/pull/1856)
@@ -953,7 +953,7 @@ This is the 1st release candidate of v0.9.0 for vllm-ascend. Please follow the [
 ### Models
 
 - Qwen2.5 VL works with V1 Engine now. [#736](https://github.com/vllm-project/vllm-ascend/pull/736)
-- LLama4 works now. [#740](https://github.com/vllm-project/vllm-ascend/pull/740)
+- Llama4 works now. [#740](https://github.com/vllm-project/vllm-ascend/pull/740)
 - A new kind of DeepSeek model called dual-batch overlap(DBO) is added. Please set `VLLM_ASCEND_ENABLE_DBO=1` to use it. [#941](https://github.com/vllm-project/vllm-ascend/pull/941)
 
 ### Others
@@ -1090,7 +1090,7 @@ This is the first release candidate of v0.8.4 for vllm-ascend. Please follow the
 
 - A new communicator `pyhccl` is added. It's used for call CANN HCCL library directly instead of using `torch.distribute`. More usage of it will be added in the next release [#503](https://github.com/vllm-project/vllm-ascend/pull/503)
 - The custom ops build is enabled by default. You should install the packages like `gcc`, `cmake` first to build `vllm-ascend` from source. Set `COMPILE_CUSTOM_KERNELS=0` environment to disable the compilation if you don't need it. [#466](https://github.com/vllm-project/vllm-ascend/pull/466)
-- The custom op `rotay embedding` is enabled by default now to improve the performance. [#555](https://github.com/vllm-project/vllm-ascend/pull/555)
+- The custom op `rotary embedding` is enabled by default now to improve the performance. [#555](https://github.com/vllm-project/vllm-ascend/pull/555)
 
 ## v0.7.3rc2 - 2025.03.29
 
