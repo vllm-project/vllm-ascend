@@ -78,7 +78,7 @@ def split_qkv_rmsnorm_rope_kernel(
             normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
 
         pos_values = tl.load(positions_gm_ptr + row_idx)
-        sin_cos_indices = ((pos_values[:, None] * ele_sin_cos_per_batch +
+        sin_cos_indices = ((pos_values * ele_sin_cos_per_batch +
             tl.arange(0, ele_sin_cos_per_batch))).reshape(2, ROPE_DIM)
         input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices)
         cos = tl.extract_slice(
@@ -177,7 +177,7 @@ def split_qkv_rmsnorm_rope_kernel(
             normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
 
         pos_values = tl.load(positions_gm_ptr + row_idx)
-        sin_cos_indices = ((pos_values[:, None] * ele_sin_cos_per_batch +
+        sin_cos_indices = ((pos_values * ele_sin_cos_per_batch +
             tl.arange(0, ele_sin_cos_per_batch))).reshape(2, ROPE_DIM)
         input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices)
         cos = tl.extract_slice(
@@ -573,8 +573,7 @@ def split_qkv_rmsnorm_rope_impl(
         n_cols = kv_hidden_size // KV_BLOCK_SIZE
         n_rows = num_vectorcore // n_cols
         
-        grid_decode = (n_rows, n_cols, 1)
-        grid = grid_decode
+        grid = (n_rows, n_cols, 1)
 
         split_qkv_rmsnorm_rope_kernel[grid](
             input,
@@ -626,24 +625,25 @@ def split_qkv_rmsnorm_rope_impl(
         # x*ROPE_DIM*2 : cos/sin
         # x*q_head_num*HEAD_DIM*2： normalized_values_tmp
         # x*q_head_num*ROPE_DIM*(0.5) x(not IS_PARTIAL_ROPE)
-        
+        UB_SIZE = 85 * 1024
+        # the factor is the sum of elements number
         if IS_PARTIAL_ROPE:
             factor = (5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 4 + q_head_num * rope_dim)
-            batch_size_per_iter_per_vec = 85 * 1024 / input.element_size() // factor
+            batch_size_per_iter_per_vec = UB_SIZE / input.element_size() // factor
         else:
-            factor = (5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 2 + q_head_num * rope_dim * 0.5)
-            batch_size_per_iter_per_vec = 85 * 1024 / input.element_size() // factor
+            factor = (5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 2 +
+                q_head_num * rope_dim * 0.5)
+            batch_size_per_iter_per_vec = UB_SIZE / input.element_size() // factor
         batch_size_per_iter_per_vec = min(batch_size_per_iter_per_vec, batch_size_per_vec)
         qk_head_num_sum = int(q_head_num + kv_head_num)
         qk_head_nums_per_iter_per_vec = batch_size_per_iter_per_vec * qk_head_num_sum
 
         iter_num_per_vec = triton.cdiv(batch_size_per_vec, batch_size_per_iter_per_vec)
 
-        grid_prefill = (min(num_vectorcore,batch_size), 1)#
-        grid = grid_prefill
+        grid = (min(num_vectorcore, batch_size), 1)
 
-        # v的分核
-        v_batch_size_per_iter_per_vec = 85 * 1024 / torch.bfloat16.itemsize // (kv_hidden_size + 1)
+        # v tiling
+        v_batch_size_per_iter_per_vec = UB_SIZE / torch.bfloat16.itemsize // (kv_hidden_size + 1)
         v_batch_size_per_iter_per_vec = min(v_batch_size_per_iter_per_vec, batch_size_per_vec)
         v_iter_num_per_vec = triton.cdiv(batch_size_per_vec, v_batch_size_per_iter_per_vec)
 
