@@ -26,7 +26,7 @@ at::Tensor matmul_gelu_impl(const at::Tensor &x, const at::Tensor &weight, const
     TORCH_CHECK(x.sizes()[1] == weight.sizes()[1] || x.sizes()[1] == weight.sizes()[0], "The x second dim should be same as weight first or second dim");
     TORCH_CHECK(
         x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat,
-        "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
+        "float16、float32 tensor expected but got a tensor with dtype: ",
         x.scalar_type());
      TORCH_CHECK(
         x.scalar_type() == weight.scalar_type() && x.scalar_type() == bias.scalar_type(),

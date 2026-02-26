@@ -39,6 +39,22 @@ See the License for the specific language governing permissions and
 namespace MatmulGelu_Kernel {
 using namespace Catlass;
 
+华为
+ matmul_gelu_kernel.h
+该文件中的函数MatmulGeluImpl中的
+if (tiling_data.m > tiling_data.n)
+ 和
+else代码块很相似，只有
+BlockScheduler
+不一样，请帮忙重构代码消除重复代码​
+TRAE AI
+我需要重构MatmulGeluImpl函数，消除if-else分支中的重复代码。通过分析发现，两个分支只有BlockScheduler模板参数不同，可以创建一个内部模板函数来处理这个差异。
+
+
+matmul_gelu_kernel.h
+Apply
+namespace MatmulGelu_Kernel {
+using namespace Catlass;
 template <class LayoutWeight, class InDType, uint32_t m, uint32_t n, uint32_t k1, uint32_t k0>
 CATLASS_DEVICE void MatmulGeluImpl(MatmulGeluTilingData tiling_data, GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR output, GM_ADDR workspace)
 {
@@ -53,29 +69,9 @@ CATLASS_DEVICE void MatmulGeluImpl(MatmulGeluTilingData tiling_data, GM_ADDR x, 
         using LayoutBias = layout::VectorLayout;
         using LayoutC = layout::RowMajor;
 
-        // if (tiling_data.m >= 4096) {
-        //         m_ = 128;
-        //         n_ = 256;
-        //         k1_ = 256;
-        //         k0_ = 64;   
-        // }
-        // if (tiling_data.m <= 16) {
-        //         m_ = 112;
-        //         n_ = 256;
-        //         k1_ = 192;
-        //         k0_ = 48;   
-        // }
-       
-      
-        // constexpr int k1 = 512 / sizeof(InDType);
-        // constexpr int k0 = 128 / sizeof(InDType);
-
         // Block level, define BlockMmad
         constexpr bool enableUnitFlag = true;
         using MmadDispatchPolicy = Gemm::MmadAtlasA2PingpongBias<enableUnitFlag>;
-        // 128x256x256_128x256x64
-        // using L1TileShape = GemmShape<128, 256, 256>;
-        // using L0TileShape = GemmShape<128, 256, 64>;
         using L1TileShape = GemmShape<m, n, k1>;
         using L0TileShape = GemmShape<m, n, k0>;
         using AType = Gemm::GemmType<half, LayoutA>;
@@ -86,8 +82,7 @@ CATLASS_DEVICE void MatmulGeluImpl(MatmulGeluTilingData tiling_data, GM_ADDR x, 
         using BlockMmad = Gemm::Block::BlockMmad<MmadDispatchPolicy, L1TileShape, L0TileShape, AType, BType, CType, BiasType>;
         using EpilogueDispatchPolicy = Epilogue::EpilogueAtlasA2ElemWiseNoSource;
 
-        // constexpr uint32_t computeLength = 16384 * 2; // 64 * 128 * 2B
-        // constexpr uint32_t computeLength = L0TileShape::M * L0TileShape::N; // 64 * 128 * 2B
+        // Define epilogue
         constexpr uint32_t computeLength = (m * n) / 2;
         using TileElemWiseEpilogue = Epilogue::Tile::TileElemWiseGelu<ArchTag, CType, computeLength>;
         using EpilogueTileCopy = Epilogue::Tile::TileCopy<
@@ -98,56 +93,39 @@ CATLASS_DEVICE void MatmulGeluImpl(MatmulGeluTilingData tiling_data, GM_ADDR x, 
         using BlockEpilogue =
         Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy, CType, DType, TileElemWiseEpilogue, EpilogueTileCopy>;
         using EpilogueParams = typename BlockEpilogue::Params;
+
+        // 内部模板函数：处理具体的BlockScheduler类型
+        auto runMatmulKernel = [&]<typename BlockSchedulerType>() {
+                // Kernel level
+                using MatmulKernel = Gemm::Kernel::MatmulActivation<BlockMmad, BlockEpilogue, BlockSchedulerType>;
+
+                // Prepare params
+                LayoutA layoutA{problemShape.m(), problemShape.k()};
+                LayoutB layoutB{problemShape.k(), problemShape.n()};
+                LayoutC layoutC{problemShape.m(), problemShape.n()};
+
+                EpilogueParams epilogueParams(workspace, layoutC, output, layoutC);
+                typename MatmulKernel::Params params(
+                                problemShape,
+                                x, layoutA,
+                                weight, layoutB,
+                                bias,
+                                workspace,
+                                epilogueParams
+                                );
+                MatmulKernel matmulKernel;
+                matmulKernel(params);
+        };
+
+        // 根据条件选择不同的BlockScheduler并执行
         if (tiling_data.m > tiling_data.n) {
-                // Define BlockScheduler
                 // Swizzle offset is 3 and direction is 0.
                 using BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<3, 0>;
-                // Kernel level
-                using MatmulKernel = Gemm::Kernel::MatmulActivation<BlockMmad, BlockEpilogue, BlockScheduler>;
-                // Prepare params
-                // typename MatmulKernel::Arguments arguments{problemShape, sizeof(InDType), x, weight, bias, output};
-                // typename MatmulKernel::Params params = MatmulKernel::ToUnderlyingArguments(arguments, (uint8_t *)workspace);
-                // AscendC::printf("yyyyyyyyyyyyyyyy m: %d, n: %d, k: %d\n", problemShape.m(), problemShape.n(), problemShape.k());
-                LayoutA layoutA{problemShape.m(), problemShape.k()};
-                LayoutB layoutB{problemShape.k(), problemShape.n()};
-                LayoutC layoutC{problemShape.m(), problemShape.n()};
-
-                EpilogueParams epilogueParams(workspace, layoutC, output, layoutC);
-                typename MatmulKernel::Params params(
-                                problemShape,
-                                x, layoutA,
-                                weight, layoutB,
-                                bias,
-                                workspace,
-                                epilogueParams
-                                );
-                MatmulKernel matmulKernel;
-                matmulKernel(params);
+                runMatmulKernel.template operator()<BlockScheduler>();
         } else {
-                // Define BlockScheduler
                 // Swizzle offset is 3 and direction is 1.
                 using BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<3, 1>;
-                // Kernel level
-                using MatmulKernel = Gemm::Kernel::MatmulActivation<BlockMmad, BlockEpilogue, BlockScheduler>;
-                // Prepare params
-                // typename MatmulKernel::Arguments arguments{problemShape, sizeof(InDType), x, weight, bias, output};
-                // typename MatmulKernel::Params params = MatmulKernel::ToUnderlyingArguments(arguments, (uint8_t *)workspace);
-                // AscendC::printf("yyyyyyyyyyyyyyyy m: %d, n: %d, k: %d\n", problemShape.m(), problemShape.n(), problemShape.k());
-                LayoutA layoutA{problemShape.m(), problemShape.k()};
-                LayoutB layoutB{problemShape.k(), problemShape.n()};
-                LayoutC layoutC{problemShape.m(), problemShape.n()};
-
-                EpilogueParams epilogueParams(workspace, layoutC, output, layoutC);
-                typename MatmulKernel::Params params(
-                                problemShape,
-                                x, layoutA,
-                                weight, layoutB,
-                                bias,
-                                workspace,
-                                epilogueParams
-                                );
-                MatmulKernel matmulKernel;
-                matmulKernel(params);
+                runMatmulKernel.template operator()<BlockScheduler>();
         }
 }
 }  // namespace CustomMatmulGelu_Kernel

@@ -31,7 +31,7 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
     const gert::Shape* x_shape = context->GetInputShape(X_INDEX);
     const gert::Shape* bias_shape = context->GetInputShape(BIAS_INDEX);
     gert::Shape* outShape = context->GetOutputShape(0);
-    int64_t m = xShape->GetDim(M_DIM_INDEX);
+    int64_t m = x_shape->GetDim(M_DIM_INDEX);
     int64_t n = bias_shape->GetDim(N_DIM_INDEX);
     outShape->SetDimNum(2);
     outShape->SetDim(0, m);

@@ -585,7 +585,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> add_layer_norm(
      TORCH_CHECK(
         x2.scalar_type() == gamma.scalar_type() && x2.scalar_type() == beta.scalar_type() &&
         x2.scalar_type() == x1.scalar_type(),
-        "The dtype of x2, gamma, beta and a1 should be same");
+        "The dtype of x1, x2, gamma and beta should be same");
 
     std::vector<int64_t> shape;
     for (int64_t index = 0; index < x1.dim() - gamma.dim(); index++) {

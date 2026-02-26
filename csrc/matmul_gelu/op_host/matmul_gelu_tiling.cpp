@@ -56,8 +56,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
     size_t systemWorkspacesSize = ascendcPlatform.GetLibApiWorkSpaceSize();
-    const size_t elementSize = (xDataType == ge::DT_FLOAT) ? sizeof(float) : 2;
-    const size_t userWorkspaceSize = m * n * 4;
+    const size_t userWorkspaceSize = m * n * sizeof(float);
     currentWorkspace[0] = systemWorkspacesSize + userWorkspaceSize;
 
     context->SetBlockDim(totalCoreNum);

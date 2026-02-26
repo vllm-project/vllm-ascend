@@ -45,9 +45,6 @@ aclnnStatus aclnnMatmulGeluGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor)
 {
-    bool transB = false;
-    bool weightNz = true;
-
     aclnnStatus ret = aclnnInnerMatmulGeluGetWorkspaceSize(x, weight, bias, out, workspaceSize, executor);
     return ret;
 }

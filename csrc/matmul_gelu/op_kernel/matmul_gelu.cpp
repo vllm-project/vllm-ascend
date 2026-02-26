@@ -31,39 +31,10 @@ extern "C" __global__ __aicore__ void matmul_gelu(GM_ADDR x, GM_ADDR weight, GM_
     REGISTER_TILING_DEFAULT(MatmulGeluTilingData);
     GET_TILING_DATA(tiling_data, tiling);
 
-    // if (TILING_KEY_IS(DT_BF16)) {
-    //     // bf16
-    //     if (!tiling_data.transB) {
-    //         MatmulGeluImpl<layout::RowMajor, bfloat16_t>(problemShape, x, weight, bias, output);
-    //     } else {
-    //         MatmulGeluImpl<layout::ColumnMajor, bfloat16_t>(problemShape, x, weight, bias, output);
-    //     }
-    // } else if (TILING_KEY_IS(DT_FLOAT)) {
-    //     // float32
-    //     if (!tiling_data.transB) {
-    //         MatmulGeluImpl<layout::RowMajor, float>(problemShape, x, weight, bias, output);
-    //     } else {
-    //         MatmulGeluImpl<layout::ColumnMajor, float>(problemShape, x, weight, bias, output);
-    //     }
-    // } else if (TILING_KEY_IS(DT_FLOAT16)) {
-    //     // float16
-    //     if (!tiling_data.transB) {
-    //         MatmulGeluImpl<layout::RowMajor, half>(problemShape, x, weight, bias, output);
-    //     } else {
-    //         MatmulGeluImpl<layout::ColumnMajor, half>(problemShape, x, weight, bias, output);
-    //     }
-    // }
     if (!tiling_data.transB) {
         MatmulGeluImpl<layout::RowMajor, half, 128, 256, 256, 64>(tiling_data, x, weight, bias, output, workspace);
     } else {
         MatmulGeluImpl<layout::ColumnMajor, half, 128, 256, 256, 64>(tiling_data, x, weight, bias, output, workspace);
     }
-    // if (tiling_data.m >= 1024) {
-    //     MatmulGeluImpl<layout::RowMajor, half, 128, 256, 256, 64>(tiling_data, x, weight, bias, output, workspace);
-    // } else if (tiling_data.m >= 512) {
-    //     MatmulGeluImpl<layout::RowMajor, half, 128, 256, 256, 64>(tiling_data, x, weight, bias, output, workspace);
-    // } else {
-    //     MatmulGeluImpl<layout::RowMajor, half, 112, 256, 256, 64>(tiling_data, x, weight, bias, output, workspace);
-    // }
-// 128x256x128_128x256x64
+
 }
