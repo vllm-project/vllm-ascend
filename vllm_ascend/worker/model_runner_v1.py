@@ -1761,9 +1761,11 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         uniform_decode = (
             (
-                (max_num_scheduled_tokens == self.uniform_decode_query_len)
+                is_all_decode
+                and (max_num_scheduled_tokens == self.uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
             )
             if force_uniform_decode is None
