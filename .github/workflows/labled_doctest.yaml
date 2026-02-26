@@ -38,6 +38,26 @@ defaults:
   run:
     shell: bash -el {0}
 
+# only cancel in-progress runs of the same workflow
+# and ignore the lint / 1 card / 4 cards test type
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PREPARE_ENV_SCRIPT: |
+    # PWD: /__w/vllm-ascend/vllm-ascend
+    # Make sure e2e tests are latest
+    echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
+    rm -rf /vllm-workspace/vllm-ascend/tests/e2e
+    mkdir -p /vllm-workspace/vllm-ascend/tests
+    # Overwrite e2e and examples
+    cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
+    cp -r examples /vllm-workspace/vllm-ascend/
+
+    # Simulate container to enter directory
+    cd /workspace
+
 jobs:
   test:
     strategy:
@@ -68,18 +88,7 @@ jobs:
 
       - name: Run vllm-ascend/tests/e2e/run_doctests.sh
         run: |
-          # PWD: /__w/vllm-ascend/vllm-ascend
-          # Make sure e2e tests are latest
-          echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
-          rm -rf /vllm-workspace/vllm-ascend/tests/e2e
-          mkdir -p /vllm-workspace/vllm-ascend/tests
-          # Overwrite e2e and examples
-          cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
-          cp -r examples /vllm-workspace/vllm-ascend/
-
-          # Simulate container to enter directory
-          cd /workspace
-
+          eval "$PREPARE_ENV_SCRIPT"
           # Run real test
           echo "Test:"
           /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
@@ -113,14 +122,20 @@ jobs:
       - name: single-node-test_qwen3_a2_inference.sh
         if: matrix.hardware == 'a2'
         run: |
-          bash tests/e2e/doctests/single_node/test_qwen3_a2_inference.sh
+          eval "$PREPARE_ENV_SCRIPT"
+          # Run real test
+          bash /vllm-workspace/vllm-ascend/tests/e2e/doctests/single_node/test_qwen3_a2_inference.sh
 
       - name: single-node-test_qwen3_a3_inference.sh
         if: matrix.hardware == 'a3'
         run: |
-          bash tests/e2e/doctests/single_node/test_qwen3_a3_inference.sh
+          eval "$PREPARE_ENV_SCRIPT"
+          # Run real test
+          bash /vllm-workspace/vllm-ascend/tests/e2e/doctests/single_node/test_qwen3_a3_inference.sh
 
       - name: single-node-test_deepseek_v3_2_a3_inference.sh
         if: matrix.hardware == 'a3'
         run: |
-          bash tests/e2e/doctests/single_node/test_deepseek_v3_2_a3_inference.sh
+          eval "$PREPARE_ENV_SCRIPT"
+          # Run real test
+          bash /vllm-workspace/vllm-ascend/tests/e2e/doctests/single_node/test_deepseek_v3_2_a3_inference.sh
