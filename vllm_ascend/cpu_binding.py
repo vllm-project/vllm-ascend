@@ -1,14 +1,29 @@
 #!/usr/bin/env python3
 
 import os
+import platform
+import shutil
 import subprocess
 from collections import defaultdict
 
 import psutil
 from vllm.logger import logger
 
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+MASK_BIT = 32  # Number of bits in a CPU affinity mask group
 ALLOWED_CPUS_PATH = "/proc/self/status"
 ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+
+
+def is_arm_cpu() -> bool:
+    arch = platform.machine().lower()
+    if arch in {"x86_64", "amd64", "i386", "i686"}:
+        return False
+    if arch in {"aarch64", "arm64"} or arch.startswith("arm"):
+        return True
+    logger.warning(f"Unknown CPU architecture '{arch}', CPU binding will be disabled.")
+    return False
 
 
 def execute_command(cmd: list[str]) -> tuple[str, int]:
@@ -77,7 +92,7 @@ class DeviceInfo:
             devices_list = [int(x) for x in devices_str.split(",")]
             running_npu_set = set(devices_list) & running_npu_set
         if not running_npu_set:
-            raise RuntimeError("Can not get running npu info, you can use BIND_CPU=0 to skip.")
+            raise RuntimeError("Can not get running npu info.")
         return sorted(running_npu_set)
 
     def parse_allowed_cpus(self) -> list[int]:
@@ -113,6 +128,16 @@ class CpuAlloc:
         self.assign_main: dict[int, list[int]] = {}
         self.assign_acl: dict[int, list[int]] = {}
         self.assign_rel: dict[int, list[int]] = {}
+
+    @staticmethod
+    def cpu_to_mask(cpu: int) -> str:
+        group = cpu // MASK_BIT
+        bit = cpu % MASK_BIT
+        value = 1 << bit
+        mask = f"{value:08x}"
+        for _ in range(1, group + 1):
+            mask = f"{mask},{'0' * (MASK_BIT // 4)}"
+        return mask
 
     @staticmethod
     def get_threads_map(thread_message: str) -> dict[str, dict[str, list[str]]]:
@@ -202,7 +227,7 @@ class CpuAlloc:
             npu_num_this_node = min(npu_num_per_node, num_running_npu - index)
             if npu_num_this_node <= 0:
                 break
-            # Evenly distribute the CPUs of this NUMA node among npu_num_this_node NPUs.
+            # NUMA-balanced distribute the CPUs of this NUMA node among npu_num_this_node NPUs.
             total_cpu_num = len(cpus)
             base_cpu_num = total_cpu_num // npu_num_this_node
             extra_cpu_num = total_cpu_num % npu_num_this_node
@@ -217,9 +242,22 @@ class CpuAlloc:
                     index += 1
                 start_index = end_index
 
+    DEVICE_BINDING_MODE = {
+        AscendDeviceType.A3: "numa_balanced",
+    }
+
+    @classmethod
+    def _binding_mode(cls) -> str:
+        device_type = get_ascend_device_type()
+        return cls.DEVICE_BINDING_MODE.get(device_type, "affinity")
+
     def build_cpu_pools(self) -> None:
         self.build_cpu_node_map()
+        if self._binding_mode() == "numa_balanced":
+            self.handle_no_affinity()
+            return
         if not self.device_info.npu_affinity:
+            logger.warning("NPU affinity info not found, fallback to NUMA-balanced CPU binding.")
             self.handle_no_affinity()
             return
         for npu in self.device_info.running_npu_list:
@@ -244,7 +282,7 @@ class CpuAlloc:
     def allocate(self) -> None:
         for npu, pool in self.npu_cpu_pool.items():
             if len(pool) >= 3:
-                main = pool[:-2]
+                main = pool[2:-2]  # Reserve first two CPUs for IRQ binding
                 acl = [pool[-2]]
                 rel = [pool[-1]]
             else:
@@ -263,6 +301,17 @@ class CpuAlloc:
         rel = str(self.assign_rel[current_npu]) if self.assign_rel[current_npu] else ""
         logger.info(f"NPU{current_npu}: main=[{main}]  acl=[{acl}]  release=[{rel}]")
 
+    def bind_memory(self, pid: str, npu: int) -> None:
+        if not shutil.which("migratepages"):
+            logger.info("The 'migratepages' command is not available, skipping memory binding.")
+            return
+        all_numa_nodes = sorted(self.numa_to_cpu_map.keys())
+        target_cpu = self.assign_acl[npu][0]
+        target_numa = self.cpu_node[target_cpu]
+        bind_numa_list = [target_numa, target_numa + 1 if target_numa % 2 == 0 else target_numa - 1]
+        logger.info(f"[migrate] rank:{self.rank_id} -> NUMA {bind_numa_list}")
+        execute_command(["migratepages", pid, ",".join(map(str, all_numa_nodes)), ",".join(map(str, bind_numa_list))])
+
     def bind_threads(self) -> None:
         thread_message, _ = execute_command(["ps", "-Te"])
         threads_map = self.get_threads_map(thread_message)
@@ -271,16 +320,77 @@ class CpuAlloc:
         self.bind(main_pid, self.assign_main[current_npu], True)
         for acl_thread in threads_map.get(main_pid, {}).get("acl_thread", []):
             self.bind(acl_thread, self.assign_acl[current_npu], False)
+            self.bind_memory(acl_thread, current_npu)
         for release_thread in threads_map.get(main_pid, {}).get("release_thread", []):
             self.bind(release_thread, self.assign_rel[current_npu], False)
+
+    def bind_npu_irq(self) -> None:
+        if not os.access("/proc/irq", os.W_OK):
+            return
+        if shutil.which("systemctl"):
+            output, _ = execute_command(["systemctl", "list-unit-files"])
+            if "irqbalance.service" in output:
+                _, return_code = execute_command(["systemctl", "is-active", "--quiet", "irqbalance"])
+                if return_code == 0:
+                    logger.warning(
+                        "The irqbalance service is running and has been stopped. "
+                        "You can run the systemctl start irqbalance command to restart it."
+                    )
+                    execute_command(["systemctl", "stop", "irqbalance"])
+        sq_irqs = []
+        with open("/proc/interrupts") as f:
+            for line in f:
+                if "sq_send_trigger_irq" in line:
+                    irq = line.split(":")[0].strip()
+                    sq_irqs.append(irq)
+        for npu in sorted(self.npu_cpu_pool.keys()):
+            cpus = self.npu_cpu_pool[npu]
+            if len(cpus) < 2:
+                continue
+            sq_cpu, cq_cpu = cpus[0], cpus[1]  # Reserved for IRQ binding
+            info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(npu)])
+            pci_addr = ""
+            for line in info.splitlines():
+                if "PCIe Bus Info" in line:
+                    pci_addr = line.split()[-1].lower()
+                    break
+            if not pci_addr:
+                logger.warning(f"Can't find pci address of NPU{npu} .")
+                continue
+            try:
+                npu_irq_list = sorted(os.listdir(f"/sys/bus/pci/devices/{pci_addr}/msi_irqs/"), key=lambda x: int(x))
+            except FileNotFoundError:
+                logger.warning(f"The msi_irqs folder cannot be found under /sys/bus/pci/devices/{pci_addr} .")
+                continue
+            sq_irq, cq_irq = "", ""
+            for irq in sq_irqs:
+                if irq in npu_irq_list:
+                    sq_irq = irq
+                    cq_irq = str(int(irq) + 1)
+                    break
+            if not sq_irq:
+                logger.warning(f"The sq_send_trigger_irq of NPU{npu} is not found.")
+                continue
+            logger.info(
+                f"NPU{npu}(PCI {pci_addr}): sq_send_trigger_irq IRQ_ID={sq_irq} -> CPU{sq_cpu}, "
+                f"cq_update_irq IRQ_ID={cq_irq} -> CPU{cq_cpu}"
+            )
+            with open(f"/proc/irq/{sq_irq}/smp_affinity", "w") as f:
+                f.write(self.cpu_to_mask(sq_cpu))
+            with open(f"/proc/irq/{cq_irq}/smp_affinity", "w") as f:
+                f.write(self.cpu_to_mask(cq_cpu))
 
     def run_all(self) -> None:
         self.build_cpu_pools()
         self.allocate()
         self.print_plan()
         self.bind_threads()
+        self.bind_npu_irq()
 
 
 def bind_cpus(rank_id: int) -> None:
+    if not is_arm_cpu():
+        logger.info("CPU binding skipped: non-ARM CPU detected.")
+        return
     binder = CpuAlloc(rank_id)
     binder.run_all()
