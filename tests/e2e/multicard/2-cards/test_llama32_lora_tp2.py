@@ -14,7 +14,7 @@ from vllm_ascend.utils import enable_custom_op
 enable_custom_op()
 
 # For hk region, we need to use the model from hf to avoid the network issue
-MODEL_PATH = "meta-llama/Llama-3.2-3B-Instruct"
+MODEL_PATH = "vllm-ascend/Llama-3.2-3B-Instruct"
 
 
 @patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
