@@ -1,21 +1,5 @@
 #!/bin/bash
 
-# Setup Environment
-setup_env() {
-    if ! command -v vllm &> /dev/null; then
-        echo "vllm not found in PATH. Searching..."
-        VLLM_PATH=$(find /usr/local/python* -name vllm -type f -executable 2>/dev/null | head -n 1)
-        if [ -n "$VLLM_PATH" ]; then
-            echo "Found vllm at $VLLM_PATH"
-            export PATH=$PATH:$(dirname "$VLLM_PATH")
-        else
-            echo "Error: vllm not found."
-            exit 1
-        fi
-    fi
-}
-setup_env
-
 # Function to run a test case and handle failure
 run_test_case() {
     echo "Running: $1"
@@ -85,7 +69,7 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 # Start Server (Background)
 echo "Starting vLLM server (Atlas A2 Configuration)..."
 # Extracted from docs/source/tutorials/models/Qwen3-235B-A22B.md (Single-node Deployment)
-vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
+vllm serve vllm-ascend/Qwen3-235B-A22B-W8A8 \
 --host ${NODE_IP} \
 --port ${PORT} \
 --tensor-parallel-size 8 \
@@ -127,7 +111,7 @@ if wait_for_server $SERVER_PID; then
     # Inference Test Case 2: vLLM Benchmark (General)
     (
         # Added explicit host/port to ensure connection to our server
-        CMD_2="vllm bench serve --model qwen3 --tokenizer vllm-ascend/Qwen3-235B-A22B-w8a8 --dataset-name random --random-input 200 --num-prompts 20 --request-rate 1 --save-result --result-dir ./ --host ${NODE_IP} --port ${PORT}"
+        CMD_2="vllm bench serve --model qwen3 --tokenizer vllm-ascend/Qwen3-235B-A22B-W8A8 --dataset-name random --random-input 200 --num-prompts 20 --request-rate 1 --save-result --result-dir ./ --host ${NODE_IP} --port ${PORT}"
         run_test_case "vLLM Benchmark (General)" "$CMD_2"
     )
 else

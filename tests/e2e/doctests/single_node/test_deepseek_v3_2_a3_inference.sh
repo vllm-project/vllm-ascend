@@ -1,21 +1,5 @@
 #!/bin/bash
 
-# Setup Environment
-setup_env() {
-    if ! command -v vllm &> /dev/null; then
-        echo "vllm not found in PATH. Searching..."
-        VLLM_PATH=$(find /usr/local/python* -name vllm -type f -executable 2>/dev/null | head -n 1)
-        if [ -n "$VLLM_PATH" ]; then
-            echo "Found vllm at $VLLM_PATH"
-            export PATH=$PATH:$(dirname "$VLLM_PATH")
-        else
-            echo "Error: vllm not found."
-            exit 1
-        fi
-    fi
-}
-setup_env
-
 # Function to run a test case and handle failure
 run_test_case() {
     echo "Running: $1"
