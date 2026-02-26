@@ -454,14 +454,13 @@ class PCPManager:
         num_reqs: int,
         tokens_original: list[int] | None = None,
     ):
-        if not self.pcp_use_hybrid_attn:
+        if not self.pcp_use_hybrid_attn or tokens_original is None:
             logits_indices = (
                 torch.from_numpy(cu_num_tokens) * self.pcp_world_size
                 - self.num_pcp_pads_cpu_tensor[: self.num_reqs]
                 - 1
             )
         else:
-            assert tokens_original is not None
             tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
             num_prefill_reqs = (tokens_original_tensor > self.decode_threshold).sum().item()
             num_decode_reqs = num_reqs - num_prefill_reqs
@@ -718,7 +717,7 @@ class PCPManager:
     ):
         from vllm_ascend.attention.utils import AscendPrefillContextParallelMetadata
 
-        if self.pcp_use_hybrid_attn:
+        if self.pcp_world_size > 1 and self.pcp_use_hybrid_attn:
             assert self.num_scheduled_tokens_padded is not None
             total_num_scheduled_tokens = sum(self.num_scheduled_tokens_padded)
         query_lens_new = (
