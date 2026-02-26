@@ -84,7 +84,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "add_rms_norm_bias"
         "apply_top_k_top_p_custom"
         "transpose_kv_cache_by_block"
-        "matmul_gelu"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
