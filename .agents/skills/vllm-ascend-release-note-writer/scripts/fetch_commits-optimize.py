@@ -170,9 +170,7 @@ def find_previous_tag(
             continue
 
         # Check if this tag's commit is an ancestor of head
-        compare_resp = requests.get(
-            f"{base_url}/compare/{tag_commit_sha}...{head_sha}", headers=headers
-        )
+        compare_resp = requests.get(f"{base_url}/compare/{tag_commit_sha}...{head_sha}", headers=headers)
 
         if compare_resp.status_code != 200:
             continue
@@ -193,9 +191,7 @@ def find_previous_tag(
                         "ahead_by": compare_data.get("ahead_by", 0),
                     }
                 )
-                print(
-                    f"  Found candidate: {tag_name} ({compare_data.get('ahead_by', 0)} commits behind)"
-                )
+                print(f"  Found candidate: {tag_name} ({compare_data.get('ahead_by', 0)} commits behind)")
 
     if not tag_candidates:
         print("  No previous tag found")
@@ -247,9 +243,7 @@ def fetch_commits_between_tags(
 
     # First, use Compare API to get total commit count (for progress info)
     print(f"\nComparing {base_tag}...{head_tag}...")
-    compare_resp = requests.get(
-        f"{base_url}/compare/{base_sha}...{head_sha}", headers=headers
-    )
+    compare_resp = requests.get(f"{base_url}/compare/{base_sha}...{head_sha}", headers=headers)
     if compare_resp.status_code == 200:
         compare_data = compare_resp.json()
         total_commits = compare_data.get("total_commits", "unknown")
@@ -360,9 +354,7 @@ def fetch_commits_by_date_range(
             break
 
         all_commits.extend(commits)
-        print(
-            f"  Page {page}: fetched {len(commits)} commits (total: {len(all_commits)})"
-        )
+        print(f"  Page {page}: fetched {len(commits)} commits (total: {len(all_commits)})")
 
         if len(commits) < per_page:
             break
@@ -373,9 +365,7 @@ def fetch_commits_by_date_range(
     return all_commits
 
 
-def get_merge_base(
-    base_url: str, base_sha: str, head_sha: str, headers: dict
-) -> str | None:
+def get_merge_base(base_url: str, base_sha: str, head_sha: str, headers: dict) -> str | None:
     """
     Get the merge base (common ancestor) of two commits.
 
@@ -461,9 +451,7 @@ def fetch_commits_by_walking_history(
                 break
             all_commits.append(commit)
 
-        print(
-            f"  Page {page}: fetched {len(commits)} commits (total: {len(all_commits)})"
-        )
+        print(f"  Page {page}: fetched {len(commits)} commits (total: {len(all_commits)})")
 
         if found_stop:
             print(f"  Reached stop commit ({target_sha[:8]})")
@@ -592,15 +580,11 @@ def fetch_commits_between_tags_fast(
             break
 
         all_commits.extend(page_commits)
-        print(
-            f"  Page {page}: got {len(page_commits)} commits (total: {len(all_commits)})"
-        )
+        print(f"  Page {page}: got {len(page_commits)} commits (total: {len(all_commits)})")
 
     # If we still don't have all commits, walk the history
     if len(all_commits) < total_commits:
-        print(
-            f"\n  Need to fetch remaining {total_commits - len(all_commits)} commits via history walk..."
-        )
+        print(f"\n  Need to fetch remaining {total_commits - len(all_commits)} commits via history walk...")
 
         # For diverged branches, use merge_base as stop point
         # For non-diverged, use base_sha
@@ -638,9 +622,7 @@ def fetch_commits_between_tags_fast(
                     seen_shas.add(sha)
                     walk_commits.append(commit)
 
-            print(
-                f"  Walk page {walk_page}: found {len(walk_commits)} additional commits"
-            )
+            print(f"  Walk page {walk_page}: found {len(walk_commits)} additional commits")
             walk_page += 1
 
         # Combine: Compare API commits first (they're in order), then walk commits
@@ -728,9 +710,7 @@ def extract_contributors(commits: list[dict]) -> dict:
                 contributors_by_login[login] = {
                     "login": login,
                     "name": commit.get("commit", {}).get("author", {}).get("name", ""),
-                    "email": commit.get("commit", {})
-                    .get("author", {})
-                    .get("email", ""),
+                    "email": commit.get("commit", {}).get("author", {}).get("email", ""),
                     "avatar_url": author.get("avatar_url", ""),
                     "html_url": author.get("html_url", ""),
                     "commits": 0,
@@ -785,9 +765,7 @@ def get_tag_date(base_url: str, tag: str, headers: dict) -> str:
     return None
 
 
-def check_contributor_is_new(
-    owner: str, repo: str, login: str, before_date: str, headers: dict
-) -> bool:
+def check_contributor_is_new(owner: str, repo: str, login: str, before_date: str, headers: dict) -> bool:
     """
     Check if a contributor has any commits before a given date.
 
@@ -858,11 +836,17 @@ def calculate_new_contributors_via_generate_notes(
 
     # Use gh CLI to call the generate-notes API
     cmd = [
-        "gh", "api", f"repos/{owner}/{repo}/releases/generate-notes",
-        "-f", f"tag_name={head_tag}",
-        "-f", f"target_commitish={head_tag}",
-        "-f", f"previous_tag_name={base_tag}",
-        "--jq", ".body"
+        "gh",
+        "api",
+        f"repos/{owner}/{repo}/releases/generate-notes",
+        "-f",
+        f"tag_name={head_tag}",
+        "-f",
+        f"target_commitish={head_tag}",
+        "-f",
+        f"previous_tag_name={base_tag}",
+        "--jq",
+        ".body",
     ]
 
     try:
@@ -875,15 +859,17 @@ def calculate_new_contributors_via_generate_notes(
 
         # Parse new contributors from the generated notes
         # Format: "* @username made their first contribution in https://github.com/owner/repo/pull/12345"
-        pattern = r'\* @(\S+) made their first contribution in https://github\.com/[^/]+/[^/]+/pull/(\d+)'
+        pattern = r"\* @(\S+) made their first contribution in https://github\.com/[^/]+/[^/]+/pull/(\d+)"
         matches = re.findall(pattern, body)
 
         new_contributors = []
         for login, pr_number in matches:
-            new_contributors.append({
-                "login": login,
-                "first_pr": pr_number,
-            })
+            new_contributors.append(
+                {
+                    "login": login,
+                    "first_pr": pr_number,
+                }
+            )
 
         print(f"  Found {len(new_contributors)} new contributors")
         return new_contributors
@@ -1040,19 +1026,17 @@ def generate_contributor_stats(
     print("RELEASE NOTES SUMMARY LINE:")
     print("-" * 60)
     if check_new:
-        summary_line = f"This release features {len(commits)} commits from {contributors['total']} contributors ({new_count} new)!"
+        summary_line = (
+            f"This release features {len(commits)} commits from {contributors['total']} contributors ({new_count} new)!"
+        )
     else:
         summary_line = f"This release features {len(commits)} commits from {contributors['total']} contributors!"
     print(summary_line)
     print("-" * 60)
 
     # Get all contributors sorted by commit count
-    all_contributors_list = list(contributors["by_login"].values()) + list(
-        contributors["by_email"].values()
-    )
-    sorted_contributors = sorted(
-        all_contributors_list, key=lambda x: x["commits"], reverse=True
-    )
+    all_contributors_list = list(contributors["by_login"].values()) + list(contributors["by_email"].values())
+    sorted_contributors = sorted(all_contributors_list, key=lambda x: x["commits"], reverse=True)
 
     # Print top contributors
     print("\nTop contributors by commit count:")
@@ -1060,9 +1044,7 @@ def generate_contributor_stats(
         if c.get("login"):
             print(f"  {i:2}. @{c['login']:20} - {c['commits']:3} commits")
         else:
-            print(
-                f"  {i:2}. {c['name']:20} - {c['commits']:3} commits (no GitHub account)"
-            )
+            print(f"  {i:2}. {c['name']:20} - {c['commits']:3} commits (no GitHub account)")
 
     return {
         "total_commits": len(commits),
@@ -1130,16 +1112,12 @@ def save_contributor_stats(stats: dict, output_file: str, owner: str, repo: str)
         lines.append("## New Contributors 🎉")
         lines.append("")
 
-        sorted_new = sorted(
-            stats["new_contributors_list"], key=lambda x: x["login"].lower()
-        )
+        sorted_new = sorted(stats["new_contributors_list"], key=lambda x: x["login"].lower())
         for c in sorted_new:
             pr_num = c.get("first_pr")
             if pr_num:
                 pr_link = f"https://github.com/{owner}/{repo}/pull/{pr_num}"
-                lines.append(
-                    f"* @{c['login']} made their first contribution in {pr_link}"
-                )
+                lines.append(f"* @{c['login']} made their first contribution in {pr_link}")
             else:
                 lines.append(f"* @{c['login']} made their first contribution")
         lines.append("")
@@ -1223,9 +1201,7 @@ def format_commit_message(
     # Clean up the message - remove existing PR references for reformatting
     clean_message = first_line
     clean_message = re.sub(r"\s*\(#\d+\)\s*$", "", clean_message)
-    clean_message = re.sub(
-        r"\s*https://github\.com/[^/]+/[^/]+/pull/\d+\s*", "", clean_message
-    )
+    clean_message = re.sub(r"\s*https://github\.com/[^/]+/[^/]+/pull/\d+\s*", "", clean_message)
     clean_message = re.sub(r"\s+in\s*$", "", clean_message)
     clean_message = clean_message.strip()
 
@@ -1279,9 +1255,7 @@ def save_commits_to_file(
 
     formatted_lines = []
     for commit in commits:
-        formatted = format_commit_message(
-            commit, owner, repo, include_sha=include_sha, include_date=include_date
-        )
+        formatted = format_commit_message(commit, owner, repo, include_sha=include_sha, include_date=include_date)
         formatted_lines.append(formatted)
 
     # Sort based on mode
@@ -1303,24 +1277,21 @@ def save_commits_to_file(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Fetch commits between two GitHub tags or between a tag and a commit"
-    )
+    parser = argparse.ArgumentParser(description="Fetch commits between two GitHub tags or between a tag and a commit")
     parser.add_argument(
         "--owner",
         default="vllm-project",
         help="Repository owner (default: vllm-project)",
     )
-    parser.add_argument(
-        "--repo", default="vllm", help="Repository name (default: vllm)"
-    )
+    parser.add_argument("--repo", default="vllm", help="Repository name (default: vllm)")
     parser.add_argument(
         "--base-tag",
         help="Base tag (older, e.g., v0.11.2). If not provided with --head-commit, will auto-detect previous tag.",
     )
     parser.add_argument(
         "--head-tag",
-        help="Head tag (newer, e.g., v0.12.0). Use this OR --head-commit. If neither specified, uses HEAD of default branch.",
+        help="Head tag (newer, e.g., v0.12.0). Use this OR --head-commit. If neither specified, uses "
+        "HEAD of default branch.",
     )
     parser.add_argument(
         "--head-commit",
@@ -1348,9 +1319,7 @@ def main():
         default="chronological",
         help="Sort mode: chronological (newest first, like GitHub), alphabetical (by message), reverse (oldest first)",
     )
-    parser.add_argument(
-        "--stats", action="store_true", help="Generate and save contributor statistics"
-    )
+    parser.add_argument("--stats", action="store_true", help="Generate and save contributor statistics")
     parser.add_argument(
         "--stats-output",
         default="0-contributor-stats.md",
@@ -1373,11 +1342,13 @@ def main():
     )
     parser.add_argument(
         "--since",
-        help="Fetch commits since this date (ISO 8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ). Use with --until for date range mode.",
+        help="Fetch commits since this date (ISO 8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ). "
+        "Use with --until for date range mode.",
     )
     parser.add_argument(
         "--until",
-        help="Fetch commits until this date (ISO 8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ). Use with --since for date range mode.",
+        help="Fetch commits until this date (ISO 8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ). "
+        "Use with --since for date range mode.",
     )
     parser.add_argument(
         "--branch",
@@ -1394,13 +1365,9 @@ def main():
     date_range_mode = args.since is not None or args.until is not None
     if date_range_mode:
         if not args.since or not args.until:
-            parser.error(
-                "Both --since and --until must be specified for date range mode"
-            )
+            parser.error("Both --since and --until must be specified for date range mode")
         if args.head_tag or args.head_commit or args.base_tag:
-            parser.error(
-                "Cannot use --since/--until with --head-tag, --head-commit, or --base-tag"
-            )
+            parser.error("Cannot use --since/--until with --head-tag, --head-commit, or --base-tag")
 
     token = args.token or get_github_token()
 
@@ -1449,9 +1416,7 @@ def main():
 
             # Stats not fully supported in date range mode (no base_tag for new contributor check)
             if args.stats:
-                print(
-                    "\nNote: Contributor statistics in date range mode won't check for new contributors."
-                )
+                print("\nNote: Contributor statistics in date range mode won't check for new contributors.")
                 stats = generate_contributor_stats(
                     commits=commits,
                     owner=args.owner,
@@ -1483,9 +1448,7 @@ def main():
         elif args.head_commit:
             head_ref = args.head_commit
             head_is_commit = True
-            head_display_name = (
-                args.head_commit[:8] if len(args.head_commit) > 8 else args.head_commit
-            )
+            head_display_name = args.head_commit[:8] if len(args.head_commit) > 8 else args.head_commit
         else:
             # Auto-detect HEAD of default branch
             branch_name, head_sha = get_default_branch_head(base_url, headers)
@@ -1509,9 +1472,7 @@ def main():
             )
 
             if result is None:
-                raise Exception(
-                    "Could not find a previous tag. Please specify --base-tag manually."
-                )
+                raise Exception("Could not find a previous tag. Please specify --base-tag manually.")
 
             base_tag, _ = result
             print(f"\nUsing auto-detected base tag: {base_tag}")
@@ -1525,9 +1486,7 @@ def main():
         if args.slow:
             # Note: slow mode doesn't support commit SHA yet, only tags
             if head_is_commit:
-                print(
-                    "Warning: --slow mode with --head-commit not fully supported, using fast mode"
-                )
+                print("Warning: --slow mode with --head-commit not fully supported, using fast mode")
             commits = fetch_commits_between_tags_fast(
                 owner=args.owner,
                 repo=args.repo,
