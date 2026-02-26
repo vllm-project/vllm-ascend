@@ -15,9 +15,14 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+import torch
 import torch_npu
 
+from vllm_ascend.quantization.mxfp_compat import (
+    FLOAT4_E2M1FN_X2_DTYPE,
+    FLOAT8_E8M0FNU_DTYPE,
+    HIFLOAT8_DTYPE,
+)
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
@@ -30,11 +35,65 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def quant_apply_mlp(**kwargs):
-        if kwargs.get("use_mxfp_quant", False):
-            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
         from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp as _impl
-
         return _impl(**kwargs)
+
+    @staticmethod
+    def npu_dynamic_quant(
+        hidden_states: torch.Tensor,
+        dynamic_scale: torch.Tensor | None = None,
+        *,
+        act_quant_type=torch.float8_e4m3fn,
+        use_mxfp_quant: bool = False,
+    ):
+        if use_mxfp_quant:
+            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+
+        if dynamic_scale is None:
+            return torch_npu.npu_dynamic_quant(hidden_states)
+
+        return hidden_states, dynamic_scale
+
+    @staticmethod
+    def npu_grouped_matmul_swiglu_quant(
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        group_list: torch.Tensor,
+        weight_scale: torch.Tensor,
+        x_scale: torch.Tensor,
+        bias=None,
+        use_mxfp_quant: bool = False,
+    ):
+        if use_mxfp_quant:
+            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+
+        return torch_npu.npu_grouped_matmul_swiglu_quant(
+            x=x,
+            weight=weight,
+            bias=bias,
+            group_list=group_list,
+            weight_scale=weight_scale,
+            x_scale=x_scale,
+        )
+
+    @staticmethod
+    def get_quant_gmm2_kwargs(
+        *,
+        input_dtype: torch.dtype,
+        act_quant_type,
+        weight_quant_type,
+        scale_type,
+        per_token_scale_type,
+        use_bf16: bool = True,
+        use_mxfp_quant: bool = False,
+    ) -> dict:
+        if use_mxfp_quant:
+            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+
+        return {
+            "output_dtype": input_dtype if input_dtype in [torch.bfloat16, torch.float16] else torch.bfloat16,
+        }
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
@@ -45,16 +104,104 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     @staticmethod
-    def quant_apply_mlp(**kwargs):
-        # A5 keeps legacy int quant paths and only enables MXFP8 additionally.
-        if kwargs.get("use_mxfp_quant", False):
-            from vllm_ascend.ops.fused_moe.moe_mlp import mxfp_quant_apply_mlp as _impl
+    def npu_dynamic_quant(
+        hidden_states: torch.Tensor,
+        dynamic_scale: torch.Tensor | None = None,
+        *,
+        act_quant_type=torch.float8_e4m3fn,
+        use_mxfp_quant: bool = False,
+    ):
+        if not use_mxfp_quant:
+            return BaseDeviceAdaptor.npu_dynamic_quant(
+                hidden_states,
+                dynamic_scale,
+                act_quant_type=act_quant_type,
+                use_mxfp_quant=False,
+            )
 
-            return _impl(**kwargs)
+        if dynamic_scale is None:
+            return torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
 
-        from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp as _impl
+        if dynamic_scale.ndim == 2:
+            dynamic_scale = dynamic_scale.reshape(dynamic_scale.shape[0], dynamic_scale.shape[1] // 2, 2)
 
-        return _impl(**kwargs)
+        return hidden_states, dynamic_scale
+
+    @staticmethod
+    def npu_grouped_matmul_swiglu_quant(
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        group_list: torch.Tensor,
+        weight_scale: torch.Tensor,
+        x_scale: torch.Tensor,
+        bias=None,
+        use_mxfp_quant: bool = False,
+    ):
+        if not use_mxfp_quant:
+            return BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+                x=x,
+                weight=weight,
+                group_list=group_list,
+                weight_scale=weight_scale,
+                x_scale=x_scale,
+                bias=bias,
+                use_mxfp_quant=False,
+            )
+
+        out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+            x=x,
+            weight=[weight],
+            group_list=group_list,
+            weight_scale=[weight_scale],
+            x_scale=x_scale,
+            dequant_mode=2,
+            quant_mode=2,
+            dequant_dtype=torch.float32,
+            quant_dtype=torch.float8_e4m3fn,
+            weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+        )
+        return out, out_scale, None
+
+    @staticmethod
+    def get_quant_gmm2_kwargs(
+        *,
+        input_dtype: torch.dtype,
+        act_quant_type,
+        weight_quant_type,
+        scale_type,
+        per_token_scale_type,
+        use_bf16: bool = True,
+        use_mxfp_quant: bool = False,
+    ) -> dict:
+        if not use_mxfp_quant:
+            return BaseDeviceAdaptor.get_quant_gmm2_kwargs(
+                input_dtype=input_dtype,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
+                scale_type=scale_type,
+                per_token_scale_type=per_token_scale_type,
+                use_bf16=use_bf16,
+                use_mxfp_quant=False,
+            )
+
+        quant_dtypes = tuple(dtype for dtype in (FLOAT4_E2M1FN_X2_DTYPE, HIFLOAT8_DTYPE) if dtype is not None)
+        scale_dtypes = tuple(dtype for dtype in (FLOAT8_E8M0FNU_DTYPE,) if dtype is not None)
+
+        output_dtype = (
+            input_dtype
+            if input_dtype in [torch.bfloat16, torch.float16]
+            else (torch.bfloat16 if use_bf16 else torch.float16)
+        )
+
+        return {
+            "scale_dtype": scale_type if scale_type in scale_dtypes else None,
+            "per_token_scale_dtype": per_token_scale_type if per_token_scale_type in scale_dtypes else None,
+            "x_dtype": act_quant_type if act_quant_type in quant_dtypes else None,
+            "weight_dtype": weight_quant_type if weight_quant_type in quant_dtypes else None,
+            "output_dtype": output_dtype,
+        }
 
 
 def get_device_adaptor():
