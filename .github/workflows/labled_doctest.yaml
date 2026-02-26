@@ -109,6 +109,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container:
       image: ${{ matrix.image }}
+      env:
+        VLLM_ENGINE_READY_TIMEOUT_S: 1800
     steps:
       - name: Check NPU/CANN and git info
         run: |
