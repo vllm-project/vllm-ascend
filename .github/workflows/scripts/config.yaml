@@ -152,4 +152,3 @@ e2e-multicard-4-cards:
     is_skipped: true
   - name: tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py
     estimated_time: 60
-    is_skipped: true
