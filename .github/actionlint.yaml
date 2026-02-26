@@ -9,6 +9,7 @@ self-hosted-runner:
     - linux-aarch64-a3-2
     - linux-aarch64-a3-4
     - linux-aarch64-a3-8
+    - linux-aarch64-a3-16
     - linux-aarch64-a3-0
     - linux-amd64-cpu-8-hk
     - linux-amd64-cpu-16-hk
