@@ -79,23 +79,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
-# ** 5. File: platform/patch_model_loader.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.model_loader.default_loader.DefaultModelLoader.track_weights_loading`
-#    Why:
-#       vLLM commit 4572a06af enabled weight loading tracking for quantized models,
-#       but it doesn't handle Ascend quantization computed parameters (weight_offset,
-#       quant_bias, deq_scale) that are computed rather than loaded from checkpoint.
-#    How：
-#       Extend track_weights_loading to also mark AscendLinearMethod computed parameters
-#       as loaded, similar to how KV cache parameters are handled.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/35074
-#    Future Plan:
-#       Submit PR to vLLM to add extension point for quantization methods to specify
-#       computed parameters.
-#
-# ** 6. File: platform/patch_balance_schedule.py**
+# ** 5. File: platform/patch_balance_schedule.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
 #      `vllm.v1.core.sched.scheduler.Scheduler`
