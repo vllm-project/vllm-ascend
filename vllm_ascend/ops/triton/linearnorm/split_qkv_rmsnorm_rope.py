@@ -22,6 +22,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
+
 @triton.jit
 def split_qkv_rmsnorm_rope_kernel(
     input_ptr,
@@ -93,7 +94,6 @@ def split_qkv_rmsnorm_rope_kernel(
             sizes=(1, ROPE_DIM),
             strides=(1, 1),
         )
-
 
         x1 = tl.extract_slice(
             normalized_values,
@@ -264,8 +264,6 @@ def split_qkv_rmsnorm_rope_kernel(
         output_offset += output_offset_step
 
 
-
-
 @triton.jit
 def split_qkv_rmsnorm_rope_prefill_kernel(
     input_gm_ptr,
@@ -367,13 +365,12 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
             sizes=(batch_size_per_iter_per_vec, q_head_num, HEAD_DIM),
             strides=(1, 1, 1),
         )
-        
+
         if BIAS:
             normalized_values_tmp = (normalized_values_tmp * q_weight_values + q_bias_values).to(tl.bfloat16)
         else:
             normalized_values_tmp = (normalized_values_tmp * q_weight_values).to(tl.bfloat16)
-            
-        
+
         # q rope
         values_tmp = tl.zeros((batch_size_per_iter_per_vec, q_head_num, ROPE_DIM), dtype=tl.bfloat16)
         y = tl.extract_slice(
@@ -382,7 +379,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
             sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        
+
         values_tmp = tl.insert_slice(
             values_tmp,
             y,
@@ -449,14 +446,14 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
             normalized_values_tmp1 = (normalized_values_tmp1 * k_weight_values).to(tl.bfloat16)
 
         values_tmp2 = tl.zeros((batch_size_per_iter_per_vec, kv_head_num, ROPE_DIM), dtype=tl.bfloat16)
-        
+
         y = tl.extract_slice(
             normalized_values_tmp1,
             offsets=(0, 0, 0),
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        
+
         values_tmp2 = tl.insert_slice(
             values_tmp2,
             y,
@@ -525,6 +522,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
         tl.store(v_gm_ptr + out_idx, values, mask=out_mask)
         mblk_idx += v_batch_size_per_iter_per_vec
 
+
 def split_qkv_rmsnorm_rope_impl(
     input: torch.Tensor,
     q_weight: torch.Tensor,
@@ -563,7 +561,7 @@ def split_qkv_rmsnorm_rope_impl(
         Q_BLOCK_SIZE = q_hidden_size // kv_hidden_size * head_dim
         n_cols = kv_hidden_size // KV_BLOCK_SIZE
         n_rows = num_vectorcore // n_cols
-        
+
         grid = (n_rows, n_cols, 1)
 
         split_qkv_rmsnorm_rope_kernel[grid](
