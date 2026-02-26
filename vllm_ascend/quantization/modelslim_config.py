@@ -246,7 +246,8 @@ def get_linear_quant_type(
                     f"use {quant_type}. Please check quantization config."
                 )
     else:
-        has_float_type = any(key.startswith(prefix) and key.endswith('.weight') and value == "FLOAT" for key, value in quant_description.items())
+        has_float_type = any(key.startswith(prefix) and key.endswith('.weight') and value == "FLOAT"
+            for key, value in quant_description.items())
         if has_float_type:
             quant_type = "FLOAT"
         else:
@@ -466,7 +467,8 @@ class AscendModelSlimConfig(QuantizationConfig):
                         "to have the same precision."
                     )
         else:
-            is_skipped = any(key.startswith(prefix) and key.endswith('.weight') and value == "FLOAT" for key, value in self.quant_description.items())
+            is_skipped = any(key.startswith(prefix) and key.endswith('.weight') and value == "FLOAT"
+                             for key, value in self.quant_description.items())
 
         assert is_skipped is not None
         return is_skipped
