@@ -24,17 +24,17 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d, nd_to_nz_spec
 
 class AttentionMaskBuilder310:
     chunked_prefill_attn_mask = None
-    max_model_len = 16384
+    max_seqlen = 16384
 
-    def __init__(self, device: torch.device, max_model_len: int):
+    def __init__(self, device: torch.device, max_seqlen: int):
         """
         Initializes the AttentionMaskBuilder for the 310P device.
 
         Args:
             device (torch.device): The device on which tensors will be allocated.
-            max_model_len (int): Maximum length of a sequence (including prompt and generated text).
+            max_seqlen (int): Maximum length of a sequence (including prompt and generated text).
         """
-        AttentionMaskBuilder310.max_model_len = max_model_len
+        AttentionMaskBuilder310.max_seqlen = max_seqlen
         self.attn_mask_cache = None
         self.device = device
         self.swa_mask = None
@@ -77,7 +77,7 @@ class AttentionMaskBuilder310:
             torch.Tensor: The splitfuse attention mask cast to ACL_FORMAT_FRACTAL_NZ.
         """
         if cls.chunked_prefill_attn_mask is None:
-            cls.chunked_prefill_attn_mask = cls.gen_causal_additive_mask(cls.max_model_len, device)
+            cls.chunked_prefill_attn_mask = cls.gen_causal_additive_mask(cls.max_seqlen, device)
         qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
         qlens = qsl[1:] - qsl[:-1]
         q_list = qlens.tolist()
@@ -105,11 +105,11 @@ class AttentionMaskBuilder310:
         """
         assert dtype == torch.float16
         if sliding_window is not None and self.swa_mask is None:
-            mask = torch.ones(self.max_model_len, self.max_model_len, dtype=torch.bool)
+            mask = torch.ones(self.max_seqlen, self.max_seqlen, dtype=torch.bool)
             triu_mask = torch.triu(mask, diagonal=1).to(self.device)
             tril_mask = torch.tril(mask, -sliding_window).to(self.device)
             mask = triu_mask + tril_mask
-            swa_mask = torch.zeros((self.max_model_len, self.max_model_len), dtype=dtype, device=self.device)
+            swa_mask = torch.zeros((self.max_seqlen, self.max_seqlen), dtype=dtype, device=self.device)
             swa_mask.masked_fill_(mask, float("-inf"))
             self.swa_mask = torch_npu.npu_format_cast(nd_to_nz_2d(swa_mask), ACL_FORMAT_FRACTAL_NZ)
         return self.swa_mask
@@ -133,7 +133,7 @@ class AttentionMaskBuilder310:
         if getattr(model_config, "runner_type", None) == "pooling":
             # TODO: pooling model will be supported soon.
             raise NotImplementedError("310P does not support runner_type='pooling'")
-        return self._get_causal_mask(self.max_model_len)
+        return self._get_causal_mask(self.max_seqlen)
 
     def _get_causal_mask(self, max_seq_len: int) -> torch.Tensor:
         """
