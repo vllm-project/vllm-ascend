@@ -7,27 +7,31 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.nightly.single_node.scripts.single_node_config import SingleNodeConfigLoader
 from tools.aisbench import run_aisbench_cases
 
-prompts = [
+PROMPTS = [
     "San Francisco is a",
 ]
 
-api_keyword_args = {
+API_KEYWORD_ARGS = {
     "max_tokens": 10,
 }
 
-@pytest.mark.asyncio
-async def test_single_node() -> None:
-    config = SingleNodeConfigLoader.from_yaml()
+configs = SingleNodeConfigLoader.from_yaml_cases()
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config", configs)
+async def test_single_node(config) -> None:
+    prompts = config.prompts or PROMPTS
+    api_keyword_args = config.api_keyword_args or API_KEYWORD_ARGS
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
     with RemoteOpenAIServer(
-            model=config.model,
-            vllm_serve_args=config.server_cmd,
-            server_port=config.server_port,
-            env_dict=config.envs,
-            auto_port=False,
+        model=config.model,
+        vllm_serve_args=config.server_cmd,
+        server_port=config.server_port,
+        env_dict=config.envs,
+        auto_port=False,
     ) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
@@ -39,7 +43,7 @@ async def test_single_node() -> None:
         assert choices[0].text, "empty response"
         print(choices)
         # aisbench test
-        aisbench_cases = [c for c in (config.acc_cmd, config.perf_cmd) if c]
+        aisbench_cases = [v for v in config.benchmarks.values() if v]
         if aisbench_cases:
             run_aisbench_cases(
                 model=config.model,

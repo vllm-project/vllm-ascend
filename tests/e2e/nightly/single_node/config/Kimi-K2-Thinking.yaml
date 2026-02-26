@@ -1,0 +1,56 @@
+env_common: &env_common
+  HCCL_BUFFSIZE: "1024"
+  TASK_QUEUE_ENABLE: "1"
+  OMP_PROC_BIND: "false"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  SERVER_PORT: "8080"
+
+cmd_common: &cmd_common
+  - "--tensor-parallel-size"
+  - "16"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "8192"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--max-num-seqs"
+  - "12"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--trust-remote-code"
+  - "--enable-expert-parallel"
+  - "--no-enable-prefix-caching"
+
+benchmarks_common: &benchmarks_common
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 4096
+    batch_size: 32
+    baseline: 95
+    threshold: 5
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs400
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 512
+    max_out_len: 256
+    batch_size: 64
+    trust_remote_code: true
+    request_rate: 11.2
+    baseline: 1
+    threshold: 0.97
+
+test_cases:
+  - name: "Kimi-K2-Thinking-TP16-Case"
+    model: "moonshotai/Kimi-K2-Thinking"
+    envs:
+      <<: *env_common
+    cmd_base: *cmd_common
+    benchmarks:
+      <<: *benchmarks_common
