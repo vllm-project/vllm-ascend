@@ -18,13 +18,6 @@
 name: Bisect vLLM
 
 on:  
-  pull_request:
-    branches:
-      - 'main'
-    paths:
-      - '.github/workflows/bisect_vllm.yaml'
-      - 'tools/bisect_vllm.sh'
-      - 'tools/bisect_helper.py'
   workflow_dispatch:
     inputs:
       good_commit:
@@ -85,6 +78,65 @@ jobs:
           python3 tools/bisect_helper.py batch-matrix \
             --test-cmds "${TEST_CMDS}" \
             --output-format github
+
+  # ================================================================
+  # Test extract_failures.py (PR only, lightweight, ubuntu-latest)
+  # Validates that CI log extraction works against a known failed run.
+  # ================================================================
+  test-extract:
+    name: Test extract_failures.py
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Test extract_failures.py against known failed run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/extract_failures.py \
+            --repo vllm-project/vllm-ascend \
+            --run-id 22414687320 > /tmp/result.json
+
+          cat /tmp/result.json
+
+          python3 << 'EOF'
+          import json, sys
+
+          d = json.load(open("/tmp/result.json"))
+
+          # Verify output structure
+          required_keys = [
+              "run_id", "run_url", "vllm_bad_commit", "vllm_good_commit",
+              "failed_jobs", "failed_tests", "test_cmds", "test_cmds_semicolon",
+              "extraction_errors", "skip_reason",
+          ]
+          for k in required_keys:
+              assert k in d, f"Missing key: {k}"
+
+          assert d["run_id"] == 22414687320, f"Unexpected run_id: {d['run_id']}"
+          assert d["skip_reason"] is None, f"Unexpected skip: {d['skip_reason']}"
+
+          # Should have extracted some failed tests
+          n = len(d["failed_tests"])
+          print(f"Extracted {n} failed test(s)")
+          if n == 0:
+              # Log extraction may fail due to token permissions in fork PRs
+              # In that case extraction_errors should be populated
+              assert len(d["extraction_errors"]) > 0, "No tests and no errors - unexpected"
+              print(f"Log extraction had {len(d['extraction_errors'])} error(s) (expected for fork PRs)")
+              print("PASS (with expected extraction errors)")
+          else:
+              # Verify test paths look reasonable
+              for t in d["failed_tests"]:
+                  assert t.startswith("tests/"), f"Bad test path: {t}"
+                  assert t.endswith(".py") or "::" in t, f"Bad test path: {t}"
+              print(f"bad_commit: {d['vllm_bad_commit']}")
+              print(f"good_commit: {d['vllm_good_commit']}")
+              print(f"test_cmds_semicolon: {d['test_cmds_semicolon'][:200]}")
+              print("PASS")
+          EOF
 
   # ================================================================
   # Generic bisect job — NO if/else branches for test types.

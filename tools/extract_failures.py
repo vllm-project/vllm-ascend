@@ -30,7 +30,7 @@ Usage:
   python3 tools/extract_failures.py --repo vllm-project/vllm-ascend
 
   # Specify a run ID:
-  python3 tools/extract_failures.py --repo vllm-project/vllm-ascend --run-id 22001852289
+  python3 tools/extract_failures.py --repo vllm-project/vllm-ascend --run-id 22414687320
 
   # Only process runs from a specific UTC hour (for dedup in cron):
   python3 tools/extract_failures.py --repo vllm-project/vllm-ascend --only-hour 20
@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -69,11 +70,20 @@ _FAILED_SUMMARY_RE = re.compile(
     re.MULTILINE,
 )
 
-# checkout action prints: "Checking out '<hash>'" or just the hash on a line
-# after "Cloning into" / "Fetching" for the vllm repo.
+# checkout action output patterns for extracting the commit hash:
+#   "HEAD is now at abc1234 some commit message"
+#   "Checking out 'abc1234def...'"
+#   "abc1234def5678901234567890abcdef12345678"  (standalone 40-char hash line)
 _CHECKOUT_HASH_RE = re.compile(
     r"(?:Checking out|HEAD is now at)\s+['\"]?([0-9a-f]{7,40})",
 )
+# Standalone 40-char hash line, possibly with GitHub Actions timestamp prefix
+# e.g. "2024-01-15T10:30:00.1234567Z ed42507f6d6e..." or just "ed42507f6d6e..."
+_STANDALONE_HASH_RE = re.compile(
+    r"^(?:\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+)?([0-9a-f]{40})\s*$",
+)
+# "git log -1 --format=%H" followed by the hash on the next line
+_GIT_LOG_HASH_RE = re.compile(r"git log -1 --format=%H")
 
 
 # ---------------------------------------------------------------------------
@@ -82,10 +92,17 @@ _CHECKOUT_HASH_RE = re.compile(
 
 
 def _gh_api(endpoint: str, **kwargs) -> dict | list:
-    """Call ``gh api`` and return parsed JSON."""
-    cmd = ["gh", "api", endpoint]
-    for k, v in kwargs.items():
-        cmd += ["-f", f"{k}={v}"]
+    """Call ``gh api`` and return parsed JSON.
+
+    Query parameters are appended to the URL (GET request).
+    """
+    # Build query string from kwargs
+    if kwargs:
+        params = "&".join(f"{k}={v}" for k, v in kwargs.items())
+        url = f"{endpoint}?{params}"
+    else:
+        url = endpoint
+    cmd = ["gh", "api", url]
     try:
         result = subprocess.run(
             cmd,
@@ -97,7 +114,7 @@ def _gh_api(endpoint: str, **kwargs) -> dict | list:
         logger.error("'gh' CLI not found. Install it or run inside GitHub Actions.")
         sys.exit(1)
     except subprocess.CalledProcessError as e:
-        logger.error("gh api %s failed: %s", endpoint, e.stderr.strip())
+        logger.error("gh api %s failed: %s", url, e.stderr.strip())
         sys.exit(1)
     return json.loads(result.stdout)
 
@@ -154,26 +171,47 @@ def get_failed_jobs(repo: str, run_id: int) -> list[dict]:
 def extract_vllm_commit_from_log(log_text: str) -> str | None:
     """Extract the vllm commit hash from a job log.
 
-    The ``actions/checkout`` action prints a line like:
-        ``Checking out '<full_sha>'``
-    We look for this pattern after a line referencing the vllm repo.
+    The ``actions/checkout`` action prints lines like:
+        ``/usr/bin/git checkout --progress --force ...``
+        ``HEAD is now at <hash> <message>``
+    after a section referencing the vllm repo.
+
+    We search for "HEAD is now at <hash>" that appears after any line
+    mentioning "vllm-project/vllm" (but not "vllm-ascend").
     """
-    # Split into lines and search for the checkout of vllm-project/vllm
     lines = log_text.splitlines()
-    in_vllm_checkout = False
+    seen_vllm_repo = False
+    seen_git_log_cmd = False
     for line in lines:
-        # checkout action logs the repo being checked out
+        # Detect any reference to the vllm repo (not vllm-ascend)
         if "vllm-project/vllm" in line and "vllm-ascend" not in line:
-            in_vllm_checkout = True
-        if in_vllm_checkout:
+            seen_vllm_repo = True
+        # Once we've seen the vllm repo, look for the commit hash
+        if seen_vllm_repo:
             m = _CHECKOUT_HASH_RE.search(line)
             if m:
                 return m.group(1)
-        # Reset if we've moved past the checkout step
-        if in_vllm_checkout and ("##[endgroup]" in line or "Run " in line):
-            # Still within the checkout step group, keep looking
-            if "##[endgroup]" in line:
-                in_vllm_checkout = False
+            # Detect "git log -1 --format=%H" — the next line is the hash
+            if _GIT_LOG_HASH_RE.search(line):
+                seen_git_log_cmd = True
+                continue
+            # Line right after "git log -1 --format=%H"
+            if seen_git_log_cmd:
+                m2 = _STANDALONE_HASH_RE.match(line.strip())
+                if m2:
+                    return m2.group(1)
+                seen_git_log_cmd = False
+            # Some checkout versions print just the 40-char hash on its own line
+            stripped = line.strip()
+            m3 = _STANDALONE_HASH_RE.match(stripped)
+            if m3:
+                return m3.group(1)
+        # If we hit the next step's group header after seeing the repo,
+        # and it's clearly a different step, stop looking
+        if seen_vllm_repo and "##[group]Run " in line:
+            # Check if this is a new step (not the checkout step itself)
+            if "checkout" not in line.lower():
+                seen_vllm_repo = False
     return None
 
 
@@ -296,43 +334,71 @@ def check_duplicate_bisect(repo: str, bad_commit: str) -> str | None:
 def get_good_commit(repo: str) -> str | None:
     """Extract the good (currently pinned) vllm commit from origin/main.
 
-    Reads pr_test_light.yaml from the main branch and extracts the commit
-    hash from the vllm_version matrix.
+    Tries multiple strategies:
+    1. Read pr_test_light.yaml from disk (works in checkout context)
+    2. Read from origin/main via git show (works in full clone)
+    3. Fallback to bisect_helper.py
     """
+    commit_re = re.compile(r"^[0-9a-f]{7,40}$")
+    yaml_rel = ".github/workflows/pr_test_light.yaml"
+
+    def _extract_from_content(content: str) -> str | None:
+        m = re.search(r"vllm_version:\s*\[([^\]]+)\]", content)
+        if not m:
+            return None
+        entries = [e.strip().strip("'\"") for e in m.group(1).split(",")]
+        for entry in entries:
+            if commit_re.match(entry):
+                return entry
+        return None
+
+    # Strategy 1: read from disk (current checkout)
+    try:
+        repo_root = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        disk_path = os.path.join(repo_root, yaml_rel)
+        if os.path.exists(disk_path):
+            with open(disk_path) as f:
+                commit = _extract_from_content(f.read())
+            if commit:
+                logger.info("Good commit from disk (%s): %s", disk_path, commit)
+                return commit
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pass
+
+    # Strategy 2: read from origin/main via git show
     try:
         result = subprocess.run(
-            ["git", "show", "origin/main:.github/workflows/pr_test_light.yaml"],
+            ["git", "show", f"origin/main:{yaml_rel}"],
             capture_output=True,
             text=True,
             check=True,
         )
-        content = result.stdout
+        commit = _extract_from_content(result.stdout)
+        if commit:
+            logger.info("Good commit from origin/main: %s", commit)
+            return commit
     except (subprocess.CalledProcessError, FileNotFoundError):
-        # Fallback: try reading from disk if not in a git repo context
-        logger.warning("Cannot read pr_test_light.yaml from origin/main, trying bisect_helper.py")
-        try:
-            result = subprocess.run(
-                ["python3", "tools/bisect_helper.py", "get-commit", "--ref", "origin/main"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            commit = result.stdout.strip()
-            if commit:
-                return commit
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
-        return None
+        pass
 
-    # Parse vllm_version matrix: [<commit_hash>, v0.15.0]
-    m = re.search(r"vllm_version:\s*\[([^\]]+)\]", content)
-    if not m:
-        return None
-    entries = [e.strip().strip("'\"") for e in m.group(1).split(",")]
-    commit_re = re.compile(r"^[0-9a-f]{7,40}$")
-    for entry in entries:
-        if commit_re.match(entry):
-            return entry
+    # Strategy 3: fallback to bisect_helper.py
+    try:
+        result = subprocess.run(
+            ["python3", "tools/bisect_helper.py", "get-commit"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        commit = result.stdout.strip()
+        if commit:
+            return commit
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    logger.warning("Could not determine good commit from any source")
     return None
 
 
@@ -447,6 +513,18 @@ def main():
         args.repo,
         failed_jobs,
     )
+
+    # Step 4b: Fallback for bad_commit — query vllm repo for HEAD at run time
+    if not bad_commit:
+        logger.warning("Could not extract vllm commit from logs, trying vllm repo API")
+        try:
+            # Get the latest commit on vllm main at the time the run was created
+            vllm_data = _gh_api("/repos/vllm-project/vllm/commits/main")
+            bad_commit = vllm_data.get("sha")
+            if bad_commit:
+                logger.info("Bad commit from vllm main HEAD: %s", bad_commit[:12])
+        except SystemExit:
+            logger.warning("Could not query vllm repo for HEAD commit")
 
     # Step 5: Get good commit
     good_commit = get_good_commit(args.repo)

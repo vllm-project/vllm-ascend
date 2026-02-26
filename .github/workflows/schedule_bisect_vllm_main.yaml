@@ -29,6 +29,13 @@ on:
         description: 'Workflow run ID to analyze (leave empty to find latest failed run)'
         required: false
         default: ''
+  # PR trigger: dry-run mode (extract only, no bisect trigger)
+  pull_request:
+    branches:
+      - 'main'
+    paths:
+      - '.github/workflows/schedule_bisect_vllm_main.yaml'
+      - 'tools/extract_failures.py'
 
 permissions:
   actions: write
@@ -43,9 +50,10 @@ jobs:
     name: Extract failures & trigger bisect
     runs-on: ubuntu-latest
     # For workflow_run: only run if the schedule test failed
-    # For workflow_dispatch: always run
+    # For workflow_dispatch / pull_request: always run
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
       github.event.workflow_run.conclusion == 'failure'
     steps:
       - name: Checkout vllm-ascend repo
@@ -60,6 +68,10 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
             RUN_ID="${{ github.event.workflow_run.id }}"
             EXTRA_ARGS="--only-hour 20 --check-duplicate"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # PR dry-run: use a known failed run for validation
+            RUN_ID="22414687320"
+            EXTRA_ARGS=""
           else
             RUN_ID="${{ inputs.run_id }}"
             EXTRA_ARGS=""
@@ -98,7 +110,7 @@ jobs:
           echo "Found ${NUM_FAILED} failed test(s), bad_commit=${BAD_COMMIT}, good_commit=${GOOD_COMMIT}"
 
       - name: Trigger bisect workflow
-        if: steps.extract.outputs.skip != 'true'
+        if: steps.extract.outputs.skip != 'true' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -115,6 +127,36 @@ jobs:
             ${ARGS}
 
           echo "Bisect workflow triggered successfully"
+
+      - name: Verify trigger command (PR only)
+        if: steps.extract.outputs.skip != 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Verify the workflow file exists and accepts expected inputs
+          gh api /repos/${{ github.repository }}/actions/workflows/bisect_vllm.yaml \
+            --jq '.id' && echo "bisect_vllm.yaml workflow found"
+
+          # Verify extraction outputs are non-empty
+          TEST_CMDS="${{ steps.extract.outputs.test_cmds }}"
+          if [[ -z "${TEST_CMDS}" ]]; then
+            echo "ERROR: test_cmds is empty"
+            exit 1
+          fi
+          echo "test_cmd=${TEST_CMDS}"
+          echo "bad_commit=${{ steps.extract.outputs.bad_commit }}"
+          echo "good_commit=${{ steps.extract.outputs.good_commit }}"
+
+          # Build and display the full command that would run
+          ARGS=""
+          if [[ -n "${{ steps.extract.outputs.good_commit }}" ]]; then
+            ARGS="${ARGS} -f good_commit=${{ steps.extract.outputs.good_commit }}"
+          fi
+          if [[ -n "${{ steps.extract.outputs.bad_commit }}" ]]; then
+            ARGS="${ARGS} -f bad_commit=${{ steps.extract.outputs.bad_commit }}"
+          fi
+          echo "Would run: gh workflow run bisect_vllm.yaml -f test_cmd=\"${TEST_CMDS}\" ${ARGS}"
+          echo "All parameters validated successfully"
 
       - name: Write summary
         if: always()
@@ -133,12 +175,17 @@ jobs:
           from pathlib import Path
 
           result_path = Path("/tmp/result.json")
-          if not result_path.exists():
+          if not result_path.exists() or result_path.stat().st_size == 0:
               print("## Auto Bisect - No Result")
               print("Extraction did not produce a result file.")
               exit(0)
 
-          d = json.load(result_path.open())
+          try:
+              d = json.load(result_path.open())
+          except json.JSONDecodeError:
+              print("## Auto Bisect - Error")
+              print("Failed to parse extraction result.")
+              exit(0)
 
           print("## Auto Bisect vLLM Main Failures")
           print()
