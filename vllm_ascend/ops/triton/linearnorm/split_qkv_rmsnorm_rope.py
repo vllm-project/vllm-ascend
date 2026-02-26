@@ -78,7 +78,8 @@ def split_qkv_rmsnorm_rope_kernel(
             normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
 
         pos_values = tl.load(positions_gm_ptr + row_idx)
-        sin_cos_indices = ((pos_values[:, None] * ele_sin_cos_per_batch + tl.arange(0, ele_sin_cos_per_batch))).reshape(2, ROPE_DIM)
+        sin_cos_indices = ((pos_values[:, None] * ele_sin_cos_per_batch +
+            tl.arange(0, ele_sin_cos_per_batch))).reshape(2, ROPE_DIM)
         input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices)
         cos = tl.extract_slice(
                 input_values,
@@ -176,7 +177,8 @@ def split_qkv_rmsnorm_rope_kernel(
             normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
 
         pos_values = tl.load(positions_gm_ptr + row_idx)
-        sin_cos_indices = ((pos_values[:, None] * ele_sin_cos_per_batch + tl.arange(0, ele_sin_cos_per_batch))).reshape(2, ROPE_DIM)
+        sin_cos_indices = ((pos_values[:, None] * ele_sin_cos_per_batch +
+            tl.arange(0, ele_sin_cos_per_batch))).reshape(2, ROPE_DIM)
         input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices)
         cos = tl.extract_slice(
                 input_values,
@@ -295,11 +297,8 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
     cos_sin_cache_gm_ptr,
     ele_sin_cos_per_batch:tl.constexpr,
 ):
-
-    # 获取当前gird
     row_pid = tl.program_id(0)
 
-    # qk的权重
     q_weight_values = tl.load(q_weight_ptr + tl.arange(0, HEAD_DIM))
     k_weight_values = tl.load(k_weight_ptr + tl.arange(0, HEAD_DIM))
 
@@ -373,7 +372,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
             normalized_values_tmp = (normalized_values_tmp * q_weight_values).to(tl.bfloat16)
             
         
-        # q rope旋转
+        # q rope
         values_tmp = tl.zeros((batch_size_per_iter_per_vec, q_head_num, ROPE_DIM),
                             dtype=tl.bfloat16)
         y = tl.extract_slice(
@@ -390,7 +389,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
             sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        #q的后一半
+
         y = tl.extract_slice(
                 normalized_values_tmp,
                 offsets=(0, 0, HALF_ROPE_DIM),
@@ -404,7 +403,6 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
             sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        # (-q2, q1) * sin + (q1, q2) * cos = (-q2* sin, q1* sin) + (q1* cos, q2* cos) = (-q2 * sin + q1 * cos, q1 * sin + q2 * cos) 
         values_tmp = values_tmp * sin
         q_output_idx = output_q_nblk_idx[None, :] + (mblk_idx + pos_offset)[:, None] * q_hidden_size
         mask = (mmask[:, None]) & (output_q_nmask[None, :])
@@ -466,7 +464,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )     
-        #q的后一半
+
         y = tl.extract_slice(
                 normalized_values_tmp1,
                 offsets=(0, 0, HALF_ROPE_DIM),
@@ -541,7 +539,7 @@ def split_qkv_rmsnorm_rope_impl(
     q_bias: Optional[torch.Tensor] | None = None,
     k_bias: Optional[torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # 获取可用VECTOR 数量
+    # get available vector core
     num_vectorcore = get_vectorcore_num()
     if rope_dim is None:
         rope_dim = head_dim
@@ -552,7 +550,7 @@ def split_qkv_rmsnorm_rope_impl(
     # Q + K + V
     total_hidden_size = q_hidden_size + kv_hidden_size * 2
     ele_sin_cos_per_batch = rope_dim * 2
-    #计算QKV的大小，为计算图准备，输入输出固定大小
+
     q_output = torch.empty(batch_size,
                            q_hidden_size,
                            device=input.device,
@@ -566,8 +564,8 @@ def split_qkv_rmsnorm_rope_impl(
                            device=input.device,
                            dtype=input.dtype)
 
-    #判断prefill阶段还是decode阶段 
-    if batch_size < num_vectorcore: #decode阶段
+    # prefill or decode
+    if batch_size < num_vectorcore: # decode
         KV_BLOCK_SIZE = triton.next_power_of_2(head_dim)
         assert KV_BLOCK_SIZE == head_dim 
         assert q_hidden_size % kv_hidden_size == 0
@@ -604,15 +602,14 @@ def split_qkv_rmsnorm_rope_impl(
             ele_sin_cos_per_batch,
         )
 
-    else:#prefill阶段      
+    else: # prefill     
         KV_BLOCK_SIZE = triton.next_power_of_2(head_dim) * batch_size
         Q_BLOCK_SIZE =  q_hidden_size // kv_hidden_size * KV_BLOCK_SIZE
         q_head_num = q_hidden_size // head_dim
         kv_head_num = kv_hidden_size // head_dim
         batch_size_per_vec =  triton.cdiv(batch_size, num_vectorcore)
 
-        # 每次迭代、UB用满的情况input输入元素数量设为x: 
-        
+        # set number of input elements for per iter and full ub utilization is x
         # 2x + x/(kv_head_num+q_head_num) + x*(q_head_num/(q_head_num+kv_headnum))*1.75=85k
         # 2x(kv_head_num+q_head_num) + x + 1.75*x*q_head_num =85k * (kv_head_num+q_head_num)
         # x*(2*(kv_head_num+q_head_num) + 1 + 1.75*q_head_num) = 85k * (kv_head_num+q_head_num)
@@ -620,9 +617,10 @@ def split_qkv_rmsnorm_rope_impl(
 
         #2x*(q_head_num + kv_head_num)*HEAD_DIM*3+x*HEAD_DIM*(2+q_head_num*0.5) = 85*1024/2
         # input_values + normalized_values+normalized_values_tmp + x + sin and cos
-        # input.element_size() 此处为bfloat16,占用两个字节
-        # batch_size_per_iter_per_vec = 85*1024/input.element_size()//(6 * head_dim * (q_head_num + kv_head_num) + head_dim * 2 + head_dim*q_head_num*0.5)
-        # 设：GM上原数据取X行元素(bfloat16)
+        # input.element_size() occupy 2B
+        # batch_size_per_iter_per_vec = 85*1024/input.element_size()//(6 * head_dim * (q_head_num + kv_head_num) + 
+        # head_dim * 2 + head_dim*q_head_num*0.5)
+        # set number of line loading from GM data is x
         # x*(q_head_num + kv_head_num)*HEAD_DIM: values_tmp
         # 2x*(q_head_num + kv_head_num)*HEAD_DIM: normalized_values(float32)
         # x*ROPE_DIM*2 : cos/sin
@@ -630,11 +628,11 @@ def split_qkv_rmsnorm_rope_impl(
         # x*q_head_num*ROPE_DIM*(0.5) x(not IS_PARTIAL_ROPE)
         
         if IS_PARTIAL_ROPE:
-            factor = (5*q_head_num*head_dim + 3*kv_head_num*head_dim + rope_dim*4 +q_head_num*rope_dim)
-            batch_size_per_iter_per_vec = 85*1024/input.element_size()// factor
+            factor = (5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 4 + q_head_num * rope_dim)
+            batch_size_per_iter_per_vec = 85 * 1024 / input.element_size() // factor
         else:
-            factor = (5*q_head_num*head_dim + 3*kv_head_num*head_dim + rope_dim*2 +q_head_num*rope_dim*0.5)
-            batch_size_per_iter_per_vec = 85*1024/input.element_size()// factor
+            factor = (5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 2 + q_head_num * rope_dim * 0.5)
+            batch_size_per_iter_per_vec = 85 * 1024 / input.element_size() // factor
         batch_size_per_iter_per_vec = min(batch_size_per_iter_per_vec, batch_size_per_vec)
         qk_head_num_sum = int(q_head_num + kv_head_num)
         qk_head_nums_per_iter_per_vec = batch_size_per_iter_per_vec * qk_head_num_sum
