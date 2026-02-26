@@ -17,7 +17,6 @@ enable_custom_op()
 MODEL_PATH = "vllm-ascend/Llama-3.2-3B-Instruct"
 
 
-@patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @wait_until_npu_memory_free()
 def test_llama_lora_tp2(llama32_lora_files, fully_sharded_loras):
