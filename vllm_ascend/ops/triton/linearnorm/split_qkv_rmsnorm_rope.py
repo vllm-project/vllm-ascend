@@ -618,17 +618,17 @@ def split_qkv_rmsnorm_rope_impl(
         # the factor is the sum of elements number
         if IS_PARTIAL_ROPE:
             factor = 5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 4 + q_head_num * rope_dim
-            batch_size_per_iter_per_vec = UB_SIZE / input.element_size() // factor
+            batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
         else:
             factor = 5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 2 + q_head_num * rope_dim * 0.5
-            batch_size_per_iter_per_vec = UB_SIZE / input.element_size() // factor
+            batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
         batch_size_per_iter_per_vec = min(batch_size_per_iter_per_vec, batch_size_per_vec)
         qk_head_num_sum = int(q_head_num + kv_head_num)
         qk_head_nums_per_iter_per_vec = batch_size_per_iter_per_vec * qk_head_num_sum
 
         iter_num_per_vec = triton.cdiv(batch_size_per_vec, batch_size_per_iter_per_vec)
 
-        grid = (min(num_vectorcore, batch_size), 1)
+        grid = (min(num_vectorcore, batch_size), 1, 1)
 
         # v tiling
         v_batch_size_per_iter_per_vec = UB_SIZE / torch.bfloat16.itemsize // (kv_hidden_size + 1)
