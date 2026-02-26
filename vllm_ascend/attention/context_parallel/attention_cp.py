@@ -921,9 +921,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         if has_decode:
             if not attn_metadata.use_hybrid_attn or not has_prefill:
-                decode_query = query[:num_decode_tokens]
+                decode_query = query[:num_decode_tokens].contiguous()
             else:
-                decode_query = query[: num_decode_tokens * self.pcp_size : self.pcp_size]
+                decode_query = query[: num_decode_tokens * self.pcp_size : self.pcp_size].contiguous()
             output_decode = self._forward_decode_pcp_dcp(decode_query, attn_metadata)
             output[:num_decode_tokens] = output_decode
         if has_prefill:
