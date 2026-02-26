@@ -28,18 +28,22 @@ This skill automates the extraction of inference examples that can be run on sin
     *   **Environment Isolation**: Wraps each test case in a subshell `( ... )` to prevent environment variable leakage.
     *   **Global vs Local Envs**: Correctly identifies and places global variables outside subshells and test-specific variables inside.
     *   **Non-Blocking Execution**: Ensures failure in one test case does not stop the entire script.
+4.  **Atlas A2 and A3 Support**:
+    *   **Separate Extraction**: Extract inference examples specifically for Atlas A2 and Atlas A3 hardware environments.
+    *   **Separate Scripts**: Create distinct bash test scripts for Atlas A2 and Atlas A3 (e.g., `test_<model>_a2_inference.sh` and `test_<model>_a3_inference.sh`) to ensure compatibility and proper resource usage for each hardware generation.
 
 ## Usage Instructions
 
 When invoked, the skill should:
 1.  Analyze the provided documentation file to identify the model name and relevant commands.
-2.  Create a bash script named `test_<model_name>_inference.sh`.
-3.  Include environment detection logic for `vllm`.
-4.  Extract the `vllm serve` command (including its environment variables).
-5.  Generate code to start the server in the background and wait for it (with PID monitoring).
-6.  Extract `curl` and `vllm bench` commands as test cases.
+2.  **Distinguish Hardware**: Check if the documentation specifies Atlas A2 or Atlas A3 instructions. If both are present or implied, generate separate scripts.
+3.  Create bash scripts named `test_<model_name>_a2_inference.sh` and/or `test_<model_name>_a3_inference.sh` as appropriate.
+4.  Include environment detection logic for `vllm`.
+5.  Extract the `vllm serve` command (including its environment variables).
+6.  Generate code to start the server in the background and wait for it (with PID monitoring).
+7.  Extract `curl` and `vllm bench` commands as test cases.
     *   **CRITICAL**: Check for `--tokenizer` in the original command. If present, it MUST be included in the test script command, even if `--model` is changed to the short name (e.g., `qwen3`).
-7.  Make the script executable.
+8.  Make the script executable.
 
 ## Example Output Structure
 
@@ -98,42 +102,4 @@ wait_for_server() {
         fi
         sleep 10
         retries=$((retries+1))
-        if [ $retries -ge $max_retries ]; then
-            echo "Server failed to start within timeout."
-            return 1
-        fi
-        echo "Waiting... ($retries/$max_retries)"
-    done
-    echo "Server is ready!"
-}
-
-# Global Envs
-export GLOBAL_VAR=value
-
-# Start Server
-echo "Starting vLLM server..."
-(
-    export SERVER_ENV=value
-    # Use setsid or just & to run in background
-    vllm serve ... &
-    echo $! > vllm_server.pid
-)
-# Main scope
-export SERVER_ENV=value
-vllm serve ... &
-SERVER_PID=$!
-echo "Server started with PID $SERVER_PID"
-
-# Ensure server is killed on exit
-trap 'kill $SERVER_PID' EXIT
-
-# Wait for readiness
-wait_for_server $SERVER_PID
-
-# Test Case 1
-(
-    export LOCAL_VAR=value
-    CMD="curl ..."
-    run_test_case "Description" "$CMD"
-)
 ```

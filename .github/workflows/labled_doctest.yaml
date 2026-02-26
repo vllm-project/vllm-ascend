@@ -88,12 +88,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: [test_deepseek_v3_2_inference.sh, test_qwen3_inference.sh]
-    name: single-node-${{ matrix.test_script }}
-    runs-on: linux-aarch64-a3-16
+        hardware: [a2, a3]
+        include:
+          - hardware: a2
+            runner: linux-aarch64-a2b3-8
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2
+          - hardware: a3
+            runner: linux-aarch64-a3-16
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3
+    name: single-node-tests (${{ matrix.hardware }})
+    runs-on: ${{ matrix.runner }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3
-      options: --user root
+      image: ${{ matrix.image }}
     steps:
       - name: Check NPU/CANN and git info
         run: |
@@ -104,7 +110,17 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
 
-      - name: Run tests/e2e/doctests/single_node/${{ matrix.test_script }}
+      - name: single-node-test_qwen3_a2_inference.sh
+        if: matrix.hardware == 'a2'
         run: |
-          echo "Running ${{ matrix.test_script }}..."
-          bash tests/e2e/doctests/single_node/${{ matrix.test_script }}
+          bash tests/e2e/doctests/single_node/test_qwen3_a2_inference.sh
+
+      - name: single-node-test_qwen3_a3_inference.sh
+        if: matrix.hardware == 'a3'
+        run: |
+          bash tests/e2e/doctests/single_node/test_qwen3_a3_inference.sh
+
+      - name: single-node-test_deepseek_v3_2_a3_inference.sh
+        if: matrix.hardware == 'a3'
+        run: |
+          bash tests/e2e/doctests/single_node/test_deepseek_v3_2_a3_inference.sh

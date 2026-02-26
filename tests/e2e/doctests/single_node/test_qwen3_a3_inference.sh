@@ -71,35 +71,39 @@ wait_for_server() {
 NODE_IP="${NODE_IP:-127.0.0.1}"
 PORT="${PORT:-8000}"
 
-# Global environment variables from Single-node Deployment
+# Global environment variables from Single Node A3 (64G*16) Performance section
+export VLLM_USE_MODELSCOPE=true
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=512
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=200
-# export VLLM_ASCEND_ENABLE_MLAPO=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+export TASK_QUEUE_ENABLE=1
+# Fix for user-specified max_model_len > derived max_model_len
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 
 # Start Server (Background)
-echo "Starting vLLM server..."
-# Extracted from docs/source/tutorials/models/DeepSeek-V3.2.md
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+echo "Starting vLLM server (Atlas A3 Configuration)..."
+# Extracted from docs/source/tutorials/models/Qwen3-235B-A22B.md (Single Node A3 Performance)
+vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --host ${NODE_IP} \
 --port ${PORT} \
---data-parallel-size 2 \
---tensor-parallel-size 8 \
---quantization ascend \
+--tensor-parallel-size 4 \
+--data-parallel-size 4 \
 --seed 1024 \
---served-model-name deepseek_v3_2 \
+--quantization ascend \
+--served-model-name qwen3 \
+--max-num-seqs 128 \
+--max-model-len 40960 \
+--max-num-batched-tokens 16384 \
 --enable-expert-parallel \
---max-num-seqs 16 \
---max-model-len 8192 \
---max-num-batched-tokens 4096 \
 --trust-remote-code \
+--gpu-memory-utilization 0.9 \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' &
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--async-scheduling &
 
 SERVER_PID=$!
 echo "Server started with PID $SERVER_PID"
@@ -114,7 +118,7 @@ if wait_for_server $SERVER_PID; then
         CMD_1="curl http://${NODE_IP}:${PORT}/v1/completions \
             -H \"Content-Type: application/json\" \
             -d '{
-                \"model\": \"deepseek_v3_2\",
+                \"model\": \"qwen3\",
                 \"prompt\": \"The future of AI is\",
                 \"max_completion_tokens\": 50,
                 \"temperature\": 0
@@ -122,21 +126,20 @@ if wait_for_server $SERVER_PID; then
         run_test_case "Functional Verification (curl)" "$CMD_1"
     )
 
-    # Inference Test Case 2: vLLM Benchmark (Performance)
+    # Inference Test Case 2: vLLM Benchmark (Single Node A3 Performance)
     (
-        # Using the model path from single-node deployment as tokenizer
-        export VLLM_USE_MODELSCOPE=true
-        CMD_2="vllm bench serve --model deepseek_v3_2 \
-        --tokenizer /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+        CMD_2="vllm bench serve --model qwen3 \
+        --tokenizer vllm-ascend/Qwen3-235B-A22B-w8a8 \
+        --ignore-eos \
         --dataset-name random \
-        --random-input 200 \
-        --num-prompts 200 \
-        --request-rate 1 \
-        --save-result \
-        --result-dir ./ \
+        --random-input-len 3584 \
+        --random-output-len 1536 \
+        --num-prompts 8 \
+        --max-concurrency 160 \
+        --request-rate 24 \
         --host ${NODE_IP} \
         --port ${PORT}"
-        run_test_case "vLLM Benchmark (Performance)" "$CMD_2"
+        run_test_case "vLLM Benchmark (Single Node A3 Performance)" "$CMD_2"
     )
 else
     echo "Server failed to start. Skipping tests."
