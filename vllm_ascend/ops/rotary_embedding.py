@@ -30,13 +30,7 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-    has_rope,
-    is_vl_model,
-    shared_expert_dp_enabled
-)
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, has_rope, is_vl_model, shared_expert_dp_enabled
 from vllm.forward_context import get_forward_context
 
 if HAS_TRITON:
