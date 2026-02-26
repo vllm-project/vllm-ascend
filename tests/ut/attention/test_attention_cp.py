@@ -81,6 +81,9 @@ class TestAscendAttentionCPImpl(TestBase):
             [0])
         attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx = torch.tensor(
             [0])
+        attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx = torch.tensor(
+            [0, 1])
+        attn_metadata.use_hybrid_attn = False
 
         output, attn_lse = self.impl._forward_prefill_cp(
             query, key, value, attn_metadata)
