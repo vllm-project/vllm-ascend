@@ -97,8 +97,8 @@
 # * Worker Patch:
 # ===============
 #
-# ** 1. File: worker/patch_distributed.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# ** 1. File: worker/patch_distributed.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
 #    Why:
 #       vllm doesn't support all_to_all for GroupCoordinator.
@@ -112,7 +112,7 @@
 #       Remove this patch when the refactor of all2all manager is done.
 #       Remove this patch when vLLM support all_reduce as customop.
 #
-# ** 3. File: worker/patch_multimodal_merge.py**
+# ** 2. File: worker/patch_multimodal_merge.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.utils._merge_multimodal_embeddings`
 #    Why:
@@ -124,9 +124,10 @@
 #    Future Plan:
 #       Identify this pattern in torch-npu and remove this patch.
 #
-# ** 4. File: worker/patch_roberta.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.bert `
+# ** 3. File: worker/patch_bert.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.bert._encode_token_type_ids`
+#      `vllm.model_executor.models.bert._decode_token_type_ids`
 #    Why:
 #       shift operation in `_encode_token_type_ids` and `_decode_token_type_ids` cannot run in ascend aclgraph mode
 #    How：
@@ -136,7 +137,7 @@
 #    Future Plan:
 #       Revert this when CANN support shift aclnn operation
 #
-# ** 5. File: worker/patch_triton.py**
+# ** 4. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
@@ -149,7 +150,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
-# ** 6. File: worker/patch_qwen3_next_mtp.py**
+# ** 5. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
@@ -162,7 +163,22 @@
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
-# ** 7. File: worker/patch_module.py**
+# ** 6. File: worker/patch_rejection_sampler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.sample.rejection_sampler`
+#    Why:
+#       - some functions from `rejection_sampler` are not supported or slow on npu.
+#    How：
+#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
+#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
+#    Related PR (if no, explain why):
+#       Let vLLM support triton ops dispatch.
+#    Future Plan:
+#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
+#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
+#       2. make these functions as costom op, then remove AscendRejectionSampler
+#
+## ** 7. File: worker/patch_module.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
@@ -178,23 +194,7 @@
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
 #       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
-# ** 8. File: worker/patch_rejection_sampler.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.rejection_sampler`
-#    Why:
-#       - some functions from `rejection_sampler` are not supported or slow on npu.
-#    How：
-#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
-#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/874
-#       https://github.com/vllm-project/vllm/pull/4849
-#    Future Plan:
-#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
-#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
-#       2. make these functions as costom op, then remove AscendRejectionSampler
-#
-# ** 9.File: worker/patch_qwen3_next.py**
+# ** 8. File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
 #    Why:
@@ -206,9 +206,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-# ** 10. File: worker/patch_qwen3_next.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
+#   2. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
 #    Why:
 #       triton ops fused_recurrent_gated_delta_rule and fused_gdn_gating in vLLM perform not good on NPU.
 #    How：
@@ -218,7 +216,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-#   2. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
+#   3. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
 #    Why:
 #       The Qwen3Next GatedDeltaNet _forward_core cannot directly add custom operators.
 #    How：
@@ -228,7 +226,17 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-# ** 11. File: worker/patch_v2_eagle.py**
+# ** 9. File: worker/patch_huanyuan_vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.processors.hunyuan_vl.HunYuanVLProcessor.__call__`
+#    Why:
+#       The `add_special_tokens` parameter is not supported by default in the processor.
+#    How：
+#       Remove the `add_special_tokens` parameter from kwargs before calling the original method.
+#    Future Plan:
+#       Remove this patch when vLLM aligns with the latest processor implementation.
+#
+# ** 10. File: worker/patch_v2_eagle.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
 #    Why:
@@ -240,7 +248,7 @@
 #    Future Plan:
 #       Remove this patch when cann fix the gather bug.
 #
-# ** 12. File: worker/patch_unquantized_gemm.py**
+# ** 11. File: worker/patch_unquantized_gemm.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.utils.default_unquantized_gemm`
 #    Why:
@@ -250,7 +258,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the operator as customop.
 #
-# ** 13. File: worker/patch_npugraph_ex_triton.py**
+# ** 12. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torchair.core._concrete_graph.ValuePack`,
 #      `torchair.npu_fx_compiler._unpack_meta`,
@@ -263,7 +271,8 @@
 #       https://gitcode.com/Ascend/torchair/pull/2575
 #    Future Plan:
 #       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
-# ** 14. File: worker/patch_v2_uva.py**
+#
+# ** 13. File: worker/patch_v2_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.states.UvaBuffer`
 #    Why:
@@ -272,3 +281,27 @@
 #       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
+#
+# ** 14. File: worker/patch_kimi_k25.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.kimi_k25_vit.Learnable2DInterpPosEmbDivided_fixed.forward`
+#    Why:
+#       The forward method uses interpolate with ops not supported on NPU.
+#    How：
+#       Replace with a new forward that uses CPU for interpolate when shape mismatch,
+#       and use get_rope_shape to handle the rope shape interpolation.
+#    Future Plan:
+#       Remove this patch when vLLM aligns with the latest main.
+#
+# ** 15. File: worker/patch_routed_experts_capturer.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.init_buffer`
+#    Why:
+#       The `_device_buffer` initialization in vLLM uses `device="cuda"` hardcoded,
+#       which doesn't work on NPU.
+#    How：
+#       Replace `device="cuda"` with `device=current_platform.device_name` to support NPU.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/34336
+#    Future Plan:
+#       Remove this patch when vLLM merges the PR.
