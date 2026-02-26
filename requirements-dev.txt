@@ -7,7 +7,6 @@ pytest-asyncio
 pytest-mock
 lm-eval==0.4.9.2
 types-jsonschema
-xgrammar
 zmq
 types-psutil
 pytest-cov
