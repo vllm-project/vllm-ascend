@@ -162,11 +162,11 @@ class TestCpuAlloc(unittest.TestCase):
     @patch('vllm_ascend.cpu_binding.execute_command')
     def test_allocate(self, mock_execute_command):
         self.cpu_alloc.device_info.running_npu_list = [0]
-        self.cpu_alloc.npu_cpu_pool = {0: [0, 1, 2]}
+        self.cpu_alloc.npu_cpu_pool = {0: [0, 1, 2, 3, 4]}
         self.cpu_alloc.allocate()
-        self.assertEqual(self.cpu_alloc.assign_main[0], [0])
-        self.assertEqual(self.cpu_alloc.assign_acl[0], [1])
-        self.assertEqual(self.cpu_alloc.assign_rel[0], [2])
+        self.assertEqual(self.cpu_alloc.assign_main[0], [2])
+        self.assertEqual(self.cpu_alloc.assign_acl[0], [3])
+        self.assertEqual(self.cpu_alloc.assign_rel[0], [4])
         self.cpu_alloc.npu_cpu_pool = {0: [0, 1]}
         with self.assertRaises(RuntimeError):
             self.cpu_alloc.allocate()
