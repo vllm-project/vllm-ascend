@@ -172,7 +172,8 @@ class AscendConfig:
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
                 logger.debug(
-                    "set compile_ranges_split_points to {new_compile_ranges_split_points} for matmul and allreduce fusion"
+                    "set compile_ranges_split_points to "
+                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
                 )
 
         else:
@@ -185,7 +186,8 @@ class AscendConfig:
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
                 logger.debug(
-                    "set compile_ranges_split_points to {new_compile_ranges_split_points} for matmul and allreduce fusion"
+                    "set compile_ranges_split_points to "
+                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
                 )
 
             from vllm_ascend.utils import is_moe_model
