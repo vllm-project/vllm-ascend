@@ -18,6 +18,7 @@
 #
 
 import math
+import os
 import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -373,6 +374,14 @@ class NPUModelRunner(GPUModelRunner):
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
+
+
+        if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
+            from vllm_ascend.worker.kvcomp_utils import build_kvcomp_metadata
+            self.kvcomp_meta_data = build_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
+                block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
+                parallel_config=self.parallel_config, dtype=self.dtype)
+            # print(f"kvcomp_meta_data: {self.kvcomp_meta_data}")
 
     @property
     def use_cp(self) -> bool:
@@ -1955,6 +1964,9 @@ class NPUModelRunner(GPUModelRunner):
                     num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
                 )
 
+            # (ldeng) add kvcomp_metadata into common_attn_metadata
+            if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
+                common_attn_metadata.kvcomp_metadata = self.kvcomp_meta_data
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
@@ -2394,6 +2406,18 @@ class NPUModelRunner(GPUModelRunner):
 
         num_attn_module = 2 if self.model_config.hf_text_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches, num_attn_module)
+
+        if os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0") == "1":
+            from vllm_ascend.worker.kvcomp_utils import init_and_bind_hashk_cache
+            init_and_bind_hashk_cache(
+                kv_caches=kv_caches,  # 你的kv缓存字典
+                num_attn_module=num_attn_module,
+                vllm_config=self.vllm_config,
+                device=self.device,
+                compilation_config=self.compilation_config,
+                kvcomp_meta_data=self.kvcomp_meta_data
+            )
+
         return kv_caches
 
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
