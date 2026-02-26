@@ -40,6 +40,8 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import set_weight_prefetch_method
 
 logger = init_logger(__name__)
 
@@ -112,6 +114,10 @@ class NPUModelRunner(GPUModelRunner):
             device="cpu",
             pin_memory=True,
         )
+
+        # Ascend-specific configurations
+        self.ascend_config = get_ascend_config()
+        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
     def prepare_inputs(
         self,
