@@ -164,6 +164,7 @@ class MoECommMethod(ABC):
             dispatch_kwargs["with_quant"] = dispatch_with_quant
             dispatch_kwargs["comm_quant_mode"] = kwargs.get("comm_quant_mode")
             dispatch_kwargs["y_dtype"] = act_quant_type if use_mxfp_quant else None
+            dispatch_kwargs["use_mxfp_quant"] = use_mxfp_quant
         else:
             dispatch_kwargs["with_quant"] = use_int8_w8a8 or use_int4_w4a8
 

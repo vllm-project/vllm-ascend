@@ -30,6 +30,8 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def quant_apply_mlp(**kwargs):
+        if kwargs.get("use_mxfp_quant", False):
+            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
         from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp as _impl
 
         return _impl(**kwargs)
@@ -44,7 +46,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def quant_apply_mlp(**kwargs):
-        from vllm_ascend.ops.fused_moe.moe_mlp import mxfp_quant_apply_mlp as _impl
+        # A5 keeps legacy int quant paths and only enables MXFP8 additionally.
+        if kwargs.get("use_mxfp_quant", False):
+            from vllm_ascend.ops.fused_moe.moe_mlp import mxfp_quant_apply_mlp as _impl
+
+            return _impl(**kwargs)
+
+        from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp as _impl
 
         return _impl(**kwargs)
 

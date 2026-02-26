@@ -103,7 +103,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
-        self.need_extra_args = get_ascend_device_type() == AscendDeviceType.A3
+        self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
         self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
@@ -138,11 +138,17 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         global_redundant_expert_num: int = 0,
         **kwargs,
     ):
-        # NOTE: quant_mode differs by device runtime:
-        # - A3 uses dynamic communication quantization with quant_mode=2.
-        # - A5 MXFP8 communication requires quant_mode=4.
-        if self.with_quant:
-            quant_mode = 4 if self.a5_need_extra_args else 2
+        use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
+        comm_quant_mode = kwargs.get("comm_quant_mode")
+        # NOTE: quant_mode differs by quant feature:
+        # - Legacy int communication quantization uses quant_mode=2.
+        # - A5 MXFP8 communication uses quant_mode=4.
+        # TODO(linfeng): The quantization-related parameters need to be consolidated into a single
+        # dataclass, and the FP8 MoE code path should be integrated into it going forward.
+        if comm_quant_mode is not None:
+            quant_mode = comm_quant_mode
+        elif self.with_quant:
+            quant_mode = 4 if self.a5_need_extra_args and use_mxfp_quant else 2
         else:
             quant_mode = 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
@@ -171,7 +177,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                     "tp_rank_id": 0,
                 }
             )
-        if self.a5_need_extra_args:
+        if self.a5_need_extra_args and use_mxfp_quant:
             y_dtype = kwargs.get("y_dtype")
             if self.with_quant:
                 y_dtype = torch.float8_e4m3fn if y_dtype is None else y_dtype
@@ -276,7 +282,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         else:
             stage3_kwargs["expand_idx"] = assist_info_for_combine
 
-        if self.need_extra_args or self.a5_need_extra_args:
+        if self.need_extra_args:
             stage3_kwargs.update(
                 {
                     "tp_send_counts": tp_recv_counts,

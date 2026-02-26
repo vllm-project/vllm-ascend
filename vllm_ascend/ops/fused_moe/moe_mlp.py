@@ -431,7 +431,7 @@ def unified_apply_mlp(
 ) -> torch.Tensor:
     """
     Unified MoE MLP entry.
-    Quant path is dispatched by DeviceOperator (A5 vs non-A5).
+    Quant path is dispatched by DeviceOperator with explicit quant-type flags.
     """
     if not with_quant:
         return unquant_apply_mlp(
@@ -452,6 +452,7 @@ def unified_apply_mlp(
     weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)
     scale_type = kwargs.get("scale_type")
     per_token_scale_type = kwargs.get("per_token_scale_type")
+    use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
     adaptor_cls = DeviceOperator
     if adaptor_cls is None:
         raise RuntimeError("Device adaptor is not initialized.")
@@ -474,5 +475,6 @@ def unified_apply_mlp(
         weight_quant_type=weight_quant_type,
         scale_type=scale_type,
         per_token_scale_type=per_token_scale_type,
+        use_mxfp_quant=use_mxfp_quant,
         use_bf16=kwargs.get("use_bf16", True),
     )
