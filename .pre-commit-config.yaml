@@ -47,6 +47,7 @@ repos:
   rev: v0.45.0
   hooks:
   - id: markdownlint
+    args: ['--fix']
     exclude: '.*\.inc\.md$|.*report_template\.md$|.*contributors\.md$|.*PULL_REQUEST_TEMPLATE\.md$'
     stages: [manual] # Only run in CI
 
