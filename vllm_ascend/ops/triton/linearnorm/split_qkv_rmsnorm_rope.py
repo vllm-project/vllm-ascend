@@ -78,7 +78,7 @@ def split_qkv_rmsnorm_rope_kernel(
 
         pos_values = tl.load(positions_gm_ptr + row_idx)
         sin_cos_indices = (pos_values * ele_sin_cos_per_batch + tl.arange(0, ele_sin_cos_per_batch)).reshape(
-                2, ROPE_DIM
+            2, ROPE_DIM
         )
         input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices)
         cos = tl.extract_slice(
@@ -394,7 +394,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
         y = tl.extract_slice(
             normalized_values_tmp,
             offsets=(0, 0, HALF_ROPE_DIM),
-            sizes=(batch_size_per_iter_per_vec, q_head_num , HALF_ROPE_DIM),
+            sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
         values_tmp = tl.insert_slice(
@@ -468,7 +468,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
         y = tl.extract_slice(
             normalized_values_tmp1,
             offsets=(0, 0, HALF_ROPE_DIM),
-            sizes=(batch_size_per_iter_per_vec, kv_head_num , HALF_ROPE_DIM),
+            sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
         values_tmp2 = tl.insert_slice(
@@ -622,8 +622,7 @@ def split_qkv_rmsnorm_rope_impl(
             factor = 5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 4 + q_head_num * rope_dim
             batch_size_per_iter_per_vec = UB_SIZE / input.element_size() // factor
         else:
-            factor = 5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 2 + \
-                q_head_num * rope_dim * 0.5
+            factor = 5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 2 + q_head_num * rope_dim * 0.5
             batch_size_per_iter_per_vec = UB_SIZE / input.element_size() // factor
         batch_size_per_iter_per_vec = min(batch_size_per_iter_per_vec, batch_size_per_vec)
         qk_head_num_sum = int(q_head_num + kv_head_num)

@@ -1,5 +1,6 @@
 import copy
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -15,6 +16,8 @@ from vllm_ascend.compilation.passes.qknorm_rope_fusion_pass import (
     QKNormRopeFusionPatternWithBias,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+MAX_POSITION_EMBEDDING = 262144
 
 
 def find_op(gm, op_default):
@@ -207,8 +210,10 @@ def test_rmsnorm_quant_fusion(
         model = model.to("npu")
         seq_len = 5
         qkv = torch.randn(seq_len, qkv_size, device="npu", dtype=dtype)
-        cos = torch.randn(1, seq_len, 1, head_dim, device="npu", dtype=dtype)
-        sin = torch.randn(1, seq_len, 1, head_dim, device="npu", dtype=dtype)
+        cos_sin_cache = torch.from_numpy(np.random.uniform(0, 1, [MAX_POSITION_EMBEDDING, head_dim])).to(dtype).npu()
+        positions = torch.randint(
+            low=0, high=MAX_POSITION_EMBEDDING, size=(num_tokens,), dtype=torch.int64, device="npu"
+        )
 
         with torch.no_grad():
             original_optimize = torchair.npu_fx_compiler._optimize_fx
@@ -218,6 +223,6 @@ def test_rmsnorm_quant_fusion(
 
             compiled_model = torch.compile(model, backend="npugraph_ex", fullgraph=True, dynamic=True)
 
-            compiled_model(qkv, cos, sin)
+            compiled_model(qkv, cos_sin_cache, positions)
 
             torchair.npu_fx_compiler._optimize_fx = original_optimize
