@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from tests.ut.base import TestBase
@@ -15,7 +16,7 @@ from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_MET
 
 class TestDetectQuantizationMethod(TestBase):
 
-    def test_returns_none_for_non_directory(self):
+    def test_returns_none_for_non_existent_path(self):
         result = detect_quantization_method("/non/existent/path")
         self.assertIsNone(result)
 
@@ -81,12 +82,10 @@ class TestDetectQuantizationMethod(TestBase):
         """When both ModelSlim config and compressed-tensors config exist,
         ModelSlim should take priority."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create ModelSlim config
             modelslim_path = os.path.join(tmpdir, MODELSLIM_CONFIG_FILENAME)
             with open(modelslim_path, "w") as f:
                 json.dump({"layer.weight": "INT8"}, f)
 
-            # Create compressed-tensors config
             config_path = os.path.join(tmpdir, "config.json")
             with open(config_path, "w") as f:
                 json.dump({
@@ -101,10 +100,12 @@ class TestDetectQuantizationMethod(TestBase):
 
 class TestMaybeAutoDetectQuantization(TestBase):
 
-    def _make_vllm_config(self, model_path="/fake/model", quantization=None):
+    def _make_vllm_config(self, model_path="/fake/model",
+                           quantization=None, revision=None):
         vllm_config = MagicMock()
         vllm_config.model_config.model = model_path
         vllm_config.model_config.quantization = quantization
+        vllm_config.model_config.revision = revision
         return vllm_config
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method",
@@ -112,7 +113,6 @@ class TestMaybeAutoDetectQuantization(TestBase):
     def test_no_detection_does_nothing(self, mock_detect):
         vllm_config = self._make_vllm_config()
         maybe_auto_detect_quantization(vllm_config)
-        # quantization should remain unchanged
         self.assertIsNone(vllm_config.model_config.quantization)
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method",
@@ -159,7 +159,6 @@ class TestMaybeAutoDetectQuantization(TestBase):
                              level=logging.WARNING) as cm:
             maybe_auto_detect_quantization(vllm_config)
 
-        # User's choice is respected
         self.assertEqual(vllm_config.model_config.quantization,
                          COMPRESSED_TENSORS_METHOD)
         log_output = "\n".join(cm.output)
@@ -180,3 +179,14 @@ class TestMaybeAutoDetectQuantization(TestBase):
                 maybe_auto_detect_quantization(vllm_config)
 
         self.assertIsNone(vllm_config.model_config.quantization)
+
+    @patch("vllm.config.VllmConfig._get_quantization_config",
+           return_value=MagicMock())
+    @patch("vllm_ascend.quantization.utils.detect_quantization_method",
+           return_value=ASCEND_QUANTIZATION_METHOD)
+    def test_passes_revision_to_detect(self, mock_detect, mock_get_quant):
+        """Verify that model revision is forwarded to detect_quantization_method."""
+        vllm_config = self._make_vllm_config(
+            model_path="org/model-name", revision="v1.0", quantization=None)
+        maybe_auto_detect_quantization(vllm_config)
+        mock_detect.assert_called_once_with("org/model-name", revision="v1.0")
