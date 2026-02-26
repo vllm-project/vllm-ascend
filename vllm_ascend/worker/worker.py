@@ -60,8 +60,8 @@ from vllm_ascend.utils import (
     register_ascend_customop,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.worker.fault_tolerance import FaultTolerance
-from vllm_ascend.worker.common import FaultToleranceLevel
+from vllm_ascend.token_reinference.fault_tolerance import FaultTolerance
+from vllm_ascend.token_reinference.common import FaultToleranceLevel
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402

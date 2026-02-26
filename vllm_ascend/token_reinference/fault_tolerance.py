@@ -11,10 +11,10 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 
-from vllm_ascend.worker.fault_aware import FaultAware
-from vllm_ascend.worker.common import FaultAction,RecoveryStatus
-from vllm_ascend.worker.recovery_handler import RecoveryHandlerManager, ForceStopHandler, NetworkHandler
-from vllm_ascend.worker.recovery_context import RecoveryContext
+from vllm_ascend.token_reinference.fault_aware import FaultAware
+from vllm_ascend.token_reinference.common import FaultAction,RecoveryStatus
+from vllm_ascend.token_reinference.recovery_handler import RecoveryHandlerManager, ForceStopHandler, NetworkHandler
+from vllm_ascend.token_reinference.recovery_context import RecoveryContext
 
 class FaultTolerance:
     _recovery_group = None

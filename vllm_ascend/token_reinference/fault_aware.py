@@ -6,7 +6,7 @@ import torch_npu
 
 from datetime import timedelta
 from vllm.logger import logger
-from vllm_ascend.worker.common import FaultStatus,FaultCommand
+from vllm_ascend.token_reinference.common import FaultStatus,FaultCommand
 
 class FaultAware:
     _fault_aware_group = None

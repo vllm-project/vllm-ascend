@@ -5,8 +5,8 @@ import torch_npu
 from typing import Optional
 from abc import ABC, abstractmethod
 from vllm.logger import logger
-from vllm_ascend.worker.common import RecoveryStatus,FaultStatus
-from vllm_ascend.worker.recovery_context import RecoveryContext
+from vllm_ascend.token_reinference.common import RecoveryStatus,FaultStatus
+from vllm_ascend.token_reinference.recovery_context import RecoveryContext
 
 force_stop_error = ["force stop"]
 network_error = [
