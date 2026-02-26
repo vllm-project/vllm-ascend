@@ -37,6 +37,7 @@
 #include "grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h"
 #include "matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
+#include "matmul_gelu/matmul_gelu_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #include "moe_combine_normal/moe_combine_normal_torch_adpt.h"
 #include "moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
@@ -569,6 +570,40 @@ void transpose_kv_cache_by_block(
 
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> add_layer_norm(
+    const at::Tensor& x1,
+    const at::Tensor& x2,
+    const at::Tensor& gamma,
+    const at::Tensor& beta,
+    double epsilon,
+    bool additional_output)
+{
+    TORCH_CHECK(
+        x1.scalar_type() == at::kHalf || x1.scalar_type() == at::kFloat,
+        "float16、float32 tensor expected but got a tensor with dtype: ",
+        x1.scalar_type());
+     TORCH_CHECK(
+        x2.scalar_type() == gamma.scalar_type() && x2.scalar_type() == beta.scalar_type() &&
+        x2.scalar_type() == x1.scalar_type(),
+        "The dtype of x2, gamma, beta and a1 should be same");
+
+    std::vector<int64_t> shape;
+    for (int64_t index = 0; index < x1.dim() - gamma.dim(); index++) {
+        shape.push_back(x1.size(index));
+    }
+    shape.push_back(1);
+
+    at::Tensor y = at::empty_like(x1);
+    at::Tensor x = at::empty_like(x1);
+
+    at::Tensor mean = at::empty(shape, x1.options().dtype(at::kFloat));
+    at::Tensor rstd = at::empty(shape, x1.options().dtype(at::kFloat));
+    const at::Tensor& bias = at::Tensor();
+
+    EXEC_NPU_CMD(aclnnAddLayerNorm, x1, x2, gamma, beta, bias, epsilon, additional_output, y, mean, rstd, x);
+    return std::make_tuple(y, mean, rstd, x);
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -743,4 +778,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
     );
     ops.impl("transpose_kv_cache_by_block", torch::kPrivateUse1, &vllm_ascend::transpose_kv_cache_by_block);
+
+    ops.def("matmul_gelu(Tensor x, Tensor weight, Tensor bias) -> Tensor");
+    ops.impl("matmul_gelu", torch::kPrivateUse1, &vllm_ascend::matmul_gelu);
+
+    ops.def("add_layer_norm(Tensor x1, Tensor x2, Tensor gamma, "
+                            "Tensor beta, float epsilon=1e-05, bool additional_output=False)"
+            "-> (Tensor, Tensor, Tensor, Tensor)"
+           );
+    ops.impl("add_layer_norm", torch::kPrivateUse1, &vllm_ascend::add_layer_norm);
 }
