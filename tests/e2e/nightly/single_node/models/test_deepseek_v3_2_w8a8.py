@@ -50,13 +50,25 @@ aisbench_cases = [{
     "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
     "request_conf": "vllm_api_stream_chat",
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+    "num_prompts": 1,
+    "max_out_len": 1500,
+    "batch_size": 1,
+    "request_rate": 11.2,
+    "baseline": 134,
+    "threshold": 0.97
+}, {
+    "case_type": "performance",
+    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+    "request_conf": "vllm_api_stream_chat",
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
     "num_prompts": 100,
     "max_out_len": 1500,
     "batch_size": 4,
     "request_rate": 11.2,
     "baseline": 134,
     "threshold": 0.97
-}]
+}
+]
 
 
 @pytest.mark.asyncio
@@ -81,10 +93,10 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         str(dp_size), "--port",
         str(port), "--max-model-len", "8192", "--max-num-batched-tokens",
         "8192", "--max-num-seqs", "4", "--trust-remote-code", "--quantization",
-        "ascend", "--gpu-memory-utilization", "0.92", "--compilation-config",
-        '{"cudagraph_capture_sizes":[3, 6, 9, 12], "cudagraph_mode":"FULL_DECODE_ONLY"}',
+        "ascend", "--gpu-memory-utilization", "0.98", "--compilation-config",
+        '{"cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48], "cudagraph_mode":"FULL_DECODE_ONLY"}',
         "--speculative-config",
-        '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}',
+        '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}',
         "--additional-config",
         '{"layer_sharding": ["q_b_proj", "o_proj"]}',
         "--reasoning-parser", "deepseek_v3", "--tokenizer_mode", "deepseek_v32"
