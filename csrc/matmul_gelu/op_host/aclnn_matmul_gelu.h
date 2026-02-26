@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-/* funtion: aclnnMatmulGeluGetWorkspaceSize
+/* function: aclnnMatmulGeluGetWorkspaceSize
  * parameters :
  * x : required
  * weight : required
@@ -42,7 +42,7 @@ aclnnStatus aclnnMatmulGeluGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-/* funtion: aclnnMatmulGelu
+/* function: aclnnMatmulGelu
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).

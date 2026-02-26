@@ -60,7 +60,6 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     currentWorkspace[0] = systemWorkspacesSize + userWorkspaceSize;
 
     context->SetBlockDim(totalCoreNum);
-    // context->SetTilingKey(static_cast<uint64_t>(xDataType));
 
     return ge::GRAPH_SUCCESS;
 }

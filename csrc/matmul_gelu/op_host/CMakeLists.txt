@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Huawei Technologies Co., Ltd.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This file is a part of the CANN Open Software.
 # Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
