@@ -8,7 +8,7 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import (PAD_SLOT_ID,
                                                         causal_conv1d_fn)
 from vllm_ascend.ops.triton.mamba.causal_conv1d import \
     causal_conv1d_update_npu as causal_conv1d_update
-
+from vllm_ascend.utils import enable_custom_op
 
 def validate_cmp(y_cal, y_ref, dtype, device='npu'):
     y_cal = y_cal.to(device)
