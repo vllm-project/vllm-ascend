@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 import torch_npu
 import sys
+import math
 from torch.nn import functional as F
 from typing import Optional
 from transformers.activations import ACT2FN
