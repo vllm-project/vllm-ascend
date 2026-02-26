@@ -1,9 +1,20 @@
-# vLLM Ascend Model Adapter Skill
+# vLLM Ascend skills
+
+This directory contains the skills for vLLM Ascend.
+
+Note: Please copy the skills directory `.agent/skills` to `.claude/skills` if you want to use the skills in this repo with Claude code.
+
+## Table of Contents
+
+- [vLLM Ascend Model Adapter Skill](#vllm-ascend-model-adapter-skill)
+
+
+## vLLM Ascend Model Adapter Skill
 
 Adapt and debug models for vLLM on Ascend NPU — covering both already-supported
 architectures and new models not yet registered in vLLM.
 
-## What it does
+### What it does
 
 This skill guides an AI agent through a deterministic workflow to:
 
@@ -12,7 +23,7 @@ This skill guides an AI agent through a deterministic workflow to:
 3. Validate via a two-stage gate (dummy fast gate + real-weight mandatory gate).
 4. Deliver one signed commit with code, test config, and tutorial doc.
 
-## File layout
+### File layout
 
 | File | Purpose |
 | ---- | ------- |
@@ -23,21 +34,21 @@ This skill guides an AI agent through a deterministic workflow to:
 | `references/multimodal-ep-aclgraph-lessons.md` | VL, EP, and ACLGraph patterns |
 | `references/deliverables.md` | Required outputs and commit discipline |
 
-## Quick start
+### Quick start
 
 1. Open a conversation with the AI agent inside the vllm-ascend dev container.
 2. Invoke the skill (e.g. `/vllm-ascend-model-adapter`).
 3. Provide the model path (default `/models/<model-name>`) and the originating issue number.
 4. The agent follows the playbook in `SKILL.md` and produces a ready-to-merge commit.
 
-## Key constraints
+### Key constraints
 
 - Never upgrade `transformers`.
 - Start `vllm serve` from `/workspace` (direct command, port 8000).
 - Dummy-only evidence is not sufficient — real-weight validation is mandatory.
 - Final delivery is exactly one signed commit in the current repo.
 
-## Two-stage validation
+### Two-stage validation
 
 - **Stage A (dummy)**: fast architecture / operator / API path check with `--load-format dummy`.
 - **Stage B (real)**: real-weight loading, fp8/quant path, KV sharding, runtime stability.
