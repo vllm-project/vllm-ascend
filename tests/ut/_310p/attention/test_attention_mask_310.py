@@ -59,4 +59,4 @@ class TestAttentionMaskBuilder310(TestBase):
         attn_metadata.query_start_loc = torch.tensor([0, 1, 5])
         attn_metadata.seq_lens = torch.tensor([7, 4])
         attn_mask = self.attention_mask_builder.get_splitfuse_mask(attn_metadata, torch.device("cpu"))
-        self.assertEqual(attn_mask.shape, (1, 128, 16, 16))
+        self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, 16, 16))
