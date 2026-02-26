@@ -1,5 +1,9 @@
 ``` yaml
-env_common: &env_common
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
   OMP_NUM_THREADS: "100"
   OMP_PROC_BIND: "false"
   HCCL_BUFFSIZE: "200"
@@ -9,7 +13,7 @@ env_common: &env_common
   DYNAMIC_EPLB: "true"
   SERVER_PORT: "8080"
 
-cmd_common: &cmd_common
+_server_cmd: &server_cmd
   - "--port"
   - "$SERVER_PORT"
   - "--quantization"
@@ -38,7 +42,7 @@ cmd_common: &cmd_common
   - "--additional-config"
   - '{"enable_shared_expert_dp": false, "multistream_overlap_shared_expert": false, "eplb_config":{"dynamic_eplb": true, "expert_heat_collection_interval": 512, "algorithm_execution_interval": 100, "num_redundant_experts": 0}}'
 
-benchmarks_common: &benchmarks_common
+_benchmarks: &benchmarks
   acc:
     case_type: accuracy
     dataset_path: vllm-ascend/gsm8k-lite
@@ -49,6 +53,10 @@ benchmarks_common: &benchmarks_common
     baseline: 95
     threshold: 5
 
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
 test_cases:
   - name: "DeepSeek-R1-0528-W8A8-EPLB-acc"
     model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
@@ -57,22 +65,22 @@ test_cases:
     api_keyword_args:
       max_tokens: 16
     envs:
-      <<: *env_common
-    cmd_base: *cmd_common
-    cmd_extra:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
       - "--eplb-config"
       - '{"dynamic_eplb": true, "expert_heat_collection_interval": 512, "algorithm_execution_interval": 100, "num_redundant_experts": 0}'
     benchmarks:
-      <<: *benchmarks_common
+      <<: *benchmarks
 
   - name: "DeepSeek-R1-0528-W8A8-EPLB-latency"
     model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
     envs:
-      <<: *env_common
-    cmd_base: *cmd_common
-    cmd_extra:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
       - "--eplb-config"
       - '{"dynamic_eplb": true, "expert_heat_collection_interval": 512, "algorithm_execution_interval": 100, "num_redundant_experts": 0}'
     benchmarks:
-      <<: *benchmarks_common
+      <<: *benchmarks
 ```

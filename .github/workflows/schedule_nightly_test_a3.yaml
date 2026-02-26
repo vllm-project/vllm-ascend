@@ -109,15 +109,84 @@ jobs:
   single-node-tests:
     name: single-node
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    needs: multi-node-tests
+    needs: [multi-node-tests]
     strategy:
       fail-fast: false
       matrix:
         test_config:
-          # YAML-driven tests (new format)
-          - name: deepseek-r1-w8a8-eplb
+          - name: qwen3-32b-in8-a3
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_32b_int8.py
+          - name: qwen3-32b-int8-a3-feature-stack3
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_32b_int8_a3_feature_stack3.py
+          - name: qwen2-5-vl-7b
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen2_5_vl_7b.py
+          - name: qwen2-5-vl-7b-epd
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen2_5_vl_7b_epd.py
+          - name: qwen2-5-vl-32b
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen2_5_vl_32b.py
+          - name: qwen3-32b-int8-prefix-cache
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/single_node/models/test_prefix_cache_qwen3_32b_int8.py
+          - name: deepseek-r1-0528-w8a8-prefix-cache
             os: linux-aarch64-a3-16
-            config_file_path: DeepSeek-R1-0528-W8A8-EPLB.yaml
+            tests: tests/e2e/nightly/single_node/models/test_prefix_cache_deepseek_r1_0528_w8a8.py
+          - name: qwen3-30b-acc
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+
+  single-node-yaml-tests:
+    name: single-node-yaml
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: [multi-node-tests, single-node-tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          # YAML-driven tests
+          - name: deepseek-r1-0528-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: DeepSeek-R1-0528-W8A8.yaml
+          - name: deepseek-r1-w8a8-hbm
+            os: linux-aarch64-a3-16
+            config_file_path: DeepSeek-R1-W8A8-HBM.yaml
+          - name: deepseek-v3-2-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: DeepSeek-V3.2-W8A8.yaml
+          - name: glm4-5
+            os: linux-aarch64-a3-16
+            config_file_path: GLM-4.5.yaml
+          - name: kimi-k2-thinking
+            os: linux-aarch64-a3-16
+            config_file_path: Kimi-K2-Thinking.yaml
+          - name: mtpx-deepseek-r1-0528-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+          - name: qwen3-235b-a22b-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: Qwen3-235B-A22B-W8A8.yaml
+          - name: qwen3-30b-a3b-w8a8
+            os: linux-aarch64-a3-4
+            config_file_path: Qwen3-30B-A3B-W8A8.yaml
+          - name: qwen3-32b
+            os: linux-aarch64-a3-4
+            config_file_path: Qwen3-32B.yaml
+          - name: qwen3-next-80b-a3b-instruct-w8a8
+            os: linux-aarch64-a3-4
+            config_file_path: Qwen3-Next-80B-A3B-Instruct-W8A8.yaml
+          - name: qwq-32b
+            os: linux-aarch64-a3-4
+            config_file_path: QwQ-32B.yaml
     uses: ./.github/workflows/_e2e_nightly_single_node_yaml.yaml
     with:
       runner: ${{ matrix.test_config.os }}

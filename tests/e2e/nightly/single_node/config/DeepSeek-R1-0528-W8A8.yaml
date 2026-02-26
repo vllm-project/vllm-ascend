@@ -1,0 +1,94 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  OMP_NUM_THREADS: "10"
+  OMP_PROC_BIND: "false"
+  HCCL_BUFFSIZE: "1024"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  SERVER_PORT: "8080"
+
+_server_cmd: &server_cmd
+  - "--quantization"
+  - "ascend"
+  - "--data-parallel-size"
+  - "2"
+  - "--tensor-parallel-size"
+  - "8"
+  - "--enable-expert-parallel"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--seed"
+  - "1024"
+  - "--max-model-len"
+  - "36864"
+  - "--max-num-batched-tokens"
+  - "4096"
+  - "--max-num-seqs"
+  - "16"
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--speculative-config"
+  - '{"num_speculative_tokens": 1, "method": "mtp"}'
+  - "--additional-config"
+  - '{"enable_weight_nz_layout": true}'
+
+_benchmarks_acc: &benchmarks_acc
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 32768
+    batch_size: 32
+    baseline: 95
+    threshold: 5
+
+_benchmarks_perf: &benchmarks_perf
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs400
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 400
+    max_out_len: 1500
+    batch_size: 1000
+    baseline: 1
+    threshold: 0.97
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "DeepSeek-R1-0528-W8A8-single"
+    model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--enforce-eager"
+    benchmarks:
+
+  - name: "DeepSeek-R1-0528-W8A8-aclgraph"
+    model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    benchmarks:
+      <<: *benchmarks_acc
+      <<: *benchmarks_perf
+
+  - name: "DeepSeek-R1-0528-W8A8-EPLB"
+    model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
+    envs:
+      <<: *envs
+      DYNAMIC_EPLB: "true"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_weight_nz_layout": true, "eplb_config": {"dynamic_eplb": "true", "expert_heat_collection_interval": 1000, "algorithm_execution_interval": 50, "eplb_policy_type": 3}}'
+    benchmarks:
+      <<: *benchmarks_acc

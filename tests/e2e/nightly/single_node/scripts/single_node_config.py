@@ -46,7 +46,7 @@ class SingleNodeConfig:
 class SingleNodeConfigLoader:
     """Load SingleNodeConfig from yaml file."""
 
-    DEFAULT_CONFIG_NAME = "Qwen3-32B.yaml"
+    DEFAULT_CONFIG_NAME = "Kimi-K2-Thinking.yaml"
 
     @classmethod
     def from_yaml_cases(cls, yaml_path: str | None = None) -> list[SingleNodeConfig]:
@@ -56,12 +56,14 @@ class SingleNodeConfigLoader:
             raise KeyError("test_cases field is required in config yaml")
 
         cases = config.get("test_cases")
+        if not isinstance(cases, list):
+            raise TypeError("test_cases must be a list")
         cls._validate_para(cases)
 
         return cls._parse_test_cases(cases)
 
     @classmethod
-    def _load_yaml(cls, yaml_path: str | None) -> dict:
+    def _load_yaml(cls, yaml_path: str | None) -> dict[str, Any]:
         if not yaml_path:
             yaml_path = os.getenv("CONFIG_YAML_PATH", cls.DEFAULT_CONFIG_NAME)
 
@@ -72,22 +74,23 @@ class SingleNodeConfigLoader:
             return yaml.safe_load(f)
 
     @staticmethod
-    def _validate_para(cases: dict):
+    def _validate_para(cases: list[dict[str, Any]]) -> None:
         if not cases:
             raise ValueError("test_cases is empty")
-        required = ["model", "envs", "cmd_base", "benchmarks"]
+        required = ["model", "envs", "server_cmd", "benchmarks"]
         for case in cases:
             missing = [k for k in required if k not in case]
             if missing:
                 raise KeyError(f"Missing required config fields: {missing}")
 
     @classmethod
-    def _parse_test_cases(cls, cases: dict[str, Any]) -> list[SingleNodeConfig]:
+    def _parse_test_cases(cls,
+                          cases: list[dict[str, Any]]) -> list[SingleNodeConfig]:
         result: list[SingleNodeConfig] = []
         for case in cases:
-            cmd_base = case.get("cmd_base", [])
-            cmd_extra = case.get("cmd_extra", [])
-            full_cmd = list(cmd_base) + list(cmd_extra)
+            server_cmd = case.get("server_cmd", [])
+            server_cmd_extra = case.get("server_cmd_extra", [])
+            full_cmd = list(server_cmd) + list(server_cmd_extra)
             result.append(
                 SingleNodeConfig(
                     model=case["model"],

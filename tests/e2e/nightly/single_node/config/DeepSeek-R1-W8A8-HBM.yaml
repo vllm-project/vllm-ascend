@@ -1,0 +1,42 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "DeepSeek-R1-W8A8-HBM-single"
+    model: "vllm-ascend/DeepSeek-R1-W8A8"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      SERVER_PORT: "8080"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--data-parallel-size"
+      - "8"
+      - "--data-parallel-size-local"
+      - "8"
+      - "--data-parallel-rpc-port"
+      - "13389"
+      - "--tensor-parallel-size"
+      - "2"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "6000"
+      - "--max-num-batched-tokens"
+      - "6000"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--no-enable-prefix-caching"
+      - "--reasoning-parser"
+      - "deepseek_r1"
+      - "--enforce-eager"
+      - "--additional-config"
+      - '{"ascend_scheduler_config": {"enabled": false}, "torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}}'
+    benchmarks:

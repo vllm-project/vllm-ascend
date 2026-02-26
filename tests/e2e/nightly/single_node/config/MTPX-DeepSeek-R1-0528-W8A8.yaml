@@ -1,0 +1,90 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  OMP_NUM_THREADS: "100"
+  OMP_PROC_BIND: "false"
+  HCCL_BUFFSIZE: "1024"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3600000"
+  SERVER_PORT: "8080"
+
+_server_cmd: &server_cmd
+  - "--quantization"
+  - "ascend"
+  - "--seed"
+  - "1024"
+  - "--no-enable-prefix-caching"
+  - "--data-parallel-size"
+  - "2"
+  - "--tensor-parallel-size"
+  - "8"
+  - "--enable-expert-parallel"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "40960"
+  - "--max-num-seqs"
+  - "14"
+  - "--trust-remote-code"
+
+_benchmarks_gsm8k: &benchmarks_gsm8k
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 32768
+    batch_size: 32
+    baseline: 95
+    threshold: 5
+
+_benchmarks_aime: &benchmarks_aime
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/aime2024
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2024/aime2024_gen_0_shot_chat_prompt
+    max_out_len: 32768
+    batch_size: 32
+    baseline: 86.67
+    threshold: 7
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "MTPX-DeepSeek-R1-0528-W8A8-mtp2"
+    model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-num-batched-tokens"
+      - "4096"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 2, "method": "mtp"}'
+      - "--gpu-memory-utilization"
+      - "0.92"
+    benchmarks:
+      <<: *benchmarks_gsm8k
+
+  - name: "MTPX-DeepSeek-R1-0528-W8A8-mtp3"
+    model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
+    envs:
+      <<: *envs
+      HCCL_OP_EXPANSION_MODE: "AIV"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-num-batched-tokens"
+      - "2048"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 3, "method": "mtp"}'
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes": [56], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+    benchmarks:
+      <<: *benchmarks_aime
