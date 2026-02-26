@@ -34,5 +34,6 @@ import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
 import vllm_ascend.patch.worker.patch_v2_eagle  # noqa
 import vllm_ascend.patch.worker.patch_v2_uva  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
+import vllm_ascend.patch.worker.patch_routed_experts_capturer  # noqa
 import vllm_ascend.patch.worker.patch_npugraph_ex_triton  # noqa
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
