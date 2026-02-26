@@ -18,7 +18,7 @@ class TestCumsumGroupList(unittest.TestCase):
         }
 
     support_combine = [(0, 0), (1, 0), (0, 1)]
-    unsupport_combine = [(0, 2), (2, 1), (1, 2)]
+    unsupported_combine = [(0, 2), (2, 1), (1, 2)]
 
     def test_cumsum_group_list_supported_conversion(self):
         for src_list_type, dst_list_type in self.support_combine:
@@ -38,7 +38,7 @@ class TestCumsumGroupList(unittest.TestCase):
 
     def test_cumsum_group_list_unsupported_conversion_notimplementederror(
             self):
-        for src_list_type, dst_list_type in self.unsupport_combine:
+        for src_list_type, dst_list_type in self.unsupported_combine:
             with self.subTest(src=src_list_type, dst=dst_list_type):
                 with self.assertRaises(NotImplementedError) as excinfo:
                     cumsum_group_list(self.glist_dict[0], src_list_type,

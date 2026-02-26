@@ -30,7 +30,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -120,11 +120,7 @@ class NPUPlatform(Platform):
         Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
         """
-        npugraph_ex_config = get_ascend_config().npugraph_ex_config
-        if npugraph_ex_config.enable:
-            return "vllm_ascend.compilation.npu_graph_ex_pass_manager.NpuGraphEXPassManager"
-        else:
-            return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
+        return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
 
     @classmethod
     def get_compile_backend(self) -> str:
@@ -175,6 +171,11 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
+
+        if vllm_config.model_config is not None:
+            maybe_auto_detect_quantization(vllm_config)
+
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
         ascend_config = init_ascend_config(vllm_config)
@@ -199,10 +200,10 @@ class NPUPlatform(Platform):
             )
 
             if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
-                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THREHOLD
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
 
                 new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
-                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THREHOLD)
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
                 logger.debug(
@@ -212,10 +213,10 @@ class NPUPlatform(Platform):
 
         npugraph_ex_config = ascend_config.npugraph_ex_config
         if npugraph_ex_config and npugraph_ex_config.fuse_allreduce_rms:
-            from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THREHOLD
+            from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
 
             new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
-            new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THREHOLD)
+            new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
             new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
             vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
             logger.debug(
@@ -551,7 +552,7 @@ class NPUPlatform(Platform):
         vllm_config: VllmConfig,
         dp_metadata,
         virtual_engine: int = 0,
-        num_tokens: int | None = None,
+        num_tokens: int = 0,
         num_tokens_across_dp: torch.Tensor | None = None,
         cudagraph_runtime_mode=None,
         batch_descriptor=None,
@@ -562,7 +563,7 @@ class NPUPlatform(Platform):
         Args:
             attn_metadata (dict[str, Any]): attention metadata for all layers.
             vllm_config (VllmConfig): configuration of vllm.
-            dp_metadata (DpMetada): metadata for data parallelism.
+            dp_metadata (Dpmetadata): metadata for data parallelism.
                 lack of typehint because of circular import.
             virtual_engine (int, optional): index of virtual engine. Defaults to 0.
             num_tokens (int | None, optional): number of tokens. Defaults to None.
@@ -601,10 +602,6 @@ class NPUPlatform(Platform):
         if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
             return {}
 
-        num_actual_tokens = list(attn_metadata.values())[0].num_actual_tokens
-        if num_tokens is None:
-            num_tokens = num_actual_tokens
-
         moe_comm_type = select_moe_comm_method(
             num_tokens,
             vllm_config,
@@ -636,10 +633,13 @@ class NPUPlatform(Platform):
 
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
         flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
-        pad_size = 0
+        pad_size = None
+        padded_length = None
         if sp_enabled or flashcomm_v2_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
 
+        if num_tokens is None and attn_metadata is not None:
+            num_tokens = list(attn_metadata.values())[0].num_actual_tokens
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.max_tokens_across_dp_cpu.item()
@@ -648,8 +648,9 @@ class NPUPlatform(Platform):
                 pad_size = padded_length - num_tokens
         else:
             max_tokens_across_dp = num_tokens
-
+        mc2_mask = None
         if num_tokens is not None:
+            num_actual_tokens = num_tokens
             # NOTE: token num which need to pad to when mc2
             padded_num_tokens = math.ceil(max_tokens_across_dp / tp_world_size) * tp_world_size
             reserved_mc2_mask = get_mc2_mask()
