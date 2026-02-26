@@ -36,6 +36,7 @@ class BaseDeviceAdaptor:
     @staticmethod
     def quant_apply_mlp(**kwargs):
         from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp as _impl
+
         return _impl(**kwargs)
 
     @staticmethod

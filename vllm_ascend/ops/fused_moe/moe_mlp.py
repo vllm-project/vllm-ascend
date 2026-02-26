@@ -25,9 +25,6 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
 from vllm_ascend.quantization.mxfp_compat import (
-    FLOAT4_E2M1FN_X2_DTYPE,
-    FLOAT8_E8M0FNU_DTYPE,
-    HIFLOAT8_DTYPE,
     ensure_mxfp8_moe_available,
 )
 from vllm_ascend.utils import (
@@ -72,8 +69,10 @@ def cumsum_group_list(
         "This feature is under development."
     )
 
+
 def _first_tensor(x):
     return x[0] if isinstance(x, list) else x
+
 
 def quant_apply_mlp(
     hidden_states: torch.Tensor,
@@ -339,6 +338,7 @@ def quant_apply_mlp(
 
             if HAS_TRITON:
                 from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
+
                 hidden_states, swiglu_out_scale = swiglu_quant(
                     hidden_states, group_list=group_list, group_list_type=group_list_type
                 )
@@ -365,6 +365,7 @@ def quant_apply_mlp(
         )[0]
 
     return hidden_states
+
 
 def unquant_apply_mlp(
     hidden_states: torch.Tensor,
