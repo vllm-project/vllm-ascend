@@ -98,7 +98,7 @@ class FaultAware:
             msg = self.fault_queue.get_nowait()
             if msg:
                 logger.info(f"Received new status: {msg.name},updating status")
-                current_status =  msg.value
+                current_status = msg.value
         except queue.Empty:
             if not threading.main_thread().is_alive():
                 raise RuntimeError("Main thread is not alive")

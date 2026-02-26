@@ -10,9 +10,9 @@ from typing import Any, Callable,List
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-from vllm_ascend.utils import get_ascend_device_type,AscendDeviceType
+
 from vllm_ascend.worker.fault_aware import FaultAware
-from vllm_ascend.worker.common import FaultAction,FaultToleranceLevel,RecoveryStatus
+from vllm_ascend.worker.common import FaultAction,RecoveryStatus
 from vllm_ascend.worker.recovery_handler import RecoveryHandlerManager, ForceStopHandler, NetworkHandler
 from vllm_ascend.worker.recovery_context import RecoveryContext
 
@@ -43,26 +43,27 @@ class FaultTolerance:
 
     def _init_recovery_group(self):
         """
-        Initialize the global communication group for fault recovery and token re-inference
+        Initialize the global communication group for status collection
         """
-
         if not dist.is_initialized() or self.world_size == 1:
             return
 
         FaultTolerance._recovery_group = dist.new_group(
             ranks=None,
-            timeout=timedelta(minutes=3),
+            timeout=timedelta(minutes=5),
             backend="gloo",
         )
 
         logger.info(f"Recovery group initialization successful for rank {self.rank}")
     def _init_sync_group(self):
-
+        """
+        Initialize the global communication group for synchronization
+        """
         if not dist.is_initialized() or self.world_size == 1:
             return
         FaultTolerance._sync_group = dist.new_group(
             ranks=None,
-            timeout=timedelta(minutes=3),
+            timeout=timedelta(minutes=5),
             backend="hccl"
         )
 
@@ -114,7 +115,6 @@ class FaultTolerance:
 
     def sample_token_decorator(self,func:Callable,max_retries: int) -> Callable:
         def wrapper(*args, **kwargs):
-            # Enable fault tolerance
             for attempt in range(max_retries + 1):
                 try:
                     output = func(*args, **kwargs)
@@ -135,6 +135,7 @@ class FaultTolerance:
                     if torch.equal(ft_action, FaultAction.RECOMPUTE):
                         self.aware_event.set()
                         logger.info(f"Begin re-execute model at rank {self.rank}")
+                        # re-execute model first
                         self.execute_model_func(*self.state_backup['args'], **self.state_backup['kwargs'])
                         logger.info(f"Begin token re-inference at rank {self.rank}")
                         continue
@@ -156,14 +157,13 @@ class FaultTolerance:
         # No target exception ,return raise Exception
         if handler is None:
             return FaultAction.RAISE_EXCEPTION
-        # wait until stop_device finished
+        # Wait until stop_device finished
         self.stop_event.wait()
         self.stop_event.clear()
-        # Rank Status
-        _ = self._all_gather_for_recovery_group()
-        logger.info("Synchronized Successfully,Begin restart and reinit")
-        reinit_status = self._clean_fault(ctx)
-        recover_action = self._coordinate_recovery(reinit_status)
+        self._all_gather_for_recovery_group()
+        logger.info("Synchronized Successfully,begin to clean fault")
+        clean_status = self._clean_fault(ctx)
+        recover_action = self._coordinate_recovery(clean_status)
         if not torch.equal(recover_action,FaultAction.RECOMPUTE):
             return recover_action
         #Begin to recover
@@ -175,7 +175,7 @@ class FaultTolerance:
     def _coordinate_recovery(self,local_status:torch.Tensor) -> torch.Tensor:
         """
         Rank 0 gathers recovery status and determines fault actions for each rank
-        Recovery status is categorized into restart recovery and fault recovery
+        Recovery status is categorized into clean status and recovery status
         Failure at any recovery stage will cause re-inference to fail
         Therefore, re-inference is executed only when both restart recovery and fault recovery succeed
         """
@@ -199,19 +199,25 @@ class FaultTolerance:
         else:
             return FaultAction.RAISE_EXCEPTION
 
+    def _clean_fault_queue(self):
+        while not self.fault_queue.empty():
+            try:
+                self.fault_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def _clean_fault(self, ctx: RecoveryContext) -> torch.Tensor:
         """
-        Restart device and reinit process group
+        Clean the abnormal status,restart device and reinit process group
         """
+        self._clean_fault_queue()
         try:
-            # TODO: 在这里加入一个threading.event，由FaultAware唤醒，防止极端情况下全部卡都抛异常，导致restart逻辑在stop前
             torch_npu.npu.restart_device(torch.npu.current_device())
             torch.distributed.reinit_process_group(group=None, rebuild_link=False)
-            self.model_runner.execute_model_state = None
             self._restore_essential_state(ctx.back_up)
             reinit_status = RecoveryStatus.SUCCESS
         except Exception as inner_e:
-            logger.error(f"Failed to restart and reinit process group for rank {self.rank},get exception :{inner_e}")
+            logger.error(f"Failed to clean fault for rank {self.rank},get exception :{inner_e}")
             ctx.exception = inner_e
             reinit_status = RecoveryStatus.FAILED
         return reinit_status
@@ -222,9 +228,8 @@ class FaultTolerance:
         logger.debug(f"Rank {self.rank} waiting for all ranks to throw exceptions")
         try:
             dist.all_gather(gather_list, local_status,group=FaultTolerance._recovery_group)
-            return gather_list
         except Exception as inner_e:
-            logger.error(f"All gather failed,exception for recovery_group:{inner_e}")
+            logger.error(f"All gather failed for _recovery_group,exception for recovery_group:{inner_e}")
             raise inner_e
 
     def _all_gather_for_sync_group(self):
@@ -234,9 +239,8 @@ class FaultTolerance:
         try:
             dist.all_gather(gather_list, local_status,group=FaultTolerance._sync_group)
             torch.npu.synchronize()
-            return gather_list
         except Exception as inner_e:
-            logger.error(f"All gather failed for _sync_group,exception:{inner_e}")
+            logger.error(f"All gather failed for _sync_group,exception :{inner_e}")
             raise inner_e
 
     def _gather_statuses(self, local_status:torch.Tensor) -> List[torch.Tensor]:
@@ -323,8 +327,7 @@ class FaultTolerance:
         )
         return recv_ft_action
 
-
-    def _create_essential_state_backup(self,*args,**kwargs) -> None:
+    def _create_essential_state_backup(self,*args,**kwargs) -> dict:
         backup = {}
         if not hasattr(self.model_runner,'requests') or not hasattr(self.model_runner,'input_batch'):
             return backup
@@ -348,7 +351,6 @@ class FaultTolerance:
             requests_backup[req_id] = req_backup
 
         backup['requests_essential'] = requests_backup
-        # TODO:Update this when using ModelRunnerV2
         # Backup input_batch
         ib = self.model_runner.input_batch
 
@@ -397,12 +399,13 @@ class FaultTolerance:
                 if hasattr(eplb,'cur_iterations')
                 else None
             )
-
         return backup
 
     def _restore_essential_state(self,backup):
         if not backup:
             return
+        # clear execute_model_state
+        self.model_runner.execute_model_state = None
         # Rollback common state
         if 'generator_state' in backup:
             torch_npu.npu.set_rng_state(backup['generator_state'])
@@ -429,7 +432,7 @@ class FaultTolerance:
                 ib.req_id_to_index.update(backup['req_id_to_index'])
             if 'num_blocks_per_row' in backup:
                 for i, bt in enumerate[Any](ib.block_table.block_tables):
-                    bt.num_blocks_per_row[:] = backup['num_blocks_per_row'][i]            
+                    bt.num_blocks_per_row[:] = backup['num_blocks_per_row'][i]
             if '_removed' in backup:
                 ib.batch_update_builder._removed = backup['_removed']
             if 'added' in backup:
@@ -449,12 +452,9 @@ class FaultTolerance:
         # Rollback eplb state
         if hasattr(self.model_runner,'eplb_updator'):
             eplb = self.model_runner.eplb_updator
-
             if 'update_info_all' in backup:
                 eplb.update_info_all = backup['update_info_all']
-
             if 'reqs' in backup:
                 eplb.reqs = backup['reqs']
-
             if 'cur_iterations' in backup:
                 eplb.cur_iterations = backup['cur_iterations']
