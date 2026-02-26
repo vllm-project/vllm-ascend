@@ -54,7 +54,7 @@ def get_model_file(
     # Remote repo: try to download from HF Hub or ModelScope
     try:
         if envs.VLLM_USE_MODELSCOPE:
-            from modelscope.hub.file_download import model_file_download
+            from modelscope.hub.file_download import model_file_download  # type: ignore[import-untyped]
 
             downloaded_path = model_file_download(
                 model_id=str(model),
