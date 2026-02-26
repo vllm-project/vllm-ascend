@@ -129,6 +129,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -369,6 +370,7 @@ class NPUModelRunner(GPUModelRunner):
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
+        self.cpu_slot_mapping = None
 
     @property
     def use_cp(self) -> bool:
@@ -1046,6 +1048,12 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self.vllm_config.model_config.enable_return_routed_experts:
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                capturer.clear_buffer()
+            else:
+                logger.warning("RoutedExpertsCapturer is not initialized.")
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
@@ -1424,6 +1432,14 @@ class NPUModelRunner(GPUModelRunner):
 
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
+
+        if self.model_config.enable_return_routed_experts:
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                capturer.save_captured_experts(indices=self.cpu_slot_mapping)
+            else:
+                logger.warning("RoutedExpertsCapturer is not initialized.")
+
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
@@ -1898,6 +1914,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens_padded,
                     slot_mapping,
                 )
+            if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
+                self.cpu_slot_mapping = slot_mapping.cpu().numpy()
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
@@ -2359,6 +2377,9 @@ class NPUModelRunner(GPUModelRunner):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
+
+        if self.model_config.enable_return_routed_experts:
+            self.init_routed_experts_capturer()
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
