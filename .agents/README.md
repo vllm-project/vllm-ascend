@@ -2,12 +2,12 @@
 
 This directory contains the skills for vLLM Ascend.
 
-Note: Please copy the skills directory `.agent/skills` to `.claude/skills` if you want to use the skills in this repo with Claude code.
+Note: Please copy the skills directory `.agents/skills` to `.claude/skills` if you want to use the skills in this repo with Claude code.
 
 ## Table of Contents
 
 - [vLLM Ascend Model Adapter Skill](#vllm-ascend-model-adapter-skill)
-
+- [vLLM Ascend main2main Skill](#vllm-ascend-main2main-skill)
 
 ## vLLM Ascend Model Adapter Skill
 
@@ -55,3 +55,22 @@ This skill guides an AI agent through a deterministic workflow to:
 
 Both stages require request-level verification (`/v1/models` + at least one chat request),
 not just startup success.
+
+## vLLM Ascend main2main Skill
+
+Migrate changes from the main vLLM repository to the vLLM Ascend repository, ensuring compatibility and performance optimizations for Ascend NPUs.
+
+### What it does
+
+This skill facilitates the process of:
+
+1. Identifying changes in the main vLLM repository.
+2. Applying necessary modifications for Ascend support.
+3. Validating the changes in an Ascend environment.
+4. Delivering a ready-to-merge commit with optimized code and configurations.
+
+### Quick start
+
+1. Open a conversation with the AI agent inside the vllm-ascend dev container.
+2. Invoke the skill (e.g. `/main2main`).
+3. The agent follows the playbook and produces a ready-to-merge commit.
