@@ -20,6 +20,7 @@ import os
 
 import torch
 import torch_npu
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
     MRotaryEmbedding,
@@ -31,7 +32,6 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, has_rope, is_vl_model, shared_expert_dp_enabled
-from vllm.forward_context import get_forward_context
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
