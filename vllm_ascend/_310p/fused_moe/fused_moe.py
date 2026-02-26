@@ -27,6 +27,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECommMethods
 from vllm_ascend.quantization.methods.base import QuantType
+from vllm_ascend.utils import vllm_version_is
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
@@ -152,6 +153,46 @@ class AscendFusedMoE310(FusedMoE):
         self.quant_type = self.get_quant_type()
 
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
+        if not vllm_version_is("0.16.0"):
+<<<<<<< HEAD
+            self.runner = self._init_runner()
+
+    if not vllm_version_is("0.16.0"):
+
+        def _init_runner(self):
+            from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+
+            return AscendMoERunner(
+                layer=self,
+                moe_config=self.moe_config,
+                router=self.router,
+                routed_input_transform=self._routed_input_transform,
+                gate=self.gate,
+                shared_experts=self.shared_experts,
+                quant_method=self.quant_method,
+                reduce_results=self.reduce_results,
+                enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+            )
+
+        if not vllm_version_is("0.16.0"):
+            self.runner = self._init_runner()
+
+    if not vllm_version_is("0.16.0"):
+
+        def _init_runner(self):
+            from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+
+            return AscendMoERunner(
+                layer=self,
+                moe_config=self.moe_config,
+                router=self.router,
+                routed_input_transform=self._routed_input_transform,
+                gate=self.gate,
+                shared_experts=self.shared_experts,
+                quant_method=self.quant_method,
+                reduce_results=self.reduce_results,
+                enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+            )
 
     def init_experts_map(self, moe_config):
         """

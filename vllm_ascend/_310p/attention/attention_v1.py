@@ -41,7 +41,6 @@ class AscendAttentionBackend310(AscendAttentionBackend):
         Initializes the 310P backend and sets up the device-specific mask builder.
         """
         super().__init__(*args, **kwargs)
-        self.attn_mask_builder = AttentionMaskBuilder310(self.device)
 
     @staticmethod
     def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int, head_size: int):

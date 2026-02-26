@@ -22,7 +22,7 @@ This tutorial will introduce the usage of them.
 pip install fastapi httpx uvicorn
 ```
 
-## Starting Exeternal DP Servers
+## Starting External DP Servers
 
 First, you need to have at least two vLLM servers running in data parallel. These can be mock servers or actual vLLM servers. Note that this proxy also works with only one vLLM server running, but will fall back to direct request forwarding which is meaningless.
 
