@@ -24,7 +24,7 @@ The server runs alongside normal inference tasks via sub-threads and via `statel
 
 ### Application Scenarios
 
-- **Reduce startup latency**: By reusing already loaded weights and transferring them directly between NPU cards, Netloader cuts down model loading time vs conventional remote/local pull strategies.  
+- **Reduce startup latency**: By reusing already loaded weights and transferring them directly between NPU cards, Netloader cuts down model loading time versus conventional remote/local pull strategies.  
 - **Relieve network & storage load**: Avoid repeated downloads of weight files from remote repositories, thus reducing pressure on central storage and network traffic.  
 - **Improve resource utilization & lower cost**: Faster loading allows less reliance on standby compute nodes; resources can be scaled up/down more flexibly.  
 - **Enhance business continuity & high availability**: In failure recovery, new instances can quickly take over without long downtime, improving system reliability and user experience.
@@ -37,7 +37,7 @@ To enable Netloader, pass `--load-format=netloader` and provide configuration vi
 
 | Field Name         | Type    | Description                                                                                          | Allowed Values / Notes                                                                                       |
 |--------------------|---------|------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
-| **SOURCE**         | List    | Weighted data sources. Each item is a map with `device_id` and `sources`, specifying the rank and its endpoints (IP:port). <br>Example: `{"SOURCE": [{"device_id": 0, "sources": ["10.170.22.152:19374"]}, {"device_id": 1, "sources": ["10.170.22.152:11228"]}]}` <br>If omitted or empty, fallback to default loader. The SOURCE here is second priority. | A list of objects with keys `device_id: int` and `sources: List[str]` |
+| **SOURCE**         | List    | Weight data sources. Each item is a map with `device_id` and `sources`, specifying the rank and its endpoints (IP:port). <br>Example: `{"SOURCE": [{"device_id": 0, "sources": ["10.170.22.152:19374"]}, {"device_id": 1, "sources": ["10.170.22.152:11228"]}]}` <br>If omitted or empty, fallback to default loader. The SOURCE here is second priority. | A list of objects with keys `device_id: int` and `sources: List[str]` |
 | **MODEL**           | String  | The model name, used to verify consistency between client and server.                                | Defaults to the `--model` argument if not specified.                                                         |
 | **LISTEN_PORT**     | Integer | Base port for the server listener.                                                                   | The actual port = `LISTEN_PORT + RANK`. If omitted, a random valid port is chosen. Valid range: 1024–65535. If out of range, that server instance won’t open a listener. |
 | **INT8_CACHE**      | String  | Behavior for handling int8 parameters in quantized models.                                           | One of `["hbm", "dram", "no"]`. <br> - `hbm`: copy original int8 parameters to high-bandwidth memory (HBM) (may cost a lot of HBM). <br> - `dram`: copy to DRAM. <br> - `no`: no special handling (may lead to divergence or unpredictable behavior). Default: `"no"`. |

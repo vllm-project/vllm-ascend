@@ -19,6 +19,7 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 
+# fmt: off
 def test_qwen3_w8a8_quant():
     max_tokens = 5
     example_prompts = [
@@ -26,9 +27,10 @@ def test_qwen3_w8a8_quant():
     ]
     vllm_target_outputs = [([
         85, 4086, 44, 374, 264, 1550, 42747, 628, 323, 4938, 72816, 44378, 323,
-        13480, 4712, 369, 444, 10994, 82, 13, 1084, 374, 6188, 369, 3460
-    ], 'vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed for large'
+        13480, 4712, 369, 444, 10994, 82, 13, 1084, 374, 6188, 311, 387
+    ], 'vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be'
                             )]
+# fmt: on
 
     with VllmRunner(
             "vllm-ascend/Qwen3-0.6B-W8A8",
@@ -47,7 +49,7 @@ def test_qwen3_w8a8_quant():
         name_1="vllm_quant_w8a8_outputs",
     )
 
-
+# fmt: off
 def test_qwen3_dense_w8a16():
     max_tokens = 5
     example_prompts = [
@@ -58,6 +60,7 @@ def test_qwen3_dense_w8a16():
         13480, 4712, 369, 444, 10994, 82, 13, 1084, 374, 6188, 311, 387
     ], 'vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be'
                             )]
+# fmt: on
 
     with VllmRunner(
             "vllm-ascend/Qwen3-0.6B-W8A16",

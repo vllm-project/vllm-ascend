@@ -23,64 +23,30 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
-
-MODELS = [
-    "vllm-ascend/Qwen3-235B-A22B-W8A8",
-]
-
-prompts = [
-    "San Francisco is a",
-]
-
-api_keyword_args = {
-    "max_tokens": 10,
-}
-
-aisbench_cases = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "top_k": 20,
-    "baseline": 95,
-    "threshold": 5
-}]
+from .test_qwen3_235b_w8a8 import *
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
-async def test_models(model: str) -> None:
-    port = get_open_port()
-    env_dict = {
-        "OMP_NUM_THREADS": "10",
-        "OMP_PROC_BIND": "false",
-        "HCCL_BUFFSIZE": "1024",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"
-    }
+async def test_models_eplb(model: str) -> None:
+    port, aisbench_cases, env_dict, compilation_config, server_args = config()
+    env_dict.update(
+        {
+            "DYNAMIC_EPLB": "true",
+        }
+    )
     additional_config: dict[str, Any] = {}
-    compilation_config = {"cudagraph_mode": "FULL_DECODE_ONLY"}
-    server_args = [
-        "--quantization", "ascend", "--async-scheduling",
-        "--data-parallel-size", "4", "--tensor-parallel-size", "4",
-        "--enable-expert-parallel", "--port",
-        str(port), "--max-model-len", "40960", "--max-num-batched-tokens",
-        "8192", "--max-num-seqs", "12", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.9"
-    ]
-    env_dict["DYNAMIC_EPLB"] = "true"
     additional_config["eplb_config"] = {
-        "dynamic_eplb": True,
-        "expert_heat_collection_interval": 512,
-        "algorithm_execution_interval": 100,
-        "num_redundant_experts": 0
+        "dynamic_eplb": "true",
+        "expert_heat_collection_interval": 600,
+        "algorithm_execution_interval": 50,
+        "num_redundant_experts": 16,
+        "eplb_policy_type": 2,
     }
+    server_args.extend(["--additional-config", json.dumps(additional_config)])
     server_args.extend(
         ["--compilation-config",
          json.dumps(compilation_config)])
-    server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }

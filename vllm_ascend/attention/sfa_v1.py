@@ -6,7 +6,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_dcp_group, get_pcp_group, get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
@@ -19,10 +19,12 @@ from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
+    enable_cp,
     maybe_save_kv_layer_to_connector,
     trans_rope_weight,
     transdata,
@@ -37,7 +39,6 @@ from vllm_ascend.ops.layer_shard_linear import (
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton
-from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
@@ -45,6 +46,7 @@ from vllm_ascend.utils import (
     dispose_layer,
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
+    get_weight_prefetch_method,
     maybe_trans_nz,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -68,6 +70,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if enable_cp():
+            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPMetadataBuilder
+
+            return AscendSFACPMetadataBuilder
         return AscendSFAMetadataBuilder
 
     @staticmethod
@@ -76,6 +82,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if enable_cp():
+            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl
+
+            return AscendSFACPImpl
         return AscendSFAImpl
 
     @staticmethod
@@ -93,12 +103,6 @@ class DSACPContext:
     slot_mapping_cp: torch.Tensor
     actual_seq_lengths_query: torch.Tensor
     actual_seq_lengths_key: torch.Tensor
-
-
-@dataclass
-class SFACPMetadata:
-    block_table_cp: torch.Tensor
-    valid_block_ids: torch.Tensor
 
 
 @dataclass
@@ -133,7 +137,10 @@ class AscendSFAMetadata:
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     dsa_cp_context: DSACPContext | None = None
     reshape_cache_event: torch.npu.Event = None
-    sfa_cp_metadata: SFACPMetadata | None = None
+    sfa_cp_metadata: AscendPCPMetadata | None = None
+    num_decodes: int = 0
+    num_decode_tokens: int = 0
+    num_prefills: int = 0
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -184,14 +191,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
         self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
-
-        self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        self.pcp_group = get_pcp_group().device_group if self.pcp_size > 1 else None
-
-        self.dcp_size = get_dcp_group().world_size
-        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
-        self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -309,22 +308,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
 
-        sfa_cp_metadata = None
-        if self.pcp_size * self.dcp_size > 1:
-            valid_block_ids, new_block_table = block_table.flatten().unique(return_inverse=True)
-            num_blocks = valid_block_ids.shape[0]
-            # Note(qcs): `block_table_cp` will have dirty values in the part beyond kv_lens.
-            # We assume that we can always get the correct kv_lens or kv index,
-            # so we omit the dirty value processing here.
-            block_table_cp = (
-                new_block_table.unsqueeze(-1).to(block_table)
-                + (torch.arange(self.pcp_size * self.dcp_size) * num_blocks).view(1, 1, -1).to(block_table)
-            ).reshape(block_table.shape[0], -1)
-            sfa_cp_metadata = SFACPMetadata(
-                block_table_cp=block_table_cp,
-                valid_block_ids=valid_block_ids,
-            )
-
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -338,7 +321,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
-            sfa_cp_metadata=sfa_cp_metadata,
         )
 
     def build_for_graph_capture(
@@ -410,7 +392,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-        self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
 
         # In sfa, prefill and decode have the same calculation formula,
         # so do not distinguish between prefill and decode here.
@@ -432,6 +413,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.weights_proj = self.indexer.weights_proj
         self.k_norm = self.indexer.k_norm
         self.cp_size = 1
+        self.is_rope_neox_style = True
+        self.use_torch_npu_lightning_indexer = False
+        if self.vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]:
+            self.is_rope_neox_style = False
+            self.use_torch_npu_lightning_indexer = True
 
         self.enable_dsa_cp = enable_dsa_cp()
         self.enable_dsa_cp_prefill_only = enable_dsa_cp_with_layer_shard()
@@ -448,14 +434,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                         "skipping sharding configuration"
                     )
             register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
-
-        self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        self.pcp_group = get_pcp_group().device_group if self.pcp_size > 1 else None
-
-        self.dcp_size = get_dcp_group().world_size
-        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
-        self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
@@ -558,6 +536,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
+    def _get_full_kv(self, k, attn_metadata):
+        return k
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -565,6 +546,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
+        attn_metadata: M,
     ):
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -800,8 +782,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
-            maybe_npu_prefetch(
-                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states, enabled=self.enable_prefetch
+            weight_prefetch_method = get_weight_prefetch_method()
+            weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
+                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
             )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
@@ -830,7 +813,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 actual_seq_lengths_query = attn_metadata.dsa_cp_context.actual_seq_lengths_query
                 actual_seq_lengths_key = attn_metadata.dsa_cp_context.actual_seq_lengths_key
 
-            k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping)
+            k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, attn_metadata)
 
             if self.enable_dsa_cp:
                 assert k_pe is not None
@@ -870,6 +853,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     torch_npu.npu_scatter_nd_update_(kv_cache[0].view(-1, k_nope.shape[-1]), slot_mapping, k_nope)
                     torch_npu.npu_scatter_nd_update_(kv_cache[1].view(-1, k_pe.shape[-1]), slot_mapping, k_pe)
 
+            k = self._get_full_kv(k, attn_metadata)
             if kv_cache is not None:
                 torch_npu.npu_scatter_nd_update_(
                     kv_cache[2].view(-1, k.shape[-1]), attn_metadata.slot_mapping.view(-1, 1), k.view(-1, k.shape[-1])
@@ -889,39 +873,17 @@ class AscendSFAImpl(MLAAttentionImpl):
             need_gather_q_kv=need_gather_q_kv,
         )
 
-        block_table = attn_metadata.block_table
-        kv = kv_cache[0]
-        key_rope = kv_cache[1]
-        if self.pcp_size * self.dcp_size > 1:
-            assert attn_metadata.sfa_cp_metadata is not None
-            valid_block_ids = attn_metadata.sfa_cp_metadata.valid_block_ids
-            kv = self.gather_kv_cross_cp(kv, valid_block_ids)
-            key_rope = self.gather_kv_cross_cp(key_rope, valid_block_ids)
-            block_table = attn_metadata.sfa_cp_metadata.block_table_cp
-
-        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
-            query=ql_nope,
-            key=kv,
-            value=kv,
-            sparse_indices=topk_indices,
-            scale_value=self.scale,
-            sparse_block_size=1,
-            block_table=block_table,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=actual_seq_lengths_key,
-            query_rope=q_pe,
-            key_rope=key_rope,
-            layout_query="TND",
-            layout_kv="PA_BSND",
-            sparse_mode=3,
+        attn_output = self._execute_sparse_flash_attention_process(
+            ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
         )
 
         attn_output = self._v_up_proj(attn_output)
-        maybe_npu_prefetch(
+        weight_prefetch_method = get_weight_prefetch_method()
+        weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
             inputs=self.o_proj.weight,
             dependency=attn_output,
             max_size=MAX_O_PROJ_PREFETCH_SIZE,
-            enabled=self.enable_prefetch,
+            linear_layer=self.o_proj,
         )
 
         if self.enable_dsa_cp and not self.enable_dsa_cp_prefill_only:
@@ -944,14 +906,30 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         return output_padded
 
-    def gather_kv_cross_cp(self, kv_cache: torch.Tensor, valid_block_ids: torch.Tensor) -> torch.Tensor:
-        # Note(qcs): we need set kv_cache_interleave_size = block_size for sfa!!!
-        kv_cache = torch.index_select(kv_cache, 0, valid_block_ids)
-        if self.dcp_size > 1:
-            kv_cache = get_dcp_group().all_gather(kv_cache, 0)
-        if self.pcp_size > 1:
-            kv_cache = get_pcp_group().all_gather(kv_cache, 0)
-        return kv_cache
+    def _execute_sparse_flash_attention_process(
+        self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+    ):
+        block_table = attn_metadata.block_table
+        kv = kv_cache[0]
+        key_rope = kv_cache[1]
+
+        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
+            query=ql_nope,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=self.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            query_rope=q_pe,
+            key_rope=key_rope,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+        )
+        return attn_output
 
     def indexer_select_pre_process(
         self,
@@ -972,7 +950,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
-            q, k = rope_forward_triton(q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=True)
+            q, k = rope_forward_triton(
+                q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+            )
         else:
             k_pe, k_nope = torch.split(k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
 
@@ -1030,23 +1010,36 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         key = kv_cache[2]
         block_table = attn_metadata.block_table
-        if self.pcp_size * self.dcp_size > 1:
-            assert attn_metadata.sfa_cp_metadata is not None
-            key = self.gather_kv_cross_cp(key, attn_metadata.sfa_cp_metadata.valid_block_ids)
-            block_table = attn_metadata.sfa_cp_metadata.block_table_cp
 
-        topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
-            query=q,
-            key=key,
-            weights=weights,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_key=actual_seq_lengths_key,
-            block_table=block_table,
-            layout_query="TND",
-            layout_key="PA_BSND",
-            sparse_count=2048,
-            sparse_mode=3,
-        )
+        # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
+        # So two branches are maintained temporarily.
+        # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
+        if self.use_torch_npu_lightning_indexer:
+            topk_indices, _ = torch_npu.npu_lightning_indexer(
+                query=q,
+                key=key,
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        else:
+            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+                query=q,
+                key=key,
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
         return topk_indices
 
     def _init_o_proj_tp_full_params(self):
