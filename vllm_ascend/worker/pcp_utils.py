@@ -451,8 +451,8 @@ class PCPManager:
     def get_logits_indices(
         self,
         cu_num_tokens: np.ndarray,
-        tokens_original: list[int],
         num_reqs: int,
+        tokens_original: list[int] | None = None,
     ):
         if not self.pcp_use_hybrid_attn:
             logits_indices = (
@@ -461,6 +461,7 @@ class PCPManager:
                 - 1
             )
         else:
+            assert tokens_original is not None
             tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
             num_prefill_reqs = (tokens_original_tensor > self.decode_threshold).sum().item()
             num_decode_reqs = num_reqs - num_prefill_reqs
