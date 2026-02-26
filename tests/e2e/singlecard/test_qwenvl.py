@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 import pytest
 import vllm
@@ -148,7 +149,6 @@ QWEN2VL_MODEL_PATH = "Qwen/Qwen2-VL-2B-Instruct"
 QWEN25VL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN3VL_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
 
-
 # @wait_until_npu_memory_free()
 # def test_qwen2vl_lora(qwen2vl_lora_files):
 #     """Test Qwen 2.0 VL model with LoRA"""
@@ -174,7 +174,6 @@ QWEN3VL_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
 #                  TEST_IMAGES,
 #                  expected_outputs=EXPECTED_OUTPUTS,
 #                  lora_id=1)
-
 
 # @wait_until_npu_memory_free()
 # def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
@@ -207,7 +206,6 @@ QWEN3VL_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
 #             lora_id=1,
 #         )
 
-
 # @wait_until_npu_memory_free()
 # def test_qwen25vl_lora(qwen25vl_lora_files):
 #     """Test Qwen 2.5 VL model with LoRA"""
@@ -234,7 +232,6 @@ QWEN3VL_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
 #                  TEST_IMAGES,
 #                  expected_outputs=EXPECTED_OUTPUTS,
 #                  lora_id=1)
-
 
 # @wait_until_npu_memory_free()
 # def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
@@ -282,7 +279,7 @@ def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
         enable_tower_connector_lora=True,
     )
     with VllmRunner(
-            config.model_path,
+            snapshot_download(config.model_path),
             max_num_seqs=config.max_num_seqs,
             enable_lora=True,
             max_loras=config.max_loras,
