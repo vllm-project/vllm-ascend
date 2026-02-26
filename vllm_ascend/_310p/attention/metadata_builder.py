@@ -54,4 +54,5 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         # Override the mask builder with the 310P-specific version
-        self.attn_mask_builder: Any = AttentionMaskBuilder310(self.device)
+        max_model_len = vllm_config.model_config.max_model_len
+        self.attn_mask_builder: Any = AttentionMaskBuilder310(self.device, max_model_len)
