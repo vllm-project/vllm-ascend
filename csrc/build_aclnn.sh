@@ -24,7 +24,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
     export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
 
-    CUSTOM_OPS="grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer_vllm;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;add_rms_norm_bias;apply_top_k_top_p_custom;transpose_kv_cache_by_block;matmul_gelu"
+    CUSTOM_OPS="grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer_vllm;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;add_rms_norm_bias;apply_top_k_top_p_custom;transpose_kv_cache_by_block;matmul_gelu;"
     SOC_ARG="ascend910b"
 elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     # ASCEND910C (A3) series
@@ -50,20 +50,28 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
     TARGET_DIR="$SCRIPT_DIR/dispatch_ffn_combine/op_kernel/utils/"
     TARGET_FILE="$TARGET_DIR/$(basename "$HCCL_STRUCT_FILE_PATH")"
+    # for dispatch_ffn_combine_bf16
+    SCRIPT_DIR_BF16=$(cd "$(dirname "$0")" && pwd)
+    TARGET_DIR_BF16="$SCRIPT_DIR_BF16/dispatch_ffn_combine_bf16/op_kernel/utils/"
+    TARGET_FILE_BF16="$TARGET_DIR_BF16/$(basename "$HCCL_STRUCT_FILE_PATH")"
 
     echo "*************************************"
     echo $HCCL_STRUCT_FILE_PATH
     echo "$TARGET_DIR"
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
+    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR_BF16"
 
     sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
     sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
+    sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE_BF16"
+    sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE_BF16"
 
     CUSTOM_OPS_ARRAY=(
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
-        "lightning_indexer"
+        "lightning_indexer_vllm"
         "sparse_flash_attention"
         "dispatch_ffn_combine"
+        "dispatch_ffn_combine_bf16"
         "dispatch_gmm_combine_decode"
         "moe_combine_normal"
         "moe_dispatch_normal"
@@ -74,7 +82,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "add_rms_norm_bias"
         "apply_top_k_top_p_custom"
         "transpose_kv_cache_by_block"
-	      "matmul_gelu"
+        "matmul_gelu"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"

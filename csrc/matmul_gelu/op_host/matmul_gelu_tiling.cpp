@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 #include "../op_kernel/matmul_gelu_tiling.h"
 #include "register/op_def_registry.h"
@@ -7,21 +22,6 @@
 
 #include "log/ops_log.h"
 #include "error/ops_error.h"
-
-//static ge::graphStatus TilingFunc(gert::TilingContext* context)
-//{
-//  Matmul_geluTilingData tiling;
-//  const gert::StorageShape* x1_shape = context->GetInputShape(0);
-//  int32_t data_sz = 1;
-//  for (int i = 0; i < x1_shape->GetStorageShape().GetDimNum(); i++)
-//    data_sz *= x1_shape->GetStorageShape().GetDim(i);
-//  tiling.set_size(data_sz);
-//  context->SetBlockDim(8);
-//  tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
-//  context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
-//
-//  return ge::GRAPH_SUCCESS;
-//}
 
 constexpr size_t INPUT_INDEX_X = 0;
 constexpr size_t INPUT_INDEX_WEIGHT = 1;

@@ -1,17 +1,18 @@
-/* Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-        http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-        limitations under the License.
-==============================================================================*/
+/*
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 #ifndef _CUSTOM_MATMUL_GELU_KERNEL_H
 #define _CUSTOM_MATMUL_GELU_KERNEL_H
@@ -35,24 +36,6 @@ See the License for the specific language governing permissions and
 #include "./kernel_matmul_activation.hpp"
 #include "matmul_gelu_tiling.h"
 
-
-namespace MatmulGelu_Kernel {
-using namespace Catlass;
-
-华为
- matmul_gelu_kernel.h
-该文件中的函数MatmulGeluImpl中的
-if (tiling_data.m > tiling_data.n)
- 和
-else代码块很相似，只有
-BlockScheduler
-不一样，请帮忙重构代码消除重复代码​
-TRAE AI
-我需要重构MatmulGeluImpl函数，消除if-else分支中的重复代码。通过分析发现，两个分支只有BlockScheduler模板参数不同，可以创建一个内部模板函数来处理这个差异。
-
-
-matmul_gelu_kernel.h
-Apply
 namespace MatmulGelu_Kernel {
 using namespace Catlass;
 template <class LayoutWeight, class InDType, uint32_t m, uint32_t n, uint32_t k1, uint32_t k0>

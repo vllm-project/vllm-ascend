@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #ifndef MATMUL_GELU_TORCH_ADPT_H
 #define MATMUL_GELU_TORCH_ADPT_H
 namespace vllm_ascend {
