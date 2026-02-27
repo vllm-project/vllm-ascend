@@ -112,6 +112,7 @@ from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import MedusaProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (
+    enable_flash_comm_v1,
     enable_sp,
     is_drafter_moe_model,
     is_moe_model,
@@ -137,12 +138,8 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
-from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("v0.15.0"):
-    from vllm.attention.layer import Attention, MLAAttention  # type: ignore
-else:
-    from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -564,7 +561,6 @@ class NPUModelRunner(GPUModelRunner):
                 dtype=np.int32,
             )
         attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
-        self.attn_state = attn_state  # type: ignore
 
         # Determine if it's a splitfuse batch
         with_prefill = attn_state not in [AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding]
@@ -803,7 +799,7 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.speculative_config and self.speculative_config.method == "mtp":
+            if self.speculative_config:
                 attn_state = AscendAttentionState.SpecDecoding
             else:
                 attn_state = AscendAttentionState.ChunkedPrefill
@@ -812,6 +808,14 @@ class NPUModelRunner(GPUModelRunner):
             attn_state = AscendAttentionState.ChunkedPrefill
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
+
+        # For the overlay of the PCP feature and the eagle3, attn_state needs to be recovered
+        # TODO: Resolved the conflict between the sunset of attn_state and the PCP that requires this interface.
+        if attn_state == AscendAttentionState.SpecDecoding and self.speculative_config.method != "mtp":
+            self.attn_state = AscendAttentionState.ChunkedPrefill  # type: ignore
+        else:
+            self.attn_state = attn_state  # type: ignore
+
         return attn_state
 
     def _calc_spec_decode_metadata(
@@ -980,6 +984,10 @@ class NPUModelRunner(GPUModelRunner):
                         target_token_ids = input_ids_pcp_full[:num_scheduled_tokens]
                         target_positions = self._get_positions(num_scheduled_tokens)
                         target_hidden_states = hidden_states
+                        if self.use_aux_hidden_state_outputs:
+                            target_hidden_states = torch.cat(
+                                [h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1
+                            )
                     else:
                         token_indices_to_sample = None
                         # input_ids can be None for multimodal models.
@@ -1017,6 +1025,8 @@ class NPUModelRunner(GPUModelRunner):
                         target_token_ids = input_ids_pcp_full[token_indices]
                         target_positions = positions
                         target_hidden_states = hidden_states
+                        if self.use_aux_hidden_state_outputs:
+                            target_hidden_states = torch.cat([h[token_indices] for h in aux_hidden_states], dim=-1)
                     else:
                         target_token_ids = self.input_ids.gpu[token_indices]
                         target_positions = self._get_positions(token_indices)
@@ -1263,13 +1273,18 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
         with record_function_or_nullcontext("post process"):
+            aux_hidden_states = None
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, aux_hidden_states = hidden_states
             if self.pcp_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
                 hidden_states = self.pcp_manager.get_restore_hidden_states(hidden_states)
-            aux_hidden_states = None
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, aux_hidden_states = hidden_states
+                if aux_hidden_states is not None:
+                    aux_hidden_states = [
+                        self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
+                        for aux_hidden_states_pcp in aux_hidden_states
+                    ]
 
             if not self.broadcast_pp_output:
                 # Common case.
@@ -1677,7 +1692,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config,
                 positions.shape[0],
             )
-        if get_forward_context().sp_enabled and not isinstance(hidden_states, IntermediateTensors):
+        if get_forward_context().flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
 
@@ -1685,7 +1700,7 @@ class NPUModelRunner(GPUModelRunner):
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if enable_sp():
+        if enable_sp(self.vllm_config):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -2236,7 +2251,7 @@ class NPUModelRunner(GPUModelRunner):
                 # tp_size; otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading
                 # to incorrect memory estimation and potentially causing OOM.
                 intermediate_tokens = num_tokens_padded
-                if enable_sp():
+                if enable_flash_comm_v1():
                     tp_size = get_tensor_model_parallel_world_size()
                     intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
                 if self.intermediate_tensors is None:
