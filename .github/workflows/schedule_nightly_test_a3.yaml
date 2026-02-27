@@ -71,6 +71,9 @@ jobs:
           - name: multi-node-dpsk3.2-2node
             config_file_path: DeepSeek-V3_2-W8A8-A3-dual-nodes.yaml
             size: 2
+          - name: multi-node-qwen3-dp-mooncake-layerwise
+            config_file_path: Qwen3-235B-A22B-Mooncake-Layerwise.yaml
+            size: 2
           - name: multi-node-deepseek-r1-w8a8-longseq
             config_file_path: DeepSeek-R1-W8A8-longseq.yaml
             size: 2
