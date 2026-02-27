@@ -2177,6 +2177,8 @@ class NPUModelRunner(GPUModelRunner):
             self.lora_config,
             num_scheduled_tokens,
             num_sampled_tokens,
+            remove_lora,
+            num_active_loras,
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
