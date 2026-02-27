@@ -31,7 +31,7 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
 from vllm_ascend.utils import vllm_version_is
 
-if not vllm_version_is("0.15.0"):
+if not vllm_version_is("0.16.0"):
     from vllm.model_executor.layers.fused_moe.fused_moe_method_base import FusedMoEMethodBase  # type: ignore
     from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter  # type: ignore
     from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
@@ -169,7 +169,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         return final_hidden_states
 
 
-if not vllm_version_is("0.15.0"):
+if not vllm_version_is("0.16.0"):
     # Please remove this inheritance after extending vllm, todo(wxs)
     class AscendMoERunner(DefaultMoERunner):
         """
@@ -323,10 +323,10 @@ class AscendFusedMoE(FusedMoE):
 
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
-        if not vllm_version_is("0.15.0"):
+        if not vllm_version_is("0.16.0"):
             self.runner = self._init_runner()
 
-    if not vllm_version_is("0.15.0"):
+    if not vllm_version_is("0.16.0"):
 
         def _init_runner(self):
             # Storing the runner in the FusedMoE is an intermediate state, eventually
@@ -372,7 +372,7 @@ class AscendFusedMoE(FusedMoE):
         """
         return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
 
-    if not vllm_version_is("0.15.0"):
+    if not vllm_version_is("0.16.0"):
 
         def forward(
             self,
@@ -519,8 +519,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     ):
         AscendFusedMoE.__init__(self, **kwargs)
 
-        if not vllm_version_is("0.15.0"):
-            self._routed_input_transform = routed_input_transform
+        self._routed_input_transform = routed_input_transform
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
@@ -533,7 +532,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             logger.info_once("Sequence parallelism is enabled, shared experts are replicated for best performance.")
 
         self._gate = gate
-        if not vllm_version_is("0.15.0"):
+        if not vllm_version_is("0.16.0"):
             # Recreate the runner with the correct shared_experts parameter
             # The parent class created the runner before self._shared_experts was set
             self.runner = self._init_runner()
