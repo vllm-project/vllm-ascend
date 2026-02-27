@@ -4,9 +4,10 @@ import re
 from typing import Any
 
 import yaml
+from vllm.utils.network_utils import get_open_port
 
 CONFIG_BASE_PATH = "tests/e2e/nightly/single_node/config"
-DEFAULT_SERVER_PORT = 8080
+DEFAULT_SERVER_PORT = get_open_port()
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,9 @@ class SingleNodeConfig:
         self.prompts = prompts
         self.api_keyword_args = api_keyword_args
         self.benchmarks = benchmarks
+
+        if self.envs.get("SERVER_PORT") == "DEFAULT_PORT":
+            self.envs["SERVER_PORT"] = str(DEFAULT_SERVER_PORT)
         self.server_cmd = self._expand_env(server_cmd)
 
     def _expand_env(self, cmd: list[str]) -> list[str]:
@@ -40,7 +44,9 @@ class SingleNodeConfig:
 
     @property
     def server_port(self) -> int:
-        return int(self.envs.get("SERVER_PORT", DEFAULT_SERVER_PORT))
+        if self.envs.get("SERVER_PORT") == "DEFAULT_PORT":
+            return int(DEFAULT_SERVER_PORT)
+        return int(self.envs.get("SERVER_PORT"))
 
 
 class SingleNodeConfigLoader:
@@ -84,8 +90,7 @@ class SingleNodeConfigLoader:
                 raise KeyError(f"Missing required config fields: {missing}")
 
     @classmethod
-    def _parse_test_cases(cls,
-                          cases: list[dict[str, Any]]) -> list[SingleNodeConfig]:
+    def _parse_test_cases(cls, cases: list[dict[str, Any]]) -> list[SingleNodeConfig]:
         result: list[SingleNodeConfig] = []
         for case in cases:
             server_cmd = case.get("server_cmd", [])

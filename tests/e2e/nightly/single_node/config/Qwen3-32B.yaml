@@ -10,7 +10,7 @@ test_cases:
       OMP_PROC_BIND: "false"
       HCCL_OP_EXPANSION_MODE: "AIV"
       PAGED_ATTENTION_MASK_LEN: "5500"
-      SERVER_PORT: "8080"
+      SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--no-enable-prefix-caching"
       - "--tensor-parallel-size"

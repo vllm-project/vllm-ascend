@@ -7,7 +7,7 @@ _envs: &envs
   OMP_PROC_BIND: "false"
   HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  SERVER_PORT: "8080"
+  SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
   - "--quantization"
