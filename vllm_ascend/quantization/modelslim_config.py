@@ -401,12 +401,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             self.packed_modules_mapping = packed_modules_model_mapping[model_type]
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
-        from vllm_ascend.utils import vllm_version_is
-
-        if vllm_version_is("v0.15.0"):
-            from vllm.attention.layer import Attention  # type: ignore
-        else:
-            from vllm.model_executor.layers.attention import Attention
+        from vllm.model_executor.layers.attention import Attention
 
         if model_type != "kimi_k2":
             if prefix.startswith("language_model"):
