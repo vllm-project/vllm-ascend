@@ -97,10 +97,6 @@ def quant_apply_mlp(
     dynamic_eplb: bool = False,
     **kwargs,
 ) -> torch.Tensor:
-    adaptor_cls = DeviceOperator
-    if adaptor_cls is None:
-        raise RuntimeError("Device adaptor is not initialized.")
-
     # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced by different
     # quantization modes will be consolidated into a dataclass in a follow-up.
     use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
@@ -132,7 +128,7 @@ def quant_apply_mlp(
         quantized_hidden_states = None
     elif dynamic_scale is None:
         unquantized_hidden_states = hidden_states
-        hidden_states, pertoken_scale = adaptor_cls.npu_dynamic_quant(
+        hidden_states, pertoken_scale = DeviceOperator.npu_dynamic_quant(
             hidden_states=hidden_states,
             dynamic_scale=None,
             act_quant_type=act_quant_type,
@@ -164,7 +160,7 @@ def quant_apply_mlp(
             )
         elif use_gmm_swiglu_quant_fusion:
             # gmm1: gate_up_proj & act_fn: swiglu
-            hidden_states, swiglu_out_scale, _ = adaptor_cls.npu_grouped_matmul_swiglu_quant(
+            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
@@ -203,7 +199,7 @@ def quant_apply_mlp(
                 quant_mode=1,
             )
         # gmm2: down_proj
-        hidden_states = adaptor_cls.npu_grouped_matmul_gmm2(
+        hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
             weight=w2,
             weight_scale=w2_scale,
@@ -269,7 +265,7 @@ def quant_apply_mlp(
                 bias=bias1,
             )
         elif use_gmm_swiglu_quant_fusion:
-            hidden_states, swiglu_out_scale, _ = adaptor_cls.npu_grouped_matmul_swiglu_quant(
+            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
@@ -308,7 +304,7 @@ def quant_apply_mlp(
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
         # gmm2: down_proj
-        hidden_states = adaptor_cls.npu_grouped_matmul_gmm2(
+        hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
             weight=w2,
             weight_scale=w2_scale,

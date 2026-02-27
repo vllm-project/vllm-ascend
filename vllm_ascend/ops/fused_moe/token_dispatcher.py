@@ -356,10 +356,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
-        adaptor_cls = DeviceOperator
-        if adaptor_cls is None:
-            raise RuntimeError("Device adaptor is not initialized.")
-        sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = adaptor_cls.npu_moe_init_routing(
+        sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = DeviceOperator.npu_moe_init_routing(
             hidden_states,
             topk_ids,
             scale=pertoken_scale,
