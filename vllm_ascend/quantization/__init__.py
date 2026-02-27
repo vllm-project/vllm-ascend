@@ -20,20 +20,16 @@ This module provides quantization support for Ascend NPU.
 
 Supported quantization tools:
 - ModelSlim: Use AscendModelSlimConfig
-- LLM-Compressor (compressed_tensors): Use AscendCompressedTensorsConfig
+- LLM-Compressor (compressed_tensors)
 
 Public API:
-- Config classes: AscendModelSlimConfig, AscendCompressedTensorsConfig
+- Config classes: AscendModelSlimConfig
 - For scheme implementations, import from vllm_ascend.quantization.methods
 """
-
-# LLM-Compressor (compressed_tensors) quantization config
-from .compressed_tensors_config import AscendCompressedTensorsConfig
 
 # ModelSlim quantization config
 from .modelslim_config import AscendModelSlimConfig
 
 __all__ = [
     "AscendModelSlimConfig",
-    "AscendCompressedTensorsConfig",
 ]

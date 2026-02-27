@@ -28,7 +28,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
+from vllm_ascend.utils import maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
@@ -195,10 +195,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         # NOTE: new quantize weights: 2 int4 pack into int8
         self.new_quant_version = quant_version == "1.0.0"
 
-        self.quant_method = vllm_config.quant_config.quant_description.get("ascend_quant_method", "")
-        if self.quant_method == COMPRESSED_TENSORS_METHOD:
-            self.weight_strategy = vllm_config.quant_config.quant_description.get("weight_strategy", "group")
-
         self.tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else self.ep_group.world_size
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         if self.new_quant_version and self.tp_size > 16:
@@ -216,28 +212,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
-        if self.quant_method == COMPRESSED_TENSORS_METHOD:
-            return self.get_weight_compressed_tensors(
-                num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype
-            )
-        else:
-            return self.get_weight_modelslim(num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype)
-
-    def get_weight_compressed_tensors(
-        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
-    ) -> dict[str, Any]:
-        param_dict = {}
-        E = num_experts
-        H = hidden_sizes
-        IN = intermediate_size_per_partition
-
-        param_dict["w13_weight"] = torch.empty(E, 2 * IN, H, dtype=torch.int8)
-        param_dict["w2_weight"] = torch.empty(E, H, IN, dtype=torch.int8)
-        return param_dict
-
-    def get_weight_modelslim(
-        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
-    ) -> dict[str, Any]:
         param_dict = {}
         if self.new_quant_version:
             w13_output_size = intermediate_size_per_partition
@@ -253,38 +227,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         return param_dict
 
     def get_dynamic_quant_param(
-        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
-    ) -> dict[str, Any]:
-        if self.quant_method == COMPRESSED_TENSORS_METHOD:
-            return self.get_dynamic_quant_param_compressed_tensors(
-                num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype
-            )
-        else:
-            return self.get_dynamic_quant_param_modelslim(
-                num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype
-            )
-
-    def get_dynamic_quant_param_compressed_tensors(
-        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
-    ) -> dict[str, Any]:
-        param_dict = {}
-
-        E = num_experts
-        H = hidden_sizes
-        IN = intermediate_size_per_partition
-        g = self.group_size
-
-        # Per-row scale columns
-        def _n_scale_cols(in_features: int) -> int:
-            return 1 if g <= 0 else (in_features // g)
-
-        param_dict["w13_weight_scale"] = torch.empty(E, 2 * IN, _n_scale_cols(H), dtype=torch.bfloat16)
-
-        param_dict["w2_weight_scale"] = torch.empty(E, H, _n_scale_cols(IN), dtype=torch.bfloat16)
-
-        return param_dict
-
-    def get_dynamic_quant_param_modelslim(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
         param_dict = {}
@@ -447,61 +389,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             )
 
     def process_weights_after_loading(self, layer):
-        if self.quant_method == COMPRESSED_TENSORS_METHOD:
-            self.process_weights_after_loading_compressed_tensors(layer)
-        else:
-            self.process_weights_after_loading_modelslim(layer)
-
-    def process_weights_after_loading_compressed_tensors(self, layer):
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
-
-        def process_scale_compressed_tensors(scale: torch.Tensor):
-            scale = scale.transpose(1, 2).to(torch.float32).contiguous()
-            scale_np = scale.cpu().numpy()
-            scale_np.dtype = np.uint32
-            scale_uint64_tensor = torch.from_numpy(scale_np.astype(np.int64)).npu()
-            return scale_uint64_tensor
-
-        def update_bias_compressed_tensors(weight: torch.Tensor, scale: torch.Tensor, strategy: str):
-            group_num, k, n = weight.shape
-            scale = scale.transpose(1, 2).contiguous()
-            scale = scale.reshape(group_num, -1, n)
-            group_num, quantgroup_num, n = scale.shape
-
-            bias = None
-            if strategy == "group":
-                tmp = weight.to(torch.float32).reshape([group_num, quantgroup_num, -1, n]) * scale.reshape(
-                    [group_num, quantgroup_num, 1, n]
-                )
-                tmp = tmp.reshape([group_num, k, n])
-                bias = 8 * tmp.sum(axis=1)
-            elif strategy == "channel":
-                bias = 8 * (weight.to(torch.float32) * scale).sum(axis=1)
-            else:
-                raise ValueError(f"Unsupported weight strategy: {strategy}")
-            return bias
-
-        w13_bias = update_bias_compressed_tensors(
-            layer.w13_weight.data, layer.w13_weight_scale.data, self.weight_strategy
-        )
-        w2_bias = update_bias_compressed_tensors(layer.w2_weight.data, layer.w2_weight_scale.data, self.weight_strategy)
-
-        layer.w13_weight_scale.data = process_scale_compressed_tensors(layer.w13_weight_scale.data)
-        layer.w2_weight_scale.data = process_scale_compressed_tensors(layer.w2_weight_scale.data)
-
-        w13_scale_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
-        layer.register_parameter("w13_scale_bias", w13_scale_bias)
-        w2_scale_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
-        layer.register_parameter("w2_scale_bias", w2_scale_bias)
-
-        # Accuracy problem in nz format
-        # layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        # layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
-        layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
-        layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
-
-    def process_weights_after_loading_modelslim(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
 
