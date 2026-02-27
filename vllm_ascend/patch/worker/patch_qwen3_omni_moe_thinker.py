@@ -21,20 +21,17 @@ import torch.nn as nn
 import torch_npu
 
 from torch.nn import functional as F
-from typing import Optional
-from collections.abc import Iterable
 from transformers.activations import ACT2FN
-from transformers.modeling_utils import PreTrainedModel
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput
-from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import(
-    Qwen3OmniMoePreTrainedModel, SinusoidsPositionEmbedding, _get_feat_extract_output_lengths
-)
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeAudioEncoderConfig
-from transformers.utils import auto_docstring
-from vllm.model_executor.models.qwen3_omni_moe_thinker import (
-    Qwen3OmniMoeThinkerForConditionalGeneration
+from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+    Qwen3OmniMoePreTrainedModel,
+    SinusoidsPositionEmbedding,
+    _get_feat_extract_output_lengths,
 )
+from transformers.utils import auto_docstring
+from vllm.model_executor.models.qwen3_omni_moe_thinker import Qwen3OmniMoeThinkerForConditionalGeneration
 from vllm.model_executor.models.utils import WeightsMapper
 
 
@@ -80,10 +77,10 @@ class NPUQwen3OmniMoeAudioAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        cu_seqlens: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         seq_length, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
@@ -128,7 +125,7 @@ def _apply_transformers_audio_attention_patch():
         modeling_module.Qwen3OmniMoeAudioAttention = NPUQwen3OmniMoeAudioAttention
         
         print("[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioAttention with NPU-optimized version.")
-    except ImportError as e:
+    except ImportError:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip patch.")
     except Exception as e:
         print(f"[vLLM-Ascend] Failed to patch transformers audio attention: {e}")
@@ -340,7 +337,7 @@ def _apply_transformers_audio_encoder_patch():
             f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoder "
             f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})"
         )
-    except ImportError as e:
+    except ImportError:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip audio encoder patch.")
     except Exception as e:
         print(f"[vLLM-Ascend] Failed to patch transformers audio encoder: {e}")
@@ -363,7 +360,7 @@ class Qwen3OmniMoeAudioEncoderLayer(GradientCheckpointingLayer):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -416,7 +413,7 @@ def _apply_transformers_audio_encoder_layer_patch():
             f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoderLayer "
             f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})"
         )
-    except ImportError as e:
+    except ImportError:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip audio encoder patch.")
     except Exception as e:
         print(f"[vLLM-Ascend] Failed to patch transformers audio encoder: {e}")
