@@ -142,12 +142,7 @@ def quant_apply_mlp(
         quantized_hidden_states = None
     else:
         unquantized_hidden_states = None
-        hidden_states, pertoken_scale = adaptor_cls.npu_dynamic_quant(
-            hidden_states=hidden_states,
-            dynamic_scale=dynamic_scale,
-            act_quant_type=act_quant_type,
-            use_mxfp_quant=use_mxfp_quant,
-        )
+        pertoken_scale = dynamic_scale
         quantized_hidden_states = hidden_states
 
     bias1, bias2 = None, None
