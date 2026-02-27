@@ -21,6 +21,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Mock torch_npu before any imports that might need it
+mock_torch_npu = MagicMock()
+sys.modules['torch_npu'] = mock_torch_npu
+sys.modules['torch_npu._inductor'] = MagicMock()
+
+# Now import the module under test
 import vllm_ascend.batch_invariant as batch_invariant
 
 
@@ -158,6 +164,80 @@ class TestBatchInvariant:
             batch_invariant.override_envs_for_invariance.assert_not_called()
             batch_invariant.enable_batch_invariant_mode.assert_not_called()
 
+    @patch("vllm_ascend.batch_invariant.torch_npu")
+    def test_add_rms_norm(self, mock_torch_npu):
+        """Test add_rms_norm function"""
+        # Mock dependencies
+        mock_torch = batch_invariant.torch
+        
+        # Create mock tensors
+        batch_size = 2
+        hidden_size = 4
+        x = MagicMock(spec=torch.Tensor)
+        residual = MagicMock(spec=torch.Tensor)
+        weight = MagicMock(spec=torch.Tensor)
+        eps = 1e-6
+        
+        # Set up mock return value for addition
+        x_plus_residual = MagicMock(spec=torch.Tensor)
+        x.__add__.return_value = x_plus_residual
+        
+        # Set up expected outputs from npu_rms_norm
+        expected_output = MagicMock(spec=torch.Tensor)
+        expected_residual = MagicMock(spec=torch.Tensor)
+        mock_torch_npu.npu_rms_norm.return_value = (expected_output, expected_residual)
+        
+        # Call the function
+        result_x, result_placeholder, result_residual = batch_invariant.add_rms_norm(x, residual, weight, eps)
+        
+        # Verify the addition was called
+        x.__add__.assert_called_once_with(residual)
+        
+        # Verify the npu_rms_norm was called with the correct parameters
+        mock_torch_npu.npu_rms_norm.assert_called_once_with(x_plus_residual, weight, eps)
+        
+        # Verify the results
+        assert result_x is expected_output
+        assert result_placeholder is None
+        assert result_residual is expected_residual
+
+    @patch("vllm_ascend.batch_invariant.torch_npu")
+    def test_add_rms_norm_consistency(self, mock_torch_npu):
+        """Test that add_rms_norm produces the same output as torch_npu.npu_add_rms_norm"""
+        # Create mock tensors
+        batch_size = 2
+        hidden_size = 4
+        x = MagicMock(spec=torch.Tensor)
+        residual = MagicMock(spec=torch.Tensor)
+        weight = MagicMock(spec=torch.Tensor)
+        eps = 1e-6
+        
+        # Set up mock values
+        x_plus_residual = MagicMock(spec=torch.Tensor)
+        x.__add__.return_value = x_plus_residual
+        
+        # Define consistent mock results
+        expected_output = MagicMock(spec=torch.Tensor)
+        expected_residual = MagicMock(spec=torch.Tensor)
+        
+        # Set up mock_npu_rms_norm to return the same results as if it were npu_add_rms_norm
+        mock_torch_npu.npu_rms_norm.return_value = (expected_output, expected_residual)
+        mock_torch_npu.npu_add_rms_norm.return_value = (expected_output, None, expected_residual)
+        
+        # Call add_rms_norm
+        add_rms_norm_result = batch_invariant.add_rms_norm(x, residual, weight, eps)
+        
+        # Call npu_add_rms_norm directly
+        npu_add_rms_norm_result = mock_torch_npu.npu_add_rms_norm(x, residual, weight, eps)
+        
+        # Verify both functions return the same results
+        assert add_rms_norm_result[0] == npu_add_rms_norm_result[0]
+        assert add_rms_norm_result[2] == npu_add_rms_norm_result[2]
+        
+        # Verify the function composition is correct
+        x.__add__.assert_called_once_with(residual)
+        mock_torch_npu.npu_rms_norm.assert_called_once_with(x_plus_residual, weight, eps)
+        mock_torch_npu.npu_add_rms_norm.assert_called_once_with(x, residual, weight, eps)
 
 if __name__ == "__main__":
     pytest.main([__file__])

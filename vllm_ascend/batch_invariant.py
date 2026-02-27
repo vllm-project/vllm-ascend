@@ -23,6 +23,7 @@ import torch_npu
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.triton_utils import HAS_TRITON
+from vllm_ascend.utils import _CUSTOM_OP_ENABLED
 
 logger = init_logger(__name__)
 
@@ -44,6 +45,20 @@ except ImportError:
     HAS_ASCENDC_BATCH_INVARIANT = False
 
 
+def add_rms_norm(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+):
+    """AclnnAddRmsNorm can't ensure batch invariant,
+    so we need to split it into add and rms_norm.
+    """
+    x_ = x + residual
+    x_, residual_ = torch_npu.npu_rms_norm(x_, weight, eps)
+    return x_, None, residual_
+
+
 def override_envs_for_invariance():
     # enabling NZ mode introduces NZ format input to the triton operator,
     # resulting in accuracy anomalies.
@@ -58,6 +73,11 @@ _batch_invariant_LIB = None
 
 
 def enable_batch_invariant_mode():
+    # There are some customed operators which aren't implemented
+    # with batch invariant in vllm-ascend, we need to disable them.
+    global _CUSTOM_OP_ENABLED
+    _CUSTOM_OP_ENABLED = False
+
     global _batch_invariant_LIB
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
@@ -76,6 +96,8 @@ def enable_batch_invariant_mode():
         torch_npu.npu_fused_infer_attention_score = (
             torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
+        # patch npu_add_rms_norm to ensure batch invariant.
+        torch_npu.npu_add_rms_norm = add_rms_norm
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
