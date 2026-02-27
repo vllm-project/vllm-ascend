@@ -45,6 +45,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
 | `layer_sharding` | dict | `{}` | Configuration options for Layer Sharding Linear |
+| `sp_threshold` | int | `1000` | For dense models, only num_tokens > threshold will enable sequence parallelism. |
 
 The details of each configuration option are as follows:
 

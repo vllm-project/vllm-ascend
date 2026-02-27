@@ -70,3 +70,8 @@ class GraphFusionPassManager:
             from .passes.allreduce_rmsnorm_fusion_pass import MatmulAllReduceAddRMSNormPass
 
             self.passes.append(MatmulAllReduceAddRMSNormPass(config))
+
+        if config.compilation_config.pass_config.enable_sp:
+            from .passes.sequence_parallelism import AscendSequenceParallelismPass
+
+            self.passes.append(AscendSequenceParallelismPass(config))

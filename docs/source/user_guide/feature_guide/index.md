@@ -24,4 +24,5 @@ speculative_decoding
 context_parallel
 npugraph_ex
 weight_prefetch
+sequence_parallelism
 :::
