@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.15.0rc1 - 2026.02.26
+## v0.15.0rc1 - 2026.02.27
 
 This is the first release candidate of v0.15.0 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
 
