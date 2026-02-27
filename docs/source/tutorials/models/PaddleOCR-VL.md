@@ -28,7 +28,7 @@ Select an image based on your machine type and start the docker image on your no
 
 ```{code-block} bash
    :substitutions:
-export IMAGE=quay.io/ascend/vllm-ascend:v0.15.0rc1
+export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0rc1
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
@@ -46,6 +46,7 @@ docker run --rm \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
 ```
+
 :::{note}
 The 310P3 device is supported from version 0.15.0rc1. You need to select the corresponding image for installation.
 :::
