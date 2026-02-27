@@ -597,23 +597,12 @@ def split_qkv_rmsnorm_rope_impl(
         kv_head_num = kv_hidden_size // head_dim
         batch_size_per_vec = triton.cdiv(batch_size, num_vectorcore)
 
-        # set number of input elements for per iter and full ub utilization is x
-        # 2x + x/(kv_head_num+q_head_num) + x*(q_head_num/(q_head_num+kv_headnum))*1.75=85k
-        # 2x(kv_head_num+q_head_num) + x + 1.75*x*q_head_num =85k * (kv_head_num+q_head_num)
-        # x*(2*(kv_head_num+q_head_num) + 1 + 1.75*q_head_num) = 85k * (kv_head_num+q_head_num)
-        # x = 85k * (kv_head_num+q_head_num) / (2*(kv_head_num+q_head_num) + 1 + 1.75*q_head_num)
-
-        # 2x*(q_head_num + kv_head_num)*HEAD_DIM*3+x*HEAD_DIM*(2+q_head_num*0.5)
-        # input_values + normalized_values+normalized_values_tmp + x + sin and cos
-        # input.element_size() occupy 2B
-        # batch_size_per_iter_per_vec = 85*1024/input.element_size()//(6 * head_dim * (q_head_num + kv_head_num) +
-        # head_dim * 2 + head_dim*q_head_num*0.5)
         # set number of line loading from GM data is x
         # x*(q_head_num + kv_head_num)*HEAD_DIM: values_tmp
         # 2x*(q_head_num + kv_head_num)*HEAD_DIM: normalized_values(float32)
         # x*ROPE_DIM*2 : cos/sin
         # x*q_head_num*HEAD_DIM*2： normalized_values_tmp
-        # x*q_head_num*ROPE_DIM*(0.5) x(not IS_PARTIAL_ROPE)
+        # x*q_head_num*ROPE_DIM*(0.5) (not IS_PARTIAL_ROPE) x*q_head_num*ROPE_DIM*(0.5): y
         UB_SIZE = 85 * 1024
         # the factor is the sum of elements number
         if IS_PARTIAL_ROPE:
