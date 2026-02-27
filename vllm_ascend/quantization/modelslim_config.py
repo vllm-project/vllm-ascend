@@ -246,14 +246,7 @@ def get_linear_quant_type(
                     f"use {quant_type}. Please check quantization config."
                 )
     else:
-        has_float_type = any(
-            key.startswith(prefix) and key.endswith(".weight") and value == "FLOAT"
-            for key, value in quant_description.items()
-        )
-        if has_float_type:
-            quant_type = "FLOAT"
-        else:
-            quant_type = "W8A8_DYNAMIC"
+        quant_type = quant_description[prefix + '.weight']
     return quant_type
 
 
