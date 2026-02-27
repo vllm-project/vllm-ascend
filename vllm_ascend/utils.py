@@ -143,7 +143,7 @@ def maybe_trans_nz(weight: torch.Tensor):
         return weight
     elif weight.dtype in {torch.bfloat16, torch.float16}:
         # bf16/fp16 will trans nz when VLLM_ASCEND_ENABLE_NZ is 2
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2 or is_310p():
             return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
         else:
             return weight
