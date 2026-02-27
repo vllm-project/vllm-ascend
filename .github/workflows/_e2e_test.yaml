@@ -89,7 +89,7 @@ jobs:
               --suite e2e-singlecard-light \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              --continue-on-error
+              --auto-upgrade-estimated-times
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-singlecard-light \
@@ -100,11 +100,12 @@ jobs:
 
       - name: Upload timing data
         uses: actions/upload-artifact@v4
+        if: ${{ inputs.continue_on_error == 'true'}}
         with:
           name: timing-data-singlecard-light-part${{ matrix.part }}
           path: test_timing_data.json
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 5
 
   e2e-full:
     name: singlecard-full
@@ -175,7 +176,7 @@ jobs:
               --suite e2e-singlecard \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 2 \
-              --continue-on-error
+              --auto-upgrade-estimated-times
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-singlecard \
@@ -185,11 +186,12 @@ jobs:
 
       - name: Upload timing data
         uses: actions/upload-artifact@v4
+        if: ${{ inputs.continue_on_error == 'true'}}
         with:
           name: timing-data-singlecard-full-part${{ matrix.part }}
           path: test_timing_data.json
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 5
 
   e2e-2-cards-light:
     name: multicard-2-light
@@ -258,7 +260,7 @@ jobs:
               --suite e2e-2card-light \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              --continue-on-error
+              --auto-upgrade-estimated-times
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-2card-light \
@@ -269,11 +271,12 @@ jobs:
 
       - name: Upload timing data
         uses: actions/upload-artifact@v4
+        if: ${{ inputs.continue_on_error == 'true'}}
         with:
           name: timing-data-2card-light-part${{ matrix.part }}
           path: test_timing_data.json
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 5
 
   e2e-2-cards-full:
     name: multicard-2-full
@@ -342,7 +345,7 @@ jobs:
               --suite e2e-multicard-2-cards \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              --continue-on-error
+              --auto-upgrade-estimated-times
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-multicard-2-cards \
@@ -353,11 +356,12 @@ jobs:
 
       - name: Upload timing data
         uses: actions/upload-artifact@v4
+        if: ${{ inputs.continue_on_error == 'true'}}
         with:
           name: timing-data-2card-full-part${{ matrix.part }}
           path: test_timing_data.json
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 5
 
       - name: Run vllm-project/vllm-ascend test (non triton)
         if: ${{ inputs.type == 'full' && matrix.part == 0 }}
@@ -434,7 +438,7 @@ jobs:
               --suite e2e-multicard-4-cards \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              --continue-on-error
+              --auto-upgrade-estimated-times
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-multicard-4-cards \
@@ -445,11 +449,12 @@ jobs:
 
       - name: Upload timing data
         uses: actions/upload-artifact@v4
+        if: ${{ inputs.continue_on_error == 'true'}}
         with:
           name: timing-data-4card-full-part${{ matrix.part }}
           path: test_timing_data.json
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 5
 
   e2e_310p:
     name: 310p singlecard

@@ -190,9 +190,15 @@ def main() -> None:
         help="Total number of partitions",
     )
     parser.add_argument(
+        "auto-upgrade-estimated-times",
+        action="store_true",
+        help="Automatically update estimated times in config.yaml based on actual timings (default: False) \
+If enabled, the script always exit with 0, even if some tests fail, since the primary purpose is to gather \
+timing data to improve estimates.",
+    )
+    parser.add_argument(
         "--continue-on-error",
         action="store_true",
-        default=True,
         help="Continue running after a test failure (default: True)",
     )
     parser.add_argument(
@@ -232,7 +238,8 @@ def main() -> None:
     _save_timing_json(records, args.suite, args.auto_partition_id, args.auto_partition_size, args.timing_report_json)
 
     _print_results(args.suite, records, skipped, partition_info)
-
+    if args.auto_upgrade_estimated_times:
+        sys.exit(0)
     sys.exit(exit_code)
 
 
