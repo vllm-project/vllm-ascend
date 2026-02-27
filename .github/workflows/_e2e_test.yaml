@@ -96,7 +96,7 @@ jobs:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           start_time=$(date +%s)
-          #pip install uc-manager
+          pip install uc-manager
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "==========install uc-manager总耗时：$duration 秒（$((duration/60)) 分 $((duration%60)) 秒）"
