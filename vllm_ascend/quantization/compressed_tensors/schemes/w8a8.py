@@ -22,6 +22,9 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
+    CompressedTensorsW8A8Int8MoEMethod,
+)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -41,7 +44,26 @@ def scale_from_float_to_int64(scale):
     return scale
 
 
+_original_create_weights = CompressedTensorsW8A8Int8MoEMethod.create_weights
+
+
 class AscendCompressedTensorsW8A8Int8DynamicFusedMoEMethod:
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        _original_create_weights(
+            self, layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype, **extra_weight_attrs
+        )
+        # Adapt for Ascend process, original create_weights use the float32 dtype.
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.to(params_dtype)
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.to(params_dtype)
+
     def process_weights_after_loading(self, layer):
         self.dtype = get_current_vllm_config().model_config.dtype
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
@@ -50,26 +72,9 @@ class AscendCompressedTensorsW8A8Int8DynamicFusedMoEMethod:
         # can only support weight nz.
         layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1).to(
-            torch.bfloat16
-        )
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
-        if hasattr(layer, "w13_weight_offset"):
-            layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1).to(
-            torch.bfloat16
-        )
-        if hasattr(layer, "w2_weight_offset"):
-            layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
-
-        layer.w13_weight_offset = torch.nn.Parameter(
-            torch.zeros_like(layer.w13_weight_scale.data),
-            requires_grad=False,
-        )
-        layer.w2_weight_offset = torch.nn.Parameter(
-            torch.zeros_like(layer.w2_weight_scale.data),
-            requires_grad=False,
-        )
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
 
         layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
         layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)

@@ -94,8 +94,6 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         # cast quantized weight tensors in NZ format for higher inference speed
         layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
-        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
-        layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
 @register_scheme("W8A8_DYNAMIC", "moe")
@@ -271,9 +269,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
-        layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
-        layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
         layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
         layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
