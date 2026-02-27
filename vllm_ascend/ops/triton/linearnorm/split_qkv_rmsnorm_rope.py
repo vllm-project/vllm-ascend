@@ -531,8 +531,8 @@ def split_qkv_rmsnorm_rope_impl(
     kv_hidden_size: int,
     head_dim: int,
     eps: float,
-    positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
     rope_dim: int | None = None,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
@@ -672,8 +672,8 @@ def split_qkv_rmsnorm_rope_impl(
 
 def split_qkv_rmsnorm_rope_impl_fake(
     input: torch.Tensor,
-    sin: torch.Tensor,
-    cos: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
     q_hidden_size: int,
