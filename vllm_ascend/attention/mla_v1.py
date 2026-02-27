@@ -945,18 +945,21 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
         if self.fa_quant:
             self.wu_q_fa3 = self.wu_q.reshape(-1 ,self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
+            
             wd_q = transdata(q_a_proj_wt, block_size=(16, 32)).unsqueeze(0).contiguous()
-
             self.wd_q = wd_q.reshape(-1 ,self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
             self.wd_q = torch_npu.npu_format_cast(self.wd_q, 29)
+            self.wd_q_fa3 = self.wd_q.reshape(-1,1536)
+            
             wd_kv = transdata(kv_a_proj_wt, block_size=(16, 32)).unsqueeze(0).contiguous()
             self.wd_kv = wd_kv.reshape(-1, self.kv_lora_rank + self.qk_rope_head_dim)
             self.wd_kv = torch_npu.npu_format_cast(self.wd_kv, 29)
-            self.dequant_scale_w_uq_qr = self.qb_deq_scl.reshape(1, self.qb_deq_scl.shape[0])
-            self.dequant_scale_w_uq_qr = self.dequant_scale_w_uq_qr.to(torch.float)
-            self.q_a_proj_deq_scl_fa3 = q_a_proj_deq_scl.view(1,-1)
-            self.kv_a_proj_deq_scl_fa3 = kv_a_proj_deq_scl.view(1,-1)
-            self.wd_q_fa3 = self.wd_q.reshape(-1,1536)
+            
+            self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.view(1, -1).to(torch.float)
+            q_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[: self.q_lora_rank].contiguous()  # type: ignore[union-attr]
+            self.q_a_proj_deq_scl_fa3 = q_a_proj_deq_scl.view(1,-1).to(torch.float)
+            kv_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[self.q_lora_rank :].contiguous()  # type: ignore[union-attr]
+            self.kv_a_proj_deq_scl_fa3 = kv_a_proj_deq_scl.view(1,-1).to(torch.float)
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
         # referenced, so drop them to save memory.
