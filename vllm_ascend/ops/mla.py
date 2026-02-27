@@ -126,16 +126,17 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             o_proj=mla_modules.o_proj,
         )
 
-        original_process_weights = self.mla_attn.process_weights_after_loading
+        if not vllm_version_is("v0.15.0"):
+            original_process_weights = self.mla_attn.process_weights_after_loading
 
-        def wrapped_process_weights(act_dtype: torch.dtype):
-            from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+            def wrapped_process_weights(act_dtype: torch.dtype):
+                from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
-            if not isinstance(self.mla_attn.impl, AscendSFAImpl):
-                original_process_weights(act_dtype)
-            self.mla_attn.impl.process_weights_after_loading(act_dtype)
+                if not isinstance(self.mla_attn.impl, AscendSFAImpl):
+                    original_process_weights(act_dtype)
+                self.mla_attn.impl.process_weights_after_loading(act_dtype)
 
-        self.mla_attn.process_weights_after_loading = wrapped_process_weights
+            self.mla_attn.process_weights_after_loading = wrapped_process_weights
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -149,7 +150,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        need_gather_q_kv = get_forward_context().sp_enabled
+        need_gather_q_kv = get_forward_context().flash_comm_v1_enabled
         output_shape = hidden_states.shape
         # FIXME: This does not seem right, should make sure the buffer is fixed
         output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)

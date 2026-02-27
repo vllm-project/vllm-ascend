@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from vllm_ascend.cpu_binding import CpuAlloc, DeviceInfo
+from vllm_ascend.cpu_binding import CpuAlloc, DeviceInfo, bind_cpus, is_arm_cpu
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestDeviceInfo(unittest.TestCase):
@@ -103,6 +104,23 @@ class TestCpuAlloc(unittest.TestCase):
             2: [8, 9, 10, 11, 12, 13]
         })
 
+    @patch('vllm_ascend.cpu_binding.get_ascend_device_type')
+    def test_binding_mode_table(self, mock_get_device_type):
+        mock_get_device_type.return_value = AscendDeviceType.A2
+        self.assertEqual(self.cpu_alloc._binding_mode(), "affinity")
+        mock_get_device_type.return_value = AscendDeviceType.A3
+        self.assertEqual(self.cpu_alloc._binding_mode(), "numa_balanced")
+
+    @patch('vllm_ascend.cpu_binding.get_ascend_device_type')
+    def test_build_cpu_pools_fallback_to_numa_balanced(self, mock_get_device_type):
+        mock_get_device_type.return_value = AscendDeviceType.A2
+        self.cpu_alloc.device_info.npu_affinity = {}
+        with patch.object(self.cpu_alloc, "build_cpu_node_map") as mock_build_cpu_node_map, \
+                patch.object(self.cpu_alloc, "handle_no_affinity") as mock_handle_no_affinity:
+            self.cpu_alloc.build_cpu_pools()
+        mock_build_cpu_node_map.assert_called_once()
+        mock_handle_no_affinity.assert_called_once()
+
     def test_extend_numa(self):
         result = self.cpu_alloc.extend_numa([])
         self.assertEqual(result, [])
@@ -128,8 +146,10 @@ class TestCpuAlloc(unittest.TestCase):
         self.assertEqual(self.cpu_alloc.numa_to_cpu_map,
                          expected_numa_to_cpu_map)
 
+    @patch('vllm_ascend.cpu_binding.get_ascend_device_type')
     @patch('vllm_ascend.cpu_binding.execute_command')
-    def test_handle_no_affinity(self, mock_execute_command):
+    def test_handle_no_affinity(self, mock_execute_command, mock_get_device_type):
+        mock_get_device_type.return_value = AscendDeviceType.A3
         mock_execute_command.side_effect = [("0 0\n1 1", 0), ("0 0\n1 1", 0)]
         self.cpu_alloc.device_info.running_npu_list = [0, 1]
         self.cpu_alloc.device_info.allowed_cpus = [0, 1, 2, 3]
@@ -142,11 +162,11 @@ class TestCpuAlloc(unittest.TestCase):
     @patch('vllm_ascend.cpu_binding.execute_command')
     def test_allocate(self, mock_execute_command):
         self.cpu_alloc.device_info.running_npu_list = [0]
-        self.cpu_alloc.npu_cpu_pool = {0: [0, 1, 2]}
+        self.cpu_alloc.npu_cpu_pool = {0: [0, 1, 2, 3, 4]}
         self.cpu_alloc.allocate()
-        self.assertEqual(self.cpu_alloc.assign_main[0], [0])
-        self.assertEqual(self.cpu_alloc.assign_acl[0], [1])
-        self.assertEqual(self.cpu_alloc.assign_rel[0], [2])
+        self.assertEqual(self.cpu_alloc.assign_main[0], [2])
+        self.assertEqual(self.cpu_alloc.assign_acl[0], [3])
+        self.assertEqual(self.cpu_alloc.assign_rel[0], [4])
         self.cpu_alloc.npu_cpu_pool = {0: [0, 1]}
         with self.assertRaises(RuntimeError):
             self.cpu_alloc.allocate()
@@ -161,6 +181,27 @@ class TestCpuAlloc(unittest.TestCase):
         self.cpu_alloc.assign_rel = {0: [3]}
         self.cpu_alloc.bind_threads()
         mock_execute_command.assert_called()
+
+
+class TestBindingSwitch(unittest.TestCase):
+
+    @patch('vllm_ascend.cpu_binding.platform.machine')
+    def test_is_arm_cpu(self, mock_machine):
+        mock_machine.return_value = "x86_64"
+        self.assertFalse(is_arm_cpu())
+        mock_machine.return_value = "aarch64"
+        self.assertTrue(is_arm_cpu())
+        mock_machine.return_value = "armv8"
+        self.assertTrue(is_arm_cpu())
+        mock_machine.return_value = "mips64"
+        self.assertFalse(is_arm_cpu())
+
+    @patch('vllm_ascend.cpu_binding.CpuAlloc')
+    @patch('vllm_ascend.cpu_binding.is_arm_cpu')
+    def test_bind_cpus_skip_non_arm(self, mock_is_arm_cpu, mock_cpu_alloc):
+        mock_is_arm_cpu.return_value = False
+        bind_cpus(0)
+        mock_cpu_alloc.assert_not_called()
 
 
 if __name__ == '__main__':

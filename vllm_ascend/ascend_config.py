@@ -30,6 +30,7 @@ class AscendConfig:
     """
 
     def __init__(self, vllm_config: "VllmConfig"):
+        self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
@@ -84,7 +85,7 @@ class AscendConfig:
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
-        self.enable_cpu_binding = additional_config.get("enable_cpu_binding", False)
+        self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
@@ -144,14 +145,14 @@ class AscendConfig:
         if os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0") == "1":
             MAX_PREFETCH_WEIGHT_SIZE: int = 18 * 1024 * 1024
             gate_up_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
-            down_prefetch_szie = int(os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
+            down_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
             self.weight_prefetch_config.set_mlp_pre_version_compatibale_config(
-                gate_up_prefetch_size, down_prefetch_szie
+                gate_up_prefetch_size, down_prefetch_size
             )
             logger.info_once(
                 f"MLP weight prefetch enabled from env variable VLLM_ASCEND_ENABLE_PREFETCH_MLP."
                 f"gate_up_prefetch_size={gate_up_prefetch_size}, "
-                f"down_prefetch_szie={down_prefetch_szie}."
+                f"down_prefetch_size={down_prefetch_size}."
             )
             warnings.warn(
                 "VLLM_ASCEND_ENABLE_PREFETCH_MLP is deprecated and will be removed in a v0.16.0 version. "
@@ -159,6 +160,47 @@ class AscendConfig:
                 DeprecationWarning,
                 stacklevel=2,
             )
+
+    def update_compile_ranges_split_points(self):
+        vllm_config = self.vllm_config
+        if self.npugraph_ex_config.enable:
+            if self.npugraph_ex_config.fuse_allreduce_rms:
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
+
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                logger.debug(
+                    "set compile_ranges_split_points to "
+                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                )
+
+        else:
+            new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+            if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
+
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                logger.debug(
+                    "set compile_ranges_split_points to "
+                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                )
+
+            from vllm_ascend.utils import is_moe_model
+
+            if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config):
+                from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_threshold
+
+                sp_threshold = get_sp_threshold(vllm_config)
+                new_compile_ranges_split_points.append(sp_threshold)
+                logger.debug(f"add {sp_threshold} to compile_ranges_split_points for sequence parallelism")
+            if len(new_compile_ranges_split_points) > len(vllm_config.compilation_config.compile_ranges_split_points):
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
 
 
 class FinegrainedTPConfig:
@@ -260,7 +302,7 @@ class NpugraphExConfig:
 
     def __init__(
         self,
-        enable: bool = False,
+        enable: bool = True,
         enable_static_kernel: bool = False,
         fuse_norm_quant: bool = True,
         fuse_qknorm_rope: bool = True,
@@ -274,7 +316,7 @@ class NpugraphExConfig:
             enable (bool): Whether to enable npugraph_ex backend.
                 When set to True, the Fx graph generated by Dymano will be
                 optimized and compiled by the npugraph_ex backend.
-                Default: False
+                Default: True
             enable_static_kernel (bool): Whether to enable static kernel.
                 Static kernel is suitable for scenarios with purely static shapes
                 or minimal shape changes, and can improve network performance.
@@ -385,6 +427,7 @@ class EplbConfig:
 
     def _validate_config(self):
         if self.expert_map_path is not None:
+            logger.info(f"The expert_map is {self.config['dynamic_eplb']}")
             if self.expert_map_path[-5:] != ".json":
                 raise TypeError("The expert_map is not json.")
             if not os.path.exists(self.expert_map_path):
@@ -402,6 +445,14 @@ class EplbConfig:
                 raise ValueError(f"{key} must greater than 0; got {self.config[key]} instead")
         if self.eplb_policy_type not in [0, 1, 2, 3]:
             raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
+        if self.config["dynamic_eplb"]:
+            assert (
+                os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
+                or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
+            ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the ePLB must be set to true."
+
+        logger.info(f"Dynamic EPLB is {self.config['dynamic_eplb']}")
+        logger.info(f"The number of redundant experts is {self.config['num_redundant_experts']}")
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
