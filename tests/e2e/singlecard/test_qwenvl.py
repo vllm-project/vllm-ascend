@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 import pytest
 import vllm
@@ -279,7 +278,7 @@ def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
         enable_tower_connector_lora=True,
     )
     with VllmRunner(
-            snapshot_download(config.model_path),
+            config.model_path,
             max_num_seqs=config.max_num_seqs,
             enable_lora=True,
             max_loras=config.max_loras,
