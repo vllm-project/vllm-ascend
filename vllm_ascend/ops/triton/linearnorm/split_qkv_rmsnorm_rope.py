@@ -539,10 +539,9 @@ def split_qkv_rmsnorm_rope_impl(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # get available vector core
     num_vectorcore = get_vectorcore_num()
-    cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
     if rope_dim is None:
         rope_dim = head_dim
-
+    cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
     batch_size = input.shape[0]
     BIAS = q_bias is not None
     IS_PARTIAL_ROPE = rope_dim != head_dim
