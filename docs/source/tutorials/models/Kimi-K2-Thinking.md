@@ -1,5 +1,31 @@
 # Kimi-K2-Thinking
 
+## Introduction
+
+Kimi-K2-Thinking is a large-scale Mixture-of-Experts (MoE) model developed by Moonshot AI. It features a hybrid thinking architecture that excels in complex reasoning and problem-solving tasks.
+
+This document will show the main verification steps of the model, including supported features, environment preparation, single-node deployment, and functional verification.
+
+## Supported Features
+
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+
+## Environment Preparation
+
+### Model Weight
+
+- `Kimi-K2-Thinking`(bfloat16): require 1 Atlas 800 A3 (64G × 16) node. [Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
+
+It is recommended to download the model weight to the shared directory, such as `/mnt/sfs_turbo/.cache/`.
+
+### Installation
+
+You can use our official docker image to run `Kimi-K2-Thinking` directly.
+
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+
 ## Run with Docker
 
 ```{code-block} bash
@@ -90,7 +116,7 @@ For an Atlas 800 A3 (64G*16) node, tensor-parallel-size should be at least 16.
 vllm serve Kimi-K2-Thinking \
 --served-model-name kimi-k2-thinking \
 --tensor-parallel-size 16 \
---enable_expert_parallel \
+--enable-expert-parallel \
 --trust-remote-code \
 --no-enable-prefix-caching
 ```

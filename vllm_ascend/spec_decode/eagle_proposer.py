@@ -1349,7 +1349,7 @@ class SpecDecodeBaseProposer(VllmEagleProposer):
                 positions = positions.squeeze(-1)
         else:
             forward_context = get_forward_context()
-            if forward_context.sp_enabled:
+            if forward_context.flash_comm_v1_enabled:
                 hidden_states = split_inputs_tp_to_sp(hidden_states, hidden_states)
         return hidden_states, positions
 
@@ -1369,7 +1369,7 @@ class SpecDecodeBaseProposer(VllmEagleProposer):
                     hidden_states = last_hidden_states
         else:
             forward_context = get_forward_context()
-            if forward_context.sp_enabled:
+            if forward_context.flash_comm_v1_enabled:
                 last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                     last_hidden_states.contiguous(), True
                 )
