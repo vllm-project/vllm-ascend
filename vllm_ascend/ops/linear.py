@@ -40,7 +40,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import enable_sp, maybe_trans_nz
+from vllm_ascend.utils import enable_flash_comm_v1, maybe_trans_nz
 
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
@@ -240,7 +240,7 @@ class AscendRowParallelLinear(RowParallelLinear):
         disable_tp: bool = False,
     ):
         # TODO(kunpengW-code): Specifying the prefix in linear layers of some models in the vLLM.
-        if enable_sp():
+        if enable_flash_comm_v1():
             compilation_config = get_current_vllm_config().compilation_config
             unique_prefix = prefix
             if prefix in compilation_config.static_forward_context:
