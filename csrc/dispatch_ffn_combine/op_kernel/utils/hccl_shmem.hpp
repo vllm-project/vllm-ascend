@@ -84,13 +84,13 @@ FORCE_INLINE_AICORE void gm_signal_wait_until_ne(__gm__ int32_t *sig_addr, int32
 class HcclShmem {
 public:
     #ifdef HCCL_COMM    // HCCL needs to initialize the HCCL context
-        __gm__ HcclOpResParam *WinContext_{nullptr};
+        __gm__ ::HcclOpResParam *WinContext_{nullptr};
         Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
         AscendC::LocalTensor<int32_t> ub;
         FORCE_INLINE_AICORE
         HcclShmem(){
             auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
-            WinContext_ = (__gm__ HcclOpResParam *)contextGM0;
+            WinContext_ = (__gm__ ::HcclOpResParam *)contextGM0;
 
             m_rank = WinContext_->localUsrRankId;
             m_rankSize = WinContext_->rankSize;
@@ -122,7 +122,7 @@ public:
     GM_ADDR operator() (int32_t index) const {  // With index parameter: return pointer to the base address of remote peermem
         #ifdef HCCL_COMM
             return (GM_ADDR)((index == m_rank) ? WinContext_->localWindowsIn :
-                                    ((HcclRankRelationResV2 *)(WinContext_->remoteRes[index].nextDevicePtr))->windowsIn);
+                                    ((::HcclRankRelationResV2 *)(WinContext_->remoteRes[index].nextDevicePtr))->windowsIn);
         #else
             return reinterpret_cast<GM_ADDR>(shmem_ptr(symmetricPtr, index));
         #endif
@@ -138,7 +138,7 @@ public:
                 return nullptr;
             }
             return (GM_ADDR)((rankId == m_rank) ? WinContext_->localWindowsIn :
-                                    ((HcclRankRelationResV2 *)(WinContext_->remoteRes[rankId].nextDevicePtr))->windowsIn) + offset;
+                                    ((::HcclRankRelationResV2 *)(WinContext_->remoteRes[rankId].nextDevicePtr))->windowsIn) + offset;
         #else
             return reinterpret_cast<GM_ADDR>(shmem_ptr((symmetricPtr + offset), rankId));
         #endif
