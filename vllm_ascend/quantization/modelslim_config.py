@@ -246,7 +246,7 @@ def get_linear_quant_type(
                     f"use {quant_type}. Please check quantization config."
                 )
     else:
-        quant_type = quant_description[prefix + '.weight']
+        quant_type = quant_description[prefix + ".weight"]
     return quant_type
 
 
