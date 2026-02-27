@@ -22,12 +22,11 @@ class AscendDynamicInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        w_q, w_s, _, _, _ = self._get_layer_params(layer)
+        w_q.data = w_q.data.transpose(0, 1).contiguous()
         # cast quantized weight tensors in NZ format for higher inference speed
-        layer.weight.data = maybe_trans_nz(layer.weight.data)
-        layer.weight_scale.data = layer.weight_scale.data.flatten()
-        # layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
-        # layer.weight_offset.data = layer.weight_offset.data.flatten()
+        w_q.data = maybe_trans_nz(w_q.data)
+        w_s.data = w_s.data.flatten()
 
     def apply_weights(
         self,
@@ -35,11 +34,12 @@ class AscendDynamicInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        w_q, w_s, _, _, _ = self._get_layer_params(layer)
         quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
         output = torch_npu.npu_quant_matmul(
             quantized_x,
-            layer.weight,
-            layer.weight_scale,
+            w_q,
+            w_s,
             pertoken_scale=pertoken_scale,
             bias=bias,
             output_dtype=x.dtype,
@@ -59,36 +59,36 @@ class AscendStaticInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         if not c.is_static_input_scheme:
             return (
                 False,
-                "AscendStaticInt8ScaledMMLinearLayerConfig does not support dynamic input quantization scheme.",
+                "AscendStaticInt8ScaledMMLinearKernel does not support dynamic input quantization scheme.",
             )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight_scale.data = layer.weight_scale.data.to(torch.bfloat16)
-        layer.input_scale.data = layer.input_scale.data.to(torch.bfloat16)
-        expanding_factor = layer.weight.data.shape[1]
-        layer.aclnn_input_scale = torch.nn.Parameter(
-            layer.input_scale.data.repeat(expanding_factor), requires_grad=False
-        )
+        w_q, w_s, i_s, i_zp, _ = self._get_layer_params(layer)
+
+        w_s.data = w_s.data.to(layer.params_dtype)
+        i_s.data = i_s.data.to(layer.params_dtype)
+        expanding_factor = w_q.data.shape[1]
+        layer.aclnn_input_scale = torch.nn.Parameter(i_s.data.repeat(expanding_factor), requires_grad=False)
         layer.aclnn_input_scale_reciprocal = 1 / torch.nn.Parameter(
-            layer.input_scale.data.repeat(expanding_factor), requires_grad=False
+            i_s.data.repeat(expanding_factor), requires_grad=False
         )
 
-        if layer.input_zero_point is None:
-            layer.input_zero_point = torch.nn.Parameter(
-                torch.zeros(1, dtype=torch.int8, device=layer.weight.device), requires_grad=False
+        if i_zp is None:
+            input_zero_point = torch.zeros(1, dtype=torch.int8, device=w_q.device)
+            layer.aclnn_input_offset = torch.nn.Parameter(
+                input_zero_point.repeat(expanding_factor), requires_grad=False
+            ).to(layer.aclnn_input_scale.dtype)
+        else:
+            layer.aclnn_input_offset = torch.nn.Parameter(i_zp.data.repeat(expanding_factor), requires_grad=False).to(
+                layer.aclnn_input_scale.dtype
             )
 
-        layer.aclnn_input_offset = torch.nn.Parameter(
-            layer.input_zero_point.data.repeat(expanding_factor), requires_grad=False
-        ).to(layer.aclnn_input_scale.dtype)
+        w_q.data = w_q.data.transpose(0, 1).contiguous()
+        w_q.data = maybe_trans_nz(w_q.data)
+        w_s.data = torch.flatten(w_s.data)
 
-        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight.data = maybe_trans_nz(layer.weight.data)
-        layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
-        # layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
-
-        deq_scale = layer.input_scale.data * layer.weight_scale.data
+        deq_scale = i_s.data * w_s.data
         layer.deq_scale = torch.nn.Parameter(deq_scale, requires_grad=False)
 
     def apply_weights(
@@ -97,6 +97,7 @@ class AscendStaticInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        w_q, _, _, _, _ = self._get_layer_params(layer)
         if x.dtype != torch.int8:
             layer_cls_name = layer.__class__.__name__
             weight_prefetch_method = get_weight_prefetch_method()
@@ -104,7 +105,7 @@ class AscendStaticInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             if weight_prefetch_method:
                 weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
                     layer_cls_name=layer_cls_name,
-                    weight=layer.weight,
+                    weight=w_q,
                     start_flag=x,
                 )
             try:
@@ -142,13 +143,11 @@ class AscendStaticInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                     stop_flag=x,
                 )
 
-        # quant_bias = layer.quant_bias if tp_rank == 0 else None
-
         quant_bias = bias
 
         output = torch_npu.npu_quant_matmul(
             x,
-            layer.weight,
+            w_q,
             layer.deq_scale,
             bias=quant_bias,
             output_dtype=layer.params_dtype,

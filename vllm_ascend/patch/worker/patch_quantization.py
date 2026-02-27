@@ -33,6 +33,9 @@ ct_moe_module.CompressedTensorsWNA16MarlinMoEMethod.process_weights_after_loadin
     AscendW4A16FusedMoEMethod.process_weights_after_loading
 )
 
+ct_moe_module.CompressedTensorsW8A8Int8MoEMethod.create_weights = (
+    AscendCompressedTensorsW8A8Int8DynamicFusedMoEMethod.create_weights
+)
 ct_moe_module.CompressedTensorsW8A8Int8MoEMethod.apply = AscendCompressedTensorsW8A8Int8DynamicFusedMoEMethod.apply
 ct_moe_module.CompressedTensorsW8A8Int8MoEMethod.process_weights_after_loading = (
     AscendCompressedTensorsW8A8Int8DynamicFusedMoEMethod.process_weights_after_loading

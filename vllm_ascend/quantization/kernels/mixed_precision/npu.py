@@ -23,8 +23,9 @@ class AscendwNa16LinearKernel(MPLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        weight, scale, _, _ = self._get_weight_params(layer)
         # Get original shape before transpose
-        weight_shape = layer.weight_packed.data.shape
+        weight_shape = weight.data.shape
 
         pack_factor = 8
         num_bits = 4
@@ -35,7 +36,7 @@ class AscendwNa16LinearKernel(MPLinearKernel):
 
         # Unpack from int32 to int8 (with int4 range)
         unpacked_weight = unpack_from_int32(
-            weight=layer.weight_packed.data,
+            weight=weight.data,
             shape=torch.Size([weight_shape[0], weight_shape[1] * pack_factor]),
             num_bits=num_bits,
             packed_dim=1,
@@ -45,10 +46,10 @@ class AscendwNa16LinearKernel(MPLinearKernel):
         unpacked_weight = unpacked_weight.transpose(0, 1).contiguous().int()
 
         # Repack to int32 using NPU int4 packing
-        layer.weight_packed.data = torch_npu.npu_convert_weight_to_int4pack(unpacked_weight)
+        weight.data = torch_npu.npu_convert_weight_to_int4pack(unpacked_weight)
 
         # Transpose scales and offsets: [n, num_groups] -> [num_groups, n]
-        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).contiguous()
+        scale.data = scale.data.transpose(0, 1).contiguous()
 
     def apply_weights(
         self,
@@ -56,10 +57,11 @@ class AscendwNa16LinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        weight, scale, _, _ = self._get_weight_params(layer)
         output = torch_npu.npu_weight_quant_batchmatmul(
             x=x,
-            weight=layer.weight_packed,
-            antiquant_scale=layer.weight_scale,
+            weight=weight,
+            antiquant_scale=scale,
             antiquant_offset=None,
             antiquant_group_size=self.config.group_size,
             bias=bias,
@@ -89,23 +91,21 @@ class AscendW4A8LinearKernel(MPLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = getattr(layer, self.w_q_name).data
-        weight = weight.transpose(0, 1).contiguous()
-        weight = maybe_trans_nz(weight)
+        weight, scale, _, _ = self._get_weight_params(layer)
+
+        weight.data = maybe_trans_nz(weight.data.transpose(0, 1).contiguous())
 
         # Pack int4 values (stored as int8 in [-8, 7]) into NPU int4pack format.
-        weight = torch_npu.npu_quantize(
-            weight.to(torch.float32),
+        weight.data = torch_npu.npu_quantize(
+            weight.data.to(torch.float32),
             torch.tensor([1.0]).npu(),
             None,
             torch.quint4x2,
             -1,
             False,
         )
-        getattr(layer, self.w_q_name).data = weight
 
-        scale = getattr(layer, self.w_s_name).data
-        getattr(layer, self.w_s_name).data = scale.contiguous().to(torch.float32)
+        scale.data = scale.data.flatten().to(torch.float32)
 
     def apply_weights(
         self,
