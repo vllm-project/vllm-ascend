@@ -16,8 +16,8 @@ from vllm import LLM
 model = LLM(
     model="path/to/Qwen2-7B-Instruct",
     additional_config={
-        "npugraph_ex_config": {
-            "enable": True,
+        "ascend_compilation_config": {
+            "enable_npugraph_ex": True,
             "enable_static_kernel": False,
         }
     }
@@ -29,7 +29,7 @@ Online example:
 
 ```shell
 vllm serve Qwen/Qwen2-7B-Instruct
---additional-config '{"npugraph_ex_config":{"enable":true, "enable_static_kernel":false}}'
+--additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":false}}'
 ```
 
 You can find more details about npugraph_ex [here](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)

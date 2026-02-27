@@ -66,13 +66,11 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
 
-        npugraph_ex_config = ascend_config.npugraph_ex_config
-        self.assertTrue(npugraph_ex_config.enable)
-        self.assertFalse(npugraph_ex_config.enable_static_kernel)
-
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)
         self.assertFalse(ascend_config.enable_kv_nz)
+        self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
+        self.assertFalse(ascend_compilation_config.enable_static_kernel)
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
@@ -82,16 +80,16 @@ class TestAscendConfig(TestBase):
     def test_init_ascend_config_enable_npugraph_ex(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
-            "npugraph_ex_config": {
-                "enable": True,
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
                 "enable_static_kernel": True
             },
             "refresh": True
         }
-        npugraph_ex_config = init_ascend_config(
-            test_vllm_config).npugraph_ex_config
-        self.assertTrue(npugraph_ex_config.enable)
-        self.assertTrue(npugraph_ex_config.enable_static_kernel)
+        ascend_compilation_config = init_ascend_config(
+            test_vllm_config).ascend_compilation_config
+        self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
+        self.assertTrue(ascend_compilation_config.enable_static_kernel)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
