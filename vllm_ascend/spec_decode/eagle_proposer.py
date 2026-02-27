@@ -1163,15 +1163,15 @@ class EagleProposer(VllmEagleProposer):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        sp_enabled = get_forward_context().sp_enabled
         if self.method == "mtp":
-            if self.enable_shared_expert_dp:
+            if sp_enabled:
                 hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
                 positions = positions.unsqueeze(-1)
                 positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
                 positions = positions.squeeze(-1)
         else:
-            forward_context = get_forward_context()
-            if forward_context.sp_enabled:
+            if sp_enabled:
                 hidden_states = split_inputs_tp_to_sp(hidden_states, hidden_states)
         return hidden_states, positions
 
