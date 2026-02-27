@@ -6,8 +6,6 @@ from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, TransferSpec
 
-from vllm_ascend.utils import vllm_version_is
-
 logger = init_logger(__name__)
 
 
@@ -155,30 +153,22 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        if vllm_version_is("v0.15.0"):
-            for job_id, event in self.transfer_events.items():
-                if event.query():
-                    results.append((job_id, True))
-                    self.events_pool.append(event)
-            for job_id, _ in results:
-                del self.transfer_events[job_id]
-        else:
-            finished_job_ids = []
-            for job_id, event in self.transfer_events.items():
-                if event.query():
-                    results.append(
-                        TransferResult(
-                            job_id=job_id,
-                            success=True,
-                            transfer_size=None,
-                            transfer_time=None,
-                            transfer_type=None,
-                        )
+        finished_job_ids = []
+        for job_id, event in self.transfer_events.items():
+            if event.query():
+                results.append(
+                    TransferResult(
+                        job_id=job_id,
+                        success=True,
+                        transfer_size=None,
+                        transfer_time=None,
+                        transfer_type=None,
                     )
-                    finished_job_ids.append(job_id)
-                    self.events_pool.append(event)
-            for job_id in finished_job_ids:
-                del self.transfer_events[job_id]
+                )
+                finished_job_ids.append(job_id)
+                self.events_pool.append(event)
+        for job_id in finished_job_ids:
+            del self.transfer_events[job_id]
         return results
 
     def wait(self, job_ids: set[int]) -> None:
