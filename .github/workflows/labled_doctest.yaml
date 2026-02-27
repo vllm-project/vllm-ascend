@@ -55,6 +55,11 @@ env:
     cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
     cp -r examples /vllm-workspace/vllm-ascend/
 
+    # Temporary code, remove me after PR 6836:
+    # https://github.com/vllm-project/vllm-ascend/pull/6836
+    # been merged
+    cp -rf vllm_ascend/quantization/modelslim_config.py /vllm-workspace/vllm-ascend/vllm_ascend/quantization/modelslim_config.py
+
     # Simulate container to enter directory
     cd /workspace
 

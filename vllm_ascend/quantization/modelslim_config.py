@@ -483,6 +483,9 @@ class AscendModelSlimConfig(QuantizationConfig):
         if self.quant_description:
             return
 
+        # Temporary code, remove me after PR 6836:
+        # https://github.com/vllm-project/vllm-ascend/pull/6836
+        # been merged
         # If model_name is not a directory, try to resolve it from Hub (ModelScope or HF)
         if not os.path.isdir(model_name):
             try:
