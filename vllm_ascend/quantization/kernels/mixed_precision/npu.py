@@ -1,6 +1,6 @@
 import torch
 import torch_npu
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKernel import (
+from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
     MPLinearKernel,
     MPLinearLayerConfig,
 )

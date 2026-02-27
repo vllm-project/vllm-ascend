@@ -18,15 +18,17 @@
 
 import json
 import os
+
 import torch
 import torch_npu
-
 from vllm.logger import init_logger
 
-from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
 logger = init_logger(__name__)
+
+# The config filename that ModelSlim generates after quantizing a model.
+MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 
 
 def detect_quantization_method(model_path: str) -> str | None:
