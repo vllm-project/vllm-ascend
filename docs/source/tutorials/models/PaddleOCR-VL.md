@@ -48,7 +48,7 @@ docker run --rm \
 ```
 
 :::{note}
-The 310P3 device is supported from version 0.15.0rc1. You need to select the corresponding image for installation.
+The 310P device is supported from version 0.15.0rc1. You need to select the corresponding image for installation.
 :::
 
 ## Deployment
@@ -90,10 +90,10 @@ vllm serve ${MODEL_PATH} \
 ```
 
 ::::
-::::{tab-item} 310P3
-:sync: 310P3
+::::{tab-item} 310P
+:sync: 310P
 
-Run the following script to start the vLLM server on single 310P3:
+Run the following script to start the vLLM server on single 310P:
 
 ```shell
 #!/bin/sh
@@ -260,7 +260,7 @@ python -m pip install opencv-python==3.4.18.65
 ::::{tab-item} OM inference
 :sync: om
 
-The 310P3 device supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
+The 310P device supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
 
 ::::
 :::::
