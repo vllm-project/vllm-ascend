@@ -15,7 +15,16 @@ on:
       contains_310:
         required: true
         type: boolean
-
+env:
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_NO_CACHE: 1
+  UV_SYSTEM_PYTHON: 1
+  SCCACHE_BUCKET: obs-guiiyang1-ascend-test
+  SCCACHE_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
+  SCCACHE_REGION: cn-southwest-2
+  SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE: true
 jobs:
   e2e-light:
     name: singlecard-light
@@ -31,11 +40,6 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
-        # uv
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        UV_INDEX_STRATEGY: unsafe-best-match
-        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -52,7 +56,18 @@ jobs:
           apt-get update -y
           apt install git -y
           pip install uv
-
+          uv pip install sccache
+      - name: Load OBS credentials from file
+        run: |
+          INI_FILE="/shared-data/obstest.ini"
+          if [ -f "$INI_FILE" ]; then
+            HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
+            HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
+            echo "AWS_ACCESS_KEY_ID=$HW_OBS_AK" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=$HW_OBS_SECRET" >> $GITHUB_ENV
+          else
+            echo "Error: $INI_FILE not found" && exit 1
+          fi
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
@@ -104,11 +119,6 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
         MODELSCOPE_HUB_FILE_LOCK: False
-        # uv
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        UV_INDEX_STRATEGY: unsafe-best-match
-        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -126,7 +136,18 @@ jobs:
           apt-get update -y
           apt install git -y
           pip install uv
-
+          uv pip install sccache
+      - name: Load OBS credentials from file
+        run: |
+          INI_FILE="/shared-data/obstest.ini"
+          if [ -f "$INI_FILE" ]; then
+            HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
+            HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
+            echo "AWS_ACCESS_KEY_ID=$HW_OBS_AK" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=$HW_OBS_SECRET" >> $GITHUB_ENV
+          else
+            echo "Error: $INI_FILE not found" && exit 1
+          fi
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
@@ -178,11 +199,6 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
         HF_HUB_OFFLINE: 1
-        # uv
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        UV_INDEX_STRATEGY: unsafe-best-match
-        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -199,7 +215,18 @@ jobs:
           apt-get update -y
           apt install git -y
           pip install uv
-
+          uv pip install --system sccache
+      - name: Load OBS credentials from file
+        run: |
+          INI_FILE="/shared-data/obstest.ini"
+          if [ -f "$INI_FILE" ]; then
+            HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
+            HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
+            echo "AWS_ACCESS_KEY_ID=$HW_OBS_AK" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=$HW_OBS_SECRET" >> $GITHUB_ENV
+          else
+            echo "Error: $INI_FILE not found" && exit 1
+          fi
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
@@ -250,11 +277,6 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
         HF_HUB_OFFLINE: 1
-        # uv
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        UV_INDEX_STRATEGY: unsafe-best-match
-        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -271,7 +293,18 @@ jobs:
           apt-get update -y
           apt install git -y
           pip install uv
-
+          uv pip install sccache
+      - name: Load OBS credentials from file
+        run: |
+          INI_FILE="/shared-data/obstest.ini"
+          if [ -f "$INI_FILE" ]; then
+            HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
+            HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
+            echo "AWS_ACCESS_KEY_ID=$HW_OBS_AK" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=$HW_OBS_SECRET" >> $GITHUB_ENV
+          else
+            echo "Error: $INI_FILE not found" && exit 1
+          fi
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
@@ -329,11 +362,6 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
-        # uv
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        UV_INDEX_STRATEGY: unsafe-best-match
-        UV_NO_CACHE: 1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -350,7 +378,18 @@ jobs:
           apt-get update -y
           apt install git -y
           pip install uv
-
+          uv pip install sccache
+      - name: Load OBS credentials from file
+        run: |
+          INI_FILE="/shared-data/obstest.ini"
+          if [ -f "$INI_FILE" ]; then
+            HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
+            HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
+            echo "AWS_ACCESS_KEY_ID=$HW_OBS_AK" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=$HW_OBS_SECRET" >> $GITHUB_ENV
+          else
+            echo "Error: $INI_FILE not found" && exit 1
+          fi
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
@@ -396,11 +435,6 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
-        # uv
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        UV_INDEX_STRATEGY: unsafe-best-match
-        UV_NO_CACHE: 1
 
     steps:
       - name: Check npu and CANN info
@@ -415,7 +449,18 @@ jobs:
           apt-get update -y
           apt install git -y
           pip install uv
-
+          uv pip install sccache
+      - name: Load OBS credentials from file
+        run: |
+          INI_FILE="/shared-data/obstest.ini"
+          if [ -f "$INI_FILE" ]; then
+            HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
+            HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
+            echo "AWS_ACCESS_KEY_ID=$HW_OBS_AK" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=$HW_OBS_SECRET" >> $GITHUB_ENV
+          else
+            echo "Error: $INI_FILE not found" && exit 1
+          fi
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
 
@@ -462,11 +507,6 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
-        # uv
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        UV_INDEX_STRATEGY: unsafe-best-match
-        UV_NO_CACHE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -480,7 +520,18 @@ jobs:
           apt-get update -y
           apt install git -y
           pip install uv
-
+          uv pip install sccache
+      - name: Load OBS credentials from file
+        run: |
+          INI_FILE="/shared-data/obstest.ini"
+          if [ -f "$INI_FILE" ]; then
+            HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
+            HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
+            echo "AWS_ACCESS_KEY_ID=$HW_OBS_AK" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=$HW_OBS_SECRET" >> $GITHUB_ENV
+          else
+            echo "Error: $INI_FILE not found" && exit 1
+          fi
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
 
