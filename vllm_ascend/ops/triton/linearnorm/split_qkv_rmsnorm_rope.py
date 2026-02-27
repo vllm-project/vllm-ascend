@@ -525,22 +525,20 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
 
 def split_qkv_rmsnorm_rope_impl(
     input: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
     q_hidden_size: int,
     kv_hidden_size: int,
     head_dim: int,
     eps: float,
-    cos_sin_cache: torch.Tensor,
-    positions: torch.Tensor,
-    rope_dim: int | None = None,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # get available vector core
     num_vectorcore = get_vectorcore_num()
-    if rope_dim is None:
-        rope_dim = head_dim
+    rope_dim = cos_sin_cache.shape[1]
     cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
     batch_size = input.shape[0]
     BIAS = q_bias is not None
