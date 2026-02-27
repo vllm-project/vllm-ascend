@@ -118,7 +118,6 @@ class NPUQwen3OmniMoeAudioAttention(nn.Module):
         return attn_output
 
 def _apply_transformers_audio_attention_patch():
-    import torch
     if not hasattr(torch, "npu") or not torch.npu.is_available():
         print("[vLLM-Ascend] NPU not available, skipping audio attention patch.")
         return
@@ -129,7 +128,7 @@ def _apply_transformers_audio_attention_patch():
         modeling_module.Qwen3OmniMoeAudioAttention = NPUQwen3OmniMoeAudioAttention
         
         print("[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioAttention with NPU-optimized version.")
-    except ImportError:
+    except ImportError as e:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip patch.")
     except Exception as e:
         print(f"[vLLM-Ascend] Failed to patch transformers audio attention: {e}")
@@ -342,7 +341,7 @@ def _apply_transformers_audio_encoder_patch():
             f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoder "
             f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})"
         )
-    except ImportError:
+    except ImportError as e:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip audio encoder patch.")
     except Exception as e:
         print(f"[vLLM-Ascend] Failed to patch transformers audio encoder: {e}")
@@ -419,7 +418,7 @@ def _apply_transformers_audio_encoder_layer_patch():
             f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoderLayer "
             f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})"
         )
-    except ImportError:
+    except ImportError as e:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip audio encoder patch.")
     except Exception as e:
         print(f"[vLLM-Ascend] Failed to patch transformers audio encoder: {e}")
