@@ -1383,9 +1383,6 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        if self.need_accepted_tokens:
-            self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
-
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
@@ -1437,6 +1434,9 @@ class NPUModelRunner(GPUModelRunner):
 
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
+
+        if self.need_accepted_tokens:
+            self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if self.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
