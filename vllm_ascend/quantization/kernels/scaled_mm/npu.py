@@ -1,6 +1,6 @@
 import torch
 import torch_npu
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
