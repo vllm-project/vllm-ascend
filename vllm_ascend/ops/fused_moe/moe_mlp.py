@@ -50,7 +50,7 @@ def cumsum_group_list(
         return new_group
     if src_list_type == 2 and dst_list_type == 0:
         experts = pad(group_list[:, 0], (1, 0))
-        tokens = pad(group_list[:, 1].cast(torch.int32).cumsum(dim=0), (1, 0))
+        tokens = pad(group_list[:, 1].cumsum(dim=0), (1, 0))
         cumsum_group_list = torch.full(
             size=(expert_num,), fill_value=active_num, dtype=group_list.dtype, device=group_list.device
         )
@@ -366,4 +366,3 @@ def unified_apply_mlp(
             topk_scales=topk_scales,
             need_trans=need_trans,
         )
-
