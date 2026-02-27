@@ -911,10 +911,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
         if has_decode:
-            if not attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn or not has_prefill:
-                decode_query = query[:num_decode_tokens].contiguous()
+            if has_prefill:
+                assert attn_metadata.prefill.pcp_metadata is not None
+                if attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
+                    decode_query = query[: num_decode_tokens * self.pcp_size : self.pcp_size].contiguous()
             else:
-                decode_query = query[: num_decode_tokens * self.pcp_size : self.pcp_size].contiguous()
+                decode_query = query[:num_decode_tokens].contiguous()
             output_decode = self._forward_decode_pcp_dcp(decode_query, attn_metadata)
             output[:num_decode_tokens] = output_decode
         if has_prefill:
@@ -931,6 +933,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             # qkv init
             num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
+            assert attn_metadata.prefill.pcp_metadata is not None
             if attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
                 prefill_query = query[self.pcp_size * num_decode_tokens :]
             else:
@@ -999,6 +1002,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     attn_output_prefill, attn_lse_prefill, context_output, context_lse, prefill_query, attn_metadata
                 )
 
+            assert attn_metadata.prefill.pcp_metadata is not None
             if self.pcp_size > 1 and attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
                 # layer_idx != num_layers - 1
                 pcp_allgather_restore_idx = attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx
