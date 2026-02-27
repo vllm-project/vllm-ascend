@@ -110,6 +110,11 @@ function set_env() {
 
 function build() {
     cd ${PATH_TO_BUILD}
+    CUSTOM_OPTION=""
+    ccache_system=$(which sccache ccache 2>/dev/null | head -n1)
+    if [ -n "${ccache_system}" ];then
+        CUSTOM_OPTION="-DENABLE_CCACHE=ON -DCUSTOM_CCACHE=${ccache_system}"
+    fi
     cmake ${PATH_TO_SOURCE} \
         -DBUILD_OPEN_PROJECT=${BUILD_OPEN_PROJECT} \
         -DPREPARE_BUILD=ON \
@@ -125,8 +130,7 @@ function build() {
         -DASCEND_COMPUTE_UNIT=${CONVERT_ASCEND_COMPUTE_UNIT} \
         -DOP_DEBUG_CONFIG=${OP_DEBUG_CONFIG} \
         -DASCEND_OP_NAME=${ASCEND_OP_NAME} \
-        -DENABLE_CCACHE="${ENABLE_CCACHE}" \
-        -DCUSTOM_CCACHE="${CUSTOM_CCACHE}"
+        ${CUSTOM_OPTION}
     make ${JOB_NUM} prepare_build
 }
 

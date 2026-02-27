@@ -202,6 +202,7 @@ if (BUILD_OPEN_PROJECT)
                 set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --custom-ccache ${CUSTOM_CCACHE} ")
             endif ()
         endif ()
+
         execute_process(COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/prepare.sh
                 -s ${CMAKE_CURRENT_SOURCE_DIR}
                 -b ${CMAKE_CURRENT_BINARY_DIR}/prepare_build
