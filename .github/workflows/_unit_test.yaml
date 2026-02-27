@@ -35,9 +35,9 @@ jobs:
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
         UV_PYTHON: python3
-        SCCACHE_BUCKET: obs-guiiyang1-ascend-test
-        SCCACHE_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
-        SCCACHE_REGION: cn-southwest-2
+        SCCACHE_BUCKET: ascend-ci-cache-hk
+        SCCACHE_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+        SCCACHE_REGION: ap-southeast-1
         SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE: true
     steps:
       - name: Install packages
