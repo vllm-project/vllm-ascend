@@ -190,7 +190,7 @@ def main() -> None:
         help="Total number of partitions",
     )
     parser.add_argument(
-        "auto-upgrade-estimated-times",
+        "--auto-upgrade-estimated-times",
         action="store_true",
         help="Automatically update estimated times in config.yaml based on actual timings (default: False) \
 If enabled, the script always exit with 0, even if some tests fail, since the primary purpose is to gather \
