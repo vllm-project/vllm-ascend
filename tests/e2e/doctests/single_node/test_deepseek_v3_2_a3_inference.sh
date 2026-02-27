@@ -88,7 +88,13 @@ SERVER_PID=$!
 echo "Server started with PID $SERVER_PID"
 
 # Ensure server is killed on exit
-trap 'kill $SERVER_PID' EXIT
+cleanup() {
+    echo "Stopping server with PID $SERVER_PID..."
+    kill $SERVER_PID
+    wait $SERVER_PID 2>/dev/null
+    echo "Server stopped."
+}
+trap cleanup EXIT
 
 # Wait for readiness
 if wait_for_server $SERVER_PID; then

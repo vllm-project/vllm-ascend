@@ -22,7 +22,7 @@ This skill automates the extraction of inference examples that can be run on sin
         * **Health Check**: Implements a `wait_for_server` function that:
             * Polls `http://localhost:8000/health` (or configured port).
             * **Monitors PID**: Checks if the server process is still running during the wait loop to fail fast on crash.
-        * **Cleanup**: Uses `trap` to ensure the server is killed when the script exits (success or failure).
+        * **Cleanup**: Uses `trap` with a cleanup function to ensure the server is killed and the process is fully drained when the script exits.
     * **Wrapper Function**: Includes a `run_test_case` helper for error handling and logging.
         * **Log Checking**: Checks command output for failure indicators (e.g., "Failed requests", "Error", "404 Not Found") even if the exit code is 0.
     * **Environment Isolation**: Wraps each test case in a subshell `( ... )` to prevent environment variable leakage.
@@ -88,4 +88,43 @@ wait_for_server() {
         fi
         sleep 10
         retries=$((retries+1))
+        if [ $retries -ge $max_retries ]; then
+            echo "Server failed to start within timeout."
+            return 1
+        fi
+        echo "Waiting... ($retries/$max_retries)"
+    done
+    echo "Server is ready!"
+    return 0
+}
+
+# Start Server (Background)
+# Ensure environment variables are set before starting
+export VLLM_USE_MODELSCOPE=true
+vllm serve ... &
+
+SERVER_PID=$!
+echo "Server started with PID $SERVER_PID"
+
+# Ensure server is killed on exit
+cleanup() {
+    echo "Stopping server with PID $SERVER_PID..."
+    kill $SERVER_PID
+    wait $SERVER_PID 2>/dev/null
+    echo "Server stopped."
+}
+trap cleanup EXIT
+
+# Wait for readiness
+if wait_for_server $SERVER_PID; then
+    # Test Cases
+    (
+        export ...
+        CMD="curl ..."
+        run_test_case "Test Case 1" "$CMD"
+    )
+else
+    echo "Server failed to start. Skipping tests."
+    exit 1
+fi
 ```
