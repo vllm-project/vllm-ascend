@@ -22,6 +22,7 @@ from vllm.config.compilation import Range
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
+from vllm_ascend.ops.rotary_embedding import get_rope_dim
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("v0.15.0"):
@@ -209,6 +210,10 @@ class QKNormRopeFusionPass(VllmInductorPass):
         for epsilon in [1e-6, 1e-5]:
             if layer.head_size != 128:
                 logger.debug("QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128", layer.head_size)
+                continue
+            rope_dim = get_rope_dim(vllm_config)
+            if rope_dim != layer.head_size:
+                logger.debug("QKNorm and Rope fusion not enabled: rotary_dim is not equal of head_dim")
                 continue
             QKNormRopeFusionPattern(
                 vllm_config=vllm_config,
