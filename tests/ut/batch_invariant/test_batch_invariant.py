@@ -20,6 +20,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 # Mock torch_npu before any imports that might need it
 mock_torch_npu = MagicMock()

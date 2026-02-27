@@ -34,6 +34,7 @@ import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
@@ -249,6 +250,13 @@ def enable_custom_op():
 
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
+
+    # There are some customed operators which aren't implemented
+    # with batch invariant in vllm-ascend, we need to disable them.
+    if vllm_is_batch_invariant():
+        _CUSTOM_OP_ENABLED = False
+        return _CUSTOM_OP_ENABLED
+
     try:
         # isort: off
         # register custom ops into torch_library here

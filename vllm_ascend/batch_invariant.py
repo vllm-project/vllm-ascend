@@ -73,11 +73,6 @@ _batch_invariant_LIB = None
 
 
 def enable_batch_invariant_mode():
-    # There are some customed operators which aren't implemented
-    # with batch invariant in vllm-ascend, we need to disable them.
-    global _CUSTOM_OP_ENABLED
-    _CUSTOM_OP_ENABLED = False
-
     global _batch_invariant_LIB
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
