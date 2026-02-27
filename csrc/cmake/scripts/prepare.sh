@@ -113,18 +113,10 @@ function log() {
 }
 function build() {
     cd ${PATH_TO_BUILD}
-    CUSTOM_OPTION=""
-    ccache_system=$(which sccache ccache 2>/dev/null | head -n1)
-    if [ -n "${ccache_system}" ];then
-        CUSTOM_OPTION="-DENABLE_CCACHE=ON -DCUSTOM_CCACHE=${ccache_system}"
-    fi
-    log "Info: cmake config CUSTOM_OPTION ${CUSTOM_OPTION} ."
     CMAKE_ARGS=(
         "${PATH_TO_SOURCE}"
         "-DBUILD_OPEN_PROJECT=${BUILD_OPEN_PROJECT}"
         "-DPREPARE_BUILD=ON"
-        "-DENABLE_CCACHE=ON"
-        "-DCUSTOM_CCACHE=/usr/local/python3.11.14/bin/sccache"
         "-DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH}"
         "-DASCEND_AUTOGEN_DIR=${ASCEND_AUTOGEN_DIR}"
         "-DASCEND_BINARY_OUT_DIR=${ASCEND_BINARY_OUT_DIR}"
@@ -139,7 +131,17 @@ function build() {
         "-DOP_DEBUG_CONFIG=${OP_DEBUG_CONFIG}"
         "-DASCEND_OP_NAME=${ASCEND_OP_NAME}"
     )
+
+    # ccache 参数仅在非空时追加，避免显式传空值覆盖 cmake 缓存
+    if [ -n "${ENABLE_CCACHE}" ]; then
+        CMAKE_ARGS+=("-DENABLE_CCACHE=${ENABLE_CCACHE}")
+    fi
+    if [ -n "${CUSTOM_CCACHE}" ]; then
+        CMAKE_ARGS+=("-DCUSTOM_CCACHE=${CUSTOM_CCACHE}")
+    fi
+
     cmake "${CMAKE_ARGS[@]}"
+
     make ${JOB_NUM} prepare_build
 }
 

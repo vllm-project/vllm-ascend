@@ -197,9 +197,9 @@ if (BUILD_OPEN_PROJECT)
         # Prepare ccache parameters for prepare.sh
         set(PREPARE_CCACHE_ARGS "")
         if (ENABLE_CCACHE)
-            set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --enable-ccache ON ")
+            list(APPEND PREPARE_CCACHE_ARGS --enable-ccache ON)
             if (CUSTOM_CCACHE)
-                set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --custom-ccache ${CUSTOM_CCACHE} ")
+                list(APPEND PREPARE_CCACHE_ARGS --custom-ccache "${CUSTOM_CCACHE}")
             endif ()
         endif ()
         execute_process(COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/prepare.sh
