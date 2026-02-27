@@ -336,7 +336,6 @@ def _apply_transformers_audio_encoder_patch():
         OriginalEncoder = modeling_module.Qwen3OmniMoeAudioEncoder
 
         modeling_module.Qwen3OmniMoeAudioEncoder = NPUQwen3OmniMoeAudioEncoder
-        
         print(
             f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoder "
             f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})"
@@ -413,8 +412,7 @@ def _apply_transformers_audio_encoder_layer_patch():
         OriginalEncoder = modeling_module.Qwen3OmniMoeAudioEncoderLayer
 
         modeling_module.Qwen3OmniMoeAudioEncoderLayer = Qwen3OmniMoeAudioEncoderLayer
-
-         print(
+        print(
             f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoderLayer "
             f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})"
         )
