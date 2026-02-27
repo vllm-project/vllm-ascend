@@ -7,9 +7,9 @@ This is the first release candidate of v0.15.0 for vLLM Ascend. Please follow th
 ### Highlights
 
 - **NPU Graph EX (npugraph_ex) Enabled by Default**: The npugraph_ex feature is now enabled by default, providing better graph optimization with integrated inductor pass and MatmulAllReduceAddRMSNorm fusion. [#6354](https://github.com/vllm-project/vllm-ascend/pull/6354) [#6664](https://github.com/vllm-project/vllm-ascend/pull/6664) [#6006](https://github.com/vllm-project/vllm-ascend/pull/6006)
-- **310P MoE and W8A8 Support**: 310P now supports MoE models, W8A8 quantization, and weightNZ feature, significantly expanding hardware capabilities. [#6530](https://github.com/vllm-project/vllm-ascend/pull/6530) [#6641](https://github.com/vllm-project/vllm-ascend/pull/6641) [#6454](https://github.com/vllm-project/vllm-ascend/pull/6454) [#6705](https://github.com/vllm-project/vllm-ascend/pull/6705)
+- **310P MoE and W8A8 Support**[Experimental]: 310P now supports MoE models, W8A8 quantization, and weightNZ feature, significantly expanding hardware capabilities. [#6530](https://github.com/vllm-project/vllm-ascend/pull/6530) [#6641](https://github.com/vllm-project/vllm-ascend/pull/6641) [#6454](https://github.com/vllm-project/vllm-ascend/pull/6454) [#6705](https://github.com/vllm-project/vllm-ascend/pull/6705)
 - **Qwen3-VL-MoE EAGLE Support**: Added EAGLE speculative decoding support for Qwen3-VL-MoE model. [#6327](https://github.com/vllm-project/vllm-ascend/pull/6327)
-- **Kimi-K2.5 Model Support**: Added support for Kimi-K2.5 models. [#6755](https://github.com/vllm-project/vllm-ascend/pull/6755)
+- **Kimi-K2.5 Model Support**: Added support for Kimi-K2.5 models. **Please note** that vLLM 0.15.0 has a known issue with Kimi-K2.5. To fix this, please apply the changes from the upstream `vllm-project/vllm` repository, specifically from pull requests [#33320](https://github.com/vllm-project/vllm/pull/33320) and [#34501](https://github.com/vllm-project/vllm/pull/34501). [#6755](https://github.com/vllm-project/vllm-ascend/pull/6755)
 
 ### Features
 
