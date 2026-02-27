@@ -243,7 +243,7 @@ During the update process, if only a few layers or the expert table of a certain
 
 When updating expert weights, ensure that the memory allocated for the expert weights has been released, or that the expert (referring to the old version) is no longer in use.
 
-## Limitation
+## Limitations
 
 Before using EPLB, start the script and add `export DYNAMIC_EPLB="true"`.
 Before performing load data collection (or performance data collection), start the script and add `export EXPERT_MAP_RECORD="true"`.
