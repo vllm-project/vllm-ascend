@@ -41,7 +41,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -357,11 +357,10 @@ class EagleProposer(VllmEagleProposer):
             is_draft_model=True,
             draft_attn_metadatas=multi_steps_attn_metadata,
         ):
-            if not vllm_version_is("v0.15.0"):
-                # Reset MOE layer index before first model call
-                forward_context = get_forward_context()
-                if forward_context is not None:
-                    forward_context.moe_layer_index = 0
+            # Reset MOE layer index before first model call
+            forward_context = get_forward_context()
+            if forward_context is not None:
+                forward_context.moe_layer_index = 0
 
             self._runnable(
                 num_input_tokens=num_tokens,
@@ -522,11 +521,10 @@ class EagleProposer(VllmEagleProposer):
             is_draft_model=True,
             draft_attn_metadatas=multi_steps_attn_metadata,
         ):
-            if not vllm_version_is("v0.15.0"):
-                # Reset MOE layer index for forward pass
-                forward_context = get_forward_context()
-                if forward_context is not None:
-                    forward_context.moe_layer_index = 0
+            # Reset MOE layer index for forward pass
+            forward_context = get_forward_context()
+            if forward_context is not None:
+                forward_context.moe_layer_index = 0
 
             draft_token_ids = self._runnable(
                 num_input_tokens=num_input_tokens,
@@ -617,11 +615,10 @@ class EagleProposer(VllmEagleProposer):
         forward_context.num_accept_tokens = batch_size
 
         for draft_step in range(self.num_speculative_tokens - 1):
-            if not vllm_version_is("v0.15.0"):
-                # Reset MOE layer index for each draft step iteration
-                forward_context = get_forward_context()
-                if forward_context is not None:
-                    forward_context.moe_layer_index = 0
+            # Reset MOE layer index for each draft step iteration
+            forward_context = get_forward_context()
+            if forward_context is not None:
+                forward_context.moe_layer_index = 0
 
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
