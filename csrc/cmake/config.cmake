@@ -195,13 +195,13 @@ if (BUILD_OPEN_PROJECT)
         string(REPLACE ";" "::" EP_ASCEND_COMPUTE_UNIT "${ASCEND_COMPUTE_UNIT}")
 
         # Prepare ccache parameters for prepare.sh
-        # set(PREPARE_CCACHE_ARGS "")
-        # if (ENABLE_CCACHE)
-        #     set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --enable-ccache ON")
-        #     if (CUSTOM_CCACHE)
-        #         set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --custom-ccache ${CUSTOM_CCACHE}")
-        #     endif ()
-        # endif ()
+        set(PREPARE_CCACHE_ARGS "")
+        if (ENABLE_CCACHE)
+            set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --enable-ccache ON")
+            if (CUSTOM_CCACHE)
+                set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --custom-ccache ${CUSTOM_CCACHE}")
+            endif ()
+        endif ()
 
         execute_process(COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/prepare.sh
                 -s ${CMAKE_CURRENT_SOURCE_DIR}
@@ -219,7 +219,7 @@ if (BUILD_OPEN_PROJECT)
                 --ascend-compute_unit ${EP_ASCEND_COMPUTE_UNIT}
                 --op_debug_config ${OP_DEBUG_CONFIG}
                 --ascend-op-name "${ASCEND_OP_NAME}"
-                # ${PREPARE_CCACHE_ARGS}
+                ${PREPARE_CCACHE_ARGS}
                 RESULT_VARIABLE result
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 OUTPUT_VARIABLE PREPARE_BUILD_OUTPUT_VARIABLE)
