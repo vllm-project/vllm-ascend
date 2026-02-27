@@ -22,16 +22,23 @@ class SingleNodeConfig:
         api_keyword_args: dict[str, Any] | None = None,
         benchmarks: dict[str, Any] | None = None,
         server_cmd: list[str],
+        test_content: list[str] | None = None,
+        **kwargs: Any,
     ):
         self.model = model
         self.envs = envs or {}
         self.prompts = prompts
+        self.test_content = test_content or ["completion"]
         self.api_keyword_args = api_keyword_args
         self.benchmarks = benchmarks
 
         if self.envs.get("SERVER_PORT") == "DEFAULT_PORT":
             self.envs["SERVER_PORT"] = str(DEFAULT_SERVER_PORT)
         self.server_cmd = self._expand_env(server_cmd)
+
+        self.extra_config = kwargs
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
     def _expand_env(self, cmd: list[str]) -> list[str]:
         pattern = re.compile(r"\$(\w+)|\$\{(\w+)\}")
@@ -53,6 +60,17 @@ class SingleNodeConfigLoader:
     """Load SingleNodeConfig from yaml file."""
 
     DEFAULT_CONFIG_NAME = "Kimi-K2-Thinking.yaml"
+    STANDARD_CASE_FIELDS = {
+        "name",
+        "model",
+        "envs",
+        "prompts",
+        "api_keyword_args",
+        "benchmarks",
+        "server_cmd",
+        "server_cmd_extra",
+        "test_content",
+    }
 
     @classmethod
     def from_yaml_cases(cls, yaml_path: str | None = None) -> list[SingleNodeConfig]:
@@ -96,6 +114,7 @@ class SingleNodeConfigLoader:
             server_cmd = case.get("server_cmd", [])
             server_cmd_extra = case.get("server_cmd_extra", [])
             full_cmd = list(server_cmd) + list(server_cmd_extra)
+            extra_case_fields = {key: value for key, value in case.items() if key not in cls.STANDARD_CASE_FIELDS}
             result.append(
                 SingleNodeConfig(
                     model=case["model"],
@@ -104,6 +123,8 @@ class SingleNodeConfigLoader:
                     benchmarks=case.get("benchmarks", {}),
                     prompts=case.get("prompts"),
                     api_keyword_args=case.get("api_keyword_args"),
+                    test_content=case.get("test_content"),
+                    **extra_case_fields,
                 )
             )
         return result

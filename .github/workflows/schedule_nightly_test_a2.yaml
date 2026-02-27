@@ -49,12 +49,6 @@ jobs:
       fail-fast: false
       matrix:
         test_config:
-          - name: qwen3-next
-            os: linux-aarch64-a2b3-4
-            tests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
-          - name: qwen3-32b-in8-a2
-            os: linux-aarch64-a2b3-4
-            tests: tests/e2e/nightly/single_node/models/test_qwen3_32b_int8.py
           - name: test_custom_op
             os: linux-aarch64-a2b3-1
             tests: tests/e2e/nightly/single_node/ops/singlecard_ops
@@ -75,9 +69,15 @@ jobs:
       fail-fast: false
       matrix:
         test_config:
-          - name: qwen3-32b-yaml
+          - name: qwen3-32b
             os: linux-aarch64-a2b3-4
             config_file_path: Qwen3-32B.yaml
+          - name: qwen3-next-80b-a3b-instruct
+            os: linux-aarch64-a2b3-4
+            config_file_path: Qwen3-Next-80B-A3B-Instruct-A2.yaml
+          - name: qwen3-32b-int8
+            os: linux-aarch64-a2b3-4
+            config_file_path: Qwen3-32B-Int8-A2.yaml
     uses: ./.github/workflows/_e2e_nightly_single_node_yaml.yaml
     with:
       runner: ${{ matrix.test_config.os }}

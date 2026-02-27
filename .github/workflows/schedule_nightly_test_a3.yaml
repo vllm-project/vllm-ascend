@@ -187,6 +187,12 @@ jobs:
           - name: qwq-32b
             os: linux-aarch64-a3-4
             config_file_path: QwQ-32B.yaml
+          - name: qwen3-32b-int8
+            os: linux-aarch64-a3-4
+            config_file_path: Qwen3-32B-Int8.yaml
+          - name: qwen3-next-80b-a3b-instruct
+            os: linux-aarch64-a3-4
+            config_file_path: Qwen3-Next-80B-A3B-Instruct.yaml
     uses: ./.github/workflows/_e2e_nightly_single_node_yaml.yaml
     with:
       runner: ${{ matrix.test_config.os }}
