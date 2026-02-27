@@ -138,12 +138,8 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
-from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("v0.15.0"):
-    from vllm.attention.layer import Attention, MLAAttention  # type: ignore
-else:
-    from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
