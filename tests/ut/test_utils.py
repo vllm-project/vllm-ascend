@@ -249,3 +249,62 @@ class TestUtils(TestBase):
         utils.register_ascend_customop()
         self.assertEqual(mock_customop.register_oot.call_count,
                          len(REGISTERED_ASCEND_OPS))
+    
+    @mock.patch("torch_npu.npu_format_cast")
+    @mock.patch("vllm_ascend.envs")
+    def test_maybe_trans_nz(self, mock_envs, mock_npu_format_cast):
+        import vllm_ascend.envs as real_envs
+        from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+        
+        # Mock the original value
+        mock_envs.VLLM_ASCEND_ENABLE_NZ = real_envs.VLLM_ASCEND_ENABLE_NZ
+        
+        # Test case 1: VLLM_ASCEND_ENABLE_NZ is False
+        mock_envs.VLLM_ASCEND_ENABLE_NZ = False
+        weight = torch.randn(32, 64, dtype=torch.float16)
+        result = utils.maybe_trans_nz(weight)
+        self.assertEqual(result, weight)
+        mock_npu_format_cast.assert_not_called()
+        
+        # Test case 2: weight is fp32
+        mock_envs.VLLM_ASCEND_ENABLE_NZ = 1
+        weight = torch.randn(32, 64, dtype=torch.float32)
+        result = utils.maybe_trans_nz(weight)
+        self.assertEqual(result, weight)
+        mock_npu_format_cast.assert_not_called()
+        
+        # Test case 3: weight is fp16, VLLM_ASCEND_ENABLE_NZ=1
+        mock_envs.VLLM_ASCEND_ENABLE_NZ = 1
+        weight = torch.randn(32, 64, dtype=torch.float16)
+        with mock.patch("vllm_ascend.utils.is_310p", return_value=False):
+            result = utils.maybe_trans_nz(weight)
+            self.assertEqual(result, weight)
+            mock_npu_format_cast.assert_not_called()
+        
+        # Test case 4: weight is fp16, VLLM_ASCEND_ENABLE_NZ=2
+        mock_envs.VLLM_ASCEND_ENABLE_NZ = 2
+        weight = torch.randn(32, 64, dtype=torch.float16)
+        with mock.patch("vllm_ascend.utils.is_310p", return_value=False):
+            result = utils.maybe_trans_nz(weight)
+            mock_npu_format_cast.assert_called_with(weight, ACL_FORMAT_FRACTAL_NZ)
+        
+        # Test case 5: weight is fp16, is_310p=True
+        mock_envs.VLLM_ASCEND_ENABLE_NZ = 1
+        weight = torch.randn(32, 64, dtype=torch.float16)
+        with mock.patch("vllm_ascend.utils.is_310p", return_value=True):
+            result = utils.maybe_trans_nz(weight)
+            mock_npu_format_cast.assert_called_with(weight, ACL_FORMAT_FRACTAL_NZ)
+        
+        # Test case 6: weight is bf16, is_310p=True
+        mock_envs.VLLM_ASCEND_ENABLE_NZ = 1
+        weight = torch.randn(32, 64, dtype=torch.bfloat16)
+        with mock.patch("vllm_ascend.utils.is_310p", return_value=True):
+            result = utils.maybe_trans_nz(weight)
+            mock_npu_format_cast.assert_called_with(weight, ACL_FORMAT_FRACTAL_NZ)
+        
+        # Test case 7: weight is other type (simulate quant weight)
+        mock_envs.VLLM_ASCEND_ENABLE_NZ = 1
+        weight = torch.randn(32, 64, dtype=torch.int8)
+        with mock.patch("vllm_ascend.utils.is_310p", return_value=False):
+            result = utils.maybe_trans_nz(weight)
+            mock_npu_format_cast.assert_called_with(weight, ACL_FORMAT_FRACTAL_NZ)
