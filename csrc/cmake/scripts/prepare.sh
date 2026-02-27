@@ -125,6 +125,7 @@ function build() {
         -DASCEND_COMPUTE_UNIT="${CONVERT_ASCEND_COMPUTE_UNIT}" \
         -DOP_DEBUG_CONFIG="${OP_DEBUG_CONFIG}" \
         -DASCEND_OP_NAME="${ASCEND_OP_NAME}" \
+        -DENABLE_CCACHE=ON \
         $( [ -n "${ENABLE_CCACHE}" ] && echo "-DENABLE_CCACHE=\"${ENABLE_CCACHE}\"" ) \
         $( [ -n "${CUSTOM_CCACHE}" ] && echo "-DCUSTOM_CCACHE=\"${CUSTOM_CCACHE}\"" )
 
