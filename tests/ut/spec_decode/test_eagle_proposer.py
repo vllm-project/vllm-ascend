@@ -390,7 +390,7 @@ class TestEagleProposerDummyRun(TestBase):
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context",
-           **{"return_value.sp_enabled": False})
+           **{"return_value.flash_comm_v1_enabled": False})
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
     def test_dummy_run_basic(self, mock_context, mock_get_context):
         num_tokens = 32
@@ -406,7 +406,7 @@ class TestEagleProposerDummyRun(TestBase):
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context",
-           **{"return_value.sp_enabled": False})
+           **{"return_value.flash_comm_v1_enabled": False})
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
     def test_dummy_run_with_prefill(self, mock_context, mock_get_context):
         mock_context.return_value.__enter__.return_value = None
@@ -426,7 +426,7 @@ class TestEagleProposerDummyRun(TestBase):
         mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
         mock_return_context.capturing = True
         # cpu does not support parallel-group, let alone `sp`
-        mock_return_context.sp_enabled = False
+        mock_return_context.flash_comm_v1_enabled = False
         mock_get_context.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
@@ -449,7 +449,7 @@ class TestEagleProposerDummyRun(TestBase):
         mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
         mock_return_context.capturing = False
         # cpu does not support parallel-group, let alone `sp`
-        mock_return_context.sp_enabled = False
+        mock_return_context.flash_comm_v1_enabled = False
         mock_get_context.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
