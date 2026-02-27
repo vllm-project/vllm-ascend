@@ -15,54 +15,30 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from tests.e2e.conftest import VllmRunner
-from PIL import Image 
+import sys
 import os
 
-def test_qwen3_vl_4b_tp1_fp16():
-    # 获取当前测试文件所在目录，然后定位到 data 目录
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    image_path_str = os.path.join(current_dir, "..", "data", "qwen.png")
-    
-    # 使用 PIL.Image 加载图片，而不是直接传递路径字符串
-    # vLLM 的 Processor 需要接收 PIL.Image.Image 对象
-    image = Image.open(image_path_str)
-    images = [image]
-    
-    # 在提示词中添加 <|image_pad|> 占位符，以便 vLLM 识别图片插入位置
-    example_prompts = [
-        "<|image_pad|>Describe this image in detail."
-    ]
-    max_tokens = 5
+# 将 310p 目录添加到 sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)  # 310p 目录
+sys.path.insert(0, parent_dir)
 
-    with VllmRunner(
-            "Qwen/Qwen3-VL-4B",
-            tensor_parallel_size=1, # 4B模型较小，单卡即可运行；如需测试多卡可改为2
-            enforce_eager=True,
-            dtype="float16"
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens, images=images)
+from test_utils import run_vl_model_test
+
+
+def test_qwen3_vl_4b_tp1_fp16():
+    """Qwen3-VL-4B 单卡 FP16 测试"""
+    run_vl_model_test(
+        model_name="Qwen/Qwen3-VL-4B",
+        tensor_parallel_size=1,
+        max_tokens=5
+    )
+
 
 def test_qwen3_vl_8b_tp1_fp16():
-    # 获取当前测试文件所在目录，然后定位到 data 目录
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    image_path_str = os.path.join(current_dir, "..", "data", "qwen.png")
-    
-    # 使用 PIL.Image 加载图片，而不是直接传递路径字符串
-    # vLLM 的 Processor 需要接收 PIL.Image.Image 对象
-    image = Image.open(image_path_str)
-    images = [image]
-    
-    # 在提示词中添加 <|image_pad|> 占位符，以便 vLLM 识别图片插入位置
-    example_prompts = [
-        "<|image_pad|>Describe this image in detail."
-    ]
-    max_tokens = 10
-
-    with VllmRunner(
-            "Qwen/Qwen3-VL-8B",
-            tensor_parallel_size=1, 
-            enforce_eager=True,
-            dtype="float16"
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens, images=images)
+    """Qwen3-VL-8B 单卡 FP16 测试"""
+    run_vl_model_test(
+        model_name="Qwen/Qwen3-VL-8B",
+        tensor_parallel_size=1,
+        max_tokens=10
+    )
