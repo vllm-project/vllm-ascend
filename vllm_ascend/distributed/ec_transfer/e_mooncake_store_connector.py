@@ -30,12 +30,11 @@ class EMoonCakeStoreConnector(ECConnectorBase):
         self._mm_datas_need_loads: dict[str, int] = {}
         if role == ECConnectorRole.SCHEDULER:
             torch.npu.set_device(0)
-        #     return
 
         # init ec mooncacke store like pool worker
         # if vllm_config.ec_transfer_config.is_ec_producer:
         parallel_config = vllm_config.parallel_config
-        self.ec_store = EMooncakeBackend(parallel_config)
+        self.ec_store = EMooncakeBackend(parallel_config, init_tcp=(role == ECConnectorRole.SCHEDULER))
 
     def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
         # self.send_queue.put((mm_hash, encoder_cache[mm_hash].cpu()))
@@ -64,7 +63,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 ec_cache = self.ec_store.get_single(mm_data.mm_hash)
                 if ec_cache is not None:
                     logger.info(f"Successfully get key:{mm_data.mm_hash} from Mooncacke")
-                encoder_cache[mm_data.mm_hash] = ec_cache
+                encoder_cache[mm_data.mm_hash] = ec_cache.npu()
             except Exception:
                 logger.error("Failed to load mm_data.mm_hash: %s from ec_store", mm_data.mm_hash)
 

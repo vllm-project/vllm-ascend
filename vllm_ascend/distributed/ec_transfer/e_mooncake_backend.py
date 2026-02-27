@@ -10,8 +10,8 @@ logger = init_logger(__name__)
 
 
 class EMooncakeBackend(MooncakeBackend):
-    def __init__(self, parallel_config: ParallelConfig):
-        super().__init__(parallel_config=parallel_config)
+    def __init__(self, parallel_config: ParallelConfig, init_tcp: False):
+        super().__init__(parallel_config=parallel_config, init_tcp = init_tcp)
 
     def put_single(self, key: str, value: torch.Tensor | None) -> None:
         if value is not None:
