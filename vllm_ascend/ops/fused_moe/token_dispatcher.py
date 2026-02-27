@@ -28,10 +28,11 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, is_hierarchical_communication_enabled
-from vllm_ascend.device.device_op import DeviceOperator
+
 
 @dataclass
 class TokenDispatchResult:
@@ -358,18 +359,16 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
         adaptor_cls = DeviceOperator
         if adaptor_cls is None:
             raise RuntimeError("Device adaptor is not initialized.")
-        sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = (
-            adaptor_cls.npu_moe_init_routing(
-                hidden_states,
-                topk_ids,
-                scale=pertoken_scale,
-                active_num=num_tokens * self.top_k,
-                expert_num=global_num_experts,
-                expert_tokens_num_type=1,
-                expert_tokens_num_flag=True,
-                active_expert_range=[first_expert_idx, last_expert_idx],
-                quant_mode=1 if self.with_quant and pertoken_scale is None else -1,
-            )
+        sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = adaptor_cls.npu_moe_init_routing(
+            hidden_states,
+            topk_ids,
+            scale=pertoken_scale,
+            active_num=num_tokens * self.top_k,
+            expert_num=global_num_experts,
+            expert_tokens_num_type=1,
+            expert_tokens_num_flag=True,
+            active_expert_range=[first_expert_idx, last_expert_idx],
+            quant_mode=1 if self.with_quant and pertoken_scale is None else -1,
         )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode

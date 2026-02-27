@@ -59,11 +59,6 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
-    def quant_apply_mlp(**kwargs):
-        from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp as _impl
-        return _impl(**kwargs)
-
-    @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
         dynamic_scale: torch.Tensor | None = None,

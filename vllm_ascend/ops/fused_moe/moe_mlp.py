@@ -25,9 +25,6 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
 from vllm_ascend.quantization.mxfp_compat import (
-    FLOAT4_E2M1FN_X2_DTYPE,
-    FLOAT8_E8M0FNU_DTYPE,
-    HIFLOAT8_DTYPE,
     ensure_mxfp8_moe_available,
 )
 from vllm_ascend.utils import (
@@ -432,10 +429,7 @@ def unified_apply_mlp(
     scale_type = kwargs.get("scale_type")
     per_token_scale_type = kwargs.get("per_token_scale_type")
     use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
-    adaptor_cls = DeviceOperator
-    if adaptor_cls is None:
-        raise RuntimeError("Device adaptor is not initialized.")
-    return adaptor_cls.quant_apply_mlp(
+    return quant_apply_mlp(
         hidden_states=hidden_states,
         w1=w1,
         w1_scale=w1_scale,
