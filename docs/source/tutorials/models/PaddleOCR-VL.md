@@ -28,7 +28,7 @@ Select an image based on your machine type and start the docker image on your no
 
 ```{code-block} bash
    :substitutions:
-export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0rc1
+export IMAGE=quay.io/ascend/vllm-ascend:v0.15.0rc1
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
@@ -46,6 +46,9 @@ docker run --rm \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
 ```
+:::{note}
+The 310P3 device is supported from version 0.15.0rc1. You need to select the corresponding image for installation.
+:::
 
 ## Deployment
 
@@ -108,7 +111,7 @@ vllm serve ${MODEL_PATH} \
 ```
 
 :::{note}
-The `--max_model_len` option is added to avoid errors in generating the mask for the attention operator.
+The `--max_model_len` option is added to prevent errors when generating the attention operator mask on the 310P device.
 :::
 
 ::::
@@ -257,6 +260,9 @@ python -m pip install opencv-python==3.4.18.65
 :sync: om
 
 The 310P3 device supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
+
+::::
+:::::
 
 ### Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
 
