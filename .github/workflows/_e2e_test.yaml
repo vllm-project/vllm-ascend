@@ -59,7 +59,7 @@ jobs:
           uv pip install sccache
       - name: Load OBS credentials from file
         run: |
-          INI_FILE="/shared-data/obstest.ini"
+          INI_FILE="/root/.cache/obstest.ini"
           if [ -f "$INI_FILE" ]; then
             HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
             HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
@@ -139,7 +139,7 @@ jobs:
           uv pip install sccache
       - name: Load OBS credentials from file
         run: |
-          INI_FILE="/shared-data/obstest.ini"
+          INI_FILE="/root/.cache/obstest.ini"
           if [ -f "$INI_FILE" ]; then
             HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
             HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
@@ -218,7 +218,7 @@ jobs:
           uv pip install sccache
       - name: Load OBS credentials from file
         run: |
-          INI_FILE="/shared-data/obstest.ini"
+          INI_FILE="/root/.cache/obstest.ini"
           if [ -f "$INI_FILE" ]; then
             HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
             HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
@@ -295,7 +295,7 @@ jobs:
           uv pip install sccache
       - name: Load OBS credentials from file
         run: |
-          INI_FILE="/shared-data/obstest.ini"
+          INI_FILE="/root/.cache/obstest.ini"
           if [ -f "$INI_FILE" ]; then
             HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
             HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
@@ -380,7 +380,7 @@ jobs:
           uv pip install sccache
       - name: Load OBS credentials from file
         run: |
-          INI_FILE="/shared-data/obstest.ini"
+          INI_FILE="/root/.cache/obstest.ini"
           if [ -f "$INI_FILE" ]; then
             HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
             HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
@@ -450,7 +450,7 @@ jobs:
           uv pip install sccache
       - name: Load OBS credentials from file
         run: |
-          INI_FILE="/shared-data/obstest.ini"
+          INI_FILE="/root/.cache/obstest.ini"
           if [ -f "$INI_FILE" ]; then
             HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
             HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
@@ -521,7 +521,7 @@ jobs:
           uv pip install sccache
       - name: Load OBS credentials from file
         run: |
-          INI_FILE="/shared-data/obstest.ini"
+          INI_FILE="/root/.cache/obstest.ini"
           if [ -f "$INI_FILE" ]; then
             HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
             HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
