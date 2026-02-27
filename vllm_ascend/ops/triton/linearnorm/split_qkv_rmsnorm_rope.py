@@ -539,6 +539,7 @@ def split_qkv_rmsnorm_rope_impl(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # get available vector core
     num_vectorcore = get_vectorcore_num()
+    cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
     if rope_dim is None:
         rope_dim = head_dim
 
@@ -618,12 +619,10 @@ def split_qkv_rmsnorm_rope_impl(
         iter_num_per_vec = triton.cdiv(batch_size_per_vec, batch_size_per_iter_per_vec)
 
         grid = (min(num_vectorcore, batch_size), 1, 1)
-
         # v tiling
         v_batch_size_per_iter_per_vec = UB_SIZE / torch.bfloat16.itemsize // (kv_hidden_size + 1)
         v_batch_size_per_iter_per_vec = min(v_batch_size_per_iter_per_vec, batch_size_per_vec)
         v_iter_num_per_vec = triton.cdiv(batch_size_per_vec, v_batch_size_per_iter_per_vec)
-
         split_qkv_rmsnorm_rope_prefill_kernel[grid](
             input,
             q_output,
