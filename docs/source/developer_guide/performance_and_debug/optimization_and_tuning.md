@@ -1,6 +1,6 @@
 # Optimization and Tuning
 
-This guide aims to help users to improve vllm-ascend performance on system level. It includes OS configuration, library optimization, deployment guide and so on. Any feedback is welcome.
+This guide aims to help users improve vLLM-Ascend performance at the system level. It includes OS configuration, library optimization, deployment guide, and so on. Any feedback is welcome.
 
 ## Preparation
 
