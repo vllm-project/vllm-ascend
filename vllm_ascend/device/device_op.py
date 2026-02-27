@@ -358,11 +358,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )[0]
 
 
-def get_device_adaptor():
+def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
     ascend_device_type = get_ascend_device_type()
     if ascend_device_type == AscendDeviceType.A5:
         return A5DeviceAdaptor
     return BaseDeviceAdaptor
 
 
-DeviceOperator: type["BaseDeviceAdaptor"] | None = get_device_adaptor()
+DeviceOperator: type["BaseDeviceAdaptor"] = get_device_adaptor()
