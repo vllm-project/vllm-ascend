@@ -217,7 +217,7 @@ class build_and_install_aclnn(Command):
             print("Running bash build_aclnn.sh ...")
             subprocess.check_call(["bash", "csrc/build_aclnn.sh", ROOT_DIR, envs.SOC_VERSION])
             elapsed = time.time() - start_time
-            print(f"buid_aclnn.sh executed successfully in {elapsed:.2f}s!")
+            print(f"build_aclnn.sh executed successfully in {elapsed:.2f}s!")
             logging.info(f"[TIMING] ACLNN build completed in {elapsed:.2f}s")
         except subprocess.CalledProcessError as e:
             elapsed = time.time() - start_time
