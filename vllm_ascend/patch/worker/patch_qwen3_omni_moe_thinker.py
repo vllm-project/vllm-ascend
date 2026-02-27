@@ -13,15 +13,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#from collections.abc import Iterable
 
+import math
+import sys
 import torch
 import torch.nn as nn
 import torch_npu
-import sys
-import math
+
 from torch.nn import functional as F
 from typing import Optional
+from collections.abc import Iterable
 from transformers.activations import ACT2FN
 from transformers.modeling_utils import PreTrainedModel
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -54,7 +55,7 @@ Qwen3OmniMoeThinkerForConditionalGeneration.packed_modules_mapping = {
 
 
 class NPUQwen3OmniMoeAudioAttention(nn.Module):
-    def __init__(self, config, quant_config=None, prefix=''):
+    def __init__(self, config, quant_config=None, prefix=""):
         super().__init__()
         self.embed_dim = config.d_model
         self.num_heads = config.encoder_attention_heads
@@ -94,7 +95,11 @@ class NPUQwen3OmniMoeAudioAttention(nn.Module):
         v = value_states.reshape(seq_length, self.num_heads, -1)
 
         attn_output = torch_npu.npu_fusion_attention(
-            q, k, v, self.num_heads, 'TND',
+            q,
+            k,
+            v,
+            self.num_heads,
+            "TND",
             pse=None,
             padding_mask=None,
             atten_mask=None,
@@ -106,7 +111,7 @@ class NPUQwen3OmniMoeAudioAttention(nn.Module):
             sparse_mode=0,
             actual_seq_qlen=cu_seqlens,
             actual_seq_kvlen=cu_seqlens,
-            )[0]
+        )[0]
 
         attn_output = attn_output.reshape(seq_length, -1).contiguous()
         attn_output = self.out_proj(attn_output)
@@ -114,7 +119,7 @@ class NPUQwen3OmniMoeAudioAttention(nn.Module):
 
 def _apply_transformers_audio_attention_patch():
     import torch
-    if not hasattr(torch, 'npu') or not torch.npu.is_available():
+    if not hasattr(torch, "npu") or not torch.npu.is_available():
         print("[vLLM-Ascend] NPU not available, skipping audio attention patch.")
         return
 
@@ -225,10 +230,11 @@ class NPUQwen3OmniMoeAudioEncoder(Qwen3OmniMoePreTrainedModel):
         chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
         padded_feature = nn.utils.rnn.pad_sequence(chunk_list, batch_first=True).transpose(1, 2)
         feature_lens_after_cnn = _get_feat_extract_output_lengths(chunk_lengths)
-        padded_mask_after_cnn = torch.ones((feature_lens_after_cnn.shape[0], 13),
-        dtype=torch.bool, device=padded_feature.device)
+        padded_mask_after_cnn = torch.ones(
+            (feature_lens_after_cnn.shape[0], 13), dtype=torch.bool, device=padded_feature.device
+        )
         for idx in tail_chunk_index:
-            padded_mask_after_cnn[idx, feature_lens_after_cnn[idx]:] = False
+            padded_mask_after_cnn[idx, feature_lens_after_cnn[idx] :] = False
 
         padded_feature = padded_feature.unsqueeze(1)
         padded_embeds = []
@@ -248,7 +254,7 @@ class NPUQwen3OmniMoeAudioEncoder(Qwen3OmniMoePreTrainedModel):
         )
         padded_embed = padded_embed + positional_embedding
         if padded_mask_after_cnn.shape[1] > padded_embed.shape[1]:
-            padded_mask_after_cnn = padded_mask_after_cnn[:, :padded_embed.shape[1]]
+            padded_mask_after_cnn = padded_mask_after_cnn[:, : padded_embed.shape[1]]
         hidden_states = padded_embed[padded_mask_after_cnn]
         cu_chunk_lens = [0]
         window_aftercnn = padded_mask_after_cnn.shape[-1] * (self.n_window_infer // (self.n_window * 2))
@@ -321,7 +327,7 @@ class NPUQwen3OmniMoeAudioEncoder(Qwen3OmniMoePreTrainedModel):
         return input_lengths, output_lengths
 
 def _apply_transformers_audio_encoder_patch():
-    if not hasattr(torch, 'npu') or not torch.npu.is_available():
+    if not hasattr(torch, "npu") or not torch.npu.is_available():
         print("[vLLM-Ascend] NPU not available, skipping audio encoder patch.")
         return
 
@@ -332,8 +338,10 @@ def _apply_transformers_audio_encoder_patch():
 
         modeling_module.Qwen3OmniMoeAudioEncoder = NPUQwen3OmniMoeAudioEncoder
         
-        print(f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoder "
-              f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})")
+        print(
+            f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoder "
+            f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})"
+        )
     except ImportError:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip audio encoder patch.")
     except Exception as e:
@@ -396,7 +404,7 @@ class Qwen3OmniMoeAudioEncoderLayer(GradientCheckpointingLayer):
         return outputs
 
 def _apply_transformers_audio_encoder_layer_patch():
-    if not hasattr(torch, 'npu') or not torch.npu.is_available():
+    if not hasattr(torch, "npu") or not torch.npu.is_available():
         print("[vLLM-Ascend] NPU not available, skipping audio encoder layer patch.")
         return
 
@@ -407,8 +415,10 @@ def _apply_transformers_audio_encoder_layer_patch():
 
         modeling_module.Qwen3OmniMoeAudioEncoderLayer = Qwen3OmniMoeAudioEncoderLayer
 
-        print(f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoderLayer "
-              f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})")
+         print(
+            f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoderLayer "
+            f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})"
+        )
     except ImportError:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip audio encoder patch.")
     except Exception as e:
@@ -419,7 +429,7 @@ def _apply_vllm_audio_encoder_patch():
         import vllm.model_executor.models.qwen3_omni_moe_thinker as thinker_module
         print(f"[vLLM-Ascend] vLLM thinker module loaded from: {thinker_module.__file__}", file=sys.stderr)
 
-        if hasattr(thinker_module, 'Qwen3OmniMoeAudioEncoder'):
+        if hasattr(thinker_module, "Qwen3OmniMoeAudioEncoder"):
             original = thinker_module.Qwen3OmniMoeAudioEncoder
             print(f"[vLLM-Ascend] Original Qwen3OmniMoeAudioEncoder ID: {id(original)}", file=sys.stderr)
             thinker_module.Qwen3OmniMoeAudioEncoder = NPUQwen3OmniMoeAudioEncoder
