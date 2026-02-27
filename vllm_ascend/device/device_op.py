@@ -32,6 +32,7 @@ class BaseDeviceAdaptor:
         torch_npu._npu_reshape_and_cache(
             key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
         )
+
     @staticmethod
     def npu_moe_init_routing(
         hidden_states,
@@ -56,6 +57,12 @@ class BaseDeviceAdaptor:
             active_expert_range=active_expert_range,
             quant_mode=quant_mode,
         )
+
+    @staticmethod
+    def quant_apply_mlp(**kwargs):
+        from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp as _impl
+        return _impl(**kwargs)
+
     @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
@@ -113,6 +120,72 @@ class BaseDeviceAdaptor:
             "output_dtype": input_dtype if input_dtype in [torch.bfloat16, torch.float16] else torch.bfloat16,
         }
 
+    @classmethod
+    def npu_grouped_matmul_gmm2(
+        cls,
+        *,
+        hidden_states: torch.Tensor,
+        weight: list[torch.Tensor] | torch.Tensor,
+        weight_scale: list[torch.Tensor] | torch.Tensor,
+        per_token_scale: torch.Tensor,
+        group_list: torch.Tensor,
+        group_list_type: int,
+        input_dtype: torch.dtype,
+        act_quant_type,
+        weight_quant_type,
+        scale_type,
+        per_token_scale_type,
+        use_bf16: bool = True,
+        use_mxfp_quant: bool = False,
+        bias=None,
+        fallback_output_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        if use_mxfp_quant:
+            gmm2_kwargs = cls.get_quant_gmm2_kwargs(
+                input_dtype=input_dtype,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
+                scale_type=scale_type,
+                per_token_scale_type=per_token_scale_type,
+                use_bf16=use_bf16,
+                use_mxfp_quant=True,
+            )
+            output_dtype = gmm2_kwargs.pop("output_dtype")
+            if isinstance(weight, list) and len(weight) != 1:
+                raise ValueError(f"w2 must have a single tensor in MXFP path, but got {len(weight)}.")
+            if isinstance(weight_scale, list) and len(weight_scale) != 1:
+                raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
+            gmm2_weight = weight if isinstance(weight, list) else [weight]
+            gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
+            return torch_npu.npu_grouped_matmul(
+                x=[hidden_states],
+                weight=gmm2_weight,
+                scale=gmm2_scale,
+                bias=bias,
+                per_token_scale=[per_token_scale],
+                split_item=2,
+                group_list_type=group_list_type,
+                group_type=0,
+                group_list=group_list,
+                output_dtype=output_dtype,
+                **gmm2_kwargs,
+            )[0]
+
+        if fallback_output_dtype is None:
+            fallback_output_dtype = weight_scale[0].dtype if isinstance(weight_scale, list) else weight_scale.dtype
+        return torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=weight,
+            scale=weight_scale,
+            bias=bias,
+            per_token_scale=[per_token_scale],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=fallback_output_dtype,
+        )[0]
+
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
@@ -120,6 +193,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         torch_npu.npu_scatter_pa_kv_cache(
             key=key, value=value.contiguous(), key_cache=key_cache, value_cache=value_cache, slot_mapping=slot_mapping
         )
+
     @staticmethod
     def npu_moe_init_routing(
         hidden_states,
@@ -144,6 +218,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             active_expert_range=active_expert_range,
             quant_mode=quant_mode,
         )
+
     @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
