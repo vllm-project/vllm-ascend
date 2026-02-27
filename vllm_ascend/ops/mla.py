@@ -20,6 +20,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
+from dataclasses import dataclass
 import torch
 from torch import nn
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -32,6 +34,18 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
+
+
+@dataclass
+class AscendMLAModules:
+    q_a_proj: Optional[torch.nn.Module]
+    q_a_layernorm: Optional[torch.nn.Module]
+    q_proj: Optional[torch.nn.Module]
+    kv_a_proj_with_mqa: torch.nn.Module
+    kv_a_layernorm: torch.nn.Module
+    kv_b_proj: torch.nn.Module
+    o_proj: torch.nn.Module
+    rotary_emb: torch.nn.Module
 
 
 class IndexerWrapper(nn.Module):
@@ -87,6 +101,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
+        self.mla_modules = mla_modules
         self.prefix = prefix
         hf_config = get_current_vllm_config().model_config.hf_text_config
         self.enable_shared_expert_dp = get_ascend_config().enable_shared_expert_dp
@@ -166,9 +181,13 @@ def mla_forward(
     else:
         attn_metadata = forward_context.attn_metadata
     kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
-    self.mla_attn.impl.forward(
-        self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
-    )
+    if hasattr(self.mla_attn, "quant_method") and self.mla_attn.fa_quant_layer:
+        assert output is not None, "Output tensor must be provided."
+        self.mla_attn.quant_method.apply(self.mla_attn, hidden_states, kv_cache, attn_metadata, self.mla_modules, need_gather_q_kv, output)
+    else:
+        assert output is not None, "Output tensor must be provided."
+        self.mla_attn.impl.forward(self.mla_attn.layer_name,hidden_states=hidden_states, kv_cache=kv_cache, attn_metadata=attn_metadata,
+                            need_gather_q_kv=need_gather_q_kv, output=output)
     return
 
 
