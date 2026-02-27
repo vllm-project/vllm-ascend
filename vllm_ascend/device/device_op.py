@@ -32,13 +32,30 @@ class BaseDeviceAdaptor:
         torch_npu._npu_reshape_and_cache(
             key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
         )
-
     @staticmethod
-    def quant_apply_mlp(**kwargs):
-        from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp as _impl
-
-        return _impl(**kwargs)
-
+    def npu_moe_init_routing(
+        hidden_states,
+        topk_ids,
+        *,
+        scale=None,
+        active_num: int,
+        expert_num: int,
+        expert_tokens_num_type: int = 1,
+        expert_tokens_num_flag: bool = True,
+        active_expert_range=None,
+        quant_mode: int = -1,
+    ):
+        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+            hidden_states,
+            topk_ids,
+            scale=scale,
+            active_num=active_num,
+            expert_num=expert_num,
+            expert_tokens_num_type=expert_tokens_num_type,
+            expert_tokens_num_flag=expert_tokens_num_flag,
+            active_expert_range=active_expert_range,
+            quant_mode=quant_mode,
+        )
     @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
@@ -103,7 +120,30 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         torch_npu.npu_scatter_pa_kv_cache(
             key=key, value=value.contiguous(), key_cache=key_cache, value_cache=value_cache, slot_mapping=slot_mapping
         )
-
+    @staticmethod
+    def npu_moe_init_routing(
+        hidden_states,
+        topk_ids,
+        *,
+        scale=None,
+        active_num: int,
+        expert_num: int,
+        expert_tokens_num_type: int = 1,
+        expert_tokens_num_flag: bool = True,
+        active_expert_range=None,
+        quant_mode: int = -1,
+    ):
+        return torch_npu.npu_moe_init_routing_v2(
+            hidden_states,
+            topk_ids,
+            scale=scale,
+            active_num=active_num,
+            expert_num=expert_num,
+            expert_tokens_num_type=expert_tokens_num_type,
+            expert_tokens_num_flag=expert_tokens_num_flag,
+            active_expert_range=active_expert_range,
+            quant_mode=quant_mode,
+        )
     @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,

@@ -461,10 +461,7 @@ def unified_apply_mlp(
     scale_type = kwargs.get("scale_type")
     per_token_scale_type = kwargs.get("per_token_scale_type")
     use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
-    adaptor_cls = DeviceOperator
-    if adaptor_cls is None:
-        raise RuntimeError("Device adaptor is not initialized.")
-    return adaptor_cls.quant_apply_mlp(
+    return quant_apply_mlp(
         hidden_states=hidden_states,
         w1=w1,
         w1_scale=w1_scale,

@@ -31,7 +31,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, is_hierarchical_communication_enabled
-
+from vllm_ascend.device.device_op import DeviceOperator
 
 @dataclass
 class TokenDispatchResult:
@@ -355,9 +355,11 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
-
+        adaptor_cls = DeviceOperator
+        if adaptor_cls is None:
+            raise RuntimeError("Device adaptor is not initialized.")
         sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = (
-            torch.ops._C_ascend.npu_moe_init_routing_custom(
+            adaptor_cls.npu_moe_init_routing(
                 hidden_states,
                 topk_ids,
                 scale=pertoken_scale,
