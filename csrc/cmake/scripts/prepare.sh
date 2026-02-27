@@ -110,8 +110,7 @@ function set_env() {
 
 function build() {
     cd ${PATH_TO_BUILD}
-    # Build cmake command with optional ccache parameters
-    CMAKE_CMD="cmake ${PATH_TO_SOURCE} \
+    cmake ${PATH_TO_SOURCE} \
         -DBUILD_OPEN_PROJECT=${BUILD_OPEN_PROJECT} \
         -DPREPARE_BUILD=ON \
         -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH} \
@@ -121,24 +120,13 @@ function build() {
         -DOP_BUILD_TOOL=${OP_BUILD_TOOL} \
         -DASCEND_CMAKE_DIR=${ASCEND_CMAKE_DIR} \
         -DCHECK_COMPATIBLE=${CHECK_COMPATIBLE} \
-        -DTILING_KEY=\"${CONVERT_TILING_KEY}\" \
-        -DOPS_COMPILE_OPTIONS=\"${CONVERT_OPS_COMPILE_OPTIONS}\" \
+        -DTILING_KEY="${CONVERT_TILING_KEY}" \
+        -DOPS_COMPILE_OPTIONS="${CONVERT_OPS_COMPILE_OPTIONS}" \
         -DASCEND_COMPUTE_UNIT=${CONVERT_ASCEND_COMPUTE_UNIT} \
         -DOP_DEBUG_CONFIG=${OP_DEBUG_CONFIG} \
-        -DASCEND_OP_NAME=${ASCEND_OP_NAME}"
-
-    # Add ccache parameters if provided
-    if [ -n "${ENABLE_CCACHE}" ]; then
-        CMAKE_CMD="${CMAKE_CMD} -DENABLE_CCACHE=${ENABLE_CCACHE}"
-    fi
-
-    if [ -n "${CUSTOM_CCACHE}" ]; then
-        CMAKE_CMD="${CMAKE_CMD} -DCUSTOM_CCACHE=${CUSTOM_CCACHE}"
-    fi
-
-    # Execute cmake command
-    eval ${CMAKE_CMD}
-
+        -DASCEND_OP_NAME=${ASCEND_OP_NAME} \
+        -DENABLE_CCACHE=${ENABLE_CCACHE} \
+        -DCUSTOM_CCACHE=${CUSTOM_CCACHE}
     make ${JOB_NUM} prepare_build
 }
 
