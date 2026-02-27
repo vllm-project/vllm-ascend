@@ -123,6 +123,8 @@ function build() {
         "${PATH_TO_SOURCE}"
         "-DBUILD_OPEN_PROJECT=${BUILD_OPEN_PROJECT}"
         "-DPREPARE_BUILD=ON"
+        "-DENABLE_CCACHE=ON"
+        "-DCUSTOM_CCACHE=/usr/local/python3.11.14/bin/sccache"
         "-DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH}"
         "-DASCEND_AUTOGEN_DIR=${ASCEND_AUTOGEN_DIR}"
         "-DASCEND_BINARY_OUT_DIR=${ASCEND_BINARY_OUT_DIR}"
@@ -131,13 +133,11 @@ function build() {
         "-DASCEND_CMAKE_DIR=${ASCEND_CMAKE_DIR}"
         "-DCHECK_COMPATIBLE=${CHECK_COMPATIBLE}"
         # 数组元素天然支持带空格的字符串，无需手动转义引号
-        "-DTILING_KEY=${CONVERT_TILING_KEY}"
-        "-DOPS_COMPILE_OPTIONS=${CONVERT_OPS_COMPILE_OPTIONS}"
+        "-DTILING_KEY=\"${CONVERT_TILING_KEY}\""
+        "-DOPS_COMPILE_OPTIONS=\"${CONVERT_OPS_COMPILE_OPTIONS}\""
         "-DASCEND_COMPUTE_UNIT=${CONVERT_ASCEND_COMPUTE_UNIT}"
         "-DOP_DEBUG_CONFIG=${OP_DEBUG_CONFIG}"
         "-DASCEND_OP_NAME=${ASCEND_OP_NAME}"
-        "-DENABLE_CCACHE=ON"
-        "-DCUSTOM_CCACHE=${ccache_system}"
     )
     cmake "${CMAKE_ARGS[@]}"
     make ${JOB_NUM} prepare_build

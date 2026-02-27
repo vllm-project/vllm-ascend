@@ -223,6 +223,7 @@ if (BUILD_OPEN_PROJECT)
                 RESULT_VARIABLE result
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 OUTPUT_VARIABLE PREPARE_BUILD_OUTPUT_VARIABLE)
+
         if (result)
             message(FATAL_ERROR "Error: ops prepare build failed.")
         endif ()
