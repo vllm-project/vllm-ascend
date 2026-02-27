@@ -39,7 +39,7 @@ def chunk_fwd_kernel_o_update(
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
-    i_n, i_h = i_nh // H, i_nh % H  # 按某个req的某个头划分网格
+    i_n, i_h = i_nh // H, i_nh % H  # splitting by the head of the req
 
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)

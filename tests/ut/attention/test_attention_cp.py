@@ -83,7 +83,7 @@ class TestAscendAttentionCPImpl(TestBase):
             [0])
         attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx = torch.tensor(
             [0, 1])
-        attn_metadata.use_hybrid_attn = False
+        attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn = False
 
         output, attn_lse = self.impl._forward_prefill_cp(
             query, key, value, attn_metadata)
@@ -259,12 +259,12 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata.prefill = MagicMock()
         attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx = torch.tensor(
             [0, 3, 1, 2, 0, 0, 0, 0])
-        attn_metadata.use_hybrid_attn = False
+        attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn = False
         attn_metadata.prefill.pcp_metadata.pcp_padded_tokens_fla = 0
         attn_metadata.prefill.pcp_metadata.pcp_enter_fa_restore_idx = torch.arange(
             num_tokens * 3 * self.impl.pcp_size
         )
-        attn_metadata.pcp_unpad_mask = torch.tensor(
+        attn_metadata.prefill.pcp_metadata.pcp_unpad_mask = torch.tensor(
             [True, False, True, True, True, True, True, True]
         )
 

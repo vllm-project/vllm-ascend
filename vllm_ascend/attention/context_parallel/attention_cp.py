@@ -122,12 +122,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded if long_seq_metadata else None
-        pcp_unpad_mask = (
-            long_seq_metadata.pcp_unpad_mask.pin_memory().to(self.device, non_blocking=True)
-            if long_seq_metadata
-            else None
-        )
-        use_hybrid_attn = long_seq_metadata.pcp_use_hybrid_attn if long_seq_metadata else False
         if num_actual_tokens_pcp_padded is None:
             num_actual_tokens_pcp_padded = num_actual_tokens
 
@@ -215,6 +209,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 head_attn_nomask_seqlens=head_attn_nomask_seqlens,
                 tail_attn_nomask_seqlens=tail_attn_nomask_seqlens,
                 q_full_idx=common_long_seq_metadata.q_full_idx,
+                pcp_use_hybrid_attn=common_long_seq_metadata.pcp_use_hybrid_attn,
+                pcp_unpad_mask=common_long_seq_metadata.pcp_unpad_mask,
                 pcp_allgather_restore_idx=common_long_seq_metadata.pcp_allgather_restore_idx,
                 pcp_fa_query_idx=common_long_seq_metadata.pcp_fa_query_idx,
                 pcp_padded_tokens_fla=common_long_seq_metadata.pcp_padded_tokens_fla,
@@ -223,9 +219,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
             prefill_metadata = AscendMetadataForPrefill(
                 pcp_metadata=pcp_metadata,
-                pcp_allgather_restore_idx=common_long_seq_metadata.pcp_allgather_restore_idx
-                if common_long_seq_metadata is not None
-                else None,
                 chunked_context=chunked_context_metadata,
                 block_tables=block_table[num_decodes:],
                 actual_seq_lengths_q=torch.cumsum(query_lens, dim=0),
@@ -257,8 +250,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_decodes=num_decodes,
             prefill=prefill_metadata,
             decode_meta=decode_metadata,
-            use_hybrid_attn=use_hybrid_attn,
-            pcp_unpad_mask=pcp_unpad_mask,
         )
         return attn_metadata
 
@@ -482,7 +473,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         kv_with_q_head_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_head_mask_idx
         kv_with_q_tail_nomask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_nomask_idx
         kv_with_q_tail_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx
-        if attn_metadata.use_hybrid_attn:
+        if attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
             fa_query_idx = attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx
             query = torch.index_select(query, 0, fa_query_idx)
 
@@ -785,7 +776,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             if has_prefill:
                 if self.pcp_size > 1:
-                    if not attn_metadata.use_hybrid_attn:
+                    if not attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
                         kv = torch.cat([key, value], dim=-1)
                         num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
                         all_kv = get_pcp_group().all_gather(kv[:num_actual_tokens_pcp_padded].contiguous(), dim=0)
@@ -856,7 +847,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         decode_offset = attn_metadata.num_decode_tokens * self.pcp_size
         qkv_fa_padding_workspace[:decode_offset] = actual_qkv[:decode_offset]
 
-        pcp_unpad_mask = attn_metadata.pcp_unpad_mask[attn_metadata.num_decodes * self.pcp_size :]
+        pcp_unpad_mask = attn_metadata.prefill.pcp_metadata.pcp_unpad_mask[attn_metadata.num_decodes * self.pcp_size :]
         qkv_fa_padding_workspace[decode_offset:][pcp_unpad_mask] = actual_qkv[decode_offset:]
 
         q, k, v = qkv_fa_padding_workspace.split(
@@ -920,7 +911,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
         if has_decode:
-            if not attn_metadata.use_hybrid_attn or not has_prefill:
+            if not attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn or not has_prefill:
                 decode_query = query[:num_decode_tokens].contiguous()
             else:
                 decode_query = query[: num_decode_tokens * self.pcp_size : self.pcp_size].contiguous()
@@ -940,7 +931,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             # qkv init
             num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
-            if attn_metadata.use_hybrid_attn:
+            if attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
                 prefill_query = query[self.pcp_size * num_decode_tokens :]
             else:
                 prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
@@ -1008,9 +999,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     attn_output_prefill, attn_lse_prefill, context_output, context_lse, prefill_query, attn_metadata
                 )
 
-            if self.pcp_size > 1 and attn_metadata.use_hybrid_attn:
+            if self.pcp_size > 1 and attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
                 # layer_idx != num_layers - 1
-                pcp_allgather_restore_idx = attn_metadata.prefill.pcp_allgather_restore_idx
+                pcp_allgather_restore_idx = attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx
                 attn_output_prefill = get_pcp_group().all_gather(attn_output_prefill.contiguous(), dim=0)
                 attn_output_prefill = torch.index_select(attn_output_prefill, 0, pcp_allgather_restore_idx)
                 fla_padding = attn_output_prefill.shape[0] + num_decode_tokens - output.shape[0]

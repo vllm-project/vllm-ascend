@@ -200,10 +200,6 @@ class AscendMetadata:
     # sliding window attention mask
     swa_mask: torch.Tensor | None = None
 
-    use_hybrid_attn: bool = False
-
-    pcp_unpad_mask: torch.Tensor = None
-
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
