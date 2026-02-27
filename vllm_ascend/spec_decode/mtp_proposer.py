@@ -14,7 +14,7 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla, update_cos_sin
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.utils import lmhead_tp_enable, vllm_version_is
 
@@ -36,7 +36,14 @@ class MtpProposer(EagleProposer):
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
     ) -> None:
-        if self.pcp_size * self.dcp_size == 1 and not self.speculative_config.disable_padded_drafter_batch:
+        # Currently, both GLM and DS encounter issues when enabling the fullgraph mode and running on EagleProposer.
+        # Therefore, we temporarily bypass this problem by adding a conditional check for fullgraph.
+        # TODO: this conditional check should be removed after bug fixing.
+        if (
+            self.pcp_size * self.dcp_size == 1
+            and not self.speculative_config.disable_padded_drafter_batch
+            and not self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
             super().dummy_run(
                 num_tokens,
                 with_prefill,
@@ -166,7 +173,14 @@ class MtpProposer(EagleProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
     ) -> torch.Tensor:
-        if self.pcp_size * self.dcp_size == 1 and not self.speculative_config.disable_padded_drafter_batch:
+        # Currently, both GLM and DS encounter issues when enabling the fullgraph mode and running on EagleProposer.
+        # Therefore, we temporarily bypass this problem by adding a conditional check for fullgraph.
+        # TODO: this conditional check should be removed after bug fixing.
+        if (
+            self.pcp_size * self.dcp_size == 1
+            and not self.speculative_config.disable_padded_drafter_batch
+            and not self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
             draft_token_ids = super()._propose(
                 target_token_ids,
                 target_positions,
@@ -315,6 +329,7 @@ class MtpProposer(EagleProposer):
         for layer_name in self.attn_layer_names:
             attn_metadata[layer_name] = attn_metadata_mtp
 
+        update_cos_sin(self._get_positions(num_input_tokens))
         for step in range(self.num_speculative_tokens):
             with set_ascend_forward_context(
                 attn_metadata,

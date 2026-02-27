@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import copy
 import functools
 from collections.abc import Callable
 from typing import Any
@@ -88,7 +89,7 @@ def npugraph_ex_compile(
         # that can trigger the compilation of static kernel. If this configuration is
         # not applied, new shapes will trigger the compilation of static kernels,
         # affecting program execution.
-        num_spec_tokens = vllm_config.speculative_config.num_speculative_token if vllm_config.speculative_config else 0
+        num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
         uniform_decode_query_len = num_spec_tokens + 1
         max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
         decode_cudagraph_batch_sizes = [
@@ -129,6 +130,10 @@ class AscendCompiler(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
+        # inductor can inplace modify the graph, so we need to copy it
+        # see https://github.com/pytorch/pytorch/issues/138980
+        graph = copy.deepcopy(graph)
+
         npugraph_ex_config = get_ascend_config().npugraph_ex_config
         if npugraph_ex_config.enable:
             assert hasattr(self, "vllm_config")
