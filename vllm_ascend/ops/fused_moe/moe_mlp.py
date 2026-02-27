@@ -101,7 +101,7 @@ def quant_apply_mlp(
     if adaptor_cls is None:
         raise RuntimeError("Device adaptor is not initialized.")
 
-    # TODO(linfeng): Current parameter flattening is quite severe; parameter differences introduced by different
+    # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced by different
     # quantization modes will be consolidated into a dataclass in a follow-up.
     use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
     act_quant_type = torch.float8_e4m3fn
@@ -422,7 +422,7 @@ def unified_apply_mlp(
         )
 
     assert w1_scale is not None and w2_scale is not None
-    # TODO(linfeng): Current parameter flattening is quite severe; parameter differences introduced by different
+    # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced by different
     # quantization modes will be consolidated into a dataclass in a follow-up.
     act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
     weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)

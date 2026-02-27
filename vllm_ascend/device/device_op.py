@@ -136,35 +136,7 @@ class BaseDeviceAdaptor:
         fallback_output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         if use_mxfp_quant:
-            gmm2_kwargs = cls.get_quant_gmm2_kwargs(
-                input_dtype=input_dtype,
-                act_quant_type=act_quant_type,
-                weight_quant_type=weight_quant_type,
-                scale_type=scale_type,
-                per_token_scale_type=per_token_scale_type,
-                use_bf16=use_bf16,
-                use_mxfp_quant=True,
-            )
-            output_dtype = gmm2_kwargs.pop("output_dtype")
-            if isinstance(weight, list) and len(weight) != 1:
-                raise ValueError(f"w2 must have a single tensor in MXFP path, but got {len(weight)}.")
-            if isinstance(weight_scale, list) and len(weight_scale) != 1:
-                raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
-            gmm2_weight = weight if isinstance(weight, list) else [weight]
-            gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
-            return torch_npu.npu_grouped_matmul(
-                x=[hidden_states],
-                weight=gmm2_weight,
-                scale=gmm2_scale,
-                bias=bias,
-                per_token_scale=[per_token_scale],
-                split_item=2,
-                group_list_type=group_list_type,
-                group_type=0,
-                group_list=group_list,
-                output_dtype=output_dtype,
-                **gmm2_kwargs,
-            )[0]
+            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
 
         if fallback_output_dtype is None:
             fallback_output_dtype = weight_scale[0].dtype if isinstance(weight_scale, list) else weight_scale.dtype
@@ -313,6 +285,77 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             "weight_dtype": weight_quant_type if weight_quant_type in quant_dtypes else None,
             "output_dtype": output_dtype,
         }
+
+    @classmethod
+    def npu_grouped_matmul_gmm2(
+        cls,
+        *,
+        hidden_states: torch.Tensor,
+        weight: list[torch.Tensor] | torch.Tensor,
+        weight_scale: list[torch.Tensor] | torch.Tensor,
+        per_token_scale: torch.Tensor,
+        group_list: torch.Tensor,
+        group_list_type: int,
+        input_dtype: torch.dtype,
+        act_quant_type,
+        weight_quant_type,
+        scale_type,
+        per_token_scale_type,
+        use_bf16: bool = True,
+        use_mxfp_quant: bool = False,
+        bias=None,
+        fallback_output_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        if not use_mxfp_quant:
+            return BaseDeviceAdaptor.npu_grouped_matmul_gmm2(
+                hidden_states=hidden_states,
+                weight=weight,
+                weight_scale=weight_scale,
+                per_token_scale=per_token_scale,
+                group_list=group_list,
+                group_list_type=group_list_type,
+                input_dtype=input_dtype,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
+                scale_type=scale_type,
+                per_token_scale_type=per_token_scale_type,
+                use_bf16=use_bf16,
+                use_mxfp_quant=False,
+                bias=bias,
+                fallback_output_dtype=fallback_output_dtype,
+            )
+
+        gmm2_kwargs = cls.get_quant_gmm2_kwargs(
+            input_dtype=input_dtype,
+            act_quant_type=act_quant_type,
+            weight_quant_type=weight_quant_type,
+            scale_type=scale_type,
+            per_token_scale_type=per_token_scale_type,
+            use_bf16=use_bf16,
+            use_mxfp_quant=True,
+        )
+        output_dtype = gmm2_kwargs.pop("output_dtype")
+
+        if isinstance(weight, list) and len(weight) != 1:
+            raise ValueError(f"w2 must have a single tensor in MXFP path, but got {len(weight)}.")
+        if isinstance(weight_scale, list) and len(weight_scale) != 1:
+            raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
+        gmm2_weight = weight if isinstance(weight, list) else [weight]
+        gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
+
+        return torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=gmm2_weight,
+            scale=gmm2_scale,
+            bias=bias,
+            per_token_scale=[per_token_scale],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=output_dtype,
+            **gmm2_kwargs,
+        )[0]
 
 
 def get_device_adaptor():

@@ -142,8 +142,8 @@ class MoECommMethod(ABC):
         # Apply log2phy if needed
         if log2phy is not None:
             topk_ids = log2phy[topk_ids]
-        # TODO(linfeng): Current parameter flattening is quite severe; parameter differences introduced by different
-        # quantization modes will be consolidated into a dataclass in a follow-up.
+        # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced
+        # by different quantization modes will be consolidated into a dataclass in a follow-up.
         use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
         dispatch_with_quant = use_int8_w8a8 or use_int4_w4a8 or use_mxfp_quant
         act_quant_type, weight_quant_type, scale_type, per_token_scale_type, round_mode = parse_mxfp_quant_params(
