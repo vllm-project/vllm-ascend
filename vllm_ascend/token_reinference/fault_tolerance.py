@@ -1,5 +1,6 @@
 import torch
 import functools
+import copy
 import queue
 import threading
 import torch_npu
@@ -344,9 +345,9 @@ class FaultTolerance:
             if state is None:
                 continue
             req_backup = {
-                'output_token_ids' : state.output_token_ids.copy() if state.output_token_ids else [],
+                'output_token_ids' : state.output_token_ids.copy(),
                 'num_computed_tokens' : state.num_computed_tokens,
-                'block_ids':tuple(block_id.copy() for block_id in state.block_ids) if state.block_ids else [],
+                'block_ids':tuple(block_id.copy() for block_id in state.block_ids),
             }
             requests_backup[req_id] = req_backup
 
@@ -355,23 +356,15 @@ class FaultTolerance:
         ib = self.model_runner.input_batch
 
         backup['_req_ids'] = ib._req_ids.copy()
-        backup['req_output_token_ids'] = ib.req_output_token_ids.copy()
+        backup['req_output_token_ids'] = [(sub.copy() if sub is not None else None) for sub in ib.req_output_token_ids]
         backup['req_id_to_index'] = dict(ib.req_id_to_index)
-        backup['num_blocks_per_row'] = [
-            bt.num_blocks_per_row.copy() for bt in ib.block_table.block_tables
-        ]
-        if ib.batch_update_builder._removed is not None:
-            backup['_removed'] = ib.batch_update_builder._removed.copy()
-        else:
-            backup['_removed'] = None
-        if ib.batch_update_builder.added is not None:
-            backup['added'] = ib.batch_update_builder.added.copy()
-        else:
-            backup['added'] = None
         backup['spec_token_ids'] = [spec_list.copy() for spec_list in ib.spec_token_ids]
+        backup['num_blocks_per_row'] = [bt.num_blocks_per_row.copy() for bt in ib.block_table.block_tables]
+        builder = ib.batch_update_builder
+        backup['_removed'] = copy.deepcopy(builder._removed)
+        backup['added'] = copy.deepcopy(builder.added)
 
         essential_arrays = ['token_ids_cpu','num_tokens','num_tokens_no_spec','num_computed_tokens_cpu','num_accepted_tokens_cpu']
-
         for attr_name in essential_arrays:
             if hasattr(ib,attr_name):
                 attr_value = getattr(ib,attr_name)
@@ -384,21 +377,10 @@ class FaultTolerance:
         # Backup eplb updator
         if hasattr(self.model_runner,'eplb_updator'):
             eplb = self.model_runner.eplb_updator
-            backup['update_info_all'] = (
-                eplb.update_info_all.copy()
-                if hasattr(eplb,'update_info_all')
-                else None
-            )
-            backup['reqs'] = (
-                eplb.reqs.copy()
-                if hasattr(eplb,'reqs')
-                else None
-            )
-            backup['cur_iterations'] = (
-                eplb.cur_iterations
-                if hasattr(eplb,'cur_iterations')
-                else None
-            )
+            backup['update_info_all'] = copy.deepcopy(eplb.update_info_all) if hasattr(eplb,'update_info_all') else None
+            backup['reqs'] = copy.deepcopy(eplb.reqs) if hasattr(eplb,'reqs') else None
+            backup['cur_iterations'] = copy.deepcopy(eplb.cur_iterations) if hasattr(eplb,'cur_iterations') else None
+
         return backup
 
     def _restore_essential_state(self,backup):
@@ -419,7 +401,7 @@ class FaultTolerance:
                     state.num_computed_tokens = req_backup['num_computed_tokens']
                     state.block_ids = req_backup['block_ids']
 
-        # Rollback inputbatch state
+        # Rollback input_batch state
         if hasattr(self.model_runner,'input_batch'):
             ib = self.model_runner.input_batch
 
@@ -431,23 +413,26 @@ class FaultTolerance:
                 ib.req_id_to_index.clear()
                 ib.req_id_to_index.update(backup['req_id_to_index'])
             if 'num_blocks_per_row' in backup:
-                for i, bt in enumerate[Any](ib.block_table.block_tables):
+                for i, bt in enumerate(ib.block_table.block_tables):
                     bt.num_blocks_per_row[:] = backup['num_blocks_per_row'][i]
-            if '_removed' in backup:
-                ib.batch_update_builder._removed = backup['_removed']
-            if 'added' in backup:
-                ib.batch_update_builder.added = backup['added']
             if 'spec_token_ids' in backup:
-                ib.spec_token_ids = backup['spec_token_ids']
+                for i, lst in enumerate(backup['spec_token_ids']):
+                    ib.spec_token_ids[i][:] = lst
+
+            if '_removed' in backup:
+                ib.batch_update_builder._removed[:] = backup['_removed']
+            if 'added' in backup:
+                ib.batch_update_builder.added[:] = backup['added']
 
             essential_arrays = ['token_ids_cpu','num_tokens','num_tokens_no_spec','num_computed_tokens_cpu','num_accepted_tokens_cpu']
             for attr_name in essential_arrays:
                 if attr_name in backup and hasattr(ib,attr_name):
                     target = getattr(ib,attr_name)
-                    if target is not None and backup[attr_name] is not None:
-                        target[:] = backup[attr_name]
+                    target[:] = backup[attr_name]
             if 'prev_sampled_token_ids' in backup and hasattr(ib,'prev_sampled_token_ids'):
-                ib.prev_sampled_token_ids = backup['prev_sampled_token_ids']
+                target = ib.prev_sampled_token_ids
+                if target is not None:
+                    target[:] = backup['prev_sampled_token_ids']
 
         # Rollback eplb state
         if hasattr(self.model_runner,'eplb_updator'):
