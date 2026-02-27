@@ -43,7 +43,7 @@ def cumsum_group_list(
     if src_list_type == dst_list_type:
         return group_list
     if src_list_type == 1 and dst_list_type == 0:
-        return group_list.cast(torch.int32).cumsum(dim=0)
+        return group_list.cumsum(dim=0)
     if src_list_type == 0 and dst_list_type == 1:
         group_diff = torch.diff(group_list)
         new_group = torch.cat([group_list[0].unsqueeze(0), group_diff], dim=0)
@@ -366,3 +366,4 @@ def unified_apply_mlp(
             topk_scales=topk_scales,
             need_trans=need_trans,
         )
+
