@@ -677,19 +677,19 @@ def split_qkv_rmsnorm_rope_impl_fake(
     batch_size = input.shape[0]
     q_output = torch.empty(
         batch_size,
-        q_hidden_size,
+        int(q_hidden_size),
         device=input.device,
         dtype=input.dtype,
     )
     k_output = torch.empty(
         batch_size,
-        kv_hidden_size,
+        int(kv_hidden_size),
         device=input.device,
         dtype=input.dtype,
     )
     v_output = torch.empty(
         batch_size,
-        kv_hidden_size,
+        int(kv_hidden_size),
         device=input.device,
         dtype=input.dtype,
     )
