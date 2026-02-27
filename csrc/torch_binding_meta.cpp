@@ -436,8 +436,8 @@ at::Tensor matmul_gelu_meta(const at::Tensor &x, const at::Tensor &weight, const
     TORCH_CHECK(x.dim() == 2, "The x should be 2D");
     TORCH_CHECK(weight.dim() == 2, "The weight should be 2D");
     TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
-    TORCH_CHECK(weight.sym_size(0) == bias.sym_size(0) || weight.sym_size(1) == bias.sym_size(0), "The weight first or second dim should be same as bias first dim");
-    TORCH_CHECK(x.sym_size(1) == weight.sym_size(1) || x.sym_size(1) == weight.sym_size(0), "The x second dim should be same as weight first or second dim");
+    TORCH_CHECK(weight.sym_size(0) == bias.sym_size(0), "The weight first dim should be same as bias first dim");
+    TORCH_CHECK(x.sym_size(1) == weight.sym_size(1), "The x second dim should be same as weight second dim");
     TORCH_CHECK(
         x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat,
         "float16 or float32 tensor expected but got a tensor with dtype: ",

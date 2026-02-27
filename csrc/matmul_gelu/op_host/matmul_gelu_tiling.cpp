@@ -42,13 +42,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling->n = n;
     tiling->k = k;
 
-    if (k == weightShape.GetDim(0)) {
-        tiling->transB = false;
-    } else if (k == weightShape.GetDim(1)) {
-        tiling->transB = true;
-    } else {
-        return ge::GRAPH_FAILED;
-    }
+    tiling->transB = true;
 
     auto platformInfo = context->GetPlatformInfo();
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
