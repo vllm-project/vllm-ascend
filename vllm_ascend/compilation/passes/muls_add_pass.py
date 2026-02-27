@@ -17,12 +17,12 @@
 from __future__ import annotations
 
 import torch
-import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.logger import logger
 
+from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.utils import vllm_version_is
 
@@ -32,7 +32,7 @@ else:
     from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 
 
-class MulsAddPattern:
+class MulsAddPattern(BasePattern):
     """
     Pattern that matches an element-wise mul + add sequence:
         tmp = x * scale
@@ -41,8 +41,7 @@ class MulsAddPattern:
     """
 
     def __init__(self, vllm_config: VllmConfig, scale: float = 1.0):
-        self.vllm_config = vllm_config
-        self.dtype = vllm_config.model_config.dtype
+        super().__init__(vllm_config)
         self.scale = scale
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -58,11 +57,7 @@ class MulsAddPattern:
         # pattern instance (self.scale) instead of being passed as an input.
         return [x, y]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        """
-        Register the muls_add pattern and its replacement into the given pass.
-        """
-
+    def get_pattern(self):
         def pattern(x: torch.Tensor, y: torch.Tensor):
             """
             Pattern for element-wise x * scale + y.
@@ -71,6 +66,9 @@ class MulsAddPattern:
             out = tmp + y
             return out
 
+        return pattern
+
+    def get_replacement(self):
         def replacement(x: torch.Tensor, y: torch.Tensor):
             """
             Replacement that calls the muls_add_triton kernel using the
@@ -78,7 +76,7 @@ class MulsAddPattern:
             """
             return muls_add_triton(x, y, self.scale)
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+        return replacement
 
 
 class MulsAddFusionPass(VllmInductorPass):
