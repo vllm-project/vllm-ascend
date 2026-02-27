@@ -447,8 +447,15 @@ class MtpProposer(EagleProposer):
                     block_indices = torch.cat(
                         [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d, dim=0)[:-1]]
                     )
-                    attn_metadata_i.decode.block_table[:batch_size] = attn_metadata_i.decode.block_table[block_indices]
-                    attn_metadata_i.decode.block_table = attn_metadata_i.decode.block_table[:batch_size]
+                    # For MLA: block_table is under .decode; For SFA: block_table is at top-level
+                    block_table_holder = getattr(attn_metadata_i, "decode", attn_metadata_i)
+                    block_table_holder.block_table[:batch_size] = block_table_holder.block_table[block_indices]
+                    block_table_holder.block_table = block_table_holder.block_table[:batch_size]
+                    # For SFA CP: forward uses sfa_cp_metadata.block_table_cp, fold it too
+                    sfa_cp_metadata = getattr(attn_metadata_i, "sfa_cp_metadata", None)
+                    if sfa_cp_metadata is not None:
+                        sfa_cp_metadata.block_table_cp[:batch_size] = sfa_cp_metadata.block_table_cp[block_indices]
+                        sfa_cp_metadata.block_table_cp = sfa_cp_metadata.block_table_cp[:batch_size]
 
             input_ids = draft_token_ids_list[-1].int()
             positions += 1
@@ -506,7 +513,11 @@ class MtpProposer(EagleProposer):
                     self.runner.parallel_config.cp_kv_cache_interleave_size,
                 )
                 cp_seq_len = num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank]
-                attn_metadata_i.decode.cp_seq_len = cp_seq_len
+                # For MLA: store CP-local seq_len in decode metadata for attention kernel.
+                # For SFA: no cp_seq_len needed; SFA CP all-gathers KV and uses full seq_lens
+                # (already updated at line above via attn_metadata_i.seq_lens += 1).
+                if getattr(attn_metadata_i, "decode", None) is not None:
+                    attn_metadata_i.decode.cp_seq_len = cp_seq_len
                 # update slot_mapping
                 slot_indices += self.pcp_size
                 slot_mapping = mtp_slot_mapping[slot_indices]
