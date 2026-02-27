@@ -89,7 +89,8 @@ jobs:
               --suite e2e-singlecard-light \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              --auto-upgrade-estimated-times
+              --auto-upgrade-estimated-times \
+              --continue-on-error
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-singlecard-light \
@@ -176,7 +177,8 @@ jobs:
               --suite e2e-singlecard \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 2 \
-              --auto-upgrade-estimated-times
+              --auto-upgrade-estimated-times \
+              --continue-on-error
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-singlecard \
@@ -260,7 +262,8 @@ jobs:
               --suite e2e-2card-light \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              --auto-upgrade-estimated-times
+              --auto-upgrade-estimated-times \
+              --continue-on-error
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-2card-light \
@@ -345,7 +348,8 @@ jobs:
               --suite e2e-multicard-2-cards \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              --auto-upgrade-estimated-times
+              --auto-upgrade-estimated-times \
+              --continue-on-error
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-multicard-2-cards \
@@ -438,7 +442,8 @@ jobs:
               --suite e2e-multicard-4-cards \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              --auto-upgrade-estimated-times
+              --auto-upgrade-estimated-times \
+              --continue-on-error
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-multicard-4-cards \
