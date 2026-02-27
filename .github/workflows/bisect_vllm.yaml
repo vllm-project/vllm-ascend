@@ -17,7 +17,7 @@
 
 name: Bisect vLLM
 
-on:  
+on:
   pull_request:
     branches:
       - 'main'
@@ -65,9 +65,9 @@ jobs:
         id: resolve
         run: |
           # ---- PR-trigger defaults (edit here) ----
-          DEFAULT_TEST_CMD="pytest -sv tests/e2e/singlecard/test_llama32_lora.py; pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py; pytest -sv tests/ut/spec_decode/test_eagle_proposer.py; pytest -sv tests/e2e/singlecard/test_models.py; pytest -sv tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py"
+          DEFAULT_TEST_CMD="pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py; pytest -sv tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py; pytest -sv tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py; pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py"
           DEFAULT_GOOD_COMMIT=""
-          DEFAULT_BAD_COMMIT=""
+          DEFAULT_BAD_COMMIT="b3c14229b032a8bbf93d450a52c9a404ddaea429"
           # ---- end defaults ----
 
           INPUT_TEST_CMD="${{ inputs.test_cmd }}"
@@ -178,3 +178,47 @@ jobs:
             --test-cmds-file /tmp/bisect_cmds.txt \
             ${{ needs.set-params.outputs.good_commit && format('--good {0}', needs.set-params.outputs.good_commit) || '' }} \
             ${{ needs.set-params.outputs.bad_commit && format('--bad {0}', needs.set-params.outputs.bad_commit) || '' }}
+
+      - name: Upload bisect results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bisect-result-${{ matrix.group }}
+          path: /tmp/bisect_summary.md
+          retention-days: 30
+
+  # ================================================================
+  # Collect all bisect results and upload combined artifact
+  # ================================================================
+  upload-all-results:
+    name: Upload all results
+    needs: bisect
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: bisect-result-*
+          path: /tmp/bisect_results
+
+      - name: Combine all summaries
+        run: |
+          # Each artifact is in its own subdirectory: bisect-result-{group}/bisect_summary.md
+          > /tmp/bisect_summary.md
+          for f in /tmp/bisect_results/*/bisect_summary.md; do
+            if [ -f "$f" ]; then
+              cat "$f" >> /tmp/bisect_summary.md
+              echo "" >> /tmp/bisect_summary.md
+            fi
+          done
+
+          echo "=== Final Combined Summary ==="
+          cat /tmp/bisect_summary.md
+
+      - name: Upload combined summary
+        uses: actions/upload-artifact@v7
+        with:
+          name: bisect-summary
+          path: /tmp/bisect_summary.md
+          retention-days: 30

@@ -177,6 +177,9 @@ ALL_RUNTIME_ENV_KEYS = sorted({k for rule in ENV_RULES for k in rule.get("runtim
 # Regex to match a 7+ hex-char commit hash (not a vX.Y.Z tag)
 COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{7,40}$")
 
+# Regex to extract test file path from pytest command
+TEST_PATH_RE = re.compile(r"\b(tests/[-\w/]+\.py(?:::[\w_]+)*)")
+
 
 def detect_env(test_cmd: str) -> dict:
     """Detect full environment config based on the test file path in test_cmd."""
@@ -475,6 +478,14 @@ def cmd_report(args):
         log_entries=log_entries,
     )
     print(report)
+
+    # Write to unified bisect_summary.md file (for artifact upload)
+    summary_md_path = Path("/tmp/bisect_summary.md")
+    with open(summary_md_path, "a" if summary_md_path.exists() else "w", encoding="utf-8") as f:
+        match = TEST_PATH_RE.search(args.test_cmd)
+        test_path = match.group(1) if match else args.test_cmd
+        f.write(f"\n# bisect {test_path}\n\n")
+        f.write(report + "\n")
 
     # Write to GITHUB_STEP_SUMMARY if available
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
