@@ -164,7 +164,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
       "kv_parallel_size": "1",
       "kv_port": "20001",
       "engine_id": "0"
-    }'
+    }' \
     --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
 ```
 

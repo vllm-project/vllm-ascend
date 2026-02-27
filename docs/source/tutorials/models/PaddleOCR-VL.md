@@ -8,9 +8,9 @@ This document provides a detailed workflow for the complete deployment and verif
 
 ## Supported Features
 
-Refer to [supported features](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/index.html) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
