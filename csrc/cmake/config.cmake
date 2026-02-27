@@ -197,9 +197,9 @@ if (BUILD_OPEN_PROJECT)
         # Prepare ccache parameters for prepare.sh
         set(PREPARE_CCACHE_ARGS "")
         if (ENABLE_CCACHE)
-            set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --enable-ccache ON")
+            set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --enable-ccache ON ")
             if (CUSTOM_CCACHE)
-                set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --custom-ccache ${CUSTOM_CCACHE}")
+                set(PREPARE_CCACHE_ARGS "${PREPARE_CCACHE_ARGS} --custom-ccache ${CUSTOM_CCACHE} ")
             endif ()
         endif ()
 
