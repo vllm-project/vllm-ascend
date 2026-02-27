@@ -7,8 +7,8 @@ This feature addresses the need to optimize the **Time Per Output Token (TPOT)**
 1. **Adjusting Parallel Strategy and Instance Count for P and D Nodes**  
    Using the disaggregated-prefill strategy, this feature allows the system to flexibly adjust the parallelization strategy (e.g., data parallelism (dp), tensor parallelism (tp), and expert parallelism (ep)) and the instance count for both P (Prefiller) and D (Decoder) nodes. This leads to better system performance tuning, particularly for **TTFT** and **TPOT**.
 
-2. **Optimizing TPOT**  
-   Without disaggregated-prefill strategy, prefill tasks are inserted during decoding, which results in inefficiencies and delays. disaggregated-prefill solves this by allowing for better control over the system’s **TPOT**. By managing chunked prefill tasks effectively, the system avoids the challenge of determining the optimal chunk size and provides more reliable control over the time taken for generating output tokens.
+2. **Optimizing TPOT**
+   Without the disaggregated-prefill strategy, prefill tasks are inserted during decoding, which results in inefficiencies and delays. Disaggregated-prefill solves this by allowing for better control over the system’s **TPOT**. By managing chunked prefill tasks effectively, the system avoids the challenge of determining the optimal chunk size and provides more reliable control over the time taken for generating output tokens.
 
 ---
 

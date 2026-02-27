@@ -267,10 +267,10 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_consumer",
     "kv_connector_extra_config": {
-        "lookup_rpc_port":"0",
-        "backend": "mooncake"
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
         "consumer_is_to_put": true,
-        "prefill_pp_size": 2
+        "prefill_pp_size": 2,
         "prefill_pp_layer_partition": "30,31"
     }
 }

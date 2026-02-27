@@ -82,7 +82,7 @@ yum update -y && yum install -y curl
 ::::
 :::::
 
-The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developers immediately make changes effective without requiring a new installation.
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developers make changes effective immediately without requiring a new installation.
 
 ## Usage
 

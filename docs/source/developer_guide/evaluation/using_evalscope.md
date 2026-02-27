@@ -1,6 +1,6 @@
 # Using EvalScope
 
-This document will guide you have model inference stress testing and accuracy testing using [EvalScope](https://github.com/modelscope/evalscope).
+This document will guide you through model inference stress testing and accuracy testing using [EvalScope](https://github.com/modelscope/evalscope).
 
 ## 1. Online server
 

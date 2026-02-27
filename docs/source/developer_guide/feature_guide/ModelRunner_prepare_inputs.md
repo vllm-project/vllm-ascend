@@ -33,7 +33,7 @@ The workflow of obtaining inputs:
 
 3. Get `Token IDs`: using token indices to retrieve the Token IDs from **token id table**.
 
-At last, these `Token IDs` are required to be fed into a model, and also, `positions` should be sent into the model to create `Rope` (Rotary positional embedding). Both of them are the inputs of the model.
+At last, these `Token IDs` are required to be fed into a model, and `positions` should also be sent into the model to create `Rope` (Rotary positional embedding). Both of them are the inputs of the model.
 
 **Note**: The `Token IDs` are the inputs of a model, so we also call them `Inputs IDs`.
 
@@ -55,13 +55,13 @@ A model requires these attention metadata during the forward pass:
 
 There are mainly three types of variables.
 
-- token level: represents one attribute corresponding to each scheduled token, so the length of this variable is the number of scheduled tokens
-- request level: represents one attribute of each scheduled request, whose length usually is the number of scheduled requests. (`query start location` is a special case, which has one more element)
+- token level: represents one attribute corresponding to each scheduled token, so the length of this variable is the number of scheduled tokens.
+- request level: represents one attribute of each scheduled request, whose length usually is the number of scheduled requests. (`query start location` is a special case, which has one more element.)
 - system level:
   1. **Token IDs table**: stores the token IDs (i.e. the inputs of a model) of each request. The shape of this table is `(max num request, max model len)`. Here, `max num request` is the maximum count of concurrent requests allowed in a forward batch and `max model len` is the maximum token count that can be handled at one request sequence in this model.
   2. **Block table**: translates the logical address (within its sequence) of each block to its global physical address in the device's memory. The shape of this table is `(max num request, max model len / block size)`
 
-**Note**: Both of these two tables are come from the `_update_states` method before **preparing inputs**. You can take a look if you need more inspiration.
+**Note**: Both of these two tables come from the `_update_states` method before **preparing inputs**. You can take a look if you need more inspiration.
 
 ### Tips
 
@@ -89,18 +89,18 @@ Example of `Token ID`:
 
 Assumptions:
 
-- maximum number of  tokens can be scheduled at once: 10
+- maximum number of tokens that can be scheduled at once: 10
 - `block size`: 2
 - Totally schedule 3 requests. Their prompt lengths are 3, 2, and 8 respectively.
-- `max model length`: 12 (the maximum token count can be handled at one request sequence in a model).
+- `max model length`: 12 (the maximum token count that can be handled at one request sequence in a model).
 
-These assumptions are configured in the beginning when starting vLLM. They are not fixed, so you can manually set them.
+These assumptions are configured at the beginning when starting vLLM. They are not fixed, so you can manually set them.
 
 ### Step 1: All requests in the prefill phase
 
 #### Obtain inputs
 
-As the maximum number of tokens that can be schedules is 10, the scheduled tokens of each request can be represented as `{'0': 3, '1': 2, '2': 5}`. Note that`request_2` uses chunked prefill, leaving 3 prompt tokens unscheduled.
+As the maximum number of tokens that can be scheduled is 10, the scheduled tokens of each request can be represented as `{'0': 3, '1': 2, '2': 5}`. Note that `request_2` uses chunked prefill, leaving 3 prompt tokens unscheduled.
 
 ##### 1. Get token positions
 
@@ -108,7 +108,7 @@ First, determine which request each token belongs to: tokens 0–2 are assigned 
 
 For each request, use **the number of computed tokens** + **the relative position of current scheduled tokens** (`request_0: [0 + 0, 0 + 1, 0 + 2]`, `request_1: [0 + 0, 0 + 1]`, `request_2: [0 + 0, 0 + 1,..., 0 + 4]`) and then concatenate them together (`[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`).
 
-Note: there is more efficient way (using `request indices`) to create positions in actual code.
+Note: there is a more efficient way (using `request indices`) to create positions in actual code.
 
 Finally, `token positions` can be obtained as `[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`. This variable is **token level**.
 
@@ -116,9 +116,9 @@ Finally, `token positions` can be obtained as `[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`. 
 
 The shape of the current **Token IDs table** is `(max num request, max model len)`.
 
-Why these `T_3_5`, `T_3_6`, `T_3_7` are in this table without being scheduled?
+Why are these `T_3_5`, `T_3_6`, `T_3_7` in this table without being scheduled?
 
-- We fill all Token IDs in one request sequence to this table at once, but we only retrieve the tokens we scheduled this time. Then we retrieve the remain Token IDs next time.
+- We fill all Token IDs in one request sequence to this table at once, but we only retrieve the tokens we scheduled this time. Then we retrieve the remaining Token IDs next time.
 
 ```shell
 | T_0_0 | T_0_1 | T_0_2 |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |   ?   |
@@ -130,7 +130,7 @@ Why these `T_3_5`, `T_3_6`, `T_3_7` are in this table without being scheduled?
 ......
 ```
 
-Note that`T_x_x` is an `int32`.
+Note that `T_x_x` is an `int32`.
 
 Let's say `M = max model len`. Then we can use `token positions` together with `request indices` of each token to construct `token indices`.
 
@@ -190,10 +190,10 @@ The workflow of achieving slot mapping:
 
 Details:
 
-1. (**Token level**) Use a simple formula to calculate `block table indices`: `request indices * K + positions / block size`. So it equal to `[0 * 6 + 0 / 2, 0 * 6 + 1 / 2, 0 * 6 + 2 / 2, 1 * 6 + 0 / 2, 1 * 6 + 1 / 2, 2 * 6 + 0 / 2, 2 * 6 + 1 / 2, 2 * 6 + 2 / 2, 2 * 6 + 3 / 2, 2 * 6 + 4 / 2] = [0, 0, 1, 6, 6, 12, 12, 13, 13, 14]`. This could be used to select `device block number` from `block table`.
-2. (**Token level**) Use `block table indices` to select out `device block number` for each scheduled token. The Pseudocode is `block_numbers = block_table[block_table_indices]`. So `device block number=[1, 1, 2, 3, 3, 4, 4, 5, 5, 6]`
+1. (**Token level**) Use a simple formula to calculate `block table indices`: `request indices * K + positions / block size`. So it equals `[0 * 6 + 0 / 2, 0 * 6 + 1 / 2, 0 * 6 + 2 / 2, 1 * 6 + 0 / 2, 1 * 6 + 1 / 2, 2 * 6 + 0 / 2, 2 * 6 + 1 / 2, 2 * 6 + 2 / 2, 2 * 6 + 3 / 2, 2 * 6 + 4 / 2] = [0, 0, 1, 6, 6, 12, 12, 13, 13, 14]`. This could be used to select `device block number` from `block table`.
+2. (**Token level**) Use `block table indices` to select out `device block number` for each scheduled token. The pseudocode is `block_numbers = block_table[block_table_indices]`. So `device block number=[1, 1, 2, 3, 3, 4, 4, 5, 5, 6]`
 3. (**Token level**) `block offsets` could be computed by `block offsets = positions % block size = [0, 1, 0, 0, 1, 0, 1, 0, 1, 0]`.
-4. At last, use `block offsets` and `device block number` to create `slot mapping`: `device block number * block size + block_offsets = [2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`
+4. Finally, use `block offsets` and `device block number` to create `slot mapping`: `device block number * block size + block_offsets = [2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`
 
 (**Request level**) As we know the scheduled token count is `[3, 2, 5]`:
 
@@ -261,7 +261,7 @@ KV cache block in the device memory:
 3. (**Token level**) `block offsets`: `[1, 0, 1, 0, 1]`
 4. (**Token level**) `slot mapping`: `[5, 14, 13, 16, 17]`
 
-Scheduled token count:`[1, 1, 3]`
+Scheduled token count: `[1, 1, 3]`
 
 - `query start location`: `[0, 1, 2, 5]`
 
@@ -281,6 +281,6 @@ Scheduled token count:`[1, 1, 3]`
 
 ## At last
 
-If you understand the step_1 and step_2, you will know the all following steps.
+If you understand step_1 and step_2, you will know all the following steps.
 
-Hope this document can help you better understand how vLLM prepares inputs for model forwarding. If you have any good idea, welcome to contribute to us.
+Hope this document helps you better understand how vLLM prepares inputs for model forwarding. If you have any good ideas, you are welcome to contribute to us.
