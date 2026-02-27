@@ -36,6 +36,12 @@ jobs:
         UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
+        # sccache
+        SCCACHE_BUCKET: ascend-ci-cache-hk
+        SCCACHE_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+        SCCACHE_REGION: ap-southeast-1
+        SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE: true
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -52,7 +58,18 @@ jobs:
           apt-get update -y
           apt install git -y
           pip install uv
-
+          uv pip install sccache
+      - name: Load OBS credentials from file
+        run: |
+          INI_FILE="/root/.cache/obstest.ini"
+          if [ -f "$INI_FILE" ]; then
+            HW_OBS_AK=$(grep '^HW_OBS_AK=' "$INI_FILE" | cut -d'=' -f2-)
+            HW_OBS_SECRET=$(grep '^HW_OBS_SECRET=' "$INI_FILE" | cut -d'=' -f2-)
+            echo "AWS_ACCESS_KEY_ID=$HW_OBS_AK" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=$HW_OBS_SECRET" >> $GITHUB_ENV
+          else
+            echo "Error: $INI_FILE not found" && exit 1
+          fi
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
@@ -72,7 +89,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install --system -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -91,7 +108,7 @@ jobs:
           end_time2=$(date +%s)
           duration=$((end_time2 - end_time1))
           echo "==========build总耗时 ：$duration 秒（$((duration/60)) 分 $((duration%60)) 秒）"
-
+          sccache -s
 #      - name: Run vllm-project/vllm-ascend test
 #        env:
 #          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
