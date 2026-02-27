@@ -2,9 +2,9 @@
 
 This document explains how to write E2E tests and unit tests to verify the implementation of your feature.
 
-## Setup a test environment
+## Set up a test environment
 
-The fastest way to setup a test environment is to use the main branch's container image:
+The fastest way to set up a test environment is to use the main branch's container image:
 
 :::::{tab-set}
 :sync-group: e2e
@@ -178,7 +178,7 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut
 
 ```bash
 cd /vllm-workspace/vllm-ascend/
-# Run all single card the tests
+# Run all single-card tests
 pytest -sv tests/ut
 
 # Run single test
@@ -192,7 +192,7 @@ pytest -sv tests/ut/test_ascend_config.py
 
 ```bash
 cd /vllm-workspace/vllm-ascend/
-# Run all single card the tests
+# Run all multi-card tests
 pytest -sv tests/ut
 
 # Run single test
@@ -223,7 +223,7 @@ You can't run the E2E test on CPUs.
 
 ```bash
 cd /vllm-workspace/vllm-ascend/
-# Run all single card the tests
+# Run all single-card tests
 VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/
 
 # Run a certain test script
@@ -240,7 +240,7 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_offline_inference.
 
 ```bash
 cd /vllm-workspace/vllm-ascend/
-# Run all the single card tests
+# Run all multi-card tests
 VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/
 
 # Run a certain test script
@@ -256,7 +256,7 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.
 
 This will reproduce the E2E test. See [vllm_ascend_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml).
 
-Run nightly multi-node test cases locally refer to section of `Running Locally` of [Multi Node Test](./multi_node_test.md).
+For running nightly multi-node test cases locally, refer to the `Running Locally` section in [Multi Node Test](./multi_node_test.md).
 
 #### E2E test example
 
