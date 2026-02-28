@@ -76,6 +76,26 @@ jobs:
         driver: docker-container
         use: true
 
+    - name: Set cache ref
+      id: cache
+      run: |
+        if [ "${{ github.ref_type }}" = "tag" ]; then
+          # For tag events, use the images built from source branch as cache (the tag image doesn't exist yet).
+          if [ -z "$branch" ]; then
+            branch=$(git branch -r --contains HEAD \
+              | grep -v 'HEAD' \
+              | sed 's|[[:space:]]*origin/||' \
+              | head -1)
+          fi
+          branch="${branch:-main}"
+        else
+          # For branch push / schedule / workflow_dispatch, use the triggering branch name
+          branch="${{ github.ref_name }}"
+        fi
+        # Replace / with - for use in image tags
+        branch="${branch//\//-}"
+        echo "ref=quay.io/ascend/vllm-ascend:${branch}-${{ inputs.suffix }}" >> $GITHUB_OUTPUT
+
     - name: Build and push
       uses: docker/build-push-action@v6
       id: build
@@ -89,6 +109,8 @@ jobs:
         outputs: type=image,name=quay.io/ascend/vllm-ascend,push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
+        # use previously pushed multi-arch image as cache to speed up builds
+        cache-from: type=registry,ref=${{ steps.cache.outputs.ref }}
         provenance: false
 
     - name: Export digest
@@ -154,6 +176,7 @@ jobs:
           #      which follow the rule from vLLM with prefix v
           # TODO(yikun): the post release might be considered as latest release
           tags: |
+            type=branch,suffix=${{ env.SUFFIX }}
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
             type=schedule,pattern=main,suffix=${{ env.SUFFIX }}
             type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' }},suffix=${{ env.SUFFIX }}
