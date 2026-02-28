@@ -1116,3 +1116,22 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     vllm_config = get_current_vllm_config()
     is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
     return is_prefill_instance
+
+
+def check_gdn_layer(vllm_config) -> bool:
+    """
+    gdn layer is marked with `linear_attention`.
+    So, if `linear_attention` is detected, we think the model has gdn-attention.
+    """
+    if not hasattr(vllm_config, "model_config"):
+        return False
+
+    model_config = vllm_config.model_config
+    if not hasattr(model_config, "hf_config"):
+        return False
+
+    hf_config = model_config.hf_config
+    if not hasattr(hf_config, "layer_types"):
+        return False
+
+    return "linear_attention" in hf_config.layer_types
