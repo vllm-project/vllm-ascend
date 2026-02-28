@@ -24,6 +24,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.triton_utils import HAS_TRITON
 
+# in case recursive call in reduce_sum.
+torch_sum = torch.sum
+
 logger = init_logger(__name__)
 
 if HAS_TRITON:
@@ -64,7 +67,10 @@ def reduce_sum(x: torch.Tensor, dim: int = -1, keepdim: bool = False) -> torch.T
     """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
     doesn't require it, so we set dim to -1 by default.
     """
-    return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
+    if x.device.type == "npu":
+        return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
+    # cpu tensor can't use npu_reduce_sum_batch_invariant, so we use torch.sum instead.
+    return torch_sum(x, dim, keepdim)
 
 
 def override_envs_for_invariance():
