@@ -19,11 +19,6 @@ import os
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
-from vllm_ascend import envs
-from vllm_ascend.utils import vllm_version_is
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
-
-if envs.VLLM_ASCEND_BALANCE_SCHEDULING and vllm_version_is("0.15.0"):
-    import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
