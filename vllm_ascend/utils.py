@@ -525,12 +525,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
         )
 
-    from vllm_ascend.utils import vllm_version_is
-
-    if vllm_version_is("0.15.0"):
-        arch_name = vllm_config.model_config.architectures[0]
-    else:
-        arch_name = vllm_config.model_config.architecture
+    arch_name = vllm_config.model_config.architecture
 
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
@@ -1121,3 +1116,22 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     vllm_config = get_current_vllm_config()
     is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
     return is_prefill_instance
+
+
+def check_gdn_layer(vllm_config) -> bool:
+    """
+    gdn layer is marked with `linear_attention`.
+    So, if `linear_attention` is detected, we think the model has gdn-attention.
+    """
+    if not hasattr(vllm_config, "model_config"):
+        return False
+
+    model_config = vllm_config.model_config
+    if not hasattr(model_config, "hf_config"):
+        return False
+
+    hf_config = model_config.hf_config
+    if not hasattr(hf_config, "layer_types"):
+        return False
+
+    return "linear_attention" in hf_config.layer_types
