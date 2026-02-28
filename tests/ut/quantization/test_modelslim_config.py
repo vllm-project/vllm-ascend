@@ -7,7 +7,6 @@ from vllm.model_executor.layers.linear import LinearBase
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
-    MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
