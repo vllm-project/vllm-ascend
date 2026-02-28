@@ -60,8 +60,8 @@ exclude = [
     "tests/e2e/multicard/2-cards/",
     
     # Batch (2)
-    "tests/e2e/multicard/4-cards/",
-    "tests/e2e/nightly/multi_node/",
+    # "tests/e2e/multicard/4-cards/",
+    # "tests/e2e/nightly/multi_node/",
     
     # Batch (3)
     "tests/e2e/nightly/single_node/models/",
