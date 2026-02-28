@@ -18,7 +18,6 @@ Patch for vLLM's _merge_multimodal_embeddings to avoid D2H sync issues on Ascend
 Replaces the masked_scatter_ operation with a custom index-based assignment.
 """
 
-import sys
 import torch
 from vllm.model_executor.models import utils
 
@@ -28,7 +27,6 @@ def masked_scatter_with_index_put(inputs_embeds, is_multimodal, mm_embeds_flat):
     row_indices = is_multimodal.squeeze(-1).nonzero().squeeze(-1)
     num_rows_to_replace = row_indices.size(0)
     inputs_embeds[row_indices] = mm_embeds_flat[:num_rows_to_replace]
-    
     return inputs_embeds
 
 
@@ -37,14 +35,7 @@ def NPU_merge_multimodal_embeddings(
     multimodal_embeddings: NestedTensors,
     is_multimodal: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
-    positions in `inputs_embeds` corresponding to placeholder tokens in
-    `input_ids`.
 
-    Note:
-        This updates `inputs_embeds` in place.
-    """
     def masked_scatter_with_index_put(inputs_embeds, is_multimodal, mm_embeds_flat):
         is_multimodal = is_multimodal.bool()
         row_indices = is_multimodal.squeeze(-1).nonzero().squeeze(-1)
@@ -59,7 +50,9 @@ def NPU_merge_multimodal_embeddings(
     input_dtype = inputs_embeds.dtype
 
     try:
-        inputs_embeds=masked_scatter_with_index_put(inputs_embeds, is_multimodal.unsqueeze(-1),mm_embeds_flat.to(dtype=input_dtype))
+        inputs_embeds=masked_scatter_with_index_put(
+            inputs_embeds, is_multimodal.unsqueeze(-1),mm_embeds_flat.to(dtype=input_dtype)
+        )
     except RuntimeError as e:
         num_actual_tokens = len(mm_embeds_flat)
         num_expected_tokens = is_multimodal.sum().item()
@@ -81,6 +74,4 @@ def apply_patch():
     utils._merge_multimodal_embeddings = NPU_merge_multimodal_embeddings
 
 
-
-# Automatically apply the patch when this module is imported
 apply_patch()
