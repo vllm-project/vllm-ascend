@@ -12,12 +12,15 @@
 name: Image Build and Push
 on:
   schedule:
-    # UTC+8: 8am, 12pm, 16pm, 22pm
-    - cron: '0 0,4,8,14 * * *'
+    # UTC+8: 8am, 10am, 12pm, 14pm, 16pm, 18pm, 22pm
+    - cron: '0 0,2,4,6,8,10,14 * * *'
   push:
+    branches:
+      # Build release branch images proactively so cache is warm when the tag is pushed
+      - 'releases/*'
     tags:
       - 'v*'
-  pull_request: 
+  pull_request:
     branches:
       - 'main'
     types: [ labeled, synchronize ]

@@ -50,6 +50,7 @@ jobs:
             --build-arg CANN_VERSION="8.5.0" \
             --build-arg UBUNTU_VERSION="22.04" \
             --build-arg PYTHON_VERSION="3.11" \
+            --cache-from "$IMAGE_TAG" \
             -t "$IMAGE_TAG" .
 
           echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
