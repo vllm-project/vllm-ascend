@@ -23,6 +23,7 @@ on:
       - '*-dev'
       - 'releases/v*'
     types: [ labeled, synchronize ]
+  workflow_dispatch:
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
