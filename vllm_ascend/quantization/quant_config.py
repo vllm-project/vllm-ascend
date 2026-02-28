@@ -193,7 +193,7 @@ class AscendQuantConfig(QuantizationConfig):
             key = prefix + '.weight'
             if key not in self.quant_description and ".head" in prefix:
                 key = 'lm_head.weight'
-            is_skipped = self.quant_description[key] == "FLOAT"
+            is_skipped = any(key.startswith(prefix) and key.endswith('.weight') and value == "FLOAT" for key, value in self.quant_description.items())
 
         assert is_skipped is not None
         return is_skipped
