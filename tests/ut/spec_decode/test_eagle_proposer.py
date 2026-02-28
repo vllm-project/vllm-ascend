@@ -181,6 +181,7 @@ class TestEagleProposerLoadModel(TestBase):
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
         self.proposer = EagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
+        self.proposer.parallel_drafting = False
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
@@ -215,7 +216,6 @@ class TestEagleProposerLoadModel(TestBase):
         mock_model.model.embed_tokens.weight = weight
 
         self.proposer.name = SpecDcodeType.EAGLE
-        self.parallel_drafting = False
         mock_get_model.return_value = MagicMock()
         mock_get_model.return_value.model.embed_tokens.weight = weight
 
@@ -240,7 +240,6 @@ class TestEagleProposerLoadModel(TestBase):
         mock_model.multimodal_cpu_fields = None
         mock_model.merge_by_field_config = None
         mock_get_model.return_value = MagicMock(model=MagicMock(embed_tokens=original_embed))
-        self.parallel_drafting = False
 
         with set_current_vllm_config(self.vllm_config):
             self.proposer.load_model(mock_model)
@@ -267,7 +266,6 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.proposer.model = MagicMock()
         self.proposer.name = SpecDcodeType.EAGLE
-        self.parallel_drafting = False
 
         with set_current_vllm_config(self.vllm_config):
             self.proposer.load_model(mock_model)
