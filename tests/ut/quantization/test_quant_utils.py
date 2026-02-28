@@ -3,12 +3,15 @@ import logging
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
+import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
 from vllm_ascend.quantization.utils import (
     detect_quantization_method,
     maybe_auto_detect_quantization,
+    pack_to_int32,
+    unpack_from_int32,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
@@ -180,3 +183,87 @@ class TestMaybeAutoDetectQuantization(TestBase):
                 maybe_auto_detect_quantization(vllm_config)
 
         self.assertIsNone(vllm_config.model_config.quantization)
+
+
+class TestUnpackFromInt32(TestBase):
+
+    def test_unpack_from_int32_packed_dim_1(self):
+        weight = torch.tensor([[305419896, -1420531520]], dtype=torch.int32)
+        shape = torch.Size([1, 8])
+        num_bits = 4
+
+        result = unpack_from_int32(weight, shape, num_bits, packed_dim=1)
+
+        self.assertEqual(result.dtype, torch.int8)
+        self.assertEqual(result.shape, shape)
+
+    def test_unpack_from_int32_packed_dim_0(self):
+        weight = torch.tensor([[305419896], [-1420531520]], dtype=torch.int32)
+        shape = torch.Size([8, 1])
+        num_bits = 4
+
+        result = unpack_from_int32(weight, shape, num_bits, packed_dim=0)
+
+        self.assertEqual(result.dtype, torch.int8)
+        self.assertEqual(result.shape, shape)
+
+    def test_unpack_from_int32_assertions(self):
+        with self.assertRaises(AssertionError):
+            weight = torch.tensor([[1, 2]], dtype=torch.int64)
+            unpack_from_int32(weight, torch.Size([8, 1]), 4)
+
+        with self.assertRaises(AssertionError):
+            weight = torch.tensor([[1, 2]], dtype=torch.int32)
+            unpack_from_int32(weight, torch.Size([8, 1]), 16)
+
+
+class TestPackToInt32(TestBase):
+
+    @patch(
+        "vllm_ascend.quantization.utils.torch_npu.npu_convert_weight_to_int4pack"
+    )
+    def test_pack_to_int32_int8(self, mock_npu_convert_weight_to_int4pack):
+        mock_npu_convert_weight_to_int4pack.return_value = torch.zeros(
+            (2, 4), dtype=torch.int32)
+
+        weight = torch.zeros((2, 8, 16), dtype=torch.int8)
+        result = pack_to_int32(weight)
+
+        self.assertEqual(result.dtype, torch.int32)
+        mock_npu_convert_weight_to_int4pack.assert_not_called()
+
+        self.assertEqual(result.shape, torch.Size([2, 8, 4]))
+
+    @patch(
+        "vllm_ascend.quantization.utils.torch_npu.npu_convert_weight_to_int4pack"
+    )
+    def test_pack_to_int32_int32(self, mock_npu_convert_weight_to_int4pack):
+
+        def mock_convert_weight(weight):
+            return weight
+
+        mock_npu_convert_weight_to_int4pack.side_effect = mock_convert_weight
+        weight = torch.zeros((2, 8, 8), dtype=torch.int32)
+        result = pack_to_int32(weight)
+
+        self.assertEqual(result.dtype, torch.int32)
+        self.assertEqual(result.shape, weight.shape)
+
+    def test_pack_to_int32_assertion_dim(self):
+        with self.assertRaises(AssertionError):
+            weight = torch.zeros((8, 8), dtype=torch.int8)
+            pack_to_int32(weight)
+
+    def test_pack_to_int32_assertion_dtype(self):
+        with self.assertRaises(AssertionError):
+            weight = torch.zeros((2, 8, 8), dtype=torch.float32)
+            pack_to_int32(weight)
+
+    def test_pack_to_int32_assertion_divisible(self):
+        with self.assertRaises(AssertionError):
+            weight = torch.zeros((2, 8, 7), dtype=torch.int32)
+            pack_to_int32(weight)
+
+        with self.assertRaises(AssertionError):
+            weight = torch.zeros((2, 8, 7), dtype=torch.int8)
+            pack_to_int32(weight)

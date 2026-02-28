@@ -12,6 +12,7 @@
       "BAAI/bge-small-en-v1.5",
       "BAAI/kernel_meta",
       "ByteDance-Seed/BAGEL-7B-MoT",
+      "cpatonn-mirror/Qwen3-30B-A3B-Thinking-2507-AWQ-4bit",
       "DeepSeek-ai/DeepSeek-OCR",
       "DevQuasar/deepseek-ai.DeepSeek-V3.2-BF16",
       "Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot",
