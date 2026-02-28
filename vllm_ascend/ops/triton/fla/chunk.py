@@ -46,7 +46,8 @@ def chunk_gated_delta_rule_fwd(
         attn_metadata = next(iter(attn_metadata.values()), None)
     if attn_metadata is not None:
         num_decodes = attn_metadata.num_decodes
-    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
+    chunk_size = 64
+    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens)
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_kkt_fwd(k=k, beta=beta, g_cumsum=g, cu_seqlens=cu_seqlens, output_dtype=torch.float32)
     A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
@@ -78,7 +79,7 @@ def chunk_gated_delta_rule_fwd(
             num_decodes=num_decodes,
         )
         all_final_state = get_pcp_group().all_gather(final_state.unsqueeze(0), 0)
-        final_chunk_indices = prepare_final_chunk_indices(cu_seqlens, 64)
+        final_chunk_indices = prepare_final_chunk_indices(cu_seqlens, chunk_size)
         final_h_update = h_update[:, final_chunk_indices, :, :, :]
         all_final_h_update = get_pcp_group().all_gather(final_h_update, 0)
 

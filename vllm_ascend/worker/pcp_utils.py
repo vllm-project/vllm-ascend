@@ -332,12 +332,12 @@ class PCPManager:
                     num_prefill_tokens_cu_ranks, num_prefill_scheduled_tokens_linear
                 )
 
-                max_scheduled_prefill_tokens = sum(num_prefill_tokens_allranks[:, 0, 0])
-                num_prefill_tokens = sum(num_scheduled_tokens[self.num_decode_reqs :])
+                max_scheduled_prefill_tokens = num_prefill_tokens_allranks[:, 0, 0].sum()
+                num_prefill_tokens = num_scheduled_tokens[self.num_decode_reqs :].sum()
                 self.total_pcp_padding_tokens_fla = (
                     max_scheduled_prefill_tokens * self.pcp_world_size - num_prefill_tokens
                 )
-                self.pcp_padded_tokens_fla += max_scheduled_prefill_tokens - sum(num_prefill_scheduled_tokens_linear)
+                self.pcp_padded_tokens_fla += max_scheduled_prefill_tokens - num_prefill_scheduled_tokens_linear.sum()
 
             max_scheduled_tokens = max_scheduled_prefill_tokens + self.num_decode_tokens
             enter_fa_prefill_restore_idx = None
@@ -427,10 +427,7 @@ class PCPManager:
                     pcp_fa_query_idx_tensor.long(), non_blocking=True
                 )
             self.pcp_tokens[: self.num_reqs] = pcp_tokens[: self.num_reqs]
-            if self.pcp_use_hybrid_attn:
-                self.total_num_sampled_tokens_pcp = num_scheduled_tokens[: self.num_reqs].sum()
-            else:
-                self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_reqs].sum()
+            self.total_num_sampled_tokens_pcp = num_scheduled_tokens[: self.num_reqs].sum()
             self.max_num_tokens_across_pcp = max_scheduled_tokens
             self.pcp_tokens_padded = pcp_tokens[: self.num_reqs]
             self.num_scheduled_tokens_padded = np.array(self.pcp_tokens_padded, dtype=np.int32)
@@ -475,7 +472,7 @@ class PCPManager:
         # so we need pad slotmapping for alignment.
         if self.pcp_use_hybrid_attn:
             assert self.num_scheduled_tokens_padded is not None
-            num_tokens = sum(self.num_scheduled_tokens_padded)
+            num_tokens = self.num_scheduled_tokens_padded.sum()
         pcp_padded_slot_mapping = (
             self.pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
             if not self.pcp_use_hybrid_attn
@@ -719,7 +716,7 @@ class PCPManager:
 
         if self.pcp_world_size > 1 and self.pcp_use_hybrid_attn:
             assert self.num_scheduled_tokens_padded is not None
-            total_num_scheduled_tokens = sum(self.num_scheduled_tokens_padded)
+            total_num_scheduled_tokens = self.num_scheduled_tokens_padded.sum()
         query_lens_new = (
             self.query_lens_pcp_full.cpu[:num_reqs]
             if self.pcp_world_size > 1 and self.speculative_config
@@ -910,13 +907,13 @@ class PCPManager:
                     ]
                 else:
                     long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
-                        : sum(num_scheduled_tokens) - num_decodes
+                        : num_scheduled_tokens.sum() - num_decodes
                     ]
                     long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[
                         : num_actual_tokens_pcp_padded // self.pcp_world_size - num_decodes
                     ]
                     long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
-                        : sum(pcp_unpad_mask) + num_decodes * (self.pcp_world_size - 1)
+                        : pcp_unpad_mask.sum() + num_decodes * (self.pcp_world_size - 1)
                     ]
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor

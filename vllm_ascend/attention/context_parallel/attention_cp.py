@@ -751,8 +751,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
-        if attn_metadata is None:
-            return output.fill_(0)
         num_decode_tokens = attn_metadata.num_decode_tokens
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
@@ -776,12 +774,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             if has_prefill:
                 if self.pcp_size > 1:
+                    assert attn_metadata.prefill is not None and attn_metadata.prefill.pcp_metadata is not None
                     if not attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
                         kv = torch.cat([key, value], dim=-1)
                         num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
                         all_kv = get_pcp_group().all_gather(kv[:num_actual_tokens_pcp_padded].contiguous(), dim=0)
-                        assert attn_metadata.prefill is not None
-                        assert attn_metadata.prefill.pcp_metadata is not None
                         pcp_allgather_restore_idx = attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx
                         all_kv = torch.index_select(all_kv, 0, pcp_allgather_restore_idx)
                         key, value = all_kv.split([self.head_size, self.head_size], dim=-1)
