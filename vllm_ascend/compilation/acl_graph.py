@@ -191,7 +191,7 @@ class ACLGraphWrapper:
         # If we do not in main model and in full-graph mode when using merge-eagle-graph,
         # we do not need to synchronize.
         use_eagle = (
-            self.vllm_config.speculative_config.method in ("eagle", "eagle3")
+            self.vllm_config.speculative_config.use_eagle()
             if self.vllm_config.speculative_config
             else False
         )

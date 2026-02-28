@@ -630,7 +630,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ):
-        if attn_state in {AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding}:
+        if attn_state in {AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding, AscendAttentionState.ChunkedPrefill}:
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
@@ -739,13 +739,23 @@ class AscendMLAImpl(MLAAttentionImpl):
     ):
         if forward_context.is_draft_model:
             graph_params = get_draft_graph_params()
+            attn_metadata = draft_attn_metadatas
+            attn_keys = list(attn_metadata[0].keys())
         else:
             graph_params = get_graph_params()
+            attn_metadata = forward_context.attn_metadata
+            attn_keys = list(attn_metadata.keys())
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
+        num_layers = len(attn_keys)
+        if num_layers == 0:
+            return
+        if forward_context.is_draft_model:
+            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+        attn_count = 0
         with torch.npu.stream(update_stream):
             for key, param, handle, event in zip(
-                forward_context.attn_metadata,
+                attn_keys,
                 graph_params.attn_params[num_tokens],
                 graph_params.handles[num_tokens],
                 graph_params.events[num_tokens],
@@ -768,23 +778,31 @@ class AscendMLAImpl(MLAAttentionImpl):
                     attn_output,
                     softmax_lse,
                 ) = param
-                seq_lens_list = forward_context.attn_metadata[key].decode.seq_lens_list
+
+                if forward_context.is_draft_model:
+                    draft_step = attn_count // num_layers
+                    attn_metadata_current = attn_metadata[draft_step]
+                    attn_count = attn_count + 1
+                else:
+                    attn_metadata_current = attn_metadata
+
+                seq_lens_list = attn_metadata_current[key].decode.seq_lens_list
                 if speculative_config and speculative_config.method == "mtp" and not forward_context.is_draft_model:
-                    actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
+                    actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
                     seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
                     actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
                 elif forward_context.is_draft_model:
-                    actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
-                    block_table = forward_context.attn_metadata[key].decode.block_table
+                    actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
+                    block_table = attn_metadata_current[key].decode.block_table
                     # TODO: This is a hack and should be fixed in the future.
                     if speculative_config.disable_padded_drafter_batch:
                         block_table = block_table[: len(actual_seq_lengths)]
                     seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
                 else:
                     seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
-                torch.npu.graph_task_update_begin(update_stream, handle)
 
+                torch.npu.graph_task_update_begin(update_stream, handle)
                 torch_npu.npu_fused_infer_attention_score.out(
                     q_nope,
                     k_nope,

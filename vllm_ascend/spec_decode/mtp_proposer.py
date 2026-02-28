@@ -39,19 +39,18 @@ class MtpProposer(EagleProposer):
         # Currently, both GLM and DS encounter issues when enabling the fullgraph mode and running on EagleProposer.
         # Therefore, we temporarily bypass this problem by adding a conditional check for fullgraph.
         # TODO: this conditional check should be removed after bug fixing.
-        if not self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            super().dummy_run(
-                num_tokens,
-                with_prefill,
-                in_graph_capturing,
-                num_reqs,
-                num_tokens_across_dp,
-                aclgraph_runtime_mode,
-                batch_descriptor,
-                dummy_compute_logits,
-                is_profile,
-            )
-            return
+        super().dummy_run(
+            num_tokens,
+            with_prefill,
+            in_graph_capturing,
+            num_reqs,
+            num_tokens_across_dp,
+            aclgraph_runtime_mode,
+            batch_descriptor,
+            dummy_compute_logits,
+            is_profile,
+        )
+        return
         (
             num_tokens,
             num_tokens_across_dp,
@@ -171,24 +170,23 @@ class MtpProposer(EagleProposer):
         # Currently, both GLM and DS encounter issues when enabling the fullgraph mode and running on EagleProposer.
         # Therefore, we temporarily bypass this problem by adding a conditional check for fullgraph.
         # TODO: this conditional check should be removed after bug fixing.
-        if not self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            draft_token_ids = super()._propose(
-                target_token_ids,
-                target_positions,
-                target_hidden_states,
-                next_token_ids,
-                last_token_indices,
-                common_attn_metadata,
-                sampling_metadata,
-                mm_embed_inputs,
-                req_scheduled_tokens,
-                long_seq_metadata,
-                num_prefill_reqs,
-                num_decode_reqs,
-                scheduler_output,
-                num_scheduled_tokens,
-            )
-            return draft_token_ids
+        draft_token_ids = super()._propose(
+            target_token_ids,
+            target_positions,
+            target_hidden_states,
+            next_token_ids,
+            last_token_indices,
+            common_attn_metadata,
+            sampling_metadata,
+            mm_embed_inputs,
+            req_scheduled_tokens,
+            long_seq_metadata,
+            num_prefill_reqs,
+            num_decode_reqs,
+            scheduler_output,
+            num_scheduled_tokens,
+        )
+        return draft_token_ids
 
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]

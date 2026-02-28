@@ -129,8 +129,6 @@ class EagleProposer(VllmEagleProposer):
             self.tp_group_context = nullcontext()
 
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
-        if self.method == "mtp":
-            self.use_cuda_graph = self.use_cuda_graph and not self.use_async_scheduling
 
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: AbstractContextManager[Any] = nullcontext()
@@ -142,6 +140,16 @@ class EagleProposer(VllmEagleProposer):
         )
         slot_mapping_lens = self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs
         self.slot_mapping_group = [
+            torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
+            for _ in range(self.num_speculative_tokens)
+        ]
+
+        # dsv32 needs seq_lens and query_start_loc persistent tensors for full graph mode
+        self.seq_lens_group = [
+            torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
+            for _ in range(self.num_speculative_tokens)
+        ]
+        self.query_start_loc_group = [
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
@@ -262,12 +270,9 @@ class EagleProposer(VllmEagleProposer):
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()
-            if self.method == "mtp":
-                self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
-            else:
-                self._runnable = ACLGraphWrapper(
-                    self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
-                )
+            self._runnable = ACLGraphWrapper(
+                self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+            )
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -340,6 +345,8 @@ class EagleProposer(VllmEagleProposer):
                 common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
                 # Set the real slot_mapping.
                 common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
+                common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][:num_reqs]
+                common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][:num_reqs + 1]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata, AscendAttentionState.ChunkedPrefill
                 )
@@ -350,7 +357,8 @@ class EagleProposer(VllmEagleProposer):
 
         model_positions = self._get_positions(num_tokens)
 
-        batch_size = num_tokens // (self.num_speculative_tokens + 1)  # if not is_profile else self.runner.max_num_reqs
+        batch_size = num_tokens // (self.num_speculative_tokens + 1)
+        # TODO: temporarily hack here, we should find out batch_size for profile_run
         if is_profile:
             batch_size = min(batch_size, self.runner.max_num_reqs)
 
@@ -383,7 +391,7 @@ class EagleProposer(VllmEagleProposer):
                 num_tokens=num_tokens,
             )
             forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing and not self.use_sparse:
                 self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
 
     def _propose(
@@ -480,23 +488,24 @@ class EagleProposer(VllmEagleProposer):
                 query_start_loc_p = cu_num_tokens_p[1:] + common_attn_metadata.query_start_loc[num_decode_reqs].item()
                 common_attn_metadata.query_start_loc[-num_prefill_reqs:] = query_start_loc_p
                 common_attn_metadata.query_start_loc_cpu[-num_prefill_reqs:] = query_start_loc_p
-        if self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
-            num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[num_tokens]
-            if not (
-                self.speculative_config.disable_padded_drafter_batch
-                and self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
-            ):
-                # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
-                # should have been done in model runner but not. For example, at prefill stage, target model
-                # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
-                # while draft model is run in graph model, which means we should pad the `query_start_loc`.
-                # Need to be fixed in the future.
-                num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
-                    num_input_tokens, common_attn_metadata.num_reqs, common_attn_metadata.num_reqs
-                )
-                common_attn_metadata.num_reqs = num_reqs_padded
-                common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
-                common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
+
+        # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
+        if scheduler_output and not self.enable_shared_expert_dp:
+            max_query_len = common_attn_metadata.max_query_len
+            uniform_decode = (max_query_len in list(range(1, self.num_speculative_tokens + 2))) and (
+                scheduler_output.total_num_scheduled_tokens
+                == self.runner.input_batch.num_reqs * (self.num_speculative_tokens + 1)
+            )
+        else:
+            uniform_decode = False
+
+        has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
+
+        if self.use_cuda_graph:
+            _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
+            )
+            num_input_tokens = batch_descriptor.num_tokens
         else:
             num_input_tokens = num_tokens
 
@@ -506,14 +515,39 @@ class EagleProposer(VllmEagleProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
 
-        has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_input_tokens, uniform_decode=True, has_lora=has_lora
+                num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
+            num_input_tokens = batch_descriptor.num_tokens
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
+
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
+            # should have been done in model runner but not. For example, at prefill stage, target model
+            # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
+            # while draft model is run in graph model, which means we should pad the `query_start_loc`.
+            # Need to be fixed in the future.
+            num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                num_input_tokens,
+                batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
+                common_attn_metadata.num_reqs,
+            )
+            common_attn_metadata.num_reqs = num_reqs_padded
+            common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[:num_reqs_padded + 1]
+            common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[:num_reqs_padded + 1]
+            common_attn_metadata.block_table_tensor = self._pad_tensor(
+                common_attn_metadata.block_table_tensor, num_reqs_padded
+            )
+            common_attn_metadata.seq_lens = self._pad_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+            common_attn_metadata.seq_lens_cpu = self._pad_tensor(common_attn_metadata.seq_lens_cpu, num_reqs_padded)
+            common_attn_metadata.num_computed_tokens_cpu = self._pad_tensor(
+                common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
+            )
+        else:
+            num_reqs_padded = common_attn_metadata.num_reqs
 
         # copy inputs to buffer for cudagraph
         self._set_positions(num_tokens, target_positions)
@@ -534,10 +568,19 @@ class EagleProposer(VllmEagleProposer):
         # only tensor which will be used in current FIA.
         # Strictly speaking, `query_start_loc`, `seq_lens` should also have
         # their memory allocated separately for each step just like `slot_mapping`.
-        slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
+        slot_mapping_lens = num_input_tokens
         self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping[:slot_mapping_lens])
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0][:slot_mapping_lens]
+
+        self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
+        self.seq_lens_group[0][num_reqs_padded:].fill_(0)
+        common_attn_metadata.seq_lens = self.seq_lens_group[0][:num_reqs_padded]
+
+        self.query_start_loc_group[0][:num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
+        self.query_start_loc_group[0][num_reqs_padded + 1:].fill_(0)
+        common_attn_metadata.query_start_loc = self.query_start_loc_group[0][:num_reqs_padded + 1]
+
         common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
@@ -666,7 +709,7 @@ class EagleProposer(VllmEagleProposer):
             )
 
             forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not self.use_sparse:
                 self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
         return draft_token_ids
 
@@ -715,6 +758,8 @@ class EagleProposer(VllmEagleProposer):
                 hidden_states, 0, self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
             )
             last_hidden_states = hidden_states  # TODO: check it
+
+        last_token_indices = last_token_indices[:batch_size]
 
         num_indices = last_token_indices.shape[0]
         if lmhead_tp_enable() and not is_dummy:
@@ -878,15 +923,15 @@ class EagleProposer(VllmEagleProposer):
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
 
         if draft_step == 1:
-            if aclgraph_runtime_mode == CUDAGraphMode.FULL and (pad_size := input_batch_size - batch_size) > 0:
+            if aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 common_attn_metadata.num_reqs = input_batch_size
                 common_attn_metadata.block_table_tensor = self._pad_tensor(
-                    common_attn_metadata.block_table_tensor, pad_size
+                    common_attn_metadata.block_table_tensor, input_batch_size
                 )
-                common_attn_metadata.seq_lens = self._pad_tensor(common_attn_metadata.seq_lens, pad_size)
-                common_attn_metadata.seq_lens_cpu = self._pad_tensor(common_attn_metadata.seq_lens_cpu, pad_size)
+                common_attn_metadata.seq_lens = self._pad_tensor(common_attn_metadata.seq_lens, input_batch_size)
+                common_attn_metadata.seq_lens_cpu = self._pad_tensor(common_attn_metadata.seq_lens_cpu, input_batch_size)
                 common_attn_metadata.num_computed_tokens_cpu = self._pad_tensor(
-                    common_attn_metadata.num_computed_tokens_cpu, pad_size
+                    common_attn_metadata.num_computed_tokens_cpu, input_batch_size
                 )
                 common_attn_metadata.query_start_loc = self.arange[: input_batch_size + 1]
                 common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
@@ -983,7 +1028,15 @@ class EagleProposer(VllmEagleProposer):
             self.slot_mapping_group[draft_step][: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
             self.slot_mapping_group[draft_step][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step][: slot_mapping.shape[0]]
+            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step][: input_batch_size]
+
+            self.seq_lens_group[draft_step][:common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
+            self.seq_lens_group[draft_step][common_attn_metadata.seq_lens.shape[0]:].fill_(0)
+            common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][:common_attn_metadata.seq_lens.shape[0]]
+
+            self.query_start_loc_group[draft_step][:common_attn_metadata.query_start_loc.shape[0]].copy_(common_attn_metadata.query_start_loc)
+            self.query_start_loc_group[draft_step][common_attn_metadata.query_start_loc.shape[0]:].fill_(0)
+            common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][:common_attn_metadata.query_start_loc.shape[0]]
 
         # Rebuild attention metadata
         attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
@@ -1321,10 +1374,12 @@ class EagleProposer(VllmEagleProposer):
         )
 
     # padding tensor into desired size
-    def _pad_tensor(self, tensor, pad_size):
-        pad = [0] * (2 * tensor.dim() - 1) + [pad_size]
-        padded_tensor = F.pad(tensor, pad, mode="constant", value=0)
-        return padded_tensor
+    def _pad_tensor(self, tensor, desired_size):
+        pad_size = desired_size - tensor.shape[0]
+        if pad_size > 0:
+            pad = [0] * (2 * tensor.dim() - 1) + [pad_size]
+            tensor = F.pad(tensor, pad, mode="constant", value=0)
+        return tensor
 
     def maybe_pad_and_reduce(
         self,
