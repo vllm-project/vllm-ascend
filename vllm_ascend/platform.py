@@ -490,7 +490,7 @@ class NPUPlatform(Platform):
     ) -> "IrOpPriorityConfig":
         from vllm.config.kernel import IrOpPriorityConfig
 
-        return IrOpPriorityConfig.with_default(["npu_ops", "native"])
+        return IrOpPriorityConfig.with_default(["npu", "native"])
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config):

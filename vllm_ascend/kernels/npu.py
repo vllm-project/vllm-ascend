@@ -38,7 +38,7 @@ fused_no_var_size = lambda x, x_residual, weight, epsilon, variance_size=None: v
 
 
 @ir.ops.rms_norm.register_impl(
-    "npu_ops",
+    "npu",
     supports_args=rms_no_var_size,
     supported=True,
 )
@@ -58,7 +58,7 @@ def rms_norm(
 
 
 @ir.ops.fused_add_rms_norm.register_impl(
-    "npu_ops",
+    "npu",
     supports_args=fused_no_var_size,
     supported=True,
     inplace=True,

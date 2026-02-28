@@ -16,6 +16,6 @@
 #
 """Kernel implementations for vllm-ascend."""
 
-from . import npu_ops
+from . import npu
 
-__all__ = ["npu_ops"]
+__all__ = ["npu"]
