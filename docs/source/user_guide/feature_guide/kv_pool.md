@@ -14,7 +14,7 @@
 **kv_connector_extra_config**: Additional Configurable Parameters for Pooling.  
 **lookup_rpc_port**: Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
 **load_async**: Whether to Enable Asynchronous Loading. The default value is false.  
-**backend**: Set the storage backend for kvpool, with the default being mooncake.
+**backend**: Set the storage backend for kvpool (`mooncake`, `memcache`, `yuanrong`), with the default being `mooncake`.
 
 ### Environment Variable Configuration
 
@@ -155,7 +155,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     --port 8100 \
     --trust-remote-code \
     --enforce-eager \
-    --no_enable_prefix_caching \
+    --no-enable-prefix-caching \
     --tensor-parallel-size 1 \
     --data-parallel-size 1 \
     --max-model-len 10000 \
@@ -220,7 +220,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     --port 8200 \
     --trust-remote-code \
     --enforce-eager \
-    --no_enable_prefix_caching \
+    --no-enable-prefix-caching \
     --tensor-parallel-size 1 \
     --data-parallel-size 1 \
     --max-model-len 10000 \
@@ -331,7 +331,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     --port 8100 \
     --trust-remote-code \
     --enforce-eager \
-    --no_enable_prefix_caching \
+    --no-enable-prefix-caching \
     --tensor-parallel-size 1 \
     --data-parallel-size 1 \
     --max-model-len 10000 \
@@ -1080,6 +1080,112 @@ python -m vllm.entrypoints.openai.api_server \
       }
   }' > log_hunbu.log 2>&1 
 
+```
+
+#### [2.Run Inference](#2run-inference)
+
+## Example of using Yuanrong as a KV Pool backend
+
+* Software:
+    * Install openyuanrong-datasystem on all nodes (yr.datasystem must be importable).
+
+### Install Yuanrong Datasystem
+
+```bash
+pip install openyuanrong-datasystem
+```
+
+### Start etcd
+
+Yuanrong Datasystem requires etcd for service discovery. Start a single-node
+etcd cluster:
+
+```bash
+ETCD_VERSION="v3.5.12"
+ETCD_IP="127.0.0.1"
+if [ "$(uname -m)" = "aarch64" ]; then
+  ETCD_ARCH="linux-arm64"
+else
+  ETCD_ARCH="linux-amd64"
+fi
+wget https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/etcd-${ETCD_VERSION}-${ETCD_ARCH}.tar.gz
+tar -xvf etcd-${ETCD_VERSION}-${ETCD_ARCH}.tar.gz
+cd etcd-${ETCD_VERSION}-${ETCD_ARCH}
+sudo cp etcd etcdctl /usr/local/bin/
+
+etcd \
+  --name etcd-single \
+  --data-dir /tmp/etcd-data \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://${ETCD_IP}:2379 \
+  --listen-peer-urls http://0.0.0.0:2380 \
+  --initial-advertise-peer-urls http://${ETCD_IP}:2380 \
+  --initial-cluster etcd-single=http://${ETCD_IP}:2380 &
+
+etcdctl --endpoints "${ETCD_IP}:2379" put key "value"
+etcdctl --endpoints "${ETCD_IP}:2379" get key
+```
+
+For production environments, refer to the official etcd clustering
+documentation: <https://etcd.io/docs/current/op-guide/clustering/>
+
+### Start Datasystem Worker
+
+Start a Datasystem worker on each node using dscli:
+
+```bash
+dscli start -w \
+  --worker_address "${WORKER_IP}:31501" \
+  --etcd_address "${ETCD_IP}:2379" \
+  --shared_memory_size_mb 20480
+```
+
+For more parameters, refer to the `dscli` usage documentation on the Yuanrong Datasystem official site:
+<https://atomgit.com/openeuler/yuanrong-datasystem>
+
+To stop the worker:
+
+```bash
+dscli stop --worker_address "${WORKER_IP}:31501"
+```
+
+### Environment Variable Configuration
+
+Set the worker address on each node. The value must match the
+`dscli start --worker_address` address on the same host.
+
+```bash
+export PYTHONHASHSEED=0
+# Required: must match local dscli --worker_address
+export VLLM_ASCEND_YUANRONG_WORKER_ADDR="${WORKER_IP}:31501"
+# Optional (default: 0)
+export VLLM_ASCEND_YUANRONG_ENABLE_EXCLUSIVE_CONNECTION=0
+export VLLM_ASCEND_YUANRONG_ENABLE_REMOTE_H2D=0
+```
+
+### Run AscendStoreConnector with Yuanrong backend
+
+```bash
+python3 -m vllm.entrypoints.openai.api_server \
+    --model /xxxxx/Qwen2.5-7B-Instruct \
+    --port 8100 \
+    --trust-remote-code \
+    --enforce-eager \
+    --no-enable-prefix-caching \
+    --tensor-parallel-size 1 \
+    --data-parallel-size 1 \
+    --max-model-len 10000 \
+    --block-size 128 \
+    --max-num-batched-tokens 4096 \
+    --kv-transfer-config \
+    '{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "lookup_rpc_port": "1",
+        "backend": "yuanrong"
+    }
+}'
 ```
 
 #### [2.Run Inference](#2run-inference)
