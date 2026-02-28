@@ -1,54 +1,14 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
-=======
-=======
->>>>>>> 5def28dc ([Feat]support sequence parallelism by pass for VL models (#5632))
-
-from vllm_ascend.utils import is_moe_model, vllm_version_is
-
-if vllm_version_is("0.15.0"):
-    from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
-else:
-    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
-<<<<<<< HEAD
->>>>>>> 7c2eee89 (# This is a combination of 3 commits.)
-=======
-from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
->>>>>>> 1a332ecc (Update rotary_embedding.py)
-=======
->>>>>>> 5def28dc ([Feat]support sequence parallelism by pass for VL models (#5632))
-=======
-from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
->>>>>>> 3d563292 (clean 0.15.0 support (#6852))
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.logger import logger
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
 from vllm_ascend.utils import is_moe_model
 
-=======
->>>>>>> 7c2eee89 (# This is a combination of 3 commits.)
-=======
-from vllm_ascend.utils import is_moe_model
-
->>>>>>> 1a332ecc (Update rotary_embedding.py)
-=======
->>>>>>> 5def28dc ([Feat]support sequence parallelism by pass for VL models (#5632))
-=======
-from vllm_ascend.utils import is_moe_model
-
->>>>>>> 3d563292 (clean 0.15.0 support (#6852))
 SP_THRESHOLD = 1000
 
 

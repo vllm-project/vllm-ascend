@@ -1339,10 +1339,6 @@ class EagleProposer(VllmEagleProposer):
                 positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
                 positions = positions.squeeze(-1)
         else:
-<<<<<<< HEAD
-=======
-            forward_context = get_forward_context()
->>>>>>> 5def28dc ([Feat]support sequence parallelism by pass for VL models (#5632))
             if forward_context.flash_comm_v1_enabled:
                 hidden_states = split_inputs_tp_to_sp(hidden_states, hidden_states)
         return hidden_states, positions
