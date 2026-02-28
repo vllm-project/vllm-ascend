@@ -89,8 +89,10 @@ jobs:
           fi
           branch="${branch:-main}"
         else
-          # For branch push / schedule / workflow_dispatch, use the triggering branch name
-          branch="${{ github.ref_name }}"
+          # For PR events github.ref_name is "<PR_number>/merge" which has no cached image;
+          # use base_ref (target branch) instead. For push/schedule, base_ref is empty so
+          # fall back to ref_name which is the actual branch name.
+          branch="${{ github.base_ref || github.ref_name }}"
         fi
         # Replace / with - for use in image tags
         branch="${branch//\//-}"
