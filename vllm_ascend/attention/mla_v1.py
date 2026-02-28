@@ -1204,8 +1204,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                             self.kv_lora_rank // 32, block_size, 32)
             k_pe = k_pe.reshape(-1, self.num_kv_heads,
                                 self.qk_rope_head_dim // 16, block_size, 16)
-        elif
-        if self.enable_kv_nz:
+        elif self.enable_kv_nz:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // nz_fmt_last_dim, block_size, nz_fmt_last_dim
