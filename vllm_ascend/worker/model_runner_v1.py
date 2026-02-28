@@ -112,6 +112,7 @@ from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import MedusaProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (
+    check_gdn_layer,
     enable_flash_comm_v1,
     enable_sp,
     is_drafter_moe_model,
@@ -228,6 +229,17 @@ class NPUModelRunner(GPUModelRunner):
             self.max_num_reqs + 2,  # type: ignore[has-type]
             dtype=torch.int32,
         )
+
+        # Now, query_start_loc is padded.
+        # But gdn needs an unpadded one.
+        # gdn_query_start_loc is an unpadded version of query_start_loc.
+        # TODO delete it if fia's check is removed.
+        self._has_gdn = check_gdn_layer(vllm_config)
+        if self._has_gdn:
+            self.gdn_query_start_loc = self._make_buffer(
+                self.max_num_reqs + 1,  # type: ignore[has-type]
+                dtype=torch.int32,
+            )
 
         vllm_config.scheduler_config.max_num_batched_tokens -= max_pcp_pad_tokens
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
@@ -676,6 +688,16 @@ class NPUModelRunner(GPUModelRunner):
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
         self.query_start_loc.copy_to_gpu()
+
+        # Now, query_start_loc is padded.
+        # But gdn needs an unpadded one.
+        # gdn_query_start_loc is an unpadded version of query_start_loc.
+        # TODO delete it if fia's check is removed.
+        if self._has_gdn:
+            self.gdn_query_start_loc.np[0] = 0
+            self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
+            self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
+            self.gdn_query_start_loc.copy_to_gpu()
 
         self.seq_lens.np[:num_reqs] = self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
         self.seq_lens.copy_to_gpu()
@@ -2019,6 +2041,18 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_group.kv_cache_spec,
                 num_reqs_padded,
             )
+
+            # Now, query_start_loc is padded.
+            # But gdn needs an unpadded one.
+            # gdn_query_start_loc is an unpadded version of query_start_loc.
+            # TODO delete it if fia's check is removed.
+            if self._has_gdn:
+                attn_group = self.attn_groups[kv_cache_gid][0]
+                builder = attn_group.get_metadata_builder(0)
+                if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
+                    cm.query_start_loc_cpu = self.gdn_query_start_loc.cpu[: num_reqs_padded + 1]
+                    cm.query_start_loc = self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
+
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(kv_cache_gid)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
