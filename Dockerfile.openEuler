@@ -18,10 +18,11 @@
 FROM quay.io/ascend/cann:8.5.0-910b-openeuler24.03-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+ARG MOONCAKE_TAG="v0.3.8.post1"
 
 WORKDIR /workspace
 
-COPY ./tools/mooncake_installer.sh /vllm-workspace/vllm-ascend/
+COPY ./tools/mooncake_installer.sh /vllm-workspace/
 
 SHELL ["/bin/bash", "-c"]
 
@@ -56,7 +57,6 @@ RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /vllm-workspace/vllm && \
     python3 -m pip cache purge
 
 # Install vllm-ascend
-ARG MOONCAKE_TAG="v0.3.8.post1"
 ARG SOC_VERSION="ascend910b1"
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
