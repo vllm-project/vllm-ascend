@@ -21,20 +21,22 @@ class SingleNodeConfig:
         prompts: list[str] | None = None,
         api_keyword_args: dict[str, Any] | None = None,
         benchmarks: dict[str, Any] | None = None,
-        server_cmd: list[str],
+        server_cmd: list[str] | None = None,
         test_content: list[str] | None = None,
+        service_mode: str = "openai",
         **kwargs: Any,
     ):
         self.model = model
         self.envs = envs or {}
         self.prompts = prompts
         self.test_content = test_content or ["completion"]
+        self.service_mode = service_mode
         self.api_keyword_args = api_keyword_args
-        self.benchmarks = benchmarks
+        self.benchmarks = benchmarks or {}
 
         if self.envs.get("SERVER_PORT") == "DEFAULT_PORT":
             self.envs["SERVER_PORT"] = str(DEFAULT_SERVER_PORT)
-        self.server_cmd = self._expand_env(server_cmd)
+        self.server_cmd = self._expand_env(server_cmd or [])
 
         self.extra_config = kwargs
         for key, value in kwargs.items():
@@ -67,9 +69,12 @@ class SingleNodeConfigLoader:
         "prompts",
         "api_keyword_args",
         "benchmarks",
+        "service_mode",
         "server_cmd",
         "server_cmd_extra",
         "test_content",
+        "epd_server_cmds",
+        "epd_proxy_args",
     }
 
     @classmethod
@@ -101,8 +106,13 @@ class SingleNodeConfigLoader:
     def _validate_para(cases: list[dict[str, Any]]) -> None:
         if not cases:
             raise ValueError("test_cases is empty")
-        required = ["model", "envs", "server_cmd", "benchmarks"]
         for case in cases:
+            mode = case.get("service_mode", "openai")
+            required = ["model", "envs", "benchmarks"]
+            if mode == "epd":
+                required.extend(["epd_server_cmds", "epd_proxy_args"])
+            else:
+                required.append("server_cmd")
             missing = [k for k in required if k not in case]
             if missing:
                 raise KeyError(f"Missing required config fields: {missing}")
@@ -124,6 +134,7 @@ class SingleNodeConfigLoader:
                     prompts=case.get("prompts"),
                     api_keyword_args=case.get("api_keyword_args"),
                     test_content=case.get("test_content"),
+                    service_mode=case.get("service_mode", "openai"),
                     **extra_case_fields,
                 )
             )
