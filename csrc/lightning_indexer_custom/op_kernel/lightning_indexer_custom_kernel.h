@@ -9,21 +9,21 @@
  */
 
 /*!
- * \file lightning_indexer_kernel.h
+ * \file lightning_indexer_custom_kernel.h
  * \brief
  */
 
-#ifndef LIGHTNING_INDEXER_KERNEL_H
-#define LIGHTNING_INDEXER_KERNEL_H
+#ifndef lightning_indexer_custom_KERNEL_H
+#define lightning_indexer_custom_KERNEL_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "lightning_indexer_common.h"
-#include "lightning_indexer_service_vector.h"
-#include "lightning_indexer_service_cube.h"
+#include "lightning_indexer_custom_common.h"
+#include "lightning_indexer_custom_service_vector.h"
+#include "lightning_indexer_custom_service_cube.h"
 
 namespace LIKernel {
 using namespace LICommon;
@@ -620,4 +620,4 @@ __aicore__ inline void LIPreload<LIT>::ProcessDecode()
     }
 }
 } // namespace LIKernel
-#endif // LIGHTNING_INDEXER_KERNEL_H
+#endif // lightning_indexer_custom_KERNEL_H
