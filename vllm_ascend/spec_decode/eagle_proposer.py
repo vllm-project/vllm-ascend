@@ -346,7 +346,8 @@ class EagleProposer(VllmEagleProposer):
                 common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][:num_reqs]
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
                 attn_metadata_eagle = builder.build_for_graph_capture(
-                    common_attn_metadata, AscendAttentionState.ChunkedPrefill
+                    common_attn_metadata,
+                    AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
                 )
                 per_layer_attn_metadata = dict()
                 for layer_name in self.attn_layer_names:
@@ -570,10 +571,9 @@ class EagleProposer(VllmEagleProposer):
         # only tensor which will be used in current FIA.
         # Strictly speaking, `query_start_loc`, `seq_lens` should also have
         # their memory allocated separately for each step just like `slot_mapping`.
-        slot_mapping_lens = num_input_tokens
-        self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping[:slot_mapping_lens])
-        self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
-        common_attn_metadata.slot_mapping = self.slot_mapping_group[0][:slot_mapping_lens]
+        self.slot_mapping_group[0][:num_tokens].copy_(common_attn_metadata.slot_mapping[:num_tokens])
+        self.slot_mapping_group[0][num_tokens:].fill_(-1)
+        common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
 
         self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
         self.seq_lens_group[0][num_reqs_padded:].fill_(0)
@@ -950,7 +950,9 @@ class EagleProposer(VllmEagleProposer):
             common_attn_metadata.num_actual_tokens = batch_size
             common_attn_metadata.max_query_len = 1
             common_attn_metadata.decode_token_per_req = 1
-            common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+            common_attn_metadata.attn_state = (
+                AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill
+            )
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
 
@@ -1032,7 +1034,7 @@ class EagleProposer(VllmEagleProposer):
             self.slot_mapping_group[draft_step][: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
             self.slot_mapping_group[draft_step][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step][:input_batch_size]
+            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
 
             self.seq_lens_group[draft_step][: common_attn_metadata.seq_lens.shape[0]].copy_(
                 common_attn_metadata.seq_lens
