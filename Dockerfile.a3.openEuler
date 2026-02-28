@@ -22,7 +22,7 @@ ARG MOONCAKE_TAG="v0.3.8.post1"
 
 WORKDIR /workspace
 
-COPY ./tools/mooncake_installer.sh /vllm-workspace/vllm-ascend/
+COPY ./tools/mooncake_installer.sh /vllm-workspace/
 
 SHELL ["/bin/bash", "-c"]
 
@@ -30,7 +30,7 @@ SHELL ["/bin/bash", "-c"]
 RUN yum update -y && \
     yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl-devel jemalloc clang && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
-    cp /vllm-workspace/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
+    mv /vllm-workspace/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     ARCH=$(uname -m) && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64:$LD_LIBRARY_PATH && \
