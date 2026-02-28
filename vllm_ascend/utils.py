@@ -154,6 +154,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     # Quantized or other supported dtypes convert by default.
     return True
 
+
 # NZ conversion policy:
 # - 310P: always convert supported weights to FRACTAL_NZ
 # - non-310P: follow VLLM_ASCEND_ENABLE_NZ
