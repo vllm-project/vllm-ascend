@@ -6,7 +6,7 @@ from vllm_ascend.quantization.utils import unpack_from_int32
 from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
 
 if vllm_version_is("0.16.0"):
-    from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKernel import (
+    from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKernel import (  # type: ignore
         MPLinearKernel,
         MPLinearLayerConfig,
     )

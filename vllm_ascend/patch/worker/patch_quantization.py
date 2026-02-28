@@ -19,8 +19,8 @@ from vllm_ascend.quantization.kernels.scaled_mm.npu import (
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.16.0"):
-    import vllm.model_executor.layers.quantization.kernels.mixed_precision as mixed_precision_module
-    import vllm.model_executor.layers.quantization.kernels.scaled_mm as scaled_mm_module
+    import vllm.model_executor.layers.quantization.kernels.mixed_precision as mixed_precision_module  # type: ignore
+    import vllm.model_executor.layers.quantization.kernels.scaled_mm as scaled_mm_module  # type: ignore
 
     mixed_precision_module._POSSIBLE_KERNELS[PlatformEnum.OOT] = [
         AscendW4A8LinearKernel,
