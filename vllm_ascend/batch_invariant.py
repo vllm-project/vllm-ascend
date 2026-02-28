@@ -60,6 +60,13 @@ def add_rms_norm(
     return x_, None, residual_
 
 
+def reduce_sum(x: torch.Tensor, dim: int = -1, keepdim: bool = False) -> torch.Tensor:
+    """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
+    doesn't require it, so we set dim to -1 by default.
+    """
+    return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
+
+
 def override_envs_for_invariance():
     # enabling NZ mode introduces NZ format input to the triton operator,
     # resulting in accuracy anomalies.
@@ -97,7 +104,7 @@ def enable_batch_invariant_mode():
         # patch npu_add_rms_norm to ensure batch invariant.
         torch_npu.npu_add_rms_norm = add_rms_norm
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
-        torch.sum = torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant
+        torch.sum = reduce_sum
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
