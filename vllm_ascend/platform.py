@@ -481,8 +481,11 @@ class NPUPlatform(Platform):
             else:
                 os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
         _CUSTOM_OP_REGISTERED = True
-        # please delete it when vllm is extended
-        import vllm_ascend.kernels  # noqa: F401, registers IR op implementations
+        
+        import contextlib
+        
+        with contextlib.suppress(ImportError):
+            import vllm_ascend.kernels  # noqa: F401
 
     @classmethod
     def get_default_ir_op_priority(
