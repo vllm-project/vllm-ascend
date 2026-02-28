@@ -357,8 +357,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
         normalized_values = values_tmp1.to(tl.float32)
         normalized_values = normalized_values * normalized_values
         normalized_values = tl.sum(normalized_values, axis=1) / HEAD_DIM
-        normalized_values = (1 / tl.sqrt(normalized_values + eps)).reshape(qk_head_nums_per_iter_per_vec, 1)
-        normalized_values *= values_tmp1
+        normalized_values = values_tmp1 / tl.sqrt(normalized_values + eps).reshape(qk_head_nums_per_iter_per_vec, 1)
 
         normalized_values_tmp = tl.extract_slice(
             normalized_values.reshape(batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM),
