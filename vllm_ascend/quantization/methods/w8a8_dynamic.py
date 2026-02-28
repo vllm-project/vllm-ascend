@@ -27,6 +27,7 @@ from vllm.forward_context import get_forward_context
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
@@ -118,6 +119,15 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
+
+        try:
+            device_group = get_mc2_group().device_group
+            # TODO: Try local_rank = ep_group.rank_in_group
+            local_rank = torch.distributed.get_rank(group=device_group)
+            backend = device_group._get_backend(torch.device("npu"))
+            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+        except AttributeError:
+            self.moe_all_to_all_group_name = ""
 
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
