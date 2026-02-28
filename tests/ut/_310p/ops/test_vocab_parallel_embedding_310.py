@@ -21,6 +21,7 @@ from torch import nn
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.ops.vocab_parallel_embedding import AscendParallelLMHead310
+from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
@@ -45,8 +46,9 @@ class TestAscendParallelLMHead310(TestBase):
     def test_process_weights_after_loading_casts_weight_to_nz(self, mock_npu_format_cast):
         mock_npu_format_cast.side_effect = lambda weight, fmt: weight
 
-        with patch(
-            "vllm_ascend._310p.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
+        with patch.object(
+            AscendVocabParallelEmbedding,
+            "__init__",
             new=self._fake_embedding_init,
         ):
             lm_head = AscendParallelLMHead310(
