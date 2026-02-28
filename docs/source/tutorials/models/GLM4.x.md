@@ -98,7 +98,7 @@ vllm serve /weight/glm4.5_w8a8_with_float_mtp \
   --gpu-memory-utilization 0.9 \
   --speculative-config '{"num_speculative_tokens": 1, "model":"/weight/glm4.5_w8a8_with_float_mtp", "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --async-scheduling \
+  --async-scheduling
 ```
 
 **Notice:**
@@ -206,8 +206,6 @@ vllm serve ZhipuAI/GLM-4.7 \
     --trust-remote-code \
     --served-model-name glm47
 ```
-
-
 
 ### Prefill-Decode Disaggregation
 
