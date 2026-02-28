@@ -37,7 +37,7 @@ deployment:
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
-        "kv_port": "30000",
+        "kv_port": "36000",
         "engine_id": "0",
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
         "kv_connector_extra_config": {
@@ -74,7 +74,7 @@ deployment:
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
-        "kv_port": "30200",
+        "kv_port": "36200",
         "engine_id": "1",
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
         "kv_connector_extra_config": {
