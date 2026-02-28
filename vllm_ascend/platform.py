@@ -163,6 +163,13 @@ class NPUPlatform(Platform):
         return torch.npu.get_device_name(device_id)
 
     @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        device_props = torch.npu.get_device_properties(device_id)
+        if not hasattr(device_props, "uuid") or device_props.uuid is None:
+            raise RuntimeError(f"Device {device_id} does not have a valid UUID.")
+        return device_props.uuid
+
+    @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
 
@@ -468,7 +475,7 @@ class NPUPlatform(Platform):
         _CUSTOM_OP_REGISTERED = True
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, attn_selector_config):
+    def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
         backend_map = {
