@@ -113,11 +113,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
+        # NOTE: global_bs is computed dynamically in token_dispatch() based on actual input shape.
         vllm_config = get_current_vllm_config()
         scheduler_config = vllm_config.scheduler_config
         compilation_config = vllm_config.compilation_config
         speculative_config = vllm_config.speculative_config
         tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.tp_size = tp_size
         uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
         decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
         max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
@@ -126,6 +128,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         else:
             max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        # Store reference value; actual global_bs is computed dynamically in token_dispatch.
         self.global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
     def get_dispatch_mc2_kwargs(
@@ -139,13 +142,19 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
     ):
         quant_mode = 2 if self.with_quant else 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
+        # Compute global_bs dynamically based on actual input shape.
+        # global_bs must be 0 or max_bs_per_rank * ep_world_size.
+        # Use max_num_seqs as max_bs_per_rank to ensure global_bs is valid across all ranks.
+        # NOTE: Using actual num_tokens may cause invalid global_bs in profile run or
+        # when num_tokens varies across ranks.
+        global_bs = self.max_num_seqs * self.ep_world_size
         kwargs_mc2 = {
             "x": hidden_states,
             "expert_ids": topk_ids,
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.moe_expert_num,
-            "global_bs": self.global_bs,
+            "global_bs": global_bs,
             "expert_token_nums_type": 0,
         }
 
@@ -238,6 +247,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
 
         assert expert_map is not None
 
+        # Compute global_bs dynamically based on actual input shape.
+        # global_bs must be 0 or max_bs_per_rank * ep_world_size.
+        # num_tokens_per_tp_rank = ceil(num_tokens / tp_size)
+        num_tokens = hidden_states.shape[0]
+        num_tokens_per_tp_rank = (num_tokens + self.tp_size - 1) // self.tp_size
+        global_bs = num_tokens_per_tp_rank * self.ep_world_size
+
         kwargs_mc2 = {
             "expand_x": hidden_states,
             "expert_ids": topk_ids,
@@ -245,7 +261,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.moe_expert_num,
-            "global_bs": self.global_bs,
+            "global_bs": global_bs,
         }
 
         if self.with_quant:
