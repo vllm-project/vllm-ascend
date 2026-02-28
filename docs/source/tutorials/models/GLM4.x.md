@@ -109,7 +109,107 @@ The parameters are explained as follows:
 
 ### Multi-node Deployment
 
-Not recommended to deploy multi-node on Atlas 800 A2 (64G * 8).
+Although the former tutorial said "Not recommended to deploy multi-node on Atlas 800 A2 (64G × 8)", but if you insist to deploy GLM-4.x model on multi-node like 2 × Atlas 800 A2 (64G × 8), run the following scripts on two nodes respectively.
+
+**Node 0**
+
+```shell
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxxx"
+local_ip="xxxx"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+export VLLM_USE_MODELSCOPE=True
+
+vllm serve ZhipuAI/GLM-4.7 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --headless \
+    --data-parallel-size 4 \
+    --data-parallel-size-local 2 \
+    --data-parallel-start-rank 2 \
+    --data-parallel-address $local_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 4 \
+    --seed 1024 \
+    --async-scheduling \
+    --max-num-seqs 16 \
+    --max-model-len 16384 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.92 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm45 \
+    --tool-call-parser glm47 \
+    --speculative-config {"num_speculative_tokens":3,"method":"mtp"} \
+    --compilation-config {"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"} \
+    --served-model-name glm47
+
+```
+
+**Node 1**
+
+```shell
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxxx"
+local_ip="xxxx"
+node0_ip="xxxx" # same as the local_IP address in node 0
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+export VLLM_USE_MODELSCOPE=True
+
+vllm serve ZhipuAI/GLM-4.7 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --headless \
+    --data-parallel-size 4 \
+    --data-parallel-size-local 2 \
+    --data-parallel-start-rank 2 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 4 \
+    --seed 1024 \
+    --async-scheduling \
+    --max-num-seqs 16 \
+    --max-model-len 16384 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.92 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm45 \
+    --tool-call-parser glm47 \
+    --speculative-config {"num_speculative_tokens":3,"method":"mtp"} \
+    --compilation-config {"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"} \
+    --served-model-name glm47
+```
+
+
 
 ### Prefill-Decode Disaggregation
 
