@@ -892,10 +892,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def reshape_and_cache(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
+        output: torch.Tensor,
     ):
         if len(kv_cache) > 1:
             if self.is_kv_producer:
@@ -915,7 +917,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
-        return key, value
+        return query, key, value, output
 
     def forward_impl(
         self,
@@ -970,12 +972,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
+        output_padded = None
         if key is not None and value is not None:
-            key, value = self.reshape_and_cache(key, value, kv_cache, attn_metadata)
+            output_padded = output
+            query, key, value, output_padded = self.reshape_and_cache(
+                query, key, value, kv_cache, attn_metadata, output
+            )
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling":
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
-        output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+        if output_padded is not None:
+            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
+        else:
+            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+        output[:num_tokens] = attn_output[:num_tokens]
         return output
