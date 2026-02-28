@@ -55,7 +55,8 @@ def add_rms_norm(
     so we need to split it into add and rms_norm.
     """
     x_ = x + residual
-    x_, residual_ = torch_npu.npu_rms_norm(x_, weight, eps)
+    residual_ = x_
+    x_, _ = torch_npu.npu_rms_norm(x_, weight, eps)
     return x_, None, residual_
 
 
