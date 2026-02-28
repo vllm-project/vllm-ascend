@@ -81,7 +81,7 @@ class CompressedTensorsAscendW4A8DynamicFusedMoEMethod:
         layer_name: str | None = None,
     ):
         CompressedTensorsMoEMethod.__init__(self, moe)
-        self.has_bias = self.moe.has_bias
+        self.has_bias = self.moe.has_bias  # type: ignore
         self.weight_quant = weight_quant
         self.input_quant = input_quant
 
