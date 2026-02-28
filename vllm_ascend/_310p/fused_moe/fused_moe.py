@@ -155,6 +155,7 @@ class AscendFusedMoE310(FusedMoE):
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
         if not vllm_version_is("0.16.0"):
 <<<<<<< HEAD
+<<<<<<< HEAD
             self.runner = self._init_runner()
 
     if not vllm_version_is("0.16.0"):
