@@ -51,7 +51,7 @@ def NPU_merge_multimodal_embeddings(
 
     try:
         inputs_embeds=masked_scatter_with_index_put(
-            inputs_embeds, is_multimodal.unsqueeze(-1),mm_embeds_flat.to(dtype=input_dtype)
+            inputs_embeds, is_multimodal.unsqueeze(-1), mm_embeds_flat.to(dtype=input_dtype)
         )
     except RuntimeError as e:
         num_actual_tokens = len(mm_embeds_flat)
