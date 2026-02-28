@@ -1399,6 +1399,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     device=hidden_states.device,
                 )
             ctkv_scale=layer.quant_kscale
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
             decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = torch_npu.npu_mla_prolog_v2(
                 quantized_x,
                 self.wd_q_fa3,
