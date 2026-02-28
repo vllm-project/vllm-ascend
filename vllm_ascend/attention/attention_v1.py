@@ -159,6 +159,7 @@ class AscendMetadata:
     num_decode_tokens: int = 0
     num_prefills: int = 0
     num_decodes: int = 0
+    num_decodes_flatten: int = 0
 
     # The sequence length per sequence. Sequence length means the computed
     # tokens + new tokens (is None if it is a decoding).
