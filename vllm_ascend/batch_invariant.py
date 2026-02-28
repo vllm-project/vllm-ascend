@@ -23,7 +23,6 @@ import torch_npu
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.triton_utils import HAS_TRITON
-from vllm_ascend.utils import _CUSTOM_OP_ENABLED
 
 logger = init_logger(__name__)
 
@@ -35,6 +34,7 @@ if HAS_TRITON:
         matmul_batch_invariant,
         mm_batch_invariant,
     )
+    from vllm_ascend.ops.triton.batch_invariant.softmax import softmax_batch_invariant
 
 
 try:
@@ -81,6 +81,8 @@ def enable_batch_invariant_mode():
     if HAS_TRITON:
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "NPU")
 
     # Register operators implemented in Ascend batch-invariant ops in priority.
     if HAS_ASCENDC_BATCH_INVARIANT:
@@ -94,6 +96,8 @@ def enable_batch_invariant_mode():
         )
         # patch npu_add_rms_norm to ensure batch invariant.
         torch_npu.npu_add_rms_norm = add_rms_norm
+        # torch.sum can't be replaced by dispatch logic, so we patch it directly.
+        torch.sum = torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
