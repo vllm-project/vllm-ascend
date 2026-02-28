@@ -136,11 +136,9 @@ export VLLM_USE_MODELSCOPE=True
 
 vllm serve ZhipuAI/GLM-4.7 \
     --host 0.0.0.0 \
-    --port 8000 \
-    --headless \
+    --port 30000 \
     --data-parallel-size 4 \
     --data-parallel-size-local 2 \
-    --data-parallel-start-rank 2 \
     --data-parallel-address $local_ip \
     --data-parallel-rpc-port 13389 \
     --tensor-parallel-size 4 \
@@ -149,13 +147,13 @@ vllm serve ZhipuAI/GLM-4.7 \
     --max-num-seqs 16 \
     --max-model-len 16384 \
     --max-num-batched-tokens 4096 \
-    --trust-remote-code \
     --gpu-memory-utilization 0.92 \
     --enable-auto-tool-choice \
     --reasoning-parser glm45 \
     --tool-call-parser glm47 \
     --speculative-config {"num_speculative_tokens":3,"method":"mtp"} \
     --compilation-config {"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"} \
+    --trust-remote-code \
     --served-model-name glm47
 
 ```
@@ -186,7 +184,7 @@ export VLLM_USE_MODELSCOPE=True
 
 vllm serve ZhipuAI/GLM-4.7 \
     --host 0.0.0.0 \
-    --port 8000 \
+    --port 30000 \
     --headless \
     --data-parallel-size 4 \
     --data-parallel-size-local 2 \
@@ -199,13 +197,13 @@ vllm serve ZhipuAI/GLM-4.7 \
     --max-num-seqs 16 \
     --max-model-len 16384 \
     --max-num-batched-tokens 4096 \
-    --trust-remote-code \
     --gpu-memory-utilization 0.92 \
     --enable-auto-tool-choice \
     --reasoning-parser glm45 \
     --tool-call-parser glm47 \
     --speculative-config {"num_speculative_tokens":3,"method":"mtp"} \
     --compilation-config {"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"} \
+    --trust-remote-code \
     --served-model-name glm47
 ```
 
