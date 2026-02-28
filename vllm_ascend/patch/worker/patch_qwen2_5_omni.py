@@ -35,14 +35,13 @@ def NPU_merge_multimodal_embeddings(
     multimodal_embeddings: NestedTensors,
     is_multimodal: torch.Tensor,
 ) -> torch.Tensor:
-
     def masked_scatter_with_index_put(inputs_embeds, is_multimodal, mm_embeds_flat):
         is_multimodal = is_multimodal.bool()
         row_indices = is_multimodal.squeeze(-1).nonzero().squeeze(-1)
         num_rows_to_replace = row_indices.size(0)
         inputs_embeds[row_indices] = mm_embeds_flat[:num_rows_to_replace]
-        
         return inputs_embeds
+
     if len(multimodal_embeddings) == 0:
         return inputs_embeds
 
@@ -50,7 +49,7 @@ def NPU_merge_multimodal_embeddings(
     input_dtype = inputs_embeds.dtype
 
     try:
-        inputs_embeds=masked_scatter_with_index_put(
+        inputs_embeds = masked_scatter_with_index_put(
             inputs_embeds, is_multimodal.unsqueeze(-1), mm_embeds_flat.to(dtype=input_dtype)
         )
     except RuntimeError as e:
