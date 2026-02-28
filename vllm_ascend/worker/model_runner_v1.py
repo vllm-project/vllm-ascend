@@ -1798,10 +1798,13 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        # When speculative decoding is enabled, uniform_decode_query_len = num_spec_tokens + 1.
+        # Prefill requests with token count matching this value could be incorrectly identified
+        # as uniform decode. Check is_all_decode to prevent this misclassification.
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         uniform_decode = (
             (
-                is_all_decode
+                (is_all_decode if self.speculative_config else True)
                 and (max_num_scheduled_tokens == self.uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
             )
