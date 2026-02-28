@@ -20,6 +20,7 @@ Replaces the masked_scatter_ operation with a custom index-based assignment.
 
 import torch
 from vllm.model_executor.models import utils
+from vllm.multimodal import NestedTensors
 
 
 def masked_scatter_with_index_put(inputs_embeds, is_multimodal, mm_embeds_flat):
@@ -45,7 +46,7 @@ def NPU_merge_multimodal_embeddings(
     if len(multimodal_embeddings) == 0:
         return inputs_embeds
 
-    mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
+    mm_embeds_flat = utils._flatten_embeddings(multimodal_embeddings)
     input_dtype = inputs_embeds.dtype
 
     try:
@@ -57,7 +58,7 @@ def NPU_merge_multimodal_embeddings(
         num_expected_tokens = is_multimodal.sum().item()
 
         if num_actual_tokens != num_expected_tokens:
-            expr = _embedding_count_expression(multimodal_embeddings)
+            expr = utils._embedding_count_expression(multimodal_embeddings)
 
             raise ValueError(
                 f"Attempted to assign {expr} = {num_actual_tokens} "
