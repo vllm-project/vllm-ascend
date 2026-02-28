@@ -314,7 +314,7 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
                 core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)[:num_actual_tokens]
         else:
             if not enable_sp():
-                core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0) 
+                core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
             else:
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
 
