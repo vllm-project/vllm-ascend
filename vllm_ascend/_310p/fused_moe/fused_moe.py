@@ -153,11 +153,10 @@ class AscendFusedMoE310(FusedMoE):
         self.quant_type = self.get_quant_type()
 
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
-
-        if not vllm_version_is("0.15.0"):
+        if not vllm_version_is("0.16.0"):
             self.runner = self._init_runner()
 
-    if not vllm_version_is("0.15.0"):
+    if not vllm_version_is("0.16.0"):
 
         def _init_runner(self):
             from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
