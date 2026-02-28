@@ -270,9 +270,7 @@ class EagleProposer(VllmEagleProposer):
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()
-            self._runnable = ACLGraphWrapper(
-                self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
-            )
+            self._runnable = ACLGraphWrapper(self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -346,7 +344,7 @@ class EagleProposer(VllmEagleProposer):
                 # Set the real slot_mapping.
                 common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
                 common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][:num_reqs]
-                common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][:num_reqs + 1]
+                common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata, AscendAttentionState.ChunkedPrefill
                 )
@@ -391,7 +389,11 @@ class EagleProposer(VllmEagleProposer):
                 num_tokens=num_tokens,
             )
             forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing and not self.use_sparse:
+            if (
+                forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+                and not forward_context.capturing
+                and not self.use_sparse
+            ):
                 self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
 
     def _propose(
@@ -536,8 +538,8 @@ class EagleProposer(VllmEagleProposer):
                 common_attn_metadata.num_reqs,
             )
             common_attn_metadata.num_reqs = num_reqs_padded
-            common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[:num_reqs_padded + 1]
-            common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[:num_reqs_padded + 1]
+            common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
+            common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
             common_attn_metadata.block_table_tensor = self._pad_tensor(
                 common_attn_metadata.block_table_tensor, num_reqs_padded
             )
@@ -577,9 +579,9 @@ class EagleProposer(VllmEagleProposer):
         self.seq_lens_group[0][num_reqs_padded:].fill_(0)
         common_attn_metadata.seq_lens = self.seq_lens_group[0][:num_reqs_padded]
 
-        self.query_start_loc_group[0][:num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
-        self.query_start_loc_group[0][num_reqs_padded + 1:].fill_(0)
-        common_attn_metadata.query_start_loc = self.query_start_loc_group[0][:num_reqs_padded + 1]
+        self.query_start_loc_group[0][: num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
+        self.query_start_loc_group[0][num_reqs_padded + 1 :].fill_(0)
+        common_attn_metadata.query_start_loc = self.query_start_loc_group[0][: num_reqs_padded + 1]
 
         common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
@@ -929,7 +931,9 @@ class EagleProposer(VllmEagleProposer):
                     common_attn_metadata.block_table_tensor, input_batch_size
                 )
                 common_attn_metadata.seq_lens = self._pad_tensor(common_attn_metadata.seq_lens, input_batch_size)
-                common_attn_metadata.seq_lens_cpu = self._pad_tensor(common_attn_metadata.seq_lens_cpu, input_batch_size)
+                common_attn_metadata.seq_lens_cpu = self._pad_tensor(
+                    common_attn_metadata.seq_lens_cpu, input_batch_size
+                )
                 common_attn_metadata.num_computed_tokens_cpu = self._pad_tensor(
                     common_attn_metadata.num_computed_tokens_cpu, input_batch_size
                 )
@@ -1028,15 +1032,21 @@ class EagleProposer(VllmEagleProposer):
             self.slot_mapping_group[draft_step][: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
             self.slot_mapping_group[draft_step][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step][: input_batch_size]
+            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step][:input_batch_size]
 
-            self.seq_lens_group[draft_step][:common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
-            self.seq_lens_group[draft_step][common_attn_metadata.seq_lens.shape[0]:].fill_(0)
-            common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][:common_attn_metadata.seq_lens.shape[0]]
+            self.seq_lens_group[draft_step][: common_attn_metadata.seq_lens.shape[0]].copy_(
+                common_attn_metadata.seq_lens
+            )
+            self.seq_lens_group[draft_step][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
+            common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][: common_attn_metadata.seq_lens.shape[0]]
 
-            self.query_start_loc_group[draft_step][:common_attn_metadata.query_start_loc.shape[0]].copy_(common_attn_metadata.query_start_loc)
-            self.query_start_loc_group[draft_step][common_attn_metadata.query_start_loc.shape[0]:].fill_(0)
-            common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][:common_attn_metadata.query_start_loc.shape[0]]
+            self.query_start_loc_group[draft_step][: common_attn_metadata.query_start_loc.shape[0]].copy_(
+                common_attn_metadata.query_start_loc
+            )
+            self.query_start_loc_group[draft_step][common_attn_metadata.query_start_loc.shape[0] :].fill_(0)
+            common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][
+                : common_attn_metadata.query_start_loc.shape[0]
+            ]
 
         # Rebuild attention metadata
         attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore

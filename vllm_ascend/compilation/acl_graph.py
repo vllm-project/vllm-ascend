@@ -190,11 +190,7 @@ class ACLGraphWrapper:
         # so that update_attn_params only executes after the previous graph replay has fully completed.
         # If we do not in main model and in full-graph mode when using merge-eagle-graph,
         # we do not need to synchronize.
-        use_eagle = (
-            self.vllm_config.speculative_config.use_eagle()
-            if self.vllm_config.speculative_config
-            else False
-        )
+        use_eagle = self.vllm_config.speculative_config.use_eagle() if self.vllm_config.speculative_config else False
         if self.runtime_mode != CUDAGraphMode.FULL or not forward_context.is_draft_model or not use_eagle:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
