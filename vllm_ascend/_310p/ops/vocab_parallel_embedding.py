@@ -19,12 +19,10 @@ import types
 import torch
 import torch_npu
 from torch import nn
-from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import DEFAULT_VOCAB_PADDING_SIZE
-from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ops.vocab_parallel_embedding import AscendParallelLMHead, AscendVocabParallelEmbedding
+from vllm_ascend.ops.vocab_parallel_embedding import AscendParallelLMHead
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
@@ -40,22 +38,9 @@ class AscendParallelLMHead310(AscendParallelLMHead):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
-        AscendVocabParallelEmbedding.__init__(
-            self, num_embeddings, embedding_dim, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
+        super().__init__(
+            num_embeddings, embedding_dim, bias, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
         )
-
-        self.quant_config = quant_config
-        if bias:
-            self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
-            set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
-            )
-        else:
-            self.register_parameter("bias", None)
 
         def patched_process_weights_after_loading(self, layer: nn.Module) -> None:
             layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
