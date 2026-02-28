@@ -23,7 +23,6 @@ from vllm.config.compilation import Range
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.15.0"):
@@ -74,7 +73,7 @@ class MulsAddPattern(BasePattern):
             Replacement that calls the muls_add_triton kernel using the
             class-level scalar self.scale.
             """
-            return muls_add_triton(x, y, self.scale)
+            return torch.ops.vllm.muls_add(x, y, self.scale)
 
         return replacement
 
