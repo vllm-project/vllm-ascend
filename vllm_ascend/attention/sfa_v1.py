@@ -393,8 +393,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
-        # In sfa, prefill and decode have the same calculation formula,
-        # so do not distinguish between prefill and decode here.
+        # The MLAPO operator fuses the pre-processing steps on Q/K/V in MLA into a single operator
+        # NOTE: it imposes a limit on the number of input tokens and conflicts with FlashComm
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
         assert self.indexer is not None, "Indexer is required for DSA."
@@ -419,21 +419,25 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.is_rope_neox_style = False
             self.use_torch_npu_lightning_indexer = True
 
+        # Effective in SFA when FlashComm is enabled.
         self.enable_dsa_cp = enable_dsa_cp()
-        self.enable_dsa_cp_prefill_only = enable_dsa_cp_with_layer_shard()
+
+        # Enable layer sharding via DSA-CP on the P node in the PD-disaggregated setup.
+        self.enable_layer_sharding_in_dsa_cp = enable_dsa_cp_with_layer_shard()
+
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
-        if self.enable_dsa_cp_prefill_only:
-            self.layer_sharding_kwargs = []
-            for layer_name in get_ascend_config().layer_sharding or []:
-                if layer_name in kwargs:
-                    self.layer_sharding_kwargs.append(kwargs[layer_name])
-                else:
-                    logger.warning_once(
-                        f"[SFAImpl init] Layer '{layer_name}' not found in kwargs for layer sharding, "
-                        "skipping sharding configuration"
-                    )
-            register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
+            if self.enable_layer_sharding_in_dsa_cp:
+                self.layer_sharding_kwargs = []
+                for layer_name in get_ascend_config().layer_sharding or []:
+                    if layer_name in kwargs:
+                        self.layer_sharding_kwargs.append(kwargs[layer_name])
+                    else:
+                        logger.warning_once(
+                            f"[SFAImpl init] Layer '{layer_name}' not found in kwargs for layer sharding, "
+                            "skipping sharding configuration"
+                        )
+                register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
@@ -469,7 +473,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
         dispose_layer(self.kv_b_proj)
         if self.enable_dsa_cp:
-            if self.enable_dsa_cp_prefill_only:
+            if self.enable_layer_sharding_in_dsa_cp:
                 for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
                         post_process_after_loading_for_shard_weight_series(layer)
@@ -545,8 +549,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
         kv_cache: tuple,
-        slots: torch.Tensor,
-        attn_metadata: M,
+        slots: torch.Tensor
     ):
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -672,15 +675,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
 
-    def _sfa_preprocess_decode(
+    def _sfa_preprocess_mlapo(
         self,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        attn_metadata: M,
-        need_gather_q_kv: bool,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
         num_input_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), need_gather_q_kv)
         k_nope, k_pe = kv_cache[0], kv_cache[1]
         ql_nope = torch.empty(
             (num_input_tokens, self.W_UK_T.shape[0], k_nope.shape[-1]),
@@ -706,12 +709,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.wu_q,
             self.qb_deq_scl,
             self.gamma2,
-            attn_metadata.cos,
-            attn_metadata.sin,
+            cos,
+            sin,
             self.W_UK_T,
             k_nope,
             k_pe,
-            attn_metadata.slot_mapping,
+            slot_mapping,
             quant_scale0=self.quant_scale0,
             quant_offset0=self.quant_offset0,
             bias0=self.quant_bias_qkv,
@@ -744,7 +747,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         forward_context = get_forward_context()
         if attn_metadata is None:
             # Profiling run.
-            if self.enable_dsa_cp_prefill_only and not forward_context.in_profile_run:
+            if self.enable_layer_sharding_in_dsa_cp and not forward_context.in_profile_run:
                 for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
@@ -752,10 +755,16 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin
-        actual_seq_lengths_query = attn_metadata.cum_query_lens
-        actual_seq_lengths_key = attn_metadata.seq_lens
         if self.enable_dsa_cp:
-            need_gather_q_kv = False
+            assert attn_metadata.dsa_cp_context is not None
+            slot_mapping = attn_metadata.dsa_cp_context.slot_mapping_cp
+            actual_seq_lengths_query = attn_metadata.dsa_cp_context.actual_seq_lengths_query
+            actual_seq_lengths_key = attn_metadata.dsa_cp_context.actual_seq_lengths_key
+        else:
+            slot_mapping = attn_metadata.slot_mapping
+            actual_seq_lengths_query = attn_metadata.cum_query_lens
+            actual_seq_lengths_key = attn_metadata.seq_lens
+
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
         output_padded = output
@@ -764,22 +773,25 @@ class AscendSFAImpl(MLAAttentionImpl):
         o_proj_full_handle = None
         # if is PD mix stage, using original TP o_proj weight, and also need to full gather for o_proj
         # weight for prefill stage.
-        should_shard_weight = self.enable_dsa_cp_prefill_only or attn_metadata.attn_state not in {
+        should_shard_weight = self.enable_layer_sharding_in_dsa_cp or attn_metadata.attn_state not in {
             AscendAttentionState.DecodeOnly,
             AscendAttentionState.SpecDecoding,
         }
 
+        # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation 
         if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
-            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode(
+            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-                need_gather_q_kv=need_gather_q_kv,
+                cos=cos,
+                sin=sin,
+                slot_mapping=slot_mapping,
                 num_input_tokens=num_input_tokens,
             )
             q, k = self.indexer_select_pre_process(
-                x=hidden_states, qr=q_c, cos=cos, sin=sin, need_gather_q_kv=need_gather_q_kv
+                x=hidden_states, q_c=q_c, cos=cos, sin=sin
             )
+        # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
             weight_prefetch_method = get_weight_prefetch_method()
@@ -793,27 +805,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
-            # Process for Flash Comm V1
-            if need_gather_q_kv:
-                q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c.contiguous(), need_gather_q_kv)
-                kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                    kv_no_split.contiguous(), need_gather_q_kv
-                )
 
             q, k = self.indexer_select_pre_process(
-                x=hidden_states, qr=q_c, cos=cos, sin=sin, need_gather_q_kv=need_gather_q_kv
+                x=hidden_states, q_c=q_c, cos=cos, sin=sin
             )
 
             wait_for_kv_layer_from_connector(layer_name)
 
-            slot_mapping = attn_metadata.slot_mapping
-            if self.enable_dsa_cp:
-                assert attn_metadata.dsa_cp_context is not None
-                slot_mapping = attn_metadata.dsa_cp_context.slot_mapping_cp
-                actual_seq_lengths_query = attn_metadata.dsa_cp_context.actual_seq_lengths_query
-                actual_seq_lengths_key = attn_metadata.dsa_cp_context.actual_seq_lengths_key
-
-            k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, attn_metadata)
+            k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping)
 
             if self.enable_dsa_cp:
                 assert k_pe is not None
@@ -835,7 +834,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if kv_ag_handle is not None:
                     kv_ag_handle.wait()
 
-                if self.enable_dsa_cp_prefill_only:
+                if self.enable_layer_sharding_in_dsa_cp:
                     for layer in self.layer_sharding_kwargs or []:
                         if is_hidden_layer(layer):
                             reach_layer_for_shard_weight_series(layer)
@@ -869,8 +868,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             cos=cos,
             sin=sin,
             actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_key=actual_seq_lengths_key,
-            need_gather_q_kv=need_gather_q_kv,
+            actual_seq_lengths_key=actual_seq_lengths_key
         )
 
         attn_output = self._execute_sparse_flash_attention_process(
@@ -886,7 +884,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             linear_layer=self.o_proj,
         )
 
-        if self.enable_dsa_cp and not self.enable_dsa_cp_prefill_only:
+        if self.enable_dsa_cp and not self.enable_layer_sharding_in_dsa_cp:
             # When using SFA-CP with pd mixed, o_proj has two cases:
             # 1. prefill: o_proj is a TP weight, we need to all-gather o_proj weight to switch TP=1.
             # 2. decode: all-to-all the hidden_state before the o_proj forward.
@@ -934,18 +932,16 @@ class AscendSFAImpl(MLAAttentionImpl):
     def indexer_select_pre_process(
         self,
         x: torch.Tensor,
-        qr: torch.Tensor,
+        q_c: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        need_gather_q_kv: bool = False,
     ):
         k_proj, _ = self.wk(x)  # [b,s,7168] @ [7168,128] = [b,s,128]
-        k_proj = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(k_proj, need_gather_q_kv)
         k = self.k_norm(k_proj).unsqueeze(1)
         k = k.view(-1, 1, self.head_dim)
 
         if HAS_TRITON:
-            q, _ = self.wq_b(qr)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
+            q, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
             q = q.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
 
             cos = cos.view(-1, self.qk_rope_head_dim)
@@ -979,8 +975,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor,
-        need_gather_q_kv: bool = False,
+        actual_seq_lengths_key: torch.Tensor
     ):
         if q is None:
             q, _ = self.wq_b(qr)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
@@ -1006,7 +1001,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 attn_metadata.reshape_cache_event.record()
 
         weights, _ = self.weights_proj(x)
-        weights = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(weights, need_gather_q_kv)
 
         key = kv_cache[2]
         block_table = attn_metadata.block_table
