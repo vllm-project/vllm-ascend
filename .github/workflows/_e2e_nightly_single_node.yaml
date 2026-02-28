@@ -28,8 +28,13 @@ on:
         type: string
         default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
       tests:
-        required: true
+        required: false
         type: string
+        description: "Python test path for pytest, e.g. tests/e2e/nightly/single_node/ops/singlecard_ops"
+      config_file_path:
+        required: false
+        type: string
+        description: "YAML config name under tests/e2e/nightly/single_node/models/models_yaml/"
       name:
         required: false
         type: string
@@ -44,12 +49,12 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.tests }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path || inputs.tests }}
   cancel-in-progress: true
 
 jobs:
   e2e-nightly:
-    name: ${{ inputs.tests }}
+    name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 600
     container:
@@ -114,6 +119,13 @@ jobs:
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
+      - name: Validate inputs
+        run: |
+          if [[ -z "${{ inputs.tests }}" && -z "${{ inputs.config_file_path }}" ]]; then
+            echo "Either 'tests' or 'config_file_path' must be provided."
+            exit 1
+          fi
+
       - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -122,6 +134,15 @@ jobs:
           BENCHMARK_HOME: /vllm-workspace/vllm-ascend/benchmark
         working-directory: /vllm-workspace/vllm-ascend
         run: |
-          # ignore test_dispatch_ffn_combine until the test is fixed
-          pytest -sv ${{ inputs.tests }} \
-          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
+          if [[ -n "${{ inputs.tests }}" ]]; then
+            echo "Running pytest with tests path: ${{ inputs.tests }}"
+            # ignore test_dispatch_ffn_combine until the test is fixed
+            pytest -sv "${{ inputs.tests }}" \
+            --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
+          fi
+
+          if [[ -n "${{ inputs.config_file_path }}" ]]; then
+            echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
+            CONFIG_YAML_PATH="${{ inputs.config_file_path }}" \
+            pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+          fi

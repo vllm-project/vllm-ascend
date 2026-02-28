@@ -78,7 +78,7 @@ jobs:
           - name: qwen3-32b-int8
             os: linux-aarch64-a2b3-4
             config_file_path: Qwen3-32B-Int8-A2.yaml
-    uses: ./.github/workflows/_e2e_nightly_single_node_yaml.yaml
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
