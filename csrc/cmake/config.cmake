@@ -137,12 +137,13 @@ if (BUILD_OPEN_PROJECT)
     endif ()
 
     # Build phase
-    #   CCACHE configuration
+    #   CCACHE configuration (supports both ccache and sccache)
     if (ENABLE_CCACHE)
         if (CUSTOM_CCACHE)
             set(CCACHE_PROGRAM ${CUSTOM_CCACHE})
         else()
-            find_program(CCACHE_PROGRAM ccache)
+            # Try to find sccache first, then fall back to ccache
+            find_program(CCACHE_PROGRAM NAMES sccache ccache)
         endif ()
         if (CCACHE_PROGRAM)
             set(CMAKE_C_COMPILER_LAUNCHER   ${CCACHE_PROGRAM} CACHE PATH "C cache Compiler")
@@ -193,6 +194,14 @@ if (BUILD_OPEN_PROJECT)
 
         string(REPLACE ";" "::" EP_ASCEND_COMPUTE_UNIT "${ASCEND_COMPUTE_UNIT}")
 
+        # Prepare ccache parameters for prepare.sh
+        set(PREPARE_CCACHE_ARGS "")
+        if (ENABLE_CCACHE)
+            list(APPEND PREPARE_CCACHE_ARGS --enable-ccache ON)
+            if (CUSTOM_CCACHE)
+                list(APPEND PREPARE_CCACHE_ARGS --custom-ccache "${CUSTOM_CCACHE}")
+            endif ()
+        endif ()
         execute_process(COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/prepare.sh
                 -s ${CMAKE_CURRENT_SOURCE_DIR}
                 -b ${CMAKE_CURRENT_BINARY_DIR}/prepare_build
@@ -209,9 +218,11 @@ if (BUILD_OPEN_PROJECT)
                 --ascend-compute_unit ${EP_ASCEND_COMPUTE_UNIT}
                 --op_debug_config ${OP_DEBUG_CONFIG}
                 --ascend-op-name "${ASCEND_OP_NAME}"
+                ${PREPARE_CCACHE_ARGS}
                 RESULT_VARIABLE result
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 OUTPUT_VARIABLE PREPARE_BUILD_OUTPUT_VARIABLE)
+
         if (result)
             message(FATAL_ERROR "Error: ops prepare build failed.")
         endif ()
