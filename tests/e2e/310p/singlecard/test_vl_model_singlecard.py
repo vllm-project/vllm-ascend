@@ -42,3 +42,11 @@ def test_qwen3_vl_8b_tp1_fp16():
         tensor_parallel_size=1,
         max_tokens=10
     )
+
+def test_qwen3_vl_32b_tp1_fp16():
+    """Qwen3-VL-32B 单卡 FP16 测试"""
+    run_vl_model_test(
+        model_name="Qwen/Qwen3-VL-32B",
+        tensor_parallel_size=1,
+        max_tokens=10
+    )
