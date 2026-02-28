@@ -123,7 +123,6 @@ def _apply_transformers_audio_attention_patch():
 
         modeling_module.Qwen3OmniMoeAudioAttention = NPUQwen3OmniMoeAudioAttention
 
-        print("[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioAttention with NPU-optimized version.")
     except ImportError:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip patch.")
     except Exception as e:
@@ -276,10 +275,6 @@ class NPUQwen3OmniMoeAudioEncoder(Qwen3OmniMoePreTrainedModel):
         return BaseModelOutput(last_hidden_state=hidden_states)
 
     def padded_and_mask_function(self, tensor_list, tensor_len, padding_value=0, padding_side="right"):
-        """
-        Pads a sequence of tensors to their maximum length on indicated `padding_side`.
-        Then prepares a mask so that pad tokens are not attended to.
-        """
         max_len = tensor_len.max()
         dim = tensor_list[0].shape[0]
         padded_tensor = torch.full(
@@ -333,10 +328,7 @@ def _apply_transformers_audio_encoder_patch():
         OriginalEncoder = modeling_module.Qwen3OmniMoeAudioEncoder
 
         modeling_module.Qwen3OmniMoeAudioEncoder = NPUQwen3OmniMoeAudioEncoder
-        print(
-            f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoder "
-            f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})"
-        )
+
     except ImportError:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip audio encoder patch.")
     except Exception as e:
@@ -364,17 +356,6 @@ class Qwen3OmniMoeAudioEncoderLayer(GradientCheckpointingLayer):
         attention_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`): attention mask of size
-                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-            layer_head_mask (`torch.FloatTensor`): mask for attention heads in a given layer of size
-                `(encoder_attention_heads,)`.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-        """
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(
@@ -411,10 +392,7 @@ def _apply_transformers_audio_encoder_layer_patch():
         OriginalEncoder = modeling_module.Qwen3OmniMoeAudioEncoderLayer
 
         modeling_module.Qwen3OmniMoeAudioEncoderLayer = Qwen3OmniMoeAudioEncoderLayer
-        print(
-            f"[vLLM-Ascend] Successfully patched transformers Qwen3OmniMoeAudioEncoderLayer "
-            f"(Original: {id(OriginalEncoder)}, New: {id(NPUQwen3OmniMoeAudioEncoder)})"
-        )
+
     except ImportError:
         print("[vLLM-Ascend] transformers Qwen3OmniMoe module not available, skip audio encoder patch.")
     except Exception as e:
@@ -429,9 +407,7 @@ def _apply_vllm_audio_encoder_patch():
 
         if hasattr(thinker_module, "Qwen3OmniMoeAudioEncoder"):
             original = thinker_module.Qwen3OmniMoeAudioEncoder
-            print(f"[vLLM-Ascend] Original Qwen3OmniMoeAudioEncoder ID: {id(original)}", file=sys.stderr)
             thinker_module.Qwen3OmniMoeAudioEncoder = NPUQwen3OmniMoeAudioEncoder
-            print(f"[vLLM-Ascend] New Qwen3OmniMoeAudioEncoder ID: {id(NPUQwen3OmniMoeAudioEncoder)}", file=sys.stderr)
         else:
             print("[vLLM-Ascend] thinker_module has no Qwen3OmniMoeAudioEncoder attribute", file=sys.stderr)
             print("Available in thinker_module:", dir(thinker_module), file=sys.stderr)
