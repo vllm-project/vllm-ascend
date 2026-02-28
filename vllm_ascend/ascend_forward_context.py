@@ -43,6 +43,7 @@ def set_ascend_forward_context(
     model_instance: torch.nn.Module = None,
     is_draft_model=False,
     skip_compiled: bool = False,
+    max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
 ):
     """A context manager that stores the current forward context,
@@ -139,6 +140,7 @@ def set_ascend_forward_context(
             max_tokens_across_dp = num_tokens
 
         forward_context.max_tokens_across_dp = max_tokens_across_dp
+        forward_context.max_tokens_across_pcp = max_tokens_across_pcp
 
         if num_tokens is not None:
             if num_actual_tokens is None:
