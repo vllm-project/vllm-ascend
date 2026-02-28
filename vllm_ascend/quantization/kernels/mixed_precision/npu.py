@@ -1,13 +1,20 @@
 import torch
 import torch_npu
-from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
-    MPLinearKernel,
-    MPLinearLayerConfig,
-)
 from vllm.scalar_type import scalar_types
 
 from vllm_ascend.quantization.utils import unpack_from_int32
-from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
+
+if vllm_version_is("0.16.0"):
+    from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKernel import (
+        MPLinearKernel,
+        MPLinearLayerConfig,
+    )
+else:
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearKernel,
+        MPLinearLayerConfig,
+    )
 
 
 class AscendwNa16LinearKernel(MPLinearKernel):

@@ -1,11 +1,18 @@
 import torch
 import torch_npu
-from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
-)
 
-from vllm_ascend.utils import get_weight_prefetch_method, maybe_trans_nz
+from vllm_ascend.utils import get_weight_prefetch_method, maybe_trans_nz, vllm_version_is
+
+if vllm_version_is("0.16.0"):
+    from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (
+        Int8ScaledMMLinearKernel,
+        Int8ScaledMMLinearLayerConfig,
+    )
+else:
+    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+        Int8ScaledMMLinearKernel,
+        Int8ScaledMMLinearLayerConfig,
+    )
 
 
 class AscendDynamicInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
