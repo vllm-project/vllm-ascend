@@ -157,7 +157,7 @@ class MtpProposer(EagleProposer):
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        last_token_indices: torch.Tensor | None,
+        token_indices_to_sample: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -178,7 +178,7 @@ class MtpProposer(EagleProposer):
                 target_positions,
                 target_hidden_states,
                 next_token_ids,
-                last_token_indices,
+                token_indices_to_sample,
                 common_attn_metadata,
                 sampling_metadata,
                 mm_embed_inputs,
@@ -194,8 +194,8 @@ class MtpProposer(EagleProposer):
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
 
-        if last_token_indices is None:
-            last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+        if token_indices_to_sample is None:
+            token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -207,13 +207,13 @@ class MtpProposer(EagleProposer):
         self.input_ids[: num_tokens - 1] = target_token_ids[1:]
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-        self.input_ids[last_token_indices] = next_token_ids
+        self.input_ids[token_indices_to_sample] = next_token_ids
 
         # update pcp related params
         if self.pcp_size * self.dcp_size > 1:
             assert long_seq_metadata is not None
             common_attn_metadata.prefill_context_parallel_metadata = long_seq_metadata
-            ori_last_token_indices = last_token_indices.clone()
+            ori_token_indices_to_sample = token_indices_to_sample.clone()
             query_lens_d = self.runner.query_lens[:num_decode_reqs]
         if self.pcp_size > 1:
             # 1. preprocess decode/prefill input_ids & target_hidden_states
@@ -252,9 +252,11 @@ class MtpProposer(EagleProposer):
             target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
             # 2. update sample_indices according to main model
             if num_decode_reqs:
-                last_token_indices[:num_decode_reqs] = self.runner.logits_indices[last_token_indices[:num_decode_reqs]]
+                token_indices_to_sample[:num_decode_reqs] = self.runner.logits_indices[
+                    token_indices_to_sample[:num_decode_reqs]
+                ]
             if num_prefill_reqs:
-                last_token_indices[-num_prefill_reqs:] = self.runner.logits_indices[-num_prefill_reqs:]
+                token_indices_to_sample[-num_prefill_reqs:] = self.runner.logits_indices[-num_prefill_reqs:]
                 # 3. update attn_metadata params that may be influenced by pcp
                 common_attn_metadata.num_actual_tokens = num_tokens
                 common_attn_metadata.max_query_len = max(self.decode_threshold, max_query_len_p)
@@ -354,12 +356,14 @@ class MtpProposer(EagleProposer):
 
                     hidden_states, positions, _ = self.maybe_all_gather_and_unpad(hidden_states, positions)
 
-            num_indices = last_token_indices.shape[0]
+            num_indices = token_indices_to_sample.shape[0]
             if lmhead_tp_enable():
                 max_num_reqs_across_dp = (
                     self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 )
-                last_token_indices = nn.functional.pad(last_token_indices, (0, max_num_reqs_across_dp - num_indices))
+                token_indices_to_sample = nn.functional.pad(
+                    token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices)
+                )
 
             if self.pcp_size > 1 and step == 0:
                 # remove graph padding before all_gather
@@ -369,11 +373,11 @@ class MtpProposer(EagleProposer):
                     hidden_states, 0, self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
                 )
 
-            sample_hidden_states = hidden_states[last_token_indices]
+            sample_hidden_states = hidden_states[token_indices_to_sample]
             logits = self.model.compute_logits(sample_hidden_states)
             if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
-                last_token_indices = last_token_indices[:num_indices]
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
             draft_token_ids = logits.argmax(dim=-1)
 
             if self.num_speculative_tokens == 1:
@@ -396,16 +400,16 @@ class MtpProposer(EagleProposer):
             attn_metadata_i = attn_metadata[self.attn_layer_names[0]]
 
             if step == 0:
-                positions = target_positions[last_token_indices]
-                hidden_states = hidden_states[last_token_indices]
-                slot_mapping = attn_metadata_i.slot_mapping[last_token_indices]
+                positions = target_positions[token_indices_to_sample]
+                hidden_states = hidden_states[token_indices_to_sample]
+                slot_mapping = attn_metadata_i.slot_mapping[token_indices_to_sample]
                 attn_metadata_i.slot_mapping.fill_(-1)
                 attn_metadata_i.query_start_loc = self.arange[: batch_size + 1]
-                last_token_indices = self.arange[:batch_size]
+                token_indices_to_sample = self.arange[:batch_size]
                 if getattr(attn_metadata_i, "num_decode_tokens", 0):
                     attn_metadata_i.num_decode_tokens = batch_size
                 if self.pcp_size * self.dcp_size > 1:
-                    positions = target_positions[ori_last_token_indices]
+                    positions = target_positions[ori_token_indices_to_sample]
                     # For pcp/dcp, tokens are split across different cp ranks,
                     # so we can not simply update slot_mapping by += 1.
                     # Instead, we pre-allocate mtp slot_mapping in model_runner
@@ -413,7 +417,7 @@ class MtpProposer(EagleProposer):
                     # to get corresponding slot_mapping in each step.
                     num_reject_tokens = (
                         torch.tensor(self.runner.pcp_manager.cu_num_tokens_pcp_full, dtype=torch.int32).to(self.device)
-                        - ori_last_token_indices
+                        - ori_token_indices_to_sample
                         - 1
                     )
                     num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
