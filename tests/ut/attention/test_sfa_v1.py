@@ -14,7 +14,7 @@ if 'torch_npu._inductor' not in sys.modules:
 from vllm_ascend.attention.sfa_v1 import (AscendSFABackend, AscendSFAImpl,
                                           AscendSFAMetadata,
                                           AscendSFAMetadataBuilder)
-from vllm_ascend.utils import enable_dsa_cp, vllm_version_is
+from vllm_ascend.utils import enable_dsa_cp
 
 
 class TestAscendSFABackend(TestBase):

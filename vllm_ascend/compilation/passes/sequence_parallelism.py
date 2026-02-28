@@ -1,17 +1,13 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
-
-from vllm_ascend.utils import is_moe_model, vllm_version_is
-
-if vllm_version_is("0.15.0"):
-    from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
-else:
-    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
+from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.logger import logger
+
+from vllm_ascend.utils import is_moe_model
 
 SP_THRESHOLD = 1000
 
