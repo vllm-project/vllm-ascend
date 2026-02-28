@@ -134,22 +134,34 @@ def _unregister_print_streams_on_exit():
 atexit.register(_unregister_print_streams_on_exit)
 
 
-def maybe_trans_nz(weight: torch.Tensor):
+def _should_trans_nz(weight: torch.Tensor) -> bool:
+    # FP32 cannot use NZ.
+    if weight.dtype == torch.float32:
+        return False
+
+    # 310P always converts to NZ.
+    if is_310p():
+        return True
+
+    # NZ is disabled on non-310P.
     if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
-        # NZ is not enabled
+        return False
+
+    # BF16/FP16 convert only when enable_nz == 2.
+    if weight.dtype in {torch.bfloat16, torch.float16}:
+        return envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+
+    # Quantized or other supported dtypes convert by default.
+    return True
+
+# NZ conversion policy:
+# - 310P: always convert supported weights to FRACTAL_NZ
+# - non-310P: follow VLLM_ASCEND_ENABLE_NZ
+# - FP32: never convert
+def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+    if not _should_trans_nz(weight):
         return weight
-    if weight.dtype == torch.float:
-        # fp32 can not support NZ
-        return weight
-    elif weight.dtype in {torch.bfloat16, torch.float16}:
-        # bf16/fp16 will trans nz when VLLM_ASCEND_ENABLE_NZ is 2
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2 or is_310p():
-            return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
-        else:
-            return weight
-    else:
-        # quant weight will trans nz by default
-        return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
 def _round_up(x: int, align: int):
