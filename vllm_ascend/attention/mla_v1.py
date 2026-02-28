@@ -1370,7 +1370,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
         return decode_q_nope, decode_q_pe
 
-    def _mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata):
+    def _mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata, layer = None): 
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz]
 
