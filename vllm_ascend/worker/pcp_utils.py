@@ -505,7 +505,11 @@ class PCPManager:
         num_requests = seq_lens.size(0)
         total_world_size = pcp_world_size * dcp_world_size
         seq_lens_tiled = seq_lens.unsqueeze(-1).repeat(1, total_world_size)
-        rank_offsets = torch.arange(total_world_size, dtype=torch.int32).unsqueeze(0).repeat(num_requests, 1)
+        rank_offsets = (
+            torch.arange(total_world_size, dtype=torch.int32, device=seq_lens.device)
+            .unsqueeze(0)
+            .repeat(num_requests, 1)
+        )
         base = seq_lens_tiled // cp_kv_cache_interleave_size // total_world_size * cp_kv_cache_interleave_size
         remainder = seq_lens_tiled - base * total_world_size
         remainder = torch.clip(
