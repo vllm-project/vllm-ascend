@@ -1331,24 +1331,15 @@ class EagleProposer(VllmEagleProposer):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        sp_enabled = get_forward_context().sp_enabled
+        forward_context = get_forward_context()
         if self.method == "mtp":
-<<<<<<< HEAD
-            if sp_enabled:
-=======
             if forward_context.flash_comm_v1_enabled:
->>>>>>> 77544388 (Update eagle_proposer.py)
                 hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
                 positions = positions.unsqueeze(-1)
                 positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
                 positions = positions.squeeze(-1)
         else:
-<<<<<<< HEAD
-            if sp_enabled:
-=======
-            forward_context = get_forward_context()
             if forward_context.flash_comm_v1_enabled:
->>>>>>> 5def28dc ([Feat]support sequence parallelism by pass for VL models (#5632))
                 hidden_states = split_inputs_tp_to_sp(hidden_states, hidden_states)
         return hidden_states, positions
 
