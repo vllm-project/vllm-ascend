@@ -26,6 +26,22 @@ from vllm.model_executor.layers.attention import Attention
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 
 
+def get_rope_dim(vllm_config):
+    model_config = vllm_config.model_config
+
+    if model_config.use_mla:
+        rope_dim = model_config.hf_text_config.qk_rope_head_dim
+    else:
+        rope_dim = model_config.get_head_size()
+        # For models using partial rope like Qwen3-Next.
+        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
+            rope_dim = int(rope_dim *
+                           model_config.hf_text_config.partial_rotary_factor)
+        elif hasattr(model_config.hf_text_config, "rotary_dim"):
+            rope_dim = int(model_config.hf_text_config.rotary_dim)
+
+    return rope_dim
+
 class QKNormRopeFusionPattern(BasePattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
         super().__init__(vllm_config, eps)
@@ -35,6 +51,7 @@ class QKNormRopeFusionPattern(BasePattern):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.device = vllm_config.device_config.device if vllm_config.device_config else None
+        self.rope_dim = get_rope_dim(vllm_config)
 
     def get_inputs(self):
         T = 5
@@ -65,7 +82,7 @@ class QKNormRopeFusionPattern(BasePattern):
             q_flat = q_norm_out.view(q.shape)
             k_flat = k_norm_out.view(k.shape)
             q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
-                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
+                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.rope_dim, True
             )
 
             return q_rope, k_rope, v
@@ -108,6 +125,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.device = vllm_config.device_config.device if vllm_config.device_config else None
+        self.rope_dim = get_rope_dim(vllm_config)
 
     def get_inputs(self):
         T = 5
@@ -145,7 +163,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
             q_flat = q_normed.view(q.shape)
             k_flat = k_normed.view(k.shape)
             q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
-                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
+                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.rope_dim, True
             )
 
             return q_rope, k_rope, v
