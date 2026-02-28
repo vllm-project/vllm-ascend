@@ -517,7 +517,9 @@ class SpecDecodeBaseProposer(VllmEagleProposer):
             target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
             # 2. update sample_indices according to main model
             if num_decode_reqs:
-                token_indices_to_sample[:num_decode_reqs] = self.runner.logits_indices[token_indices_to_sample[:num_decode_reqs]]
+                token_indices_to_sample[:num_decode_reqs] = self.runner.logits_indices[
+                    token_indices_to_sample[:num_decode_reqs]
+                ]
             if num_prefill_reqs:
                 token_indices_to_sample[-num_prefill_reqs:] = self.runner.logits_indices[-num_prefill_reqs:]
                 # 3. update attn_metadata params that may be influenced by pcp
