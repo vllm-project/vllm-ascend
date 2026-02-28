@@ -243,10 +243,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_draft_model = get_forward_context().is_draft_model
         flash_comm_v1_enabled = get_forward_context().flash_comm_v1_enabled
         if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
-            positions_new = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
-            return torch.ops.vllm.npu_rotary_embedding(
-                positions_new, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
-            )
+            positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
         return torch.ops.vllm.npu_rotary_embedding(
             positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )
