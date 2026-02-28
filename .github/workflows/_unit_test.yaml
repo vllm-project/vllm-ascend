@@ -15,7 +15,7 @@ on:
       type:
         required: true
         type: string
-
+  workflow_dispatch:
 jobs:
   unit-test:
     name: unit test
