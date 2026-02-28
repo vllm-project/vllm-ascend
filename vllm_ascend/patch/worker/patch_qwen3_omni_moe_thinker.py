@@ -325,8 +325,6 @@ def _apply_transformers_audio_encoder_patch():
     try:
         import transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe as modeling_module
 
-        OriginalEncoder = modeling_module.Qwen3OmniMoeAudioEncoder
-
         modeling_module.Qwen3OmniMoeAudioEncoder = NPUQwen3OmniMoeAudioEncoder
 
     except ImportError:
@@ -389,8 +387,6 @@ def _apply_transformers_audio_encoder_layer_patch():
     try:
         import transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe as modeling_module
 
-        OriginalEncoder = modeling_module.Qwen3OmniMoeAudioEncoderLayer
-
         modeling_module.Qwen3OmniMoeAudioEncoderLayer = Qwen3OmniMoeAudioEncoderLayer
 
     except ImportError:
@@ -406,7 +402,6 @@ def _apply_vllm_audio_encoder_patch():
         print(f"[vLLM-Ascend] vLLM thinker module loaded from: {thinker_module.__file__}", file=sys.stderr)
 
         if hasattr(thinker_module, "Qwen3OmniMoeAudioEncoder"):
-            original = thinker_module.Qwen3OmniMoeAudioEncoder
             thinker_module.Qwen3OmniMoeAudioEncoder = NPUQwen3OmniMoeAudioEncoder
         else:
             print("[vLLM-Ascend] thinker_module has no Qwen3OmniMoeAudioEncoder attribute", file=sys.stderr)
