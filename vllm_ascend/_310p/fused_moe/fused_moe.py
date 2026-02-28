@@ -154,28 +154,6 @@ class AscendFusedMoE310(FusedMoE):
 
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
         if not vllm_version_is("0.16.0"):
-<<<<<<< HEAD
-<<<<<<< HEAD
-            self.runner = self._init_runner()
-
-    if not vllm_version_is("0.16.0"):
-
-        def _init_runner(self):
-            from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-
-            return AscendMoERunner(
-                layer=self,
-                moe_config=self.moe_config,
-                router=self.router,
-                routed_input_transform=self._routed_input_transform,
-                gate=self.gate,
-                shared_experts=self.shared_experts,
-                quant_method=self.quant_method,
-                reduce_results=self.reduce_results,
-                enable_dbo=self.vllm_config.parallel_config.enable_dbo,
-            )
-
-        if not vllm_version_is("0.16.0"):
             self.runner = self._init_runner()
 
     if not vllm_version_is("0.16.0"):
