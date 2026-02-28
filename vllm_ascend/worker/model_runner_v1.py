@@ -45,6 +45,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -2479,6 +2480,7 @@ class NPUModelRunner(GPUModelRunner):
             corresponding memory buffer for KV cache.
         """
         # Initialize the memory buffer for KV cache
+        print(f'{kv_cache_config=}')
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
@@ -2518,7 +2520,7 @@ class NPUModelRunner(GPUModelRunner):
             # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                if "linear_attn" in layer_name and layer_name not in kv_cache_raw_tensors:
+                if "linear_attn" in layer_name:
                     # for mamba linear attention
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
@@ -2529,9 +2531,8 @@ class NPUModelRunner(GPUModelRunner):
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache between the self_attn specs in the same group
-                        if "linear_attn" in layer_name_inner:
-                            kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors:
+                        kv_cache_raw_tensors[layer_name_inner] = tensor
+                elif "self_attn" in layer_name and len(kv_cache_tensor.shared_by) == 1:
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
                     # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
                     # as it only support the 0-dim of kv_cache is `num_blocks`.
@@ -2636,6 +2637,9 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                         assert raw_dsa_k_tensor is not None
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel() + raw_dsa_k_tensor.numel()
+                    elif self.use_hybrid_blocks:
+                        raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
+                        sum_page_size_bytes = raw_k_tensor.numel()
                     else:
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
                             layer_name
@@ -2665,6 +2669,11 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size,
                         )
+                        attn_tensor_page_size = int(np.prod(kv_cache_shape[1: ])) * get_dtype_size(kv_cache_spec.dtype)
+                        conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
+                        raw_kv_tensor = raw_k_tensor[conv_block_padding_size: ]
+                        raw_k_tensor = raw_kv_tensor[: attn_tensor_page_size]
+                        raw_v_tensor = raw_kv_tensor[attn_tensor_page_size: attn_tensor_page_size * 2]
                     else:
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                             num_blocks, kv_cache_spec.block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
@@ -2721,6 +2730,12 @@ class NPUModelRunner(GPUModelRunner):
                     state_tensors = []
                     target_idx = 0
                     start_idx = 0
+                    # NOTE(zxr): in order to keep all tensor contiguous, we align ssm and kv block
+                    # with same page size, so have to add extra padding block for kv, the overall
+                    # layout of hybrid kv_cache on Ascend is:
+                    # tensor1: [(kv_padding), conv           , ...]
+                    # tensor2: [k           , ssm            , ...]
+                    # tensor3: [v           , (mamba_padding), ...]
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                         # normally, there is conv state and ssm state in this loop. And there is only
                         # a conv state in some special models.
@@ -2928,6 +2943,7 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE: Must process Attention/MLAAttention before MambaBase to maintain
         # ordering expected by graph parameter update logic in attention backends.
         mamba_layers: dict[str, MambaBase] = {}
+        attn_layer_names = set()
         for layer_name, attn_module in attn_layers.items():
             if isinstance(attn_module, Attention):
                 if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None:
@@ -2943,6 +2959,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
+                    attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
@@ -2965,9 +2982,15 @@ class NPUModelRunner(GPUModelRunner):
         if len(mamba_layers) > 0:
             if self.vllm_config.cache_config.enable_prefix_caching:
                 raise NotImplementedError("Prefix caching is not supported for Mamba yet.")
+            mamba_page_size_padded = 0
             for layer_name, mamba_module in mamba_layers.items():
                 if spec := mamba_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
+                    mamba_page_size_padded = spec.page_size_bytes
+            # align attn_page_size to mamba_page_size_padded
+            for layer_name in attn_layer_names:
+                if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:
+                    object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
         return kv_cache_spec
 
