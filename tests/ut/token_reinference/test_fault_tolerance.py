@@ -360,7 +360,7 @@ class TestFaultTolerance(TestBase):
         self.assertTrue(torch.equal(decisions[0], FaultAction.RETURN))
         self.assertTrue(torch.equal(decisions[1], FaultAction.RAISE_EXCEPTION))
 
-        def test_analyze_global_status_unknown(self):
+    def test_analyze_global_status_unknown(self):
         self.ft.world_size = 2
         unknown = torch.tensor([999])
         all_status = [RecoveryStatus.SUCCESS, unknown]
