@@ -25,6 +25,13 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
+from vllm_ascend.ops.linear import (
+    AscendColumnParallelLinear,
+    AscendMergedColumnParallelLinear,
+    AscendQKVParallelLinear,
+    AscendReplicatedLinear,
+    AscendRowParallelLinear,
+)
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
@@ -63,3 +70,39 @@ class AscendLinearBase310(LinearBase):
             self.quant_method: QuantizeMethodBase | None = AscendUnquantizedLinearMethod310()
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
+
+
+def _replace_unquant_method_for_310(layer: nn.Module, quant_config: QuantizationConfig | None) -> None:
+    """Use 310P-specific unquantized method for non-quantized models."""
+    if quant_config is None and isinstance(getattr(layer, "quant_method", None), UnquantizedLinearMethod):
+        layer.quant_method = AscendUnquantizedLinearMethod310()
+
+
+class AscendColumnParallelLinear310(AscendColumnParallelLinear):
+    def __init__(self, *args, quant_config: QuantizationConfig | None = None, **kwargs):
+        super().__init__(*args, quant_config=quant_config, **kwargs)
+        _replace_unquant_method_for_310(self, quant_config)
+
+
+class AscendMergedColumnParallelLinear310(AscendMergedColumnParallelLinear):
+    def __init__(self, *args, quant_config: QuantizationConfig | None = None, **kwargs):
+        super().__init__(*args, quant_config=quant_config, **kwargs)
+        _replace_unquant_method_for_310(self, quant_config)
+
+
+class AscendQKVParallelLinear310(AscendQKVParallelLinear):
+    def __init__(self, *args, quant_config: QuantizationConfig | None = None, **kwargs):
+        super().__init__(*args, quant_config=quant_config, **kwargs)
+        _replace_unquant_method_for_310(self, quant_config)
+
+
+class AscendRowParallelLinear310(AscendRowParallelLinear):
+    def __init__(self, *args, quant_config: QuantizationConfig | None = None, **kwargs):
+        super().__init__(*args, quant_config=quant_config, **kwargs)
+        _replace_unquant_method_for_310(self, quant_config)
+
+
+class AscendReplicatedLinear310(AscendReplicatedLinear):
+    def __init__(self, *args, quant_config: QuantizationConfig | None = None, **kwargs):
+        super().__init__(*args, quant_config=quant_config, **kwargs)
+        _replace_unquant_method_for_310(self, quant_config)
