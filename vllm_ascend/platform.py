@@ -280,7 +280,7 @@ class NPUPlatform(Platform):
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
-            ascend_config.npugraph_ex_config.enable = False
+            ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             logger.info("PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode")
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (
@@ -300,7 +300,7 @@ class NPUPlatform(Platform):
             # not be detected in advance assert.
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
-            ascend_config.npugraph_ex_config.enable = False
+            ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif (
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
@@ -329,7 +329,7 @@ class NPUPlatform(Platform):
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.mode = CompilationMode.NONE
-            ascend_config.npugraph_ex_config.enable = False
+            ascend_config.ascend_compilation_config.enable_npugraph_ex = False
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience
