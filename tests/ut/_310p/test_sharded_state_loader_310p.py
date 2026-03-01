@@ -52,15 +52,18 @@ class MockModel(torch.nn.Module):
 class TestShardedStateLoader310(TestBase):
     """Test cases for ShardedStateLoader310."""
 
+    @patch("vllm.model_executor.model_loader.ShardedStateLoader._filter_subtensors")
     @patch("vllm.distributed.get_tensor_model_parallel_rank")
     @patch("safetensors.torch.save_file")
     @patch("torch_npu.get_npu_format")
     @patch("torch_npu.npu_format_cast")
-    def test_save_model_with_nz_format_310(self, mock_cast, mock_get_format, mock_save_file, mock_get_rank):
+    def test_save_model_with_nz_format_310(
+        self, mock_cast, mock_get_format, mock_save_file, mock_get_rank, mock_filter
+    ):
         """Test save_model with NZ format tensors that need conversion."""
         mock_get_rank.return_value = 0
         mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
-
+        mock_filter.side_effect = lambda x: x
         mock_tensor = MagicMock(spec=torch.Tensor)
         mock_cast.return_value = mock_tensor
 
@@ -76,15 +79,18 @@ class TestShardedStateLoader310(TestBase):
             call_args = mock_save_file.call_args[0]
             self.assertTrue(call_args[1].endswith("model-00000-of-00001.safetensors"))
 
+    @patch("vllm.model_executor.model_loader.ShardedStateLoader._filter_subtensors")
     @patch("vllm.distributed.get_tensor_model_parallel_rank")
     @patch("safetensors.torch.save_file")
     @patch("torch_npu.get_npu_format")
     @patch("torch_npu.npu_format_cast")
-    def test_save_model_with_nd_format_310(self, mock_cast, mock_get_format, mock_save_file, mock_get_rank):
+    def test_save_model_with_nd_format_310(
+        self, mock_cast, mock_get_format, mock_save_file, mock_get_rank, mock_filter
+    ):
         """Test save_model with ND format tensors (no conversion needed)."""
         mock_get_rank.return_value = 0
         mock_get_format.return_value = ACL_FORMAT_FRACTAL_ND
-
+        mock_filter.side_effect = lambda x: x
         mock_tensor = MagicMock(spec=torch.Tensor)
 
         model = MockModel()
