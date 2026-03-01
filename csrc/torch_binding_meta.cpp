@@ -431,6 +431,33 @@ void transpose_kv_cache_by_block_meta(
     return;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+npu_copy_and_expand_eagle_inputs_meta(
+    const at::Tensor &target_token_ids,
+    const at::Tensor &target_positions,
+    const at::Tensor &next_token_ids,
+    const at::Tensor &query_start_loc,
+    const at::Tensor &query_end_loc,
+    int64_t padding_token_id,
+    int64_t parallel_drafting_token_id,
+    int64_t num_padding_slots_per_request,
+    bool shift_input_ids,
+    int64_t total_draft_tokens)
+{
+    int64_t total_input_tokens = target_token_ids.size(0);
+    int64_t num_reqs = query_start_loc.size(0) - 1;
+
+    at::Tensor out_input_ids = at::empty({total_draft_tokens}, target_token_ids.options());
+    at::Tensor out_positions = at::empty({total_draft_tokens}, target_token_ids.options());
+    at::Tensor out_is_rejected_token_mask = at::empty({total_draft_tokens}, target_token_ids.options().dtype(at::kChar));
+    at::Tensor out_is_masked_token_mask = at::empty({total_draft_tokens}, target_token_ids.options().dtype(at::kChar));
+    at::Tensor out_new_token_indices = at::empty({num_reqs * num_padding_slots_per_request}, target_token_ids.options());
+    at::Tensor out_hidden_state_mapping = at::empty({total_input_tokens}, target_token_ids.options());
+
+    return {out_input_ids, out_positions, out_is_rejected_token_mask, out_is_masked_token_mask,
+            out_new_token_indices, out_hidden_state_mapping};
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -471,5 +498,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
+    // CopyAndExpandEagleInputs
+    ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
 }
 }
