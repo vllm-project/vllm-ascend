@@ -245,9 +245,11 @@ def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="loc
     return aisbench_results
 
 
-def get_TTFT(result):
-    TTFT = result[0][0].loc["TTFT", "Average"][:-3]
-    return float(TTFT)
+def get_TTFT(results):
+    TTFT = []
+    for i in range(len(results)):
+        TTFT.append(float(results[i][0].loc["TTFT", "Average"][:-3]))
+    return TTFT
 
 
 temp_dir = tempfile.gettempdir()

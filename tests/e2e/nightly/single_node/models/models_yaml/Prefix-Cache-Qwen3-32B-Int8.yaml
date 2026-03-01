@@ -1,0 +1,64 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "prefix-cache-qwen3-32b-w8a8"
+    model: "vllm-ascend/Qwen3-32B-W8A8"
+    envs:
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--reasoning-parser"
+      - "qwen3"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "256"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--additional-config"
+      - '{"enable_weight_nz_layout": true}'
+    test_content:
+      - "TTFT_comparison"
+    benchmarks:
+      warm_up:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in1024-bs210
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 210
+        max_out_len: 2
+        batch_size: 1000
+        baseline: 0
+        threshold: 0.97
+      prefix0:
+        case_type: performance
+        dataset_path: vllm-ascend/prefix0-in3500-bs210
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 210
+        max_out_len: 1500
+        batch_size: 48
+        baseline: 1
+        threshold: 0.97
+      prefix75:
+        case_type: performance
+        dataset_path: vllm-ascend/prefix75-in3500-bs210
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 210
+        max_out_len: 1500
+        batch_size: 48
+        baseline: 1
+        threshold: 0.97

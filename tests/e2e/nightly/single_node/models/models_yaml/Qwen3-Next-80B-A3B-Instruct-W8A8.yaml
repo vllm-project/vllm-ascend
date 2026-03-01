@@ -1,0 +1,45 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3-Next-80B-A3B-Instruct-W8A8"
+    model: "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8"
+    envs:
+      OMP_NUM_THREADS: "10"
+      OMP_PROC_BIND: "false"
+      HCCL_BUFFSIZE: "1024"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--async-scheduling"
+      - "--no-enable-prefix-caching"
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-model-len"
+      - "40960"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "32"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.65"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes": [32]}'
+    benchmarks:
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 32768
+        batch_size: 32
+        baseline: 95
+        threshold: 5
