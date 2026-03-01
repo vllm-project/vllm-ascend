@@ -123,5 +123,7 @@ jobs:
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           # ignore test_dispatch_ffn_combine until the test is fixed
+          git fetch origin pull/6655/head:pr-6655
+          git checkout pr-6655
           pytest -sv ${{ inputs.tests }} \
           --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
