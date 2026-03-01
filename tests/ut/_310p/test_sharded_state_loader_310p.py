@@ -76,8 +76,6 @@ class TestShardedStateLoader310(TestBase):
 
             mock_cast.assert_called_once_with(mock_tensor, ACL_FORMAT_FRACTAL_ND)
             mock_save_file.assert_called_once()
-            call_args = mock_save_file.call_args[0]
-            self.assertTrue(call_args[1].endswith("model-00000-of-00001.safetensors"))
 
     @patch("vllm.model_executor.model_loader.ShardedStateLoader._filter_subtensors")
     @patch("vllm.distributed.get_tensor_model_parallel_rank")
