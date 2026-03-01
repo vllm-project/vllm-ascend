@@ -349,6 +349,11 @@ class FusedMC2CommImpl(MoECommMethod):
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert expert_map is not None, "expert_map cannot be None."
             group_list_type = 1
+            # Compute global_bs dynamically based on actual hidden_states shape.
+            # global_bs must be 0 or max_bs_per_rank * ep_world_size.
+            num_tokens = hidden_states.shape[0]
+            num_tokens_per_tp_rank = (num_tokens + self.token_dispatcher.tp_size - 1) // self.token_dispatcher.tp_size
+            global_bs = num_tokens_per_tp_rank * self.token_dispatcher.ep_world_size
             out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
                 x=hidden_states,
                 expert_ids=topk_ids,
@@ -362,7 +367,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 ep_rank_size=self.token_dispatcher.ep_world_size,
                 ep_rank_id=self.token_dispatcher.ep_rank_id,
                 moe_expert_num=self.moe_config.num_experts,
-                global_bs=self.token_dispatcher.global_bs,
+                global_bs=global_bs,
             )
         else:
             raise ValueError(f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
