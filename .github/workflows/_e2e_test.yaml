@@ -129,6 +129,12 @@ jobs:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           DEST="/vllm-workspace/vllm-ascend"
+          # rebase commits
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git fetch origin ${{ github.base_ref }}
+          git rebase origin/${{ github.base_ref }}
+
           IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
           cp -rT . "${DEST}/"
           if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
@@ -216,6 +222,12 @@ jobs:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           DEST="/vllm-workspace/vllm-ascend"
+          # rebase commits
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git fetch origin ${{ github.base_ref }}
+          git rebase origin/${{ github.base_ref }}
+
           IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
           cp -rT . "${DEST}/"
           if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
@@ -301,6 +313,12 @@ jobs:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           DEST="/vllm-workspace/vllm-ascend"
+          # rebase commits
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git fetch origin ${{ github.base_ref }}
+          git rebase origin/${{ github.base_ref }}
+
           IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
           cp -rT . "${DEST}/"
           if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
@@ -385,6 +403,12 @@ jobs:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           DEST="/vllm-workspace/vllm-ascend"
+          # rebase commits
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git fetch origin ${{ github.base_ref }}
+          git rebase origin/${{ github.base_ref }}
+
           IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
           cp -rT . "${DEST}/"
           if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
@@ -477,6 +501,12 @@ jobs:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           DEST="/vllm-workspace/vllm-ascend"
+          # rebase commits
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git fetch origin ${{ github.base_ref }}
+          git rebase origin/${{ github.base_ref }}
+
           IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
           cp -rT . "${DEST}/"
           if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
@@ -557,6 +587,12 @@ jobs:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           DEST="/vllm-workspace/vllm-ascend"
+          # rebase commits
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git fetch origin ${{ github.base_ref }}
+          git rebase origin/${{ github.base_ref }}
+
           IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
           cp -rT . "${DEST}/"
           if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
@@ -638,6 +674,12 @@ jobs:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           DEST="/vllm-workspace/vllm-ascend"
+          # rebase commits
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git fetch origin ${{ github.base_ref }}
+          git rebase origin/${{ github.base_ref }}
+
           IMAGE_SHA=$(git -C "${DEST}" log -1 --format=%H 2>/dev/null || echo "")
           cp -rT . "${DEST}/"
           if [ -n "$IMAGE_SHA" ] && git cat-file -e "${IMAGE_SHA}" 2>/dev/null; then
