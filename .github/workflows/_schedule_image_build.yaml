@@ -96,7 +96,8 @@ jobs:
         fi
         # Replace / with - for use in image tags
         branch="${branch//\//-}"
-        echo "ref=quay.io/ascend/vllm-ascend:${branch}-${{ inputs.suffix }}" >> $GITHUB_OUTPUT
+        suffix="${{ inputs.suffix }}"
+        echo "ref=quay.io/ascend/vllm-ascend:${branch}${suffix:+-${suffix}}" >> $GITHUB_OUTPUT
 
     - name: Build and push
       uses: docker/build-push-action@v6
