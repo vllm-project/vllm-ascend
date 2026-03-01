@@ -315,6 +315,14 @@ add feature
 update code
 ```
 
+### Pull Request Template
+
+When creating a PR, please follow the template in `.github/PULL_REQUEST_TEMPLATE.md` and ensure the following sections are completed:
+
+- **What this PR does / why we need it?** - Clearly describe the changes and their purpose
+- **Does this PR introduce _any_ user-facing change?** - Indicate if there are any user-visible changes
+- **How was this patch tested?** - Describe the testing methodology and verification results
+
 ---
 
 ## Review Checklist
