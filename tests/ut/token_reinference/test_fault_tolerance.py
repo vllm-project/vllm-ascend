@@ -71,7 +71,7 @@ class TestFaultTolerance(TestBase):
             model_runner=self.model_runner,
             execute_model_func=self.execute_model_func,
         )
-
+        self.ft.recovery_handler_manager = MagicMock()
         FaultTolerance._recovery_group = None
         FaultTolerance._sync_group = None
 
@@ -140,7 +140,7 @@ class TestFaultTolerance(TestBase):
         self.ft.recovery_handler_manager.find_handler.return_value = mock_handler
         self.ft.stop_event = MagicMock()
         mock_clean.return_value = RecoveryStatus.SUCCESS
-        mock_coord.side_effect = [FaultAction.RECOMPUTE, RecoveryStatus.SUCCESS]
+        mock_coord.side_effect = [FaultAction.RECOMPUTE, FaultAction.RECOMPUTE]
         ctx = MagicMock(spec=RecoveryContext)
 
         result = self.ft._handle_exception(ctx)
@@ -186,17 +186,17 @@ class TestFaultTolerance(TestBase):
 
         local_status = RecoveryStatus.SUCCESS
         all_statuses = [RecoveryStatus.SUCCESS, RecoveryStatus.FAILED]
-        decisions = [FaultAction.RECOMPUTE, FaultAction.RETURN]
+        decisions = [FaultAction.RETURN, FaultAction.RAISE_EXCEPTION]
 
         with patch.object(self.ft, '_gather_statuses', return_value=all_statuses) as mock_gather, \
                 patch.object(self.ft, '_analyze_global_status', return_value=decisions) as mock_analyze, \
-                patch.object(self.ft, '_scatter_ft_actions', return_value=FaultAction.RECOMPUTE) as mock_scatter:
+                patch.object(self.ft, '_scatter_ft_actions', return_value=FaultAction.RETURN) as mock_scatter:
             result = self.ft._coordinate_recovery(local_status)
 
         mock_gather.assert_called_once_with(local_status)
         mock_analyze.assert_called_once_with(all_statuses)
         mock_scatter.assert_called_once_with(decisions)
-        self.assertTrue(torch.equal(result, FaultAction.RECOMPUTE))
+        self.assertTrue(torch.equal(result, FaultAction.RETURN))
 
     def test_coordinate_recovery_multi_node_non_rank0(self):
         self.mock_dist_is_initialized.return_value = True
@@ -208,13 +208,13 @@ class TestFaultTolerance(TestBase):
 
         with patch.object(self.ft, '_gather_statuses', return_value=[]) as mock_gather, \
                 patch.object(self.ft, '_analyze_global_status') as mock_analyze, \
-                patch.object(self.ft, '_receive_ft_actions', return_value=FaultAction.RETURN) as mock_receive:
+                patch.object(self.ft, '_receive_ft_actions', return_value=FaultAction.RECOMPUTE) as mock_receive:
             result = self.ft._coordinate_recovery(local_status)
 
         mock_gather.assert_called_once_with(local_status)
         mock_analyze.assert_not_called()
         mock_receive.assert_called_once()
-        self.assertTrue(torch.equal(result, FaultAction.RETURN))
+        self.assertTrue(torch.equal(result, FaultAction.RECOMPUTE))
 
     def test_clean_fault_queue(self):
         q = queue.Queue()
@@ -224,12 +224,9 @@ class TestFaultTolerance(TestBase):
         self.ft._clean_fault_queue()
         self.assertTrue(q.empty())
 
-    @patch('torch_npu.npu.restart_device')
-    @patch('torch.distributed.reinit_process_group')
     @patch.object(FaultTolerance, '_clean_fault_queue')
     @patch.object(FaultTolerance, '_restore_essential_state')
-    def test_clean_fault_success_dummy_run_true(self, mock_restore, mock_clean_q,
-                                                mock_reinit, mock_restart):
+    def test_clean_fault_success_dummy_run_true(self, mock_restore, mock_clean_q):
         ctx = MagicMock()
         ctx.is_dummy_run = True
         ctx.back_up = {'some': 'data'}
@@ -238,16 +235,13 @@ class TestFaultTolerance(TestBase):
 
         self.assertTrue(torch.equal(status, RecoveryStatus.SUCCESS))
         mock_clean_q.assert_called_once()
-        mock_restart.assert_called_once_with(0)
-        mock_reinit.assert_called_once_with(group=None, rebuild_link=False)
+        self.mock_restart_device.assert_called_once_with(0)
+        self.mock_reinit_process_group.assert_called_once_with(group=None, rebuild_link=False)
         mock_restore.assert_called_once_with(ctx.back_up)
 
-    @patch('torch_npu.npu.restart_device')
-    @patch('torch.distributed.reinit_process_group')
     @patch.object(FaultTolerance, '_clean_fault_queue')
     @patch.object(FaultTolerance, '_restore_essential_state')
-    def test_clean_fault_success_dummy_run_false(self, mock_restore, mock_clean_q,
-                                                 mock_reinit, mock_restart):
+    def test_clean_fault_success_dummy_run_false(self, mock_restore, mock_clean_q):
         ctx = MagicMock()
         ctx.is_dummy_run = False
 
@@ -255,12 +249,12 @@ class TestFaultTolerance(TestBase):
 
         self.assertTrue(torch.equal(status, RecoveryStatus.SUCCESS))
         mock_clean_q.assert_called_once()
-        mock_restart.assert_called_once()
-        mock_reinit.assert_called_once()
+        self.mock_restart_device.assert_called_once()
+        self.mock_reinit_process_group.assert_called_once()
         mock_restore.assert_not_called()
 
-    @patch('torch_npu.npu.restart_device', side_effect=Exception("device restart failed"))
     def test_clean_fault_exception(self, mock_restart):
+        self.mock_restart_device.side_effect = Exception("device restart failed")
         ctx = MagicMock()
         status = self.ft._clean_fault(ctx)
         self.assertTrue(torch.equal(status, RecoveryStatus.FAILED))
@@ -273,7 +267,7 @@ class TestFaultTolerance(TestBase):
             self.ft._all_gather_for_recovery_group()
             mock_all_gather.assert_called_once()
             args, kwargs = mock_all_gather.call_args
-            self.assertEqual(len(args[1]), 2)  # gather_list length
+            self.assertEqual(len(args[0]), 2)
             self.assertEqual(kwargs['group'], FaultTolerance._recovery_group)
 
     def test_all_gather_for_recovery_group_exception(self):
@@ -287,14 +281,13 @@ class TestFaultTolerance(TestBase):
     def test_all_gather_for_sync_group(self):
         FaultTolerance._sync_group = MagicMock()
         self.ft.world_size = 2
-        with patch('torch.distributed.all_gather') as mock_all_gather, \
-                patch('torch_npu.npu.synchronize') as mock_sync:
+        with patch('torch.distributed.all_gather') as mock_all_gather:
             self.ft._all_gather_for_sync_group()
             mock_all_gather.assert_called_once()
             args, kwargs = mock_all_gather.call_args
-            self.assertEqual(len(args[1]), 2)
+            self.assertEqual(len(args[0]), 2)
             self.assertEqual(kwargs['group'], FaultTolerance._sync_group)
-            mock_sync.assert_called_once()
+            self.mock_npu_sync.assert_called_once()
 
     def test_gather_statuses_rank0(self):
         self.ft.rank = 0
@@ -344,6 +337,7 @@ class TestFaultTolerance(TestBase):
                 self.assertTrue(torch.equal(r, RecoveryStatus.FAILED))
 
     def test_analyze_global_status_all_success(self):
+        self.ft.world_size = 2
         all_status = [RecoveryStatus.SUCCESS, RecoveryStatus.SUCCESS]
         decisions = self.ft._analyze_global_status(all_status)
         self.assertEqual(len(decisions), 2)
@@ -351,6 +345,7 @@ class TestFaultTolerance(TestBase):
             self.assertTrue(torch.equal(d, FaultAction.RECOMPUTE))
 
     def test_analyze_global_status_all_failure(self):
+        self.ft.world_size = 2
         all_status = [RecoveryStatus.FAILED, RecoveryStatus.FAILED]
         decisions = self.ft._analyze_global_status(all_status)
         self.assertEqual(len(decisions), 2)
@@ -358,6 +353,7 @@ class TestFaultTolerance(TestBase):
             self.assertTrue(torch.equal(d, FaultAction.RAISE_EXCEPTION))
 
     def test_analyze_global_status_mixed(self):
+        self.ft.world_size = 2
         all_status = [RecoveryStatus.SUCCESS, RecoveryStatus.FAILED]
         decisions = self.ft._analyze_global_status(all_status)
         self.assertEqual(len(decisions), 2)
@@ -365,6 +361,7 @@ class TestFaultTolerance(TestBase):
         self.assertTrue(torch.equal(decisions[1], FaultAction.RAISE_EXCEPTION))
 
     def test_analyze_global_status_unknown(self):
+        self.ft.world_size = 2
         unknown = torch.tensor([999])
         all_status = [RecoveryStatus.SUCCESS, unknown]
         with patch.object(self.mock_logger, 'warning') as mock_warn:
