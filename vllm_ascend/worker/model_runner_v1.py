@@ -2121,6 +2121,20 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
         return attn_metadata, spec_decode_common_attn_metadata
 
+    def _should_build_dummy_attn_metadata(
+        self,
+        force_attention: bool = False,
+        is_profile: bool = False,
+        cudagraph_runtime_mode: CUDAGraphMode | None = None,
+    ) -> bool:
+        """
+        Determine whether attention metadata should be built during dummy_run.
+        SubClass can override this to add custom conditions.
+        """
+        # If force_attention is True, we always capture attention, Otherwise,
+        # it only happens for cudagraph_runtime_mode=FULL.
+        return force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -2224,9 +2238,8 @@ class NPUModelRunner(GPUModelRunner):
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
-        # If force_attention is True, we always capture attention. Otherwise,
-        # it only happens for cudagraph_runtime_mode=FULL.
-        if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        # Build attention metadata for dummy_run
+        if self._should_build_dummy_attn_metadata(force_attention, is_profile, cudagraph_runtime_mode):
             if create_mixed_batch:
                 raise NotImplementedError(
                     "create_mixed_batch is used for warmup deepgemm, vllm-ascend does not need it"

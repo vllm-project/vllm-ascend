@@ -157,9 +157,6 @@ class LlamaXliteModel(XliteModel):
 
 class QwenMoeXliteModel(LlamaXliteModel):
     def initialize(self, runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Model, int, int, torch.dtype]:
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
-            architecture = vllm_config.model_config.architectures[0]
-            raise ValueError(f"{architecture} not support VLLM_ASCEND_ENABLE_NZ = 2!")
         dtype = vllm_config.model_config.dtype
         config = self._build_model_config(vllm_config)
         xlite_model = self._build_model(runnable, vllm_config, config)
@@ -174,7 +171,6 @@ class QwenMoeXliteModel(LlamaXliteModel):
         config = super()._build_model_config(vllm_config)
         hf_config = vllm_config.model_config.hf_text_config
         ep_group = get_ep_group()
-        config.n_layers = hf_config.max_window_layers
         config.n_dense_layers = 0
         config.n_routed_experts = hf_config.num_experts
         config.n_shared_experts = 0
@@ -229,9 +225,8 @@ class XliteWrapper:
 
         rank = torch.distributed.get_rank()
         local_rank = get_world_group().local_rank
-        self.xlite_rt = Runtime(
-            local_rank, 0, rank, get_tensor_model_parallel_world_size(), vllm_config.parallel_config.data_parallel_size
-        )
+        self.data_parallel_size = vllm_config.parallel_config.data_parallel_size
+        self.xlite_rt = Runtime(local_rank, 0, rank, get_tensor_model_parallel_world_size(), self.data_parallel_size)
 
         (self.xlite_model, self.freq_cis, hidden_size, dtype) = xlite_model_init(runnable, vllm_config)
 
@@ -278,7 +273,16 @@ class XliteWrapper:
             AscendAttentionState.SpecDecoding,
         ]
 
-        if not with_prefill or self.full_mode:
+        # Full: graph for prefill and decode
+        # Decode-Only: runnable for prefill, graph for decode
+        if not self.full_mode and self.data_parallel_size > 1:
+            num_tokens = forward_context.batch_descriptor.num_tokens
+            num_reqs = forward_context.batch_descriptor.num_reqs
+            use_xlite_graph = num_reqs is not None and num_tokens <= num_reqs
+        else:
+            use_xlite_graph = not with_prefill or self.full_mode
+
+        if use_xlite_graph:
             # TODO: When vllm_ascend enables graph mode, attn_metadata.num_decodes
             # will be padded in decode requests. Therefore, it is first fixed using
             # num_decode_tokens. However, in the future, when MTP is enabled, there
@@ -299,7 +303,11 @@ class XliteWrapper:
             xlite_attn_metadata.is_prefills = [False] * num_decodes + [True] * num_prefills
             xlite_attn_metadata.block_tables = attn_metadata.block_tables.cpu().tolist()
 
-            h = self.hidden_states[: attn_metadata.num_actual_tokens]
+            # - Non-DP: batch_tokens == current_tokens
+            # - DP: batch_tokens >= current_tokens
+            batch_tokens = forward_context.batch_descriptor.num_tokens
+            current_tokens = attn_metadata.num_actual_tokens
+            h = self.hidden_states[:batch_tokens]
             stream = torch.npu.current_stream().npu_stream
             if inputs_embeds is None:
                 self.xlite_model.forward(
@@ -309,6 +317,6 @@ class XliteWrapper:
                 self.xlite_model.forward_with_inputs_embeds(
                     self.xlite_rt, inputs_embeds, xlite_attn_metadata, self.kv_caches, self.freq_cis, h, stream
                 )
-            return h
+            return h[:current_tokens]
         else:
             return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds)
