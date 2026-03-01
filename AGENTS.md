@@ -270,12 +270,20 @@ Reviewers must verify:
 
 ### Commit Message Format
 
-Follow the [Conventional Commits](https://www.conventionalcommits.org/) format:
+Follow the [Conventional Commits](https://www.conventionalcommits.org/) format and **must include a sign-off**:
+
+```bash
+git commit -s -m "<type>: <summary>" -m "<body - explaining what changed and why>"
+```
+
+Or using the full message format:
 
 ```txt
 <type>: <summary>
 
 <body - explaining what changed and why>
+
+Signed-off-by: Your Name <your.email@example.com>
 ```
 
 **Valid Types**: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`
@@ -341,7 +349,8 @@ Before merging, verify:
 
 ### Commit and PR
 
-- [ ] Commit messages are clear and descriptive
+- [ ] Commit messages are clear and descriptive, following Conventional Commits format
+- [ ] **All commits are signed off** (`git commit -s`)
 - [ ] PR description is complete
 - [ ] All review comments addressed
 
@@ -356,7 +365,8 @@ Before merging, verify:
 5. Make your changes following guidelines in this document
 6. Add tests for new behavior
 7. Run full test suite before committing
-8. Create a PR with clear description
+8. Commit with sign-off: `git commit -s`
+9. Create a PR with clear description
 
 ---
 
