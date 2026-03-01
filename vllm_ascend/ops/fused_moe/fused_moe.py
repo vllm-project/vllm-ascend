@@ -302,6 +302,11 @@ class AscendFusedMoE(FusedMoE):
             )
         if self.dynamic_eplb:
             self.moe_load = torch.zeros(self.local_num_experts, dtype=torch.int64).npu()
+            if eplb_config.policy_type == 3:
+                self.multi_stage = True
+                self.load_counter = torch.tensor(0, dtype=torch.int32, device="npu")
+                self.num_iter = eplb_config.num_iterations_per_update
+                self.moe_load = torch.zeros((self.num_iter, self.local_num_experts), dtype=torch.int32, device="npu")
 
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
@@ -362,6 +367,8 @@ class AscendFusedMoE(FusedMoE):
     def clear_moe_load(self):
         if self.moe_load is not None:
             self.moe_load.zero_()
+        if self.multi_stage:
+            self.load_counter.zero_()
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
         """NOTE(Yizhou): This is to override the parent class method. In `mc2commimpl`,
@@ -485,12 +492,19 @@ class AscendFusedMoE(FusedMoE):
             assert expert_tokens is not None and group_list_type is not None, (
                 "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
             )
-            local_load = (
-                expert_tokens
-                if group_list_type == 1
-                else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-            )
-            self.moe_load.add_(local_load)
+            if self.multi_stage:
+                cur_iter = torch.remainder(self.load_counter, self.num_iter)
+                self.moe_load.index_add_(
+                    dim=0, index=cur_iter, source=expert_tokens.to(torch.int32, non_blocking=True).view(1, -1)
+                )
+                self.load_counter.add_(1)
+            else:
+                local_load = (
+                    expert_tokens
+                    if group_list_type == 1
+                    else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+                )
+                self.moe_load.add_(local_load)
         routed_out = forward_context.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
