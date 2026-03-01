@@ -95,11 +95,7 @@ class MoETokenDispatcher(ABC):
 class TokenDispatcherWithMC2(MoETokenDispatcher):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        device_group = get_mc2_group().device_group
-        # TODO: Try local_rank = ep_group.rank_in_group
-        local_rank = torch.distributed.get_rank(group=device_group)
-        backend = device_group._get_backend(torch.device("npu"))
-        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+        self._moe_all_to_all_group_name: str | None = None
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
@@ -127,6 +123,16 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
         self.global_bs = num_tokens_per_tp_rank * self.ep_world_size
+
+    @property
+    def moe_all_to_all_group_name(self) -> str:
+        if self._moe_all_to_all_group_name is None:
+            device_group = get_mc2_group().device_group
+            # TODO: Try local_rank = ep_group.rank_in_group
+            local_rank = torch.distributed.get_rank(group=device_group)
+            backend = device_group._get_backend(torch.device("npu"))
+            self._moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+        return self._moe_all_to_all_group_name
 
     def get_dispatch_mc2_kwargs(
         self,
@@ -409,10 +415,16 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                 "local_expert_indices must be continuous"
             )
 
-        # TODO: Try local_rank = ep_group.rank_in_group
-        local_rank = torch.distributed.get_rank(group=self.ep_group)
-        backend = self.ep_group._get_backend(torch.device("npu"))
-        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+        self._moe_all_to_all_group_name: str | None = None
+
+    @property
+    def moe_all_to_all_group_name(self) -> str:
+        if self._moe_all_to_all_group_name is None:
+            # TODO: Try local_rank = ep_group.rank_in_group
+            local_rank = torch.distributed.get_rank(group=self.ep_group)
+            backend = self.ep_group._get_backend(torch.device("npu"))
+            self._moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+        return self._moe_all_to_all_group_name
 
     def token_dispatch(
         self,

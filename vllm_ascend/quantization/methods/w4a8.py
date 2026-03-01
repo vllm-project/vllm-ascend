@@ -26,7 +26,6 @@ from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
@@ -203,15 +202,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         if self.new_quant_version and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
-
-        try:
-            device_group = get_mc2_group().device_group
-            # TODO: Try local_rank = ep_group.rank_in_group
-            local_rank = torch.distributed.get_rank(group=device_group)
-            backend = device_group._get_backend(torch.device("npu"))
-            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
-        except AttributeError:
-            self.moe_all_to_all_group_name = ""
 
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
