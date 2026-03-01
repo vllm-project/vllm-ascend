@@ -35,18 +35,32 @@ class MooncakeBackend(Backend):
         self.rank = parallel_config.rank
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
-            transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
-            self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
-            ret = self.store.setup(
-                self.local_seg,
-                self.config.metadata_server,
-                self.config.global_segment_size,
-                self.config.local_buffer_size,
-                self.config.protocol,
-                self.config.device_name,
-                self.config.master_server_address,
-                transfer_engine.get_engine(),
-            )
+            soc_version = get_ascend_device_type()
+            if soc_version in {AscendDeviceType.A2}:
+                transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
+                self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
+                ret = self.store.setup(
+                    self.local_seg,
+                    self.config.metadata_server,
+                    self.config.global_segment_size,
+                    self.config.local_buffer_size,
+                    self.config.protocol,
+                    self.config.device_name,
+                    self.config.master_server_address,
+                    transfer_engine.get_engine(),
+                )
+            else:
+                self.local_seg = local_hostname
+                ret = self.store.setup(
+                    self.local_seg,
+                    self.config.metadata_server,
+                    self.config.global_segment_size,
+                    0,
+                    self.config.protocol,
+                    self.config.device_name,
+                    self.config.master_server_address,
+                )
+
         if ret != 0:
             msg = "Initialize mooncake failed."
             logger.error(msg)
@@ -57,21 +71,18 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-        global_te.register_buffer(ptrs, lengths)
+         soc_version = get_ascend_device_type()
+        if soc_version in {AscendDeviceType.A2}:
+            global_te.register_buffer(ptrs, lengths)
+        else:
+            pass
 
     def exists(self, keys: list[str]) -> list[int]:
         return self.store.batch_is_exist(keys)
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         try:
-            soc_version = get_ascend_device_type()
-            if soc_version in {AscendDeviceType.A2}:
-                res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
-            else:
-                config = ReplicateConfig()
-                config.preferred_segment = self.local_seg
-                config.prefer_alloc_in_same_node = True
-                res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
+            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
             for value in res:
                 if value < 0:
                     logger.error(f"Failed to put key {keys},res:{res}")
@@ -80,11 +91,7 @@ class MooncakeBackend(Backend):
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         try:
-            soc_version = get_ascend_device_type()
-            if soc_version in {AscendDeviceType.A2}:
-                res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
-            else:
-                res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes, True)
+            res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             for value in res:
                 if value < 0:
                     logger.error(f"Failed to get key {keys}, res:{res}")
