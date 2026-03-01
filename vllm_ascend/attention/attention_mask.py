@@ -73,13 +73,15 @@ class AttentionMaskBuilder:
             self.pcp_mla_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=dtype), 1)
         return self.pcp_mla_mask
 
-    def get_swa_mask(self, dtype: torch.dtype, sliding_window):
-        if self.swa_mask is None or self.swa_mask.dtype != dtype:
-            if sliding_window is not None:
-                mask = torch.ones(2048, 2048, dtype=torch.bool)
-                triu_mask = torch.triu(mask, diagonal=1).to(self.device)
-                tril_mask = torch.tril(mask, -sliding_window).to(self.device)
-                self.swa_mask = triu_mask + tril_mask
+    def get_swa_mask(self, seq_lens: torch.Tensor, s2: int, left_context=512):
+        if seq_lens.dim() == 1:
+            seq_lens = seq_lens.unsqueeze(1)
+        b = seq_lens.size(0)
+        device = seq_lens.device
+        indices = torch.arange(s2, device=device).unsqueeze(0).expand(b, -1)
+        start_indices = torch.clamp(seq_lens - left_context, min=0)
+        mask = (indices < start_indices) | (indices >= seq_lens)
+        self.swa_mask = mask.unsqueeze(1).npu()
         return self.swa_mask
 
     def get_attention_mask(self, model_config: ModelConfig):

@@ -22,7 +22,7 @@ from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, swiglustep_and_mul
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
@@ -266,6 +266,21 @@ def quant_apply_mlp(
     return hidden_states
 
 
+def apply_moe_activation(
+    activation: str,
+    gate_up_out: torch.Tensor,
+) -> torch.Tensor:
+    if activation == "silu":
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+
+    elif activation == "swiglustep":
+        gate_up_out = swiglustep_and_mul(gate_up_out, limit=7.0)
+
+    else:
+        raise ValueError(f"Unsupported FusedMoE activation: {activation}")
+    return gate_up_out
+
+
 def unquant_apply_mlp(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -292,11 +307,15 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    if activation == "swigluoai":
+    # apply_moe_activation expects `str`, but `activation` can be None.
+    # Default to "silu" to match fused_moe default behavior.
+    act: str = activation or "silu"
+
+    if act == "swigluoai":
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     else:
-        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+        gate_up_out = apply_moe_activation(act, gate_up_out)
 
     if topk_scales is not None:
         gate_up_out *= topk_scales

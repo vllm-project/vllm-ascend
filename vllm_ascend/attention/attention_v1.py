@@ -292,9 +292,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         swa_mask = None
         is_swa = hasattr(self.model_config.hf_text_config, "sliding_window")
         if self.model_config is not None and is_swa:
-            swa_mask = self.attn_mask_builder.get_swa_mask(
-                self.model_config.dtype, self.model_config.hf_text_config.sliding_window
-            )
+            block_size = 128
+            max_model_len = block_table.shape[-1] * block_size
+            swa_mask = self.attn_mask_builder.get_swa_mask(seq_lens, max_model_len)
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -738,7 +738,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_key_value_heads=self.num_kv_heads,
             input_layout="BSH",
             block_size=block_size,
-            pre_tokens=self.sliding_window,
+            atten_mask=attn_metadata.swa_mask,
+            sparse_mode=0,
             scale=self.scale,
             block_table=attn_metadata.block_tables,
             actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
@@ -782,6 +783,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = key[:num_tokens]
             value = value[:num_tokens]
         # Get workspace from cache or calculate it if not present.
+
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
@@ -815,6 +817,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query=query,
                 key=key,
                 value=value,
+                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
+                next_tokens=0 if self.sliding_window is not None else SWA_INT_MAX,
                 atten_mask=attn_metadata.attn_mask,
                 block_table=block_table,
                 input_layout="TND",
@@ -824,7 +828,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale=self.scale,
-                sparse_mode=3,
+                sparse_mode=4 if self.sliding_window is not None else 3,
             )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
