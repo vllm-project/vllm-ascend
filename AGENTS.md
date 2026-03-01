@@ -321,7 +321,10 @@ When creating a PR, please follow the template in `.github/PULL_REQUEST_TEMPLATE
 
 - **What this PR does / why we need it?** - Clearly describe the changes and their purpose
 - **Does this PR introduce _any_ user-facing change?** - Indicate if there are any user-visible changes
-- **How was this patch tested?** - Describe the testing methodology and verification results
+- **How was this patch tested?** - Describe how you tested the changes. Examples:
+  - Unit tests added/updated: list the test files
+  - Manual testing: provide the test steps and commands
+  - CI testing: indicate if only CI verification is needed
 
 ---
 
