@@ -1836,8 +1836,8 @@ class NPUModelRunner(GPUModelRunner):
         has_lora = len(self.input_batch.lora_id_to_lora_request) > 0 if force_has_lora is None else force_has_lora
 
         # ruff: noqa: E731
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -2524,15 +2524,23 @@ class NPUModelRunner(GPUModelRunner):
                 assert len(layer_kv_cache_spec[layer_name]) <= 1, (
                     "vLLM-Ascned does not support multi kv_cache_spec on one layer now."
                 )
+        # If some tensors are shared by linear layers and attention layers,
+        # the same tensor format must be maintained even if some layers
+        # have only linear or attention layers, for example, the mtp layer.
+        use_attn_linear_hybrid = False
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            use_mamba = False
+            use_mamba, use_attn = False, False
             for layer_name in kv_cache_tensor.shared_by:
                 if isinstance(layer_kv_cache_spec[layer_name][0], MambaSpec):
                     use_mamba = True
+                if isinstance(layer_kv_cache_spec[layer_name][0], AttentionSpec):
+                    use_attn = True
+            if use_mamba and use_attn:
+                use_attn_linear_hybrid = True
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                if "linear_attn" in layer_name and use_mamba and layer_name not in kv_cache_raw_tensors:
-                    # for mamba linear attention
+                if ("linear_attn" in layer_name or use_attn_linear_hybrid) and layer_name not in kv_cache_raw_tensors:
+                    # for mamba linear attention or attn-linear hybrid
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
                     else:
@@ -2665,6 +2673,11 @@ class NPUModelRunner(GPUModelRunner):
                     elif self.use_hybrid_blocks and layer_name in attn_linear_hybrid_layers:
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
                         sum_page_size_bytes = raw_k_tensor.numel()
+                    elif self.use_hybrid_blocks and layer_name not in attn_linear_hybrid_layers:
+                        # Currently, we ensure that the same kvcache format is used even if there 
+                        # is no shared layer, such as the full attention mtp layer of qwen3.5, etc.
+                        raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
+                        sum_page_size_bytes = raw_k_tensor.numel()
                     else:
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
                             layer_name
@@ -2695,6 +2708,14 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_spec.head_size,
                         )
                         if layer_name in attn_linear_hybrid_layers:
+                            attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
+                                kv_cache_spec.dtype
+                            )
+                            conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
+                            raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
+                            raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
+                            raw_v_tensor = raw_kv_tensor[attn_tensor_page_size : attn_tensor_page_size * 2]
+                        else:
                             attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                 kv_cache_spec.dtype
                             )
