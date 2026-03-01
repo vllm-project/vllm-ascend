@@ -719,15 +719,6 @@ def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
-def enable_flash_comm_v1():
-    return (
-        envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-        # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
-        # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
-        or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
-    )
-
-
 def enable_sp_by_pass(vllm_config: VllmConfig):
     return not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.pass_config.enable_sp
 
@@ -739,7 +730,12 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
-        _ENABLE_SP = enable_sp_by_pass(vllm_config) or enable_flash_comm_v1()
+        _ENABLE_SP = (
+            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
+        )
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
@@ -1104,7 +1100,7 @@ def enable_dsa_cp() -> bool:
     is_ds_v32 = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
         vllm_config.model_config.hf_text_config, "index_topk"
     )
-    return bool(is_ds_v32 and enable_flash_comm_v1())
+    return bool(is_ds_v32 and enable_sp())
 
 
 @lru_cache(maxsize=1)
