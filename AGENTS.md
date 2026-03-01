@@ -359,7 +359,8 @@ Before merging, verify:
 
 - [ ] Commit messages are clear and descriptive, following Conventional Commits format
 - [ ] **All commits are signed off** (`git commit -s`)
-- [ ] PR description is complete
+- [ ] PR is created from your fork repository, not directly from the main repository
+- [ ] PR description is complete, following the PR template
 - [ ] All review comments addressed
 
 ---
@@ -374,7 +375,12 @@ Before merging, verify:
 6. Add tests for new behavior
 7. Run full test suite before committing
 8. Commit with sign-off: `git commit -s`
-9. Create a PR with clear description
+9. Push to your fork repository (NOT the main repository):
+   ```bash
+   git remote add myfork https://github.com/YOUR_USERNAME/vllm-ascend.git
+   git push -u myfork your-branch-name
+   ```
+10. Create a PR from your fork to the main repository with clear description
 
 ---
 
