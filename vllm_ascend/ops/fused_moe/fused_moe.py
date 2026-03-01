@@ -639,11 +639,15 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # Execute the gate projection and activation concurrently with the
             # dispatch communication.
             maybe_wait_event(fused_moe_evts.before_dispatch)
+            if enable_sp():
+                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True, True)
             part1_out = self._shared_experts_part1(hidden_states)
             # Execute the down projection concurrently with the combine
             # communication.
             maybe_wait_event(fused_moe_evts.before_combine)
             shared_out = self._shared_experts_part2(hidden_states, part1_out)
+            if enable_sp():
+                shared_out = torch.ops.vllm.maybe_pad_and_reduce(shared_out, True)
 
         # Make sure the default stream waits for the shared experts stream to
         # finish.
