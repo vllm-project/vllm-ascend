@@ -1,13 +1,13 @@
 # mypy: ignore-errors
+import numpy as np
 import vllm.model_executor.models.config
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
-import numpy as np
 
 @classmethod
 def verify_and_update_config(cls, vllm_config) -> None:
@@ -64,8 +64,12 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # and single attn_block
     ssm_block_page_size = int(np.prod(ssm_shape) * get_dtype_size(ssm_dtype))
     conv_block_page_size = int(np.prod(conv_shape) * get_dtype_size(conv_dtype))
-    attn_block_size = block_alignment_bytes * cdiv(ssm_block_page_size, block_alignment_bytes * attn_single_block_page_size)
-    assert attn_single_block_page_size * block_alignment_bytes != ssm_block_page_size, "Cannot align ssm_page_size and attn_page_size."
+    attn_block_size = block_alignment_bytes * cdiv(
+        ssm_block_page_size, block_alignment_bytes * attn_single_block_page_size
+    )
+    assert attn_single_block_page_size * block_alignment_bytes != ssm_block_page_size, (
+        "Cannot align ssm_page_size and attn_page_size."
+    )
 
     # override attention block size if either (a) the
     # user has not set it or (b) the user has set it
@@ -81,7 +85,10 @@ def verify_and_update_config(cls, vllm_config) -> None:
     attn_page_size = cache_config.block_size * 2 * attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
 
     # pad mamba page size for conv_blocks
-    if cache_config.mamba_page_size_padded is None or cache_config.mamba_page_size_padded != attn_page_size + conv_block_page_size:
+    if (
+        cache_config.mamba_page_size_padded is None
+        or cache_config.mamba_page_size_padded != attn_page_size + conv_block_page_size
+    ):
         cache_config.mamba_page_size_padded = attn_page_size + conv_block_page_size
         mamba_padding_pct = 100 * conv_block_page_size / cache_config.mamba_page_size_padded
         logger.info(

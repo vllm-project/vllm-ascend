@@ -1836,8 +1836,8 @@ class NPUModelRunner(GPUModelRunner):
         has_lora = len(self.input_batch.lora_id_to_lora_request) > 0 if force_has_lora is None else force_has_lora
 
         # ruff: noqa: E731
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -2480,7 +2480,6 @@ class NPUModelRunner(GPUModelRunner):
             corresponding memory buffer for KV cache.
         """
         # Initialize the memory buffer for KV cache
-        print(f'{kv_cache_config=}')
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
@@ -2516,11 +2515,23 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_raw_tensors: dict[str, torch.Tensor | torch.Tensor | None] = {}
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
+        layer_kv_cache_spec = {}
+        for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
+            for layer_name in group_kv_cache_spec.layer_names:
+                if layer_name not in layer_kv_cache_spec:
+                    layer_kv_cache_spec[layer_name] = []
+                layer_kv_cache_spec[layer_name].append(group_kv_cache_spec.kv_cache_spec)
+                assert len(layer_kv_cache_spec[layer_name]) <= 1, (
+                    "vLLM-Ascned does not support multi kv_cache_spec on one layer now."
+                )
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            # TODO: REFACTOR ME to sharing hybrid cache
+            use_mamba = False
+            for layer_name in kv_cache_tensor.shared_by:
+                if isinstance(layer_kv_cache_spec[layer_name][0], MambaSpec):
+                    use_mamba = True
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                if "linear_attn" in layer_name:
+                if "linear_attn" in layer_name and use_mamba and layer_name not in kv_cache_raw_tensors:
                     # for mamba linear attention
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
@@ -2530,9 +2541,9 @@ class NPUModelRunner(GPUModelRunner):
                         tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
+                        # shared the kvcache for all shared layers
                         kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "self_attn" in layer_name and len(kv_cache_tensor.shared_by) == 1:
+                elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
                     # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
                     # as it only support the 0-dim of kv_cache is `num_blocks`.
@@ -2585,7 +2596,7 @@ class NPUModelRunner(GPUModelRunner):
                             dsa_k_cache_tensor = self._align_memory(dsa_k_cache_tensor, alignment)[:dsa_k_cache_size]
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
+                        # shared the attn kvcache for all shared layers
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             kv_cache_raw_tensors[layer_name_inner] = (
                                 (k_tensor, v_tensor)
@@ -2620,6 +2631,20 @@ class NPUModelRunner(GPUModelRunner):
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
+        layer_kv_cache_spec = {}
+        for group in kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                layer_kv_cache_spec[layer_name] = group.kv_cache_spec
+        attn_linear_hybrid_layers = []
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            has_mamba, has_attn = False, False
+            for layer_name in kv_cache_tensor.shared_by:
+                if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
+                    has_mamba = True
+                elif isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
+                    has_attn = True
+            if has_mamba and has_attn:
+                attn_linear_hybrid_layers.extend(kv_cache_tensor.shared_by)
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -2637,7 +2662,7 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                         assert raw_dsa_k_tensor is not None
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel() + raw_dsa_k_tensor.numel()
-                    elif self.use_hybrid_blocks:
+                    elif self.use_hybrid_blocks and layer_name in attn_linear_hybrid_layers:
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
                         sum_page_size_bytes = raw_k_tensor.numel()
                     else:
@@ -2669,11 +2694,14 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size,
                         )
-                        attn_tensor_page_size = int(np.prod(kv_cache_shape[1: ])) * get_dtype_size(kv_cache_spec.dtype)
-                        conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
-                        raw_kv_tensor = raw_k_tensor[conv_block_padding_size: ]
-                        raw_k_tensor = raw_kv_tensor[: attn_tensor_page_size]
-                        raw_v_tensor = raw_kv_tensor[attn_tensor_page_size: attn_tensor_page_size * 2]
+                        if layer_name in attn_linear_hybrid_layers:
+                            attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
+                                kv_cache_spec.dtype
+                            )
+                            conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
+                            raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
+                            raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
+                            raw_v_tensor = raw_kv_tensor[attn_tensor_page_size : attn_tensor_page_size * 2]
                     else:
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                             num_blocks, kv_cache_spec.block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
