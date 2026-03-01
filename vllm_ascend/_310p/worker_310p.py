@@ -14,7 +14,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
 import torch_npu
 from vllm.logger import logger
 
@@ -30,6 +29,23 @@ class NPUWorker310(NPUWorker):
         init_workspace_manager(self.device, num_ubatches=1)
 
         self.model_runner = NPUModelRunner310(self.vllm_config, self.device)
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: str | None = None,
+        max_size: int | None = None,
+    ) -> None:
+        from vllm_ascend._310p.sharded_state_loader_310p import ShardedStateLoader310
+
+        ShardedStateLoader310.save_model(
+            self.model_runner.model,
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
+
+        ShardedStateLoader310.generate_quant_description(self.model_runner.model, path)
 
     def _warm_up_atb(self):
         # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops
