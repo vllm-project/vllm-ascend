@@ -253,7 +253,7 @@ class TestFaultTolerance(TestBase):
         self.mock_reinit_process_group.assert_called_once()
         mock_restore.assert_not_called()
 
-    def test_clean_fault_exception(self, mock_restart):
+    def test_clean_fault_exception(self):
         self.mock_restart_device.side_effect = Exception("device restart failed")
         ctx = MagicMock()
         status = self.ft._clean_fault(ctx)
@@ -360,7 +360,7 @@ class TestFaultTolerance(TestBase):
         self.assertTrue(torch.equal(decisions[0], FaultAction.RETURN))
         self.assertTrue(torch.equal(decisions[1], FaultAction.RAISE_EXCEPTION))
 
-    def test_analyze_global_status_unknown(self):
+        def test_analyze_global_status_unknown(self):
         self.ft.world_size = 2
         unknown = torch.tensor([999])
         all_status = [RecoveryStatus.SUCCESS, unknown]
@@ -369,12 +369,15 @@ class TestFaultTolerance(TestBase):
         self.assertEqual(len(decisions), 2)
         self.assertTrue(torch.equal(decisions[0], FaultAction.RETURN))
         self.assertTrue(torch.equal(decisions[1], FaultAction.RAISE_EXCEPTION))
-        mock_warn.assert_called_once()
+        self.assertEqual(mock_warn.call_count, 2)
 
     def test_scatter_ft_actions(self):
         ft_actions = [torch.tensor([FaultAction.RECOMPUTE]), torch.tensor([FaultAction.RETURN])]
         FaultTolerance._recovery_group = MagicMock()
         with patch('torch.distributed.scatter') as mock_scatter:
+            def scatter_side_effect(recv_tensor, *args, **kwargs):
+                recv_tensor.copy_(torch.tensor([FaultAction.RECOMPUTE]))
+            mock_scatter.side_effect = scatter_side_effect
             result = self.ft._scatter_ft_actions(ft_actions)
             mock_scatter.assert_called_once_with(
                 ANY,
@@ -382,19 +385,25 @@ class TestFaultTolerance(TestBase):
                 src=0,
                 group=FaultTolerance._recovery_group
             )
-            self.assertTrue(torch.equal(result, torch.tensor([0])))
+            self.assertTrue(torch.equal(result, torch.tensor([FaultAction.RECOMPUTE])))
 
     def test_receive_ft_actions(self):
         FaultTolerance._recovery_group = MagicMock()
         with patch('torch.distributed.scatter') as mock_scatter:
+            def scatter_side_effect(recv_tensor, *args, **kwargs):
+                recv_tensor.copy_(torch.tensor([FaultAction.RETURN]))
+
+            mock_scatter.side_effect = scatter_side_effect
+
             result = self.ft._receive_ft_actions()
+
             mock_scatter.assert_called_once_with(
                 ANY,
                 scatter_list=None,
                 src=0,
                 group=FaultTolerance._recovery_group
             )
-            self.assertTrue(torch.equal(result, torch.tensor([0])))
+            self.assertTrue(torch.equal(result, torch.tensor([FaultAction.RETURN])))
 
     def test_generate_scheduler_output_key_normal(self):
         mock_out = MagicMock()
@@ -439,7 +448,8 @@ class TestFaultTolerance(TestBase):
         self.assertEqual(result, expected_hash)
 
     def test_create_essential_state_backup_full(self):
-        # 设置 model_runner.requests
+        import numpy as np
+
         self.model_runner.requests = {
             'req1': MagicMock(
                 output_token_ids=[1, 2, 3],
@@ -447,7 +457,7 @@ class TestFaultTolerance(TestBase):
                 block_ids=(MagicMock(), MagicMock())
             )
         }
-        # 设置 input_batch
+
         self.model_runner.input_batch = MagicMock()
         ib = self.model_runner.input_batch
         ib._req_ids = ['r1']
@@ -457,14 +467,14 @@ class TestFaultTolerance(TestBase):
         ib.block_table.block_tables = [MagicMock(num_blocks_per_row=[4, 5])]
         ib.batch_update_builder._removed = [6]
         ib.batch_update_builder.added = [7]
-        ib.token_ids_cpu = [8]
-        ib.num_tokens = 9
-        ib.num_tokens_no_spec = 10
-        ib.num_computed_tokens_cpu = [11]
-        ib.num_accepted_tokens_cpu = [12]
+
+        ib.token_ids_cpu = np.array([8], dtype=np.int32)
+        ib.num_tokens = np.array([9], dtype=np.int32)
+        ib.num_tokens_no_spec = np.array([10], dtype=np.int32)
+        ib.num_computed_tokens_cpu = np.array([11], dtype=np.int32)
+        ib.num_accepted_tokens_cpu = np.array([12], dtype=np.int32)
         ib.prev_sampled_token_ids = torch.tensor([13])
 
-        # 设置 eplb_updator
         self.model_runner.eplb_updator = MagicMock(
             update_info_all={'info': 'test'},
             reqs=['r1'],
@@ -473,21 +483,17 @@ class TestFaultTolerance(TestBase):
 
         backup = self.ft._create_essential_state_backup('arg', kw='val')
 
-        # 验证 args/kwargs
         self.assertEqual(backup['args'], ('arg',))
         self.assertEqual(backup['kwargs'], {'kw': 'val'})
 
-        # 验证 generator_state
         self.assertTrue(torch.equal(backup['generator_state'], torch.tensor([1, 2, 3])))
         self.mock_get_rng_state.assert_called_once()
 
-        # 验证 requests
         req_backup = backup['requests_essential']['req1']
         self.assertEqual(req_backup['output_token_ids'], [1, 2, 3])
         self.assertEqual(req_backup['num_computed_tokens'], 5)
         self.assertEqual(len(req_backup['block_ids']), 2)
 
-        # 验证 input_batch
         self.assertEqual(backup['_req_ids'], ['r1'])
         self.assertEqual(backup['req_output_token_ids'], [[1], [2]])
         self.assertEqual(backup['req_id_to_index'], {'r1': 0})
@@ -495,20 +501,21 @@ class TestFaultTolerance(TestBase):
         self.assertEqual(backup['num_blocks_per_row'], [[4, 5]])
         self.assertEqual(backup['_removed'], [6])
         self.assertEqual(backup['added'], [7])
-        self.assertEqual(backup['token_ids_cpu'], [8])
-        self.assertEqual(backup['num_tokens'], 9)
-        self.assertEqual(backup['num_tokens_no_spec'], 10)
-        self.assertEqual(backup['num_computed_tokens_cpu'], [11])
-        self.assertEqual(backup['num_accepted_tokens_cpu'], [12])
+        self.assertEqual(backup['token_ids_cpu'].tolist(), [8])
+        self.assertEqual(backup['num_tokens'].tolist(), [9])
+        self.assertEqual(backup['num_tokens_no_spec'].tolist(), [10])
+        self.assertEqual(backup['num_computed_tokens_cpu'].tolist(), [11])
+        self.assertEqual(backup['num_accepted_tokens_cpu'].tolist(), [12])
         self.assertTrue(torch.equal(backup['prev_sampled_token_ids'], torch.tensor([13])))
 
-        # 验证 eplb
         self.assertEqual(backup['update_info_all'], {'info': 'test'})
         self.assertEqual(backup['reqs'], ['r1'])
         self.assertEqual(backup['cur_iterations'], 2)
 
-    # ---------- 测试 _restore_essential_state ----------
     def test_restore_essential_state_full(self):
+        import numpy as np
+        from types import SimpleNamespace
+
         backup = {
             'args': ('arg',),
             'kwargs': {'kw': 'val'},
@@ -527,46 +534,49 @@ class TestFaultTolerance(TestBase):
             'num_blocks_per_row': [[10, 11]],
             '_removed': [12],
             'added': [13],
-            'token_ids_cpu': [14],
-            'num_tokens': 15,
-            'num_tokens_no_spec': 16,
-            'num_computed_tokens_cpu': [17],
-            'num_accepted_tokens_cpu': [18],
+            'token_ids_cpu': np.array([14], dtype=np.int32),
+            'num_tokens': np.array([15], dtype=np.int32),
+            'num_tokens_no_spec': np.array([16], dtype=np.int32),
+            'num_computed_tokens_cpu': np.array([17], dtype=np.int32),
+            'num_accepted_tokens_cpu': np.array([18], dtype=np.int32),
             'prev_sampled_token_ids': torch.tensor([19]),
             'update_info_all': {'info2': 'test2'},
             'reqs': ['r2'],
             'cur_iterations': 3
         }
 
-        # 构造需要被恢复的对象
         self.model_runner.requests = {'req1': MagicMock()}
-        self.model_runner.input_batch = MagicMock()
+        self.model_runner.input_batch = SimpleNamespace()
         ib = self.model_runner.input_batch
-        ib.block_table.block_tables = [MagicMock(num_blocks_per_row=[0, 0])]
-        ib.batch_update_builder = MagicMock()
+
+        ib._req_ids = []
+        ib.req_output_token_ids = []
+        ib.req_id_to_index = {}
+        ib.spec_token_ids = []
+        ib.block_table = SimpleNamespace()
+        ib.block_table.block_tables = [SimpleNamespace()]
+        ib.block_table.block_tables[0].num_blocks_per_row = []
+        ib.batch_update_builder = SimpleNamespace()
         ib.batch_update_builder._removed = []
         ib.batch_update_builder.added = []
-        ib.token_ids_cpu = [0]
-        ib.num_tokens = 0
-        ib.num_tokens_no_spec = 0
-        ib.num_computed_tokens_cpu = [0]
-        ib.num_accepted_tokens_cpu = [0]
+        ib.token_ids_cpu = np.array([0], dtype=np.int32)
+        ib.num_tokens = np.array([0], dtype=np.int32)
+        ib.num_tokens_no_spec = np.array([0], dtype=np.int32)
+        ib.num_computed_tokens_cpu = np.array([0], dtype=np.int32)
+        ib.num_accepted_tokens_cpu = np.array([0], dtype=np.int32)
         ib.prev_sampled_token_ids = torch.tensor([0])
 
         self.model_runner.eplb_updator = MagicMock()
 
         self.ft._restore_essential_state(backup)
 
-        # 验证 RNG
         self.mock_set_rng_state.assert_called_once_with(torch.tensor([99]))
 
-        # 验证 requests
         req_state = self.model_runner.requests['req1']
         self.assertEqual(req_state.output_token_ids, [4, 5, 6])
         self.assertEqual(req_state.num_computed_tokens, 7)
         self.assertEqual(req_state.block_ids, backup['requests_essential']['req1']['block_ids'])
 
-        # 验证 input_batch
         self.assertEqual(ib._req_ids, ['r2'])
         self.assertEqual(ib.req_output_token_ids, [[8]])
         self.assertEqual(ib.req_id_to_index, {'r2': 1})
@@ -574,14 +584,14 @@ class TestFaultTolerance(TestBase):
         self.assertEqual(ib.block_table.block_tables[0].num_blocks_per_row, [10, 11])
         self.assertEqual(ib.batch_update_builder._removed, [12])
         self.assertEqual(ib.batch_update_builder.added, [13])
-        self.assertEqual(ib.token_ids_cpu, [14])
-        self.assertEqual(ib.num_tokens, 15)
-        self.assertEqual(ib.num_tokens_no_spec, 16)
-        self.assertEqual(ib.num_computed_tokens_cpu, [17])
-        self.assertEqual(ib.num_accepted_tokens_cpu, [18])
+
+        np.testing.assert_array_equal(ib.token_ids_cpu, np.array([14]))
+        np.testing.assert_array_equal(ib.num_tokens, np.array([15]))
+        np.testing.assert_array_equal(ib.num_tokens_no_spec, np.array([16]))
+        np.testing.assert_array_equal(ib.num_computed_tokens_cpu, np.array([17]))
+        np.testing.assert_array_equal(ib.num_accepted_tokens_cpu, np.array([18]))
         self.assertTrue(torch.equal(ib.prev_sampled_token_ids, torch.tensor([19])))
 
-        # 验证 eplb
         eplb = self.model_runner.eplb_updator
         self.assertEqual(eplb.update_info_all, {'info2': 'test2'})
         self.assertEqual(eplb.reqs, ['r2'])
@@ -591,7 +601,6 @@ class TestFaultTolerance(TestBase):
         self.ft._restore_essential_state({})
         self.mock_set_rng_state.assert_not_called()
 
-    # ---------- 测试 _single_node_decision ----------
     def test_single_node_decision(self):
         self.assertTrue(torch.equal(
             self.ft._single_node_decision(RecoveryStatus.SUCCESS),
