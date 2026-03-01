@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config import set_current_vllm_config
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
+from vllm.model_executor.layers.activation import FastGELU, NewGELU, QuickGELU, SiluAndMul
 
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.utils import is_310p as is_310p_hw
@@ -39,6 +39,28 @@ def default_vllm_config():
 
     with set_current_vllm_config(mock_config):
         yield mock_config
+
+
+@patch("torch_npu.npu_gelu", side_effect=lambda x, approximate: x + 1)
+def test_FastGELU_forward(mock_gelu, dummy_tensor, default_vllm_config):
+    layer = FastGELU()
+    out = layer.forward(dummy_tensor)
+
+    expected_out = dummy_tensor + 1
+    assert torch.allclose(out, expected_out)
+
+    mock_gelu.assert_called_once()
+
+
+@patch("torch_npu.npu_gelu", side_effect=lambda x, approximate: x + 1)
+def test_NewGELU_forward(mock_gelu, dummy_tensor, default_vllm_config):
+    layer = NewGELU()
+    out = layer.forward(dummy_tensor)
+
+    expected_out = dummy_tensor + 1
+    assert torch.allclose(out, expected_out)
+
+    mock_gelu.assert_called_once()
 
 
 @patch("torch_npu.npu_fast_gelu", side_effect=lambda x: x + 1)
