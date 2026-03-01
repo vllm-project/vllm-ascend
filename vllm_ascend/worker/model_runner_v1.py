@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import ctypes
 import math
 import sys
 from collections import defaultdict
@@ -151,6 +152,10 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
+# TODO: remove this after python update to 3.12
+NONE_REF_COUNT_THRESHOLDS = 500000
+U32_MAX = 0xFFFFFFFF
 
 
 @dataclass
@@ -1399,6 +1404,11 @@ class NPUModelRunner(GPUModelRunner):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
+
+        # TODO: remove this after python update to 3.12
+        refcountNone = sys.getrefcount(None)
+        if refcountNone < NONE_REF_COUNT_THRESHOLDS:
+            ctypes.c_long.from_address(id(None)).value = U32_MAX - 1
 
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
