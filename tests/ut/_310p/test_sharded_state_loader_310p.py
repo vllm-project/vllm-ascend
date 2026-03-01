@@ -41,8 +41,10 @@ class MockModel(torch.nn.Module):
         self.with_int_weights = with_int_weights
         if with_int_weights:
             self.linear = torch.nn.Linear(10, 10)
-            self.linear.weight = torch.nn.Parameter(torch.randint(-127, 127, (10, 10), dtype=torch.int8))
-            self.linear.bias = torch.nn.Parameter(torch.zeros(10, dtype=torch.int32))
+            self.linear.weight = torch.nn.Parameter(
+                torch.randint(-127, 127, (10, 10), dtype=torch.int8), requires_grad=False
+            )
+            self.linear.bias = torch.nn.Parameter(torch.zeros(10, dtype=torch.int32), requires_grad=False)
         else:
             self.linear = torch.nn.Linear(10, 10)
 
@@ -156,8 +158,10 @@ class TestShardedStateLoader310(TestBase):
             def __init__(self):
                 super().__init__()
                 self.quant_config = quant_config
-                self.int_weight = torch.nn.Parameter(torch.randint(-127, 127, (10, 10), dtype=torch.int8))
-                self.float_weight = torch.nn.Parameter(torch.randn(10, 10))
+                self.int_weight = torch.nn.Parameter(
+                    torch.randint(-127, 127, (10, 10), dtype=torch.int8), requires_grad=False
+                )
+                self.float_weight = torch.nn.Parameter(torch.randn(10, 10), requires_grad=False)
 
         model = MixedModel()
 
