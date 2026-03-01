@@ -462,7 +462,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         assert is_skipped is not None
         return is_skipped
 
-    def maybe_update_config(self, model_name: str) -> None:
+    def maybe_update_config(self, model_name: str, revision: str | None = None) -> None:
         """Load the ModelSlim quantization config from model directory.
 
         This method is called by vllm after get_quant_config() returns
@@ -470,28 +470,38 @@ class AscendModelSlimConfig(QuantizationConfig):
         to bypass vllm's built-in file lookup, we do the actual config loading
         here and provide user-friendly error messages when the config is missing.
 
+        Works with both local directories (``/path/to/model``) and remote
+        repository identifiers (``org/model-name``).  For remote repos the
+        lookup goes through the HuggingFace / ModelScope cache via
+        ``get_model_file`` to fetch the config if not already cached.
+
         Args:
-            model_name: Path to the model directory or model name.
+            model_name: Path to the model directory or HuggingFace /
+                ModelScope repo id.
+            revision: Optional revision (branch, tag, or commit hash) for
+                remote repos.
         """
+        from vllm_ascend.quantization.utils import get_model_file
+
         # If quant_description is already populated (e.g. from from_config()),
         # there is nothing to do.
         if self.quant_description:
             return
 
-        # Try to find and load the ModelSlim config file
-        if os.path.isdir(model_name):
-            config_path = os.path.join(model_name, MODELSLIM_CONFIG_FILENAME)
-            if os.path.isfile(config_path):
-                with open(config_path) as f:
-                    self.quant_description = json.load(f)
-                self._apply_extra_quant_adaptations()
-                return
+        # Try to get the config file (local or remote)
+        config_path = get_model_file(model_name, MODELSLIM_CONFIG_FILENAME, revision=revision)
 
-            # Check if there are any json files at all to help diagnose
+        if config_path is not None:
+            with open(config_path) as f:
+                self.quant_description = json.load(f)
+            self._apply_extra_quant_adaptations()
+            return
+
+        # Collect diagnostic info for the error message
+        json_names: list[str] = []
+        if os.path.isdir(model_name):
             json_files = glob.glob(os.path.join(model_name, "*.json"))
             json_names = [os.path.basename(f) for f in json_files]
-        else:
-            json_names = []
 
         # Config file not found - raise a friendly error message
         raise ValueError(
@@ -504,7 +514,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             + "\n"
             + f"You have enabled '--quantization {ASCEND_QUANTIZATION_METHOD}' "
             + "(ModelSlim quantization),\n"
-            + f"but the model at '{model_name}' does not contain the required\n"
+            + f"but the model '{model_name}' does not contain the required\n"
             + f"quantization config file ('{MODELSLIM_CONFIG_FILENAME}').\n"
             + "\n"
             + "This usually means the model weights are NOT quantized by "
