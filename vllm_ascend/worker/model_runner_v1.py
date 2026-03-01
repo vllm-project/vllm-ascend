@@ -2711,15 +2711,7 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size,
                         )
-                        if layer_name in attn_linear_hybrid_layers:
-                            attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
-                                kv_cache_spec.dtype
-                            )
-                            conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
-                            raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
-                            raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
-                            raw_v_tensor = raw_kv_tensor[attn_tensor_page_size : attn_tensor_page_size * 2]
-                        else:
+                        if len(attn_linear_hybrid_layers) > 0:
                             attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                 kv_cache_spec.dtype
                             )
