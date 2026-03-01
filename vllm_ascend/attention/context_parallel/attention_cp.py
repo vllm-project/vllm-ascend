@@ -293,24 +293,21 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
     @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config=None,
-        speculative_config=None,
-        num_dcp_pcp_tokens=None,
-        draft_attn_metadatas=None,
-    ):
-        graph_params = get_graph_params()
+    def get_graph_params(forward_context):
+        return get_graph_params()
+
+    @staticmethod
+    def update_graph_params(update_ctx):
+        if update_ctx.graph_params is None:
+            raise ValueError("graph_params must be provided for attention CP update")
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
-        with torch.npu.stream(update_stream):
+        with torch.npu.stream(update_ctx.update_stream):
             for key, param, handle, event in zip(
-                forward_context.attn_metadata,
-                graph_params.attn_params[num_tokens],
-                graph_params.handles[num_tokens],
-                graph_params.events[num_tokens],
+                update_ctx.forward_context.attn_metadata,
+                update_ctx.graph_params.attn_params[update_ctx.num_tokens],
+                update_ctx.graph_params.handles[update_ctx.num_tokens],
+                update_ctx.graph_params.events[update_ctx.num_tokens],
             ):
                 (
                     q_nope,
@@ -329,9 +326,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     pcp_rank,
                     dcp_rank,
                 ) = param
-                attn_metadata = forward_context.attn_metadata[key]
+                attn_metadata = update_ctx.forward_context.attn_metadata[key]
                 actual_seq_lengths_kv = attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:, pcp_rank, dcp_rank]
-                pad_length = num_tokens - len(actual_seq_lengths_kv)
+                pad_length = update_ctx.num_tokens - len(actual_seq_lengths_kv)
                 if pad_length > 0:
                     pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
                     actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
@@ -341,7 +338,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 if dcp_size > 1:
                     num_heads = num_heads * dcp_size
 
-                torch.npu.graph_task_update_begin(update_stream, handle)
+                torch.npu.graph_task_update_begin(update_ctx.update_stream, handle)
 
                 torch_npu.npu_fused_infer_attention_score.out(
                     q_nope,
@@ -359,12 +356,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     block_size=block_size,
                     actual_seq_lengths_kv=actual_seq_lengths_kv,
                     actual_seq_lengths=actual_seq_lengths_q,
-                    workspace=graph_params.workspaces.get(num_tokens),
+                    workspace=update_ctx.graph_params.workspaces.get(update_ctx.num_tokens),
                     out=[attn_output, softmax_lse],
                 )
-                torch.npu.graph_task_update_end(update_stream)
+                torch.npu.graph_task_update_end(update_ctx.update_stream)
 
-                event.record(update_stream)
+                event.record(update_ctx.update_stream)
 
     def _attention_with_nomask_and_mask(
         self,
