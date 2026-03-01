@@ -95,6 +95,17 @@ struct MlaTilingData {
     uint32_t hiddenStateDim{7168};
 
     uint32_t isWeightQuantized{1};
+
+    // Model-specific MLA dimensions (derived from tensor shapes)
+    uint32_t mm1OutSize{2112};        // q_lora_rank + kv_lora_rank + qk_rope_head_dim
+    uint32_t splitSizeOne{576};        // kv_lora_rank + qk_rope_head_dim
+    uint32_t splitSizeTwo{1536};       // q_lora_rank
+    uint32_t splitRmsNormSizeOne{512}; // kv_lora_rank
+    uint32_t splitRmsNormSizeTwo{64};  // qk_rope_head_dim
+    uint32_t ropeSplitSizeOne{64};     // qk_rope_head_dim
+    uint32_t ropeSplitSizeTwo{128};    // qk_nope_head_dim
+    uint32_t hiddenStrateRope{192};    // qk_nope_head_dim + qk_rope_head_dim
+    uint32_t qkNopeHeadDim{128};       // for RoPE offset calc
 };
 
 #endif  // MLAPREPROCESS_TILING_H

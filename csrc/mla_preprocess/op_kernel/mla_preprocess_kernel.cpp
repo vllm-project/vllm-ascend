@@ -136,6 +136,17 @@ extern "C" __global__ __aicore__ void mla_preprocess(
     mlaTilingData.s4Offset = tilingData->s4Offset;
     mlaTilingData.s5Offset = tilingData->s5Offset;
 
+    // Model-specific MLA dimensions
+    mlaTilingData.mm1OutSize = tilingData->mm1OutSize;
+    mlaTilingData.splitSizeOne = tilingData->splitSizeOne;
+    mlaTilingData.splitSizeTwo = tilingData->splitSizeTwo;
+    mlaTilingData.splitRmsNormSizeOne = tilingData->splitRmsNormSizeOne;
+    mlaTilingData.splitRmsNormSizeTwo = tilingData->splitRmsNormSizeTwo;
+    mlaTilingData.ropeSplitSizeOne = tilingData->ropeSplitSizeOne;
+    mlaTilingData.ropeSplitSizeTwo = tilingData->ropeSplitSizeTwo;
+    mlaTilingData.hiddenStrateRope = tilingData->hiddenStrateRope;
+    mlaTilingData.qkNopeHeadDim = tilingData->qkNopeHeadDim;
+
     GM_ADDR s1 = workspace + static_cast<uint64_t>(mlaTilingData.s1Offset);
     GM_ADDR s2 = workspace + static_cast<uint64_t>(mlaTilingData.s2Offset);
     GM_ADDR s3 = workspace + static_cast<uint64_t>(mlaTilingData.s3Offset);
