@@ -315,6 +315,19 @@ add feature
 update code
 ```
 
+### Pull Request Title Format
+
+PR titles should follow the format: `[Type][Module] Description`
+
+- **Type**: The type of change (e.g., `CI`, `Doc`, `Bugfix`, `Feat`, `Platform`, `Refactor`)
+- **Module**: The affected module (optional, e.g., `Misc`, `Model`, `Worker`)
+- **Description**: Brief description of the change
+
+**Examples:**
+- `[Doc][Misc] Update contribution guidelines`
+- `[Bugfix] Fix CPU binding logic`
+- `[CI] Update image build workflow`
+
 ### Pull Request Template
 
 When creating a PR, please follow the template in `.github/PULL_REQUEST_TEMPLATE.md` and ensure the following sections are completed:
