@@ -104,8 +104,6 @@ check_npu_info() {
 
 check_and_config() {
     echo "====> Configure mirrors and git proxy"
-    # Fix me(Potabk): Currently, there have some issues with accessing GitHub via https://gh-proxy.test.osinfra.cn in certain regions.
-    # We should switch to a more stable proxy for now until the network proxy is stable enough.
     git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
@@ -136,6 +134,64 @@ install_extra_components() {
     echo "====> Extra components installation completed"
 }
 
+checkout_src() {
+    echo "====> Checkout source code"
+    mkdir -p "$WORKSPACE"
+    cd "$WORKSPACE"
+    pip uninstall -y vllm vllm-ascend || true
+    rm -rf "$WORKSPACE/vllm" "$WORKSPACE/vllm-ascend"
+
+    if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
+        echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
+        git clone --depth 1 "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
+        cd "$WORKSPACE/vllm-ascend"
+        PR_REF=$(git ls-remote origin 'refs/pull/*/head' | grep "^${VLLM_ASCEND_REF}" | awk '{print $2}' | head -1)
+        if [ -n "$PR_REF" ]; then
+            git fetch --depth 1 origin "$PR_REF"
+            git checkout FETCH_HEAD
+        else
+            git fetch origin '+refs/pull/*/head:refs/remotes/pull/*' 2>/dev/null || true
+            git checkout "$VLLM_ASCEND_REF"
+        fi
+    fi
+
+    if [ ! -d "$WORKSPACE/vllm" ]; then
+        echo "Cloning vllm version/ref: $VLLM_VERSION"
+        git clone --depth 1 --branch "$VLLM_VERSION" https://github.com/vllm-project/vllm.git "$WORKSPACE/vllm"
+    fi
+}
+
+install_vllm() {
+    echo "====> Install vllm and vllm-ascend"
+    VLLM_TARGET_DEVICE=empty pip install -e "$WORKSPACE/vllm"
+    pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
+    pip install -e "$WORKSPACE/vllm-ascend"
+}
+
+install_aisbench() {
+    echo "====> Install AISBench benchmark"
+    
+    export AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
+    : "${AIS_BENCH_TAG:=v3.0-20250930-master}"  
+
+    BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
+
+    if [ -d "$BENCH_DIR" ]; then
+        echo "Removing existing benchmark directory..."
+        rm -rf "$BENCH_DIR"
+    fi
+
+    git clone -b "${AIS_BENCH_TAG}" --depth 1 \
+        "${AIS_BENCH_URL}" "${BENCH_DIR}"
+
+    cd "$BENCH_DIR"
+    pip install -e . \
+        -r requirements/api.txt \
+        -r requirements/extra.txt
+
+    python3 -m pip cache purge || echo "WARNING: pip cache purge failed, but proceeding..."
+
+}
 
 show_triton_ascend_info() {
     echo "====> Check triton ascend info"
@@ -170,6 +226,11 @@ If this is insufficient to pinpoint the error, please download and review the lo
 main() {
     check_npu_info
     check_and_config
+    if [[ "$IS_PR_TEST" == "true" ]]; then
+        checkout_src
+        install_vllm
+        install_aisbench
+    fi
     show_vllm_info
     show_triton_ascend_info
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
