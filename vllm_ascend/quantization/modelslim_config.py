@@ -478,6 +478,28 @@ class AscendModelSlimConfig(QuantizationConfig):
         if self.quant_description:
             return
 
+        # Temporary code, remove me after PR 6836:
+        # https://github.com/vllm-project/vllm-ascend/pull/6836
+        # been merged
+        # If model_name is not a directory, try to resolve it from Hub (ModelScope or HF)
+        if not os.path.isdir(model_name):
+            try:
+                # Check for ModelScope
+                if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
+                    from modelscope import snapshot_download
+
+                    # Only download the config file to be fast
+                    model_name = snapshot_download(model_name, allow_patterns=MODELSLIM_CONFIG_FILENAME)
+                else:
+                    # Check for HuggingFace
+                    from huggingface_hub import snapshot_download
+
+                    model_name = snapshot_download(model_name, allow_patterns=MODELSLIM_CONFIG_FILENAME)
+            except Exception:
+                # Ignore errors (e.g. network issues, model not found),
+                # let the subsequent check fail with the standard error message.
+                pass
+
         # Try to find and load the ModelSlim config file
         if os.path.isdir(model_name):
             config_path = os.path.join(model_name, MODELSLIM_CONFIG_FILENAME)

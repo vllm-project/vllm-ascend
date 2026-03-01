@@ -25,9 +25,9 @@ export VLLM_USE_MODELSCOPE=true
 export MODELSCOPE_HUB_FILE_LOCK=false
 
 _info "====> Start Quickstart test"
-. "${SCRIPT_DIR}/doctests/001-quickstart-test.sh"
+. "${SCRIPT_DIR}/doctests/singlecard/001-quickstart-test.sh"
 
 _info "====> Start pip binary installation test"
-. "${SCRIPT_DIR}/doctests/002-pip-binary-installation-test.sh"
+. "${SCRIPT_DIR}/doctests/singlecard/002-pip-binary-installation-test.sh"
 
 _info "Doctest passed."
