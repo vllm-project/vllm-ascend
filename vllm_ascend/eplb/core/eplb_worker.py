@@ -17,6 +17,7 @@
 from multiprocessing import Process, Queue
 from typing import Any
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from vllm.logger import logger
@@ -59,6 +60,15 @@ class EplbWorker:
         # Get the updated expert table based on the workload information
         old_placement = self.global2local(self.old_expert_maps, self.num_local_experts)
         _, _, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
+
+        if self.rank_id == 0:
+            hotness = self._calculate_hotness(old_placement, load_info)
+            current_mean, current_max = self._compute_imbalance(old_placement, hotness)
+            update_mean, update_max = self._compute_imbalance(new_placement, hotness)
+            logger.info(
+                f"[Expert Hotness] Current: mean={current_mean:.3f}, max={current_max:.3f}, "
+                f"Updated: mean={update_mean:.3f}, max={update_max:.3f}"
+            )
 
         if not torch.is_tensor(new_placement):
             new_placement = torch.tensor(new_placement)
@@ -250,6 +260,35 @@ class EplbWorker:
             layer_ids.append(layer_id)
 
         return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
+
+    @staticmethod
+    def _compute_imbalance(deployment_all_layer: np.ndarray, hotness_all_layer: np.ndarray):
+        imbalance_list = []
+        for deployment, hotness in zip(deployment_all_layer, hotness_all_layer):
+            counts = np.bincount(deployment.reshape(-1), minlength=hotness.shape[0])
+
+            unit_hotness = np.divide(hotness, counts, out=np.zeros_like(hotness, dtype=float), where=counts != 0)
+
+            stage_load = unit_hotness[deployment].sum(-1)
+            stage_par = stage_load.max() / stage_load.mean()
+            imbalance_list.append(stage_par)
+
+        max_val = max(imbalance_list)
+        mean_val = sum(imbalance_list) / len(imbalance_list)
+        return mean_val, max_val
+
+    @staticmethod
+    def _calculate_hotness(deployment_all_layer, moe_load_all_layer):
+        hotnesses = []
+        num_of_expert = deployment_all_layer.shape[1] * deployment_all_layer.shape[2]
+        for deployment, rank_load in zip(deployment_all_layer, moe_load_all_layer.numpy()):
+            hotness = np.zeros(num_of_expert, dtype=rank_load.dtype)
+            deployment_flat = deployment.ravel()
+            rank_load_flat = rank_load.ravel()
+            np.add.at(hotness, deployment_flat, rank_load_flat)
+            hotnesses.append(hotness)
+
+        return np.array(hotnesses)
 
 
 class EplbProcess:
