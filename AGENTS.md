@@ -378,12 +378,16 @@ Before merging, verify:
 6. Add tests for new behavior
 7. Run full test suite before committing
 8. Commit with sign-off: `git commit -s`
-9. Push to your fork repository (NOT the main repository):
+9. Run linting check before pushing:
+   ```bash
+   bash format.sh ci
+   ```
+10. Push to your fork repository (NOT the main repository):
    ```bash
    git remote add myfork https://github.com/YOUR_USERNAME/vllm-ascend.git
    git push -u myfork your-branch-name
    ```
-10. Create a PR from your fork to the main repository with clear description
+11. Create a PR from your fork to the main repository with clear description
 
 ---
 
