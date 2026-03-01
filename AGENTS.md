@@ -396,6 +396,7 @@ Before merging, verify:
    ```bash
    bash format.sh ci
    ```
+   > **Note**: This check is required for **all file types**, including markdown files. If `markdownlint` modifies files, re-add them with `git add` and commit again.
 10. Push to your fork repository (NOT the main repository):
 
    ```bash
