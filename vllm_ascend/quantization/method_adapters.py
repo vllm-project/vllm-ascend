@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWei
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearMethodBase, RowParallelLinear
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.parameter import PerTensorScaleParameter
+from vllm.model_executor.parameter import PackedColumnParameter, PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -67,10 +67,10 @@ class AscendLinearMethod(LinearMethodBase):
         packed_factor = weight_dict.pop("_packed_factor", None)
 
         for weight_name, weight_param in weight_dict.items():
-            param = torch.nn.Parameter(weight_param, requires_grad=False)
-            set_weight_attrs(param, {"input_dim": 1, "output_dim": 0})
+            # Create parameter from weight_param
+            param = weight_param
 
-            # Set packing attributes if the weight is packed
+            # Use PackedvLLMParameter if the weight is packed
             if packed_dim is not None and packed_factor is not None:
                 set_weight_attrs(param, {"packed_dim": packed_dim, "packed_factor": packed_factor})
 
@@ -100,11 +100,31 @@ class AscendLinearMethod(LinearMethodBase):
         pergroup_dict = self.quant_method.get_pergroup_param(
             input_size_per_partition, output_size_per_partition, params_dtype, layer_type=layer_type
         )
+
+        # Extract packing information for qzeros (if present)
+        qzeros_packed_dim = pergroup_dict.pop("_qzeros_packed_dim", None)
+        qzeros_packed_factor = pergroup_dict.pop("_qzeros_packed_factor", None)
+
         for pergroup_name, pergroup_param in pergroup_dict.items():
-            param = torch.nn.Parameter(pergroup_param, requires_grad=False)
-            set_weight_attrs(param, {"output_dim": 0})
-            layer.register_parameter(pergroup_name, param)
-            set_weight_attrs(param, extra_weight_attrs)
+            # Use PackedColumnParameter for qzeros if it's packed (GPTQ)
+            if pergroup_name == "qzeros" and qzeros_packed_dim is not None and qzeros_packed_factor is not None:
+                param = PackedColumnParameter(
+                    data=pergroup_param,
+                    output_dim=1,
+                    packed_dim=qzeros_packed_dim,
+                    packed_factor=qzeros_packed_factor,
+                    weight_loader=weight_loader,
+                )
+                layer.register_parameter(pergroup_name, param)
+                # Only set extra_weight_attrs that aren't already set
+                filtered_attrs = {k: v for k, v in extra_weight_attrs.items() if k != "weight_loader"}
+                set_weight_attrs(param, filtered_attrs)
+            else:
+                param = torch.nn.Parameter(pergroup_param, requires_grad=False)
+                set_weight_attrs(param, {"output_dim": 0})
+                layer.register_parameter(pergroup_name, param)
+                set_weight_attrs(param, extra_weight_attrs)
+
             if (
                 "weight_scale_second" in pergroup_name
                 or "weight_offset_second" in pergroup_name
