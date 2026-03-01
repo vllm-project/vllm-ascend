@@ -20,7 +20,7 @@ from collections.abc import Callable
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
-from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearMethodBase, RowParallelLinear
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -280,6 +280,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if not isinstance(layer, FusedMoE):
+            return
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
