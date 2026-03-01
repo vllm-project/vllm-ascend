@@ -79,6 +79,11 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
         quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+        need_unsqz = False
+        if pertoken_scale.dim() == 2:
+            need_unsqz = True
+            quantized_x = quantized_x.squeeze(dim=1)
+            pertoken_scale = pertoken_scale.squeeze(dim=1)
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
@@ -87,6 +92,8 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             bias=bias,
             output_dtype=x.dtype,
         )
+        if need_unsqz:
+            output = output.unsqueeze(dim=1)
         return output
 
     def process_weights_after_loading(self, layer):
