@@ -178,7 +178,7 @@ jobs:
           #      which follow the rule from vLLM with prefix v
           # TODO(yikun): the post release might be considered as latest release
           tags: |
-            type=branch,suffix=${{ env.SUFFIX }}
+            type=ref,event=branch,suffix=${{ env.SUFFIX }}
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
             type=schedule,pattern=main,suffix=${{ env.SUFFIX }}
             type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' }},suffix=${{ env.SUFFIX }}
