@@ -2,6 +2,8 @@ import torch
 import functools
 import copy
 import queue
+import json
+import hashlib
 import threading
 import torch_npu
 import torch.distributed as dist
@@ -36,6 +38,7 @@ class FaultTolerance:
         self._init_sync_group()
 
         self.state_backup = {}
+        self.async_batch_to_backup = {}
         self.aware_event = threading.Event()
         self.stop_event = threading.Event()
         FaultAware(
@@ -83,8 +86,25 @@ class FaultTolerance:
     def execute_model_decorator(self,func:Callable,max_retries: int,dummy_run: bool) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            self.state_backup = self._create_essential_state_backup(*args, **kwargs)
             for attempt in range(max_retries + 1):
+                if not dummy_run:
+                    batch_key = self._generate_scheduler_output_key(args[0])
+                    if batch_key in self.async_batch_to_backup:
+                        logger.info(f"Current batch is token reinference batch")
+                        self.state_backup = self.async_batch_to_backup[batch_key]
+                        self._restore_essential_state(self.state_backup)
+                        keys_to_remove = [k for k in self.async_batch_to_backup.keys() if k != batch_key]
+                        for key in keys_to_remove:
+                            del self.async_batch_to_backup[key]
+                    else:
+                        map_size = len(self.async_batch_to_backup)
+                        if map_size >= 2:
+                            oldest_key = next(iter(self.async_batch_to_backup))
+                            del self.async_batch_to_backup[oldest_key]
+                        self.state_backup = self._create_essential_state_backup(*args, **kwargs)
+                        self.async_batch_to_backup[batch_key] = self.state_backup
+                else:
+                    self.state_backup = self._create_essential_state_backup(*args, **kwargs)
                 try:
                     output = func(*args, **kwargs)
                     if dummy_run:
@@ -98,7 +118,8 @@ class FaultTolerance:
                     recovery_context = RecoveryContext(
                         exception=e,
                         fault_queue=self.fault_queue,
-                        back_up=self.state_backup
+                        back_up=self.state_backup,
+                        is_dummy_run=dummy_run
                     )
                     ft_action = self._handle_exception(recovery_context)
                     if torch.equal(ft_action, FaultAction.RECOMPUTE):
@@ -130,7 +151,8 @@ class FaultTolerance:
                     recovery_context = RecoveryContext(
                         exception=e,
                         fault_queue=self.fault_queue,
-                        back_up=self.state_backup
+                        back_up=self.state_backup,
+                        is_dummy_run=False
                     )
                     ft_action = self._handle_exception(recovery_context)
                     if torch.equal(ft_action, FaultAction.RECOMPUTE):
@@ -215,7 +237,8 @@ class FaultTolerance:
         try:
             torch_npu.npu.restart_device(torch.npu.current_device())
             torch.distributed.reinit_process_group(group=None, rebuild_link=False)
-            self._restore_essential_state(ctx.back_up)
+            if ctx.is_dummy_run:
+                self._restore_essential_state(ctx.back_up)
             reinit_status = RecoveryStatus.SUCCESS
         except Exception as inner_e:
             logger.error(f"Failed to clean fault for rank {self.rank},get exception :{inner_e}")
@@ -328,6 +351,20 @@ class FaultTolerance:
         )
         return recv_ft_action
 
+    def _generate_scheduler_output_key(self, scheduler_output):
+        new_req_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
+        cached_req_ids = [req_id for req_id in scheduler_output.scheduled_cached_reqs.req_ids]
+        cached_num_tokens = [num_tokens for num_tokens in scheduler_output.scheduled_cached_reqs.num_computed_tokens]
+
+        key_data = {
+            "new_req_ids": new_req_ids,
+            "cached_req_ids": cached_req_ids,
+            "cached_num_tokens": cached_num_tokens
+        }
+
+        key_json = json.dumps(key_data, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(key_json.encode('utf-8')).hexdigest()
+
     def _create_essential_state_backup(self,*args,**kwargs) -> dict:
         backup = {}
         if not hasattr(self.model_runner,'requests') or not hasattr(self.model_runner,'input_batch'):
@@ -416,8 +453,7 @@ class FaultTolerance:
                 for i, bt in enumerate(ib.block_table.block_tables):
                     bt.num_blocks_per_row[:] = backup['num_blocks_per_row'][i]
             if 'spec_token_ids' in backup:
-                for i, lst in enumerate(backup['spec_token_ids']):
-                    ib.spec_token_ids[i][:] = lst
+                ib.spec_token_ids = backup['spec_token_ids']
 
             if '_removed' in backup:
                 ib.batch_update_builder._removed[:] = backup['_removed']
@@ -430,9 +466,7 @@ class FaultTolerance:
                     target = getattr(ib,attr_name)
                     target[:] = backup[attr_name]
             if 'prev_sampled_token_ids' in backup and hasattr(ib,'prev_sampled_token_ids'):
-                target = ib.prev_sampled_token_ids
-                if target is not None:
-                    target[:] = backup['prev_sampled_token_ids']
+                ib.prev_sampled_token_ids = backup['prev_sampled_token_ids']
 
         # Rollback eplb state
         if hasattr(self.model_runner,'eplb_updator'):
