@@ -214,6 +214,8 @@ class FinegrainedTPConfig:
         self.embedding_tensor_parallel_size = finegrained_tp_config.get("embedding_tensor_parallel_size", 0)
         self.mlp_tensor_parallel_size = finegrained_tp_config.get("mlp_tensor_parallel_size", 0)
 
+        if not vllm_config.model_config.is_moe:
+            raise AssertionError("finegrained_tp_config is only supported for moe model")
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
