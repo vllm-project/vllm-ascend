@@ -1,7 +1,6 @@
 import unittest
 import queue
 import threading
-import time
 from unittest.mock import MagicMock, patch, call, ANY
 
 import torch
@@ -13,7 +12,6 @@ from vllm_ascend.token_reinference.common import FaultStatus, FaultCommand
 
 class TestFaultAware(TestBase):
     def setUp(self):
-        super().setUp()
         self.rank = 0
         self.world_size = 2
         self.fault_queue = queue.Queue()
@@ -169,7 +167,6 @@ class TestFaultAware(TestBase):
         self.mock_logger.error.assert_called_once()
 
     def test_gather_statuses_normal(self):
-        """正常调用 gather"""
         FaultAware._fault_aware_group = MagicMock()
         current_status = FaultStatus.ACTIVE.value
         status_list = [torch.zeros([1], dtype=torch.int64) for _ in range(self.world_size)]
@@ -192,7 +189,6 @@ class TestFaultAware(TestBase):
         self.mock_logger.error.assert_called_once()
 
     def test_determine_fault_command_rank0_all_active(self):
-        """rank 0，所有状态 ACTIVE -> SILENCE_CMD"""
         self.fa.rank = 0
         status_list = [FaultStatus.ACTIVE.value, FaultStatus.ACTIVE.value]
         cmd = self.fa._determine_fault_command(status_list)
@@ -279,7 +275,7 @@ class TestFaultAware(TestBase):
              patch.object(self.fa, '_execute_command') as mock_execute, \
              patch('threading.main_thread') as mock_main:
 
-            mock_main.return_value.is_alive.return_value = False  # 主线程不存活，break 循环
+            mock_main.return_value.is_alive.return_value = False
 
             self.fa._handler_loop()
 
