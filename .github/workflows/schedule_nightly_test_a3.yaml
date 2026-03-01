@@ -28,7 +28,10 @@ on:
   pull_request: 
     branches:
       - 'main'
-    types: [ labeled ]
+    # types: [ labeled ]
+  push: 
+    branches:
+      - 'main'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -126,8 +129,8 @@ jobs:
 
   single-node-yaml-tests:
     name: single-node-yaml
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    needs: [multi-node-tests, single-node-tests]
+    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    # needs: [multi-node-tests, single-node-tests]
     strategy:
       fail-fast: false
       matrix:
@@ -151,45 +154,45 @@ jobs:
           - name: mtpx-deepseek-r1-0528-w8a8
             os: linux-aarch64-a3-16
             config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
-          - name: qwen3-235b-a22b-w8a8
-            os: linux-aarch64-a3-16
-            config_file_path: Qwen3-235B-A22B-W8A8.yaml
-          - name: qwen3-30b-a3b-w8a8
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen3-30B-A3B-W8A8.yaml
-          - name: qwen3-32b
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen3-32B.yaml
-          - name: qwen3-next-80b-a3b-instruct-w8a8
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen3-Next-80B-A3B-Instruct-W8A8.yaml
-          - name: qwq-32b
-            os: linux-aarch64-a3-4
-            config_file_path: QwQ-32B.yaml
-          - name: qwen3-32b-int8
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen3-32B-Int8.yaml
-          - name: qwen3-next-80b-a3b-instruct
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen3-Next-80B-A3B-Instruct.yaml
-          - name: qwen2-5-vl-7b
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen2.5-VL-7B-Instruct.yaml
-          - name: qwen2-5-vl-7b-epd
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen2.5-VL-7B-Instruct-EPD.yaml
-          - name: qwen2-5-vl-32b
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen2.5-VL-32B-Instruct.yaml
-          - name: qwen3-32b-int8-a3-feature-stack3
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen3-32B-Int8-A3-Feature-Stack3.yaml
-          - name: qwen3-32b-int8-prefix-cache
-            os: linux-aarch64-a3-4
-            config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
-          - name: deepseek-r1-0528-w8a8-prefix-cache
-            os: linux-aarch64-a3-16
-            config_file_path: Prefix-Cache-DeepSeek-R1-0528-W8A8.yaml
+          # - name: qwen3-235b-a22b-w8a8
+          #   os: linux-aarch64-a3-16
+          #   config_file_path: Qwen3-235B-A22B-W8A8.yaml
+          # - name: qwen3-30b-a3b-w8a8
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: Qwen3-30B-A3B-W8A8.yaml
+          # - name: qwen3-32b
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: Qwen3-32B.yaml
+          # - name: qwen3-next-80b-a3b-instruct-w8a8
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: Qwen3-Next-80B-A3B-Instruct-W8A8.yaml
+          # - name: qwq-32b
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: QwQ-32B.yaml
+          # - name: qwen3-32b-int8
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: Qwen3-32B-Int8.yaml
+          # - name: qwen3-next-80b-a3b-instruct
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: Qwen3-Next-80B-A3B-Instruct.yaml
+          # - name: qwen2-5-vl-7b
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: Qwen2.5-VL-7B-Instruct.yaml
+          # - name: qwen2-5-vl-7b-epd
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: Qwen2.5-VL-7B-Instruct-EPD.yaml
+          # - name: qwen2-5-vl-32b
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: Qwen2.5-VL-32B-Instruct.yaml
+          # - name: qwen3-32b-int8-a3-feature-stack3
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: Qwen3-32B-Int8-A3-Feature-Stack3.yaml
+          # - name: qwen3-32b-int8-prefix-cache
+          #   os: linux-aarch64-a3-4
+          #   config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
+          # - name: deepseek-r1-0528-w8a8-prefix-cache
+          #   os: linux-aarch64-a3-16
+          #   config_file_path: Prefix-Cache-DeepSeek-R1-0528-W8A8.yaml
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}

@@ -67,6 +67,15 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+        
+      - name: Checkout PR 6503
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          echo "Fetching PR 6503..."
+          git fetch origin pull/6503/head:pr6503
+          git checkout pr6503
+          echo "Checked out PR 6503 successfully."
+          echo "Current Commit: $(git rev-parse HEAD)"
 
       - name: Show vLLM and vLLM-Ascend version
         working-directory: /vllm-workspace

@@ -151,9 +151,9 @@ class SingleNodeConfigLoader:
                     epd_server_cmds=case.get("epd_server_cmds", []),
                     epd_proxy_args=case.get("epd_proxy_args", []),
                     benchmarks=case.get("benchmarks", {}),
-                    prompts=case.get("prompts"),
-                    api_keyword_args=case.get("api_keyword_args"),
-                    test_content=case.get("test_content"),
+                    prompts=case.get("prompts", PROMPTS),
+                    api_keyword_args=case.get("api_keyword_args", API_KEYWORD_ARGS),
+                    test_content=case.get("test_content", ["completion"]),
                     service_mode=case.get("service_mode", "openai"),
                     extra_config=extra_case_fields,
                 )
