@@ -38,12 +38,10 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod, VocabParallelEmbedding
 from vllm.model_executor.models.utils import WeightsMapper
 
+from vllm_ascend.quantization.utils import MODELSLIM_CONFIG_FILENAME
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 from .methods import get_scheme_class
-
-# The config filename that ModelSlim generates after quantizing a model.
-MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 
 logger = init_logger(__name__)
 

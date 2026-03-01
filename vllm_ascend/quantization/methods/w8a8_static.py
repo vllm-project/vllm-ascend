@@ -21,7 +21,6 @@ import torch
 import torch_npu
 
 from vllm_ascend.utils import (
-    COMPRESSED_TENSORS_METHOD,
     get_weight_prefetch_method,
     maybe_trans_nz,
 )
@@ -123,13 +122,6 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
 
-        try:
-            ascend_quant_method = layer.ascend_quant_method
-        except AttributeError:
-            ascend_quant_method = ""
-        if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
-            quant_bias = bias
-
         output = torch_npu.npu_quant_matmul(
             x,
             layer.weight,
@@ -155,7 +147,3 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
-        ascend_quant_method = getattr(layer, "ascend_quant_method", "")
-        if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
-            deq_scale = layer.input_scale.data * layer.weight_scale.data
-            layer.deq_scale = torch.nn.Parameter(deq_scale, requires_grad=False)
