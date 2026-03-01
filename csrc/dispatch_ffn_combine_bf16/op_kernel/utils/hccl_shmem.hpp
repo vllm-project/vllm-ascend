@@ -76,20 +76,20 @@ FORCE_INLINE_AICORE void gm_signal_wait_until_ne(__gm__ int32_t *sig_addr, int32
 class HcclShmem {
 public:
     #ifdef HCCL_COMM
-        __gm__ HcclOpResParamCustom *WinContext_{nullptr};
+        __gm__ ::HcclOpResParam *WinContext_{nullptr};
         Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
         GM_ADDR m_ptrArray[MAX_RANK_SIZE];
         FORCE_INLINE_AICORE
         HcclShmem(){
             auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
-            WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
+            WinContext_ = (__gm__ ::HcclOpResParam *)contextGM0;
 
             m_rank = WinContext_->localUsrRankId;
             m_rankSize = WinContext_->rankSize;
             m_segmentSize = WinContext_->winSize;
             for (int i = 0; i < m_rankSize; i++) {
                 m_ptrArray[i] = (GM_ADDR)((i == m_rank) ? WinContext_->localWindowsIn :
-                                    ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[i].nextDevicePtr))->windowsIn);
+                                    ((::HcclRankRelationResV2 *)(WinContext_->remoteRes[i].nextDevicePtr))->windowsIn);
             }
         }
     #else
