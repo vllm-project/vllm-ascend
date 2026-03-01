@@ -215,7 +215,7 @@ def filter_chunked_req_indices(
 def split_decodes_and_prefills(
     common_attn_metadata: AscendCommonAttentionMetadata,
     decode_threshold: int = 1,
-) -> tuple[int, int, int, int]:
+ require_uniform: bool = False) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
@@ -232,6 +232,9 @@ def split_decodes_and_prefills(
         num_prefills: The number of prefill requests.
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
+        require_uniform: If True, requires that all decode requests have the
+            same query length. When set, some queries may be considered prefills
+
     """
     long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
     query_lens_pcp_full = long_seq_metadata.query_lens_pcp_full_cpu if long_seq_metadata else None
@@ -241,11 +244,19 @@ def split_decodes_and_prefills(
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
 
-    if max_query_len <= decode_threshold:
+    if max_query_len <= decode_threshold and \
+        (not require_uniform or decode_threshold <= 1):
         return num_reqs, 0, num_tokens, 0
 
     query_lens = (query_start_loc[1:] - query_start_loc[:-1]) if query_lens_pcp_full is None else query_lens_pcp_full
     is_prefill = query_lens > decode_threshold
+    if query_lens[0].item() != decode_threshold:
+        # first request is not decode, so no decode requests
+        return 0, num_reqs, 0, num_tokens
+    if require_uniform:
+        is_prefill = query_lens != query_lens[0]
+    else:
+        is_prefill = query_lens > decode_threshold
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
 
