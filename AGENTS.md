@@ -324,6 +324,7 @@ PR titles should follow the format: `[Type][Module] Description`
 - **Description**: Brief description of the change
 
 **Examples:**
+
 - `[Doc][Misc] Update contribution guidelines`
 - `[Bugfix] Fix CPU binding logic`
 - `[CI] Update image build workflow`
@@ -335,9 +336,9 @@ When creating a PR, please follow the template in `.github/PULL_REQUEST_TEMPLATE
 - **What this PR does / why we need it?** - Clearly describe the changes and their purpose
 - **Does this PR introduce _any_ user-facing change?** - Indicate if there are any user-visible changes
 - **How was this patch tested?** - Describe how you tested the changes. Examples:
-  - Unit tests added/updated: list the test files
-  - Manual testing: provide the test steps and commands
-  - CI testing: indicate if only CI verification is needed
+    - Unit tests added/updated: list the test files
+    - Manual testing: provide the test steps and commands
+    - CI testing: indicate if only CI verification is needed
 
 ---
 
@@ -396,10 +397,12 @@ Before merging, verify:
    bash format.sh ci
    ```
 10. Push to your fork repository (NOT the main repository):
+
    ```bash
    git remote add myfork https://github.com/YOUR_USERNAME/vllm-ascend.git
    git push -u myfork your-branch-name
    ```
+
 11. Create a PR from your fork to the main repository with clear description
 
 ---
