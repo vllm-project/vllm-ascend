@@ -58,6 +58,8 @@ e2e-singlecard:
     is_skipped: true
 
 e2e-singlecard-light:
+  - name: tests/e2e/singlecard/compile/test_graphex_norm_quant_fusion.py
+    estimated_time: 80
   - name: tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
     estimated_time: 220
   - name: tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
