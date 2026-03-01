@@ -29,17 +29,19 @@ def softmax_func(x, axis=None):
     return res, x_max, x_sum
 
 
-def moe_gating_top_k_numpy_ref(x: torch.Tensor,
-                               k: int,
-                               bias: torch.Tensor | None,
-                               k_group: int = 1,
-                               group_count: int = 1,
-                               group_select_mode: int = 0,
-                               renorm: int = 0,
-                               norm_type: int = 0,
-                               y2_flag: bool = False,
-                               routed_scaling_factor: float = 1.0,
-                               eps: float = 1e-20) -> tuple:
+def moe_gating_top_k_numpy_ref(
+    x: torch.Tensor,
+    k: int,
+    bias: torch.Tensor | None,
+    k_group: int = 1,
+    group_count: int = 1,
+    group_select_mode: int = 0,
+    renorm: int = 0,
+    norm_type: int = 0,
+    y2_flag: bool = False,
+    routed_scaling_factor: float = 1.0,
+    eps: float = 1e-20,
+) -> tuple:
     """NumPy reference implementation of MOE Gating TopK.
 
     For result comparison with NPU operator, ensure the consistency
@@ -89,22 +91,19 @@ def moe_gating_top_k_numpy_ref(x: torch.Tensor,
             group_x = numpy.amax(x, axis=-1)
         else:
             group_x = numpy.partition(x, -2, axis=-1)[..., -2:].sum(axis=-1)
-        indices = numpy.argsort(-group_x, axis=-1, kind='stable')[:, :k_group]
+        indices = numpy.argsort(-group_x, axis=-1, kind="stable")[:, :k_group]
 
         mask = numpy.ones((x.shape[0], group_count), dtype=bool)
         mask[numpy.arange(x.shape[0])[:, None], indices] = False
-        x = numpy.where(mask[..., None], float('-inf'), x)
+        x = numpy.where(mask[..., None], float("-inf"), x)
         x = x.reshape(x.shape[0], -1)
 
-    _, indices = torch.sort(torch.from_numpy(x),
-                            dim=-1,
-                            stable=True,
-                            descending=True)
+    _, indices = torch.sort(torch.from_numpy(x), dim=-1, stable=True, descending=True)
     indices = numpy.asarray(indices[:, :k])
 
     y = numpy.take_along_axis(original_x, indices, axis=1)
     if norm_type == 1 or renorm == 1:
-        y /= (numpy.sum(y, axis=-1, keepdims=True) + eps)
+        y /= numpy.sum(y, axis=-1, keepdims=True) + eps
     y *= routed_scaling_factor
 
     y2 = original_x if y2_flag else None
@@ -120,14 +119,16 @@ def moe_gating_top_k_numpy_ref(x: torch.Tensor,
 @pytest.mark.parametrize("k_ranges", [4, 8, 12, 16, 6, 32])
 @pytest.mark.parametrize("x_dim0_range", list(range(1, 17)))
 @pytest.mark.parametrize("x_dim1_range", [256, 128, 64, 208, 192, 160])
-def test_npu_moe_gating_topk_compare(group_select_mode: int,
-                                     renorm: int,
-                                     norm_type: int,
-                                     group_count: int,
-                                     k_ranges: int,
-                                     x_dim0_range: int,
-                                     x_dim1_range: int,
-                                     device: str = "npu"):
+def test_npu_moe_gating_topk_compare(
+    group_select_mode: int,
+    renorm: int,
+    norm_type: int,
+    group_count: int,
+    k_ranges: int,
+    x_dim0_range: int,
+    x_dim1_range: int,
+    device: str = "npu",
+):
     """Ascend NPU MOE Gating TopK operator test.
 
     Compare NPU kernel results with NumPy reference implementation
@@ -154,7 +155,7 @@ def test_npu_moe_gating_topk_compare(group_select_mode: int,
 
     # Construct test inputs
     x = numpy.random.uniform(-2, 2, (dim0, dim1)).astype(numpy.float32)
-    bias = numpy.random.uniform(-2, 2, (dim1, )).astype(numpy.float32)
+    bias = numpy.random.uniform(-2, 2, (dim1,)).astype(numpy.float32)
 
     x_tensor = torch.tensor(x, dtype=torch.float32)
     bias_tensor = torch.tensor(bias, dtype=torch.float32)
@@ -195,14 +196,8 @@ def test_npu_moe_gating_topk_compare(group_select_mode: int,
     )
 
     # Verify consistency between NPU and NumPy results
-    assert numpy.allclose(y.cpu().numpy(),
-                          y_npu.cpu().numpy(),
-                          rtol=RTOL_TOLERANCE,
-                          atol=ATOL_TOLERANCE)
-    assert numpy.allclose(expert_idx,
-                          expert_idx_npu.cpu().numpy(),
-                          rtol=RTOL_TOLERANCE,
-                          atol=ATOL_TOLERANCE)
+    assert numpy.allclose(y.cpu().numpy(), y_npu.cpu().numpy(), rtol=RTOL_TOLERANCE, atol=ATOL_TOLERANCE)
+    assert numpy.allclose(expert_idx, expert_idx_npu.cpu().numpy(), rtol=RTOL_TOLERANCE, atol=ATOL_TOLERANCE)
 
 
 if __name__ == "__main__":
