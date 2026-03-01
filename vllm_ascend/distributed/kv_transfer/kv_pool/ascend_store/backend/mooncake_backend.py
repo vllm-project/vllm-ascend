@@ -21,7 +21,7 @@ DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 
 
 class MooncakeBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig):
+    def __init__(self, parallel_config: ParallelConfig, init_tcp: False):
         try:
             from mooncake.store import MooncakeDistributedStore  # type: ignore
         except ImportError as e:
@@ -33,7 +33,7 @@ class MooncakeBackend(Backend):
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
         self.rank = parallel_config.rank
-        if self.config.protocol == "ascend":
+        if self.config.protocol == "ascend" and (not init_tcp):
             local_hostname = get_ip()
             transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
             self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
@@ -47,10 +47,21 @@ class MooncakeBackend(Backend):
                 self.config.master_server_address,
                 transfer_engine.get_engine(),
             )
-        if ret != 0:
-            msg = "Initialize mooncake failed."
-            logger.error(msg)
-            raise RuntimeError(msg)
+            if ret != 0:
+                msg = "Initialize mooncake failed."
+                logger.error(msg)
+                raise RuntimeError(msg)
+        else:
+            local_hostname = get_ip()
+            self.store.setup(
+                local_hostname,
+                self.config.metadata_server,
+                self.config.global_segment_size,
+                self.config.local_buffer_size,
+                "tcp",
+                self.config.device_name,
+                self.config.master_server_address
+            )
 
     def set_device(self):
         device = torch.device(f"npu:{self.rank}")
