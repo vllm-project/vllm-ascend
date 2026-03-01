@@ -69,7 +69,7 @@ class FusedExpertsResult:
     before_dispatch_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
     # For dynamic_eplb
-    group_list_type: int | None = None
+    group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
 
 
@@ -328,7 +328,6 @@ class FusedMC2CommImpl(MoECommMethod):
         if log2phy is not None:
             topk_ids = log2phy[topk_ids]
 
-        group_list_type = None
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
             out = torch.empty_like(hidden_states)
@@ -348,7 +347,6 @@ class FusedMC2CommImpl(MoECommMethod):
             expert_tokens = self.expert_token_nums
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert expert_map is not None, "expert_map cannot be None."
-            group_list_type = 1
             out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
                 x=hidden_states,
                 expert_ids=topk_ids,
@@ -366,4 +364,4 @@ class FusedMC2CommImpl(MoECommMethod):
             )
         else:
             raise ValueError(f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
-        return FusedExpertsResult(routed_out=out, group_list_type=group_list_type, expert_tokens=expert_tokens)
+        return FusedExpertsResult(routed_out=out, expert_tokens=expert_tokens)
