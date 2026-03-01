@@ -385,6 +385,7 @@ class NPUModelRunner(GPUModelRunner):
         self.long_seq_metadata = None
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
+        self.kvbytes = {}
 
     @property
     def use_cp(self) -> bool:
@@ -2538,10 +2539,12 @@ class NPUModelRunner(GPUModelRunner):
                     # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
                     # and rope head dim.
                     if self.model_config.use_mla:
-                        head_size = (
-                            self.model_config.hf_text_config.qk_rope_head_dim
-                            + self.model_config.hf_text_config.kv_lora_rank
-                        )
+                        if layer_name in self.kvbytes.keys():
+                            head_size = (self.model_config.hf_text_config.qk_rope_head_dim*self.kvbytes[layer_name][1] + \
+                                self.model_config.hf_text_config.kv_lora_rank*self.kvbytes[layer_name][0])
+                        else:
+                            head_size = (self.model_config.hf_text_config.qk_rope_head_dim + \
+                                self.model_config.hf_text_config.kv_lora_rank)
 
                     dsa_k_cache_factor = None
                     dsa_k_cache_size = None
@@ -2556,6 +2559,9 @@ class NPUModelRunner(GPUModelRunner):
                             sparse_sum_head_size / ratio for ratio in self._get_sparse_kv_cache_ratio()
                         ]
                         dsa_k_cache_size = int(kv_cache_tensor.size // dsa_k_cache_factor)
+                    elif layer_name in self.kvbytes and self.model_config.use_mla:
+                        k_tensor_split_factor = head_size / (self.model_config.hf_text_config.kv_lora_rank * self.kvbytes[layer_name][0])
+                        v_tensor_split_factor = head_size / (self.model_config.hf_text_config.qk_rope_head_dim * self.kvbytes[layer_name][1])
                     else:
                         # for other deepseek models, use MLAAttentionSpec
                         k_tensor_split_factor = head_size / self.model_config.hf_text_config.kv_lora_rank
@@ -2688,8 +2694,12 @@ class NPUModelRunner(GPUModelRunner):
                             num_kv_heads,
                             self.model_config.hf_text_config.qk_rope_head_dim,
                         ]
-                    k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                    v_cache = raw_v_tensor.view(dtype).view(v_shape)
+                    if layer_name in self.kvbytes:
+                        k_cache = raw_k_tensor.view(dtype).view(k_shape)
+                        v_cache = raw_v_tensor.view(self.vllm_config.model_config.dtype).view(v_shape)
+                    else:
+                        k_cache = raw_k_tensor.view(dtype).view(k_shape)
+                        v_cache = raw_v_tensor.view(dtype).view(v_shape)
 
                     if self.use_sparse and raw_dsa_k_tensor is not None:
                         index_head_dim = self._get_sparse_kv_cache_ratio()[-1]
@@ -2927,6 +2937,9 @@ class NPUModelRunner(GPUModelRunner):
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         # NOTE: Must process Attention/MLAAttention before MambaBase to maintain
         # ordering expected by graph parameter update logic in attention backends.
+        def dtype_to_bytes(dtype: torch.dtype) -> int:
+            """将 torch.dtype 转换为字节数"""
+            return torch.tensor([], dtype=dtype).element_size()
         mamba_layers: dict[str, MambaBase] = {}
         for layer_name, attn_module in attn_layers.items():
             if isinstance(attn_module, Attention):
@@ -2956,6 +2969,19 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=self.kv_cache_dtype,
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                     )
+                elif getattr(attn_module, "fa_quant_layer", False):     
+                    block_size = self.vllm_config.cache_config.block_size
+                    head_size = attn_module.head_size + attn_module.impl.qk_rope_head_dim
+                    kv_cache_spec[layer_name] = MLAAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=head_size,
+                        dtype=attn_module.dtype,
+                        cache_dtype_str=None)
+                    self.fa_quant  = True
+                    if layer_name not in self.kvbytes:
+                        self.kvbytes[layer_name] = [dtype_to_bytes(attn_module.dtype), 
+                                        dtype_to_bytes(self.vllm_config.model_config.dtype)]
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
 

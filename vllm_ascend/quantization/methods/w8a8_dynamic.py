@@ -16,7 +16,9 @@
 #
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any,Optional, Tuple, TypeVar
+from vllm.distributed import get_ep_group, get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 
 import torch
 import torch_npu
@@ -34,7 +36,8 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
-
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.ops.mla import AscendMLAModules
 
 def scale_from_float_to_int64(scale):
     """Convert float32 scale to int64 representation."""
@@ -291,3 +294,97 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             del layer.w13_weight_scale_fp32
             del layer.w2_weight_scale
             torch.npu.empty_cache()
+
+def weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
+    """fa_q weight loader."""
+    if param.numel() == 1 and loaded_weight.numel() == 1:
+        param.data.fill_(loaded_weight.item())
+    else:
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+        shard_size = loaded_weight.shape[0] // tp_size
+        # print("loaded_weight",loaded_weight)
+        loaded_weight = loaded_weight.narrow(0, shard_size * tp_rank,
+                                             shard_size)
+        loaded_weight.data= loaded_weight.data.view(loaded_weight.shape[0],1)
+        assert param.size() == loaded_weight.size(), (
+            f"Attempted to load weight ({loaded_weight.size()}) "
+            f"into parameter ({param.size()}) when TP is ({tp_size})")
+
+        param.data.copy_(loaded_weight)
+        # param.data.copy_(loaded_weight)
+
+
+M = TypeVar("M", bound=AscendMLAMetadata)
+
+@register_scheme("FAKQuant", "attention")
+class AscendFAQuantAttentionMethod:
+
+    def __init__(self):
+        self.transpose_weight = True
+        self.printFlag = False
+        vllm_config = get_current_vllm_config()
+        config = vllm_config.model_config.hf_config
+        self.kv_lora_rank = getattr(config, "kv_lora_rank", 0)
+        self.qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
+
+    def create_weights(self, layer: torch.nn.Module) -> None:
+        extra_module_names = ["fa_q", "fa_k", "fa_v"]
+        for name in extra_module_names:
+            setattr(layer, name, torch.nn.Module())
+        # print("==== name weight")
+        params_dict = {}
+        dtype = torch.get_default_dtype()
+        layer.num_kv_heads = 1
+        params_dict["fa_q.scale"] = torch.empty((layer.num_heads, 1),
+                                                dtype=dtype)
+        params_dict["fa_k.scale"] = torch.empty((layer.num_kv_heads, 1),
+                                                dtype=dtype)
+        params_dict["fa_v.scale"] = torch.empty((layer.num_kv_heads, 1),
+                                                dtype=dtype)
+        params_dict["fa_q.offset"] = torch.empty((layer.num_heads, 1),
+                                                 dtype=torch.int8)
+        params_dict["fa_k.offset"] = torch.empty((layer.num_kv_heads, 1),
+                                                 dtype=torch.int8)
+        params_dict["fa_v.offset"] = torch.empty((layer.num_kv_heads, 1),
+                                                 dtype=torch.int8)
+        # print("layer.num_heads",layer.num_heads)
+        for name, weight in params_dict.items():
+            # print(f"==== name:{name} weight:{weight}")
+            module_name, weight_name = name.split('.')
+            module = getattr(layer, module_name)
+            # weight.shape = weight.view(weight.shape[0],1)
+            weight_param = torch.nn.Parameter(weight, requires_grad=False)
+            module.register_parameter(weight_name, weight_param)
+            # When loading weights, segment them according to TP
+            setattr(weight_param, "weight_loader", weight_loader)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+
+        if not hasattr(layer,
+                       "fa_quant_layer") or layer.fa_quant_layer is False:
+            return
+        repeated_query_scale = torch.squeeze(layer.fa_q.scale)
+        repeated_quant_qscale = repeated_query_scale.repeat(1536)
+        layer.quant_qscale = repeated_quant_qscale.view(1,repeated_quant_qscale.shape[0])
+        layer.quant_qscale = 1.0 / torch.nn.Parameter(layer.quant_qscale.to(torch.float),
+                                                   requires_grad=False)
+
+
+        repeated_fa_kscale = torch.squeeze(layer.fa_k.scale).unsqueeze(0)
+
+        layer.fak_descale = torch.nn.Parameter(repeated_fa_kscale.to(torch.float),
+                                             requires_grad=False) 
+        repeated_quant_kscale = repeated_fa_kscale.repeat(self.kv_lora_rank)
+        layer.quant_kscale = repeated_quant_kscale.view(1,self.kv_lora_rank)
+
+        layer.quant_kscale = 1.0 / torch.nn.Parameter(layer.quant_kscale.to(torch.float),
+                                             requires_grad=False)
+
+    def apply(self, layer: torch.nn.Module, hidden_states: torch.Tensor,
+              kv_cache: Tuple[torch.Tensor], attn_metadata: M, mla_module: AscendMLAModules, need_gather_q_kv: bool = False,
+        output: Optional[torch.Tensor] = None,) -> torch.Tensor:
+        layer_impl = layer
+        layer.impl.forward(layer.layer_name, hidden_states, kv_cache, attn_metadata,
+                            need_gather_q_kv, output, layer_impl)
+        return output

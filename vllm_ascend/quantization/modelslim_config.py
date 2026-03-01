@@ -401,7 +401,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             self.packed_modules_mapping = packed_modules_model_mapping[model_type]
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
-        from vllm.model_executor.layers.attention import Attention
+        from vllm.model_executor.layers.attention import Attention, MLAAttention
 
         if model_type != "kimi_k2":
             if prefix.startswith("language_model"):
@@ -414,8 +414,8 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
             return AscendLinearMethod(scheme)
-        elif (
-            isinstance(layer, Attention)
+        elif (isinstance(layer, Attention) 
+            or (isinstance(layer, MLAAttention))
             and "fa_quant_type" in self.quant_description
             and self.quant_description["fa_quant_type"] is not None
         ):
@@ -557,3 +557,9 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def get_scaled_act_names(self) -> list[str]:
         return []
+
+    def is_enable_fa_quant(self):
+        if 'fa_quant_type' in self.quant_description.keys() and \
+                self.quant_description['fa_quant_type'] is not None:
+            return True
+        return False
