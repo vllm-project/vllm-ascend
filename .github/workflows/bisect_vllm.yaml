@@ -1,0 +1,231 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Bisect vLLM
+
+on:  
+  workflow_dispatch:
+    inputs:
+      good_commit:
+        description: 'Known good vllm commit (leave empty to auto-detect from main branch)'
+        required: false
+        default: ''
+      bad_commit:
+        description: 'Known bad vllm commit (leave empty to auto-detect from current branch)'
+        required: false
+        default: ''
+      test_cmd:
+        description: 'Failing pytest command(s), semicolon-separated for batch mode'
+        required: true
+        default: 'pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  # ================================================================
+  # Parameter resolution + matrix generation.
+  # All environment differences are driven by bisect_helper.py ENV_RULES.
+  # To change env config for a test type, edit ONLY bisect_helper.py.
+  # ================================================================
+  set-params:
+    name: Set parameters
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      good_commit: ${{ steps.resolve.outputs.good_commit }}
+      bad_commit: ${{ steps.resolve.outputs.bad_commit }}
+    steps:
+      - name: Checkout vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Resolve parameters and build matrix
+        id: resolve
+        run: |
+          # ---- PR-trigger defaults (edit here) ----
+          DEFAULT_TEST_CMD="pytest -sv tests/e2e/singlecard/test_llama32_lora.py; pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py; pytest -sv tests/ut/spec_decode/test_eagle_proposer.py; pytest -sv tests/e2e/singlecard/test_models.py; pytest -sv tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py"
+          DEFAULT_GOOD_COMMIT=""
+          DEFAULT_BAD_COMMIT=""
+          # ---- end defaults ----
+
+          INPUT_TEST_CMD="${{ inputs.test_cmd }}"
+          if [[ -n "${INPUT_TEST_CMD}" ]]; then
+            TEST_CMDS="${INPUT_TEST_CMD}"
+          else
+            TEST_CMDS="${DEFAULT_TEST_CMD}"
+          fi
+
+          INPUT_GOOD="${{ inputs.good_commit }}"
+          INPUT_BAD="${{ inputs.bad_commit }}"
+          echo "good_commit=${INPUT_GOOD:-${DEFAULT_GOOD_COMMIT}}" >> "$GITHUB_OUTPUT"
+          echo "bad_commit=${INPUT_BAD:-${DEFAULT_BAD_COMMIT}}" >> "$GITHUB_OUTPUT"
+
+          python3 tools/bisect_helper.py batch-matrix \
+            --test-cmds "${TEST_CMDS}" \
+            --output-format github
+
+  # ================================================================
+  # Test extract_failures.py (PR only, lightweight, ubuntu-latest)
+  # Validates that CI log extraction works against a known failed run.
+  # ================================================================
+  test-extract:
+    name: Test extract_failures.py
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Test extract_failures.py against known failed run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/extract_failures.py \
+            --repo vllm-project/vllm-ascend \
+            --run-id 22414687320 > /tmp/result.json
+
+          cat /tmp/result.json
+
+          python3 << 'EOF'
+          import json, sys
+
+          d = json.load(open("/tmp/result.json"))
+
+          # Verify output structure
+          required_keys = [
+              "run_id", "run_url", "vllm_bad_commit", "vllm_good_commit",
+              "failed_jobs", "failed_tests", "test_cmds", "test_cmds_semicolon",
+              "extraction_errors", "skip_reason",
+          ]
+          for k in required_keys:
+              assert k in d, f"Missing key: {k}"
+
+          assert d["run_id"] == 22414687320, f"Unexpected run_id: {d['run_id']}"
+          assert d["skip_reason"] is None, f"Unexpected skip: {d['skip_reason']}"
+
+          # Should have extracted some failed tests
+          n = len(d["failed_tests"])
+          print(f"Extracted {n} failed test(s)")
+          if n == 0:
+              # Log extraction may fail due to token permissions in fork PRs
+              # In that case extraction_errors should be populated
+              assert len(d["extraction_errors"]) > 0, "No tests and no errors - unexpected"
+              print(f"Log extraction had {len(d['extraction_errors'])} error(s) (expected for fork PRs)")
+              print("PASS (with expected extraction errors)")
+          else:
+              # Verify test paths look reasonable
+              for t in d["failed_tests"]:
+                  assert t.startswith("tests/"), f"Bad test path: {t}"
+                  assert t.endswith(".py") or "::" in t, f"Bad test path: {t}"
+              print(f"bad_commit: {d['vllm_bad_commit']}")
+              print(f"good_commit: {d['vllm_good_commit']}")
+              print(f"test_cmds_semicolon: {d['test_cmds_semicolon'][:200]}")
+              print("PASS")
+          EOF
+
+  # ================================================================
+  # Generic bisect job — NO if/else branches for test types.
+  # All env config comes from the matrix (generated by bisect_helper.py).
+  # To add/change env for a test type, edit ONLY ENV_RULES in bisect_helper.py.
+  # ================================================================
+  bisect:
+    name: Bisect (${{ matrix.group }})
+    needs: set-params
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-params.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    container:
+      image: ${{ matrix.image }}
+      env:
+        # All container env keys are flattened as cenv_XXX in the matrix.
+        # Empty string = not set for this env type.
+        VLLM_LOGGING_LEVEL: ${{ matrix.cenv_VLLM_LOGGING_LEVEL }}
+        VLLM_USE_MODELSCOPE: ${{ matrix.cenv_VLLM_USE_MODELSCOPE }}
+        HF_HUB_OFFLINE: ${{ matrix.cenv_HF_HUB_OFFLINE }}
+        SOC_VERSION: ${{ matrix.cenv_SOC_VERSION }}
+        MAX_JOBS: ${{ matrix.cenv_MAX_JOBS }}
+        COMPILE_CUSTOM_KERNELS: ${{ matrix.cenv_COMPILE_CUSTOM_KERNELS }}
+        HCCL_BUFFSIZE: ${{ matrix.cenv_HCCL_BUFFSIZE }}
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+        with:
+          path: ./vllm-ascend
+          fetch-depth: 0
+
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info || echo "npu-smi not available (expected on CPU runners)"
+          if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
+            cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          fi
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list || true
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple || true
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local || true
+          apt-get update -y
+
+      - name: Install system dependencies
+        working-directory: ./vllm-ascend
+        run: ${{ matrix.sys_deps }}
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ needs.set-params.outputs.bad_commit }}
+          path: ./vllm-empty
+          fetch-depth: 500
+      - name: Install vllm from source
+        working-directory: ./vllm-empty
+        run: ${{ matrix.vllm_install }}
+
+      - name: Install vllm-ascend
+        working-directory: ./vllm-ascend
+        run: ${{ matrix.ascend_install }}
+
+      - name: Run bisect
+        working-directory: ./vllm-ascend
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        run: |
+          # Apply runtime_env from matrix (JSON string → export each key)
+          RUNTIME_ENV='${{ matrix.runtime_env }}'
+          for key in $(echo "${RUNTIME_ENV}" | python3 -c "import sys,json; [print(k) for k in json.load(sys.stdin)]" 2>/dev/null); do
+            val=$(echo "${RUNTIME_ENV}" | python3 -c "import sys,json; print(json.load(sys.stdin)['${key}'])")
+            export "${key}=${val}"
+          done
+
+          chmod +x tools/bisect_vllm.sh
+          echo "${{ matrix.test_cmds }}" > /tmp/bisect_cmds.txt
+
+          tools/bisect_vllm.sh \
+            --vllm-repo ../vllm-empty \
+            --ascend-repo . \
+            --fetch-depth 500 \
+            --step-timeout 1200 \
+            --total-timeout 20400 \
+            --test-cmds-file /tmp/bisect_cmds.txt \
+            ${{ needs.set-params.outputs.good_commit && format('--good {0}', needs.set-params.outputs.good_commit) || '' }} \
+            ${{ needs.set-params.outputs.bad_commit && format('--bad {0}', needs.set-params.outputs.bad_commit) || '' }}

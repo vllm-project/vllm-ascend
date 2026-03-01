@@ -1,0 +1,218 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Auto Bisect vLLM Main Failures
+
+on:
+  # Automatically triggered when schedule_test_vllm_main completes
+  workflow_run:
+    workflows: ["vLLM Main Schedule Test"]
+    types: [completed]
+  # Manual trigger for analyzing a specific run
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Workflow run ID to analyze (leave empty to find latest failed run)'
+        required: false
+        default: ''
+  # PR trigger: dry-run mode (extract only, no bisect trigger)
+  pull_request:
+    branches:
+      - 'main'
+    paths:
+      - '.github/workflows/schedule_bisect_vllm_main.yaml'
+      - 'tools/extract_failures.py'
+
+permissions:
+  actions: write
+  contents: read
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  extract-and-trigger:
+    name: Extract failures & trigger bisect
+    runs-on: ubuntu-latest
+    # For workflow_run: only run if the schedule test failed
+    # For workflow_dispatch / pull_request: always run
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
+      github.event.workflow_run.conclusion == 'failure'
+    steps:
+      - name: Checkout vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Extract failures from CI logs
+        id: extract
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Determine run ID from trigger source
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            RUN_ID="${{ github.event.workflow_run.id }}"
+            EXTRA_ARGS="--only-hour 20 --check-duplicate"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # PR dry-run: use a known failed run for validation
+            RUN_ID="22414687320"
+            EXTRA_ARGS=""
+          else
+            RUN_ID="${{ inputs.run_id }}"
+            EXTRA_ARGS=""
+          fi
+
+          ARGS="--repo ${{ github.repository }}"
+          if [[ -n "${RUN_ID}" ]]; then
+            ARGS="${ARGS} --run-id ${RUN_ID}"
+          fi
+
+          python3 tools/extract_failures.py ${ARGS} ${EXTRA_ARGS} > /tmp/result.json
+
+          # Parse the result
+          SKIP_REASON=$(python3 -c "import json; print(json.load(open('/tmp/result.json')).get('skip_reason') or '')")
+          if [[ -n "${SKIP_REASON}" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=${SKIP_REASON}" >> "$GITHUB_OUTPUT"
+            echo "Skipping: ${SKIP_REASON}"
+            exit 0
+          fi
+
+          # Extract values for the bisect trigger
+          TEST_CMDS=$(python3 -c "import json; print(json.load(open('/tmp/result.json'))['test_cmds_semicolon'])")
+          BAD_COMMIT=$(python3 -c "import json; print(json.load(open('/tmp/result.json')).get('vllm_bad_commit') or '')")
+          GOOD_COMMIT=$(python3 -c "import json; print(json.load(open('/tmp/result.json')).get('vllm_good_commit') or '')")
+          NUM_FAILED=$(python3 -c "import json; print(len(json.load(open('/tmp/result.json'))['failed_tests']))")
+          RUN_URL=$(python3 -c "import json; print(json.load(open('/tmp/result.json')).get('run_url') or '')")
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "test_cmds=${TEST_CMDS}" >> "$GITHUB_OUTPUT"
+          echo "bad_commit=${BAD_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "good_commit=${GOOD_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "num_failed=${NUM_FAILED}" >> "$GITHUB_OUTPUT"
+          echo "run_url=${RUN_URL}" >> "$GITHUB_OUTPUT"
+
+          echo "Found ${NUM_FAILED} failed test(s), bad_commit=${BAD_COMMIT}, good_commit=${GOOD_COMMIT}"
+
+      - name: Trigger bisect workflow
+        if: steps.extract.outputs.skip != 'true' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ARGS=""
+          if [[ -n "${{ steps.extract.outputs.good_commit }}" ]]; then
+            ARGS="${ARGS} -f good_commit=${{ steps.extract.outputs.good_commit }}"
+          fi
+          if [[ -n "${{ steps.extract.outputs.bad_commit }}" ]]; then
+            ARGS="${ARGS} -f bad_commit=${{ steps.extract.outputs.bad_commit }}"
+          fi
+
+          gh workflow run bisect_vllm.yaml \
+            -f test_cmd="${{ steps.extract.outputs.test_cmds }}" \
+            ${ARGS}
+
+          echo "Bisect workflow triggered successfully"
+
+      - name: Verify trigger command (PR only)
+        if: steps.extract.outputs.skip != 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Verify the workflow file exists and accepts expected inputs
+          gh api /repos/${{ github.repository }}/actions/workflows/bisect_vllm.yaml \
+            --jq '.id' && echo "bisect_vllm.yaml workflow found"
+
+          # Verify extraction outputs are non-empty
+          TEST_CMDS="${{ steps.extract.outputs.test_cmds }}"
+          if [[ -z "${TEST_CMDS}" ]]; then
+            echo "ERROR: test_cmds is empty"
+            exit 1
+          fi
+          echo "test_cmd=${TEST_CMDS}"
+          echo "bad_commit=${{ steps.extract.outputs.bad_commit }}"
+          echo "good_commit=${{ steps.extract.outputs.good_commit }}"
+
+          # Build and display the full command that would run
+          ARGS=""
+          if [[ -n "${{ steps.extract.outputs.good_commit }}" ]]; then
+            ARGS="${ARGS} -f good_commit=${{ steps.extract.outputs.good_commit }}"
+          fi
+          if [[ -n "${{ steps.extract.outputs.bad_commit }}" ]]; then
+            ARGS="${ARGS} -f bad_commit=${{ steps.extract.outputs.bad_commit }}"
+          fi
+          echo "Would run: gh workflow run bisect_vllm.yaml -f test_cmd=\"${TEST_CMDS}\" ${ARGS}"
+          echo "All parameters validated successfully"
+
+      - name: Write summary
+        if: always()
+        run: |
+          if [[ "${{ steps.extract.outputs.skip }}" == "true" ]]; then
+            cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          ## Auto Bisect - Skipped
+          EOF
+            echo "**Reason:** ${{ steps.extract.outputs.skip_reason }}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Generate summary from the extraction result
+          python3 << 'PYEOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          result_path = Path("/tmp/result.json")
+          if not result_path.exists() or result_path.stat().st_size == 0:
+              print("## Auto Bisect - No Result")
+              print("Extraction did not produce a result file.")
+              exit(0)
+
+          try:
+              d = json.load(result_path.open())
+          except json.JSONDecodeError:
+              print("## Auto Bisect - Error")
+              print("Failed to parse extraction result.")
+              exit(0)
+
+          print("## Auto Bisect vLLM Main Failures")
+          print()
+          print("| Field | Value |")
+          print("|-------|-------|")
+          if d.get("run_url"):
+              print(f"| Source run | [{d['run_id']}]({d['run_url']}) |")
+          if d.get("vllm_bad_commit"):
+              print(f"| vllm bad commit | `{d['vllm_bad_commit']}` |")
+          if d.get("vllm_good_commit"):
+              print(f"| vllm good commit | `{d['vllm_good_commit']}` |")
+          print(f"| Failed tests | {len(d.get('failed_tests', []))} |")
+          print()
+
+          if d.get("failed_tests"):
+              print("### Failed Tests")
+              print()
+              for t in d["failed_tests"]:
+                  print(f"- `{t}`")
+              print()
+
+          if d.get("extraction_errors"):
+              print("### Extraction Errors")
+              print()
+              print("The following jobs had log extraction failures (not included in bisect):")
+              print()
+              for e in d["extraction_errors"]:
+                  print(f"- **{e['job_name']}**: {e['error']}")
+              print()
+          PYEOF
