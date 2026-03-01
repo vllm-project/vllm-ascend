@@ -51,13 +51,13 @@ line-length = 120
 # Folder to be modified
 exclude = [
     # Batch (1)
-    "tests/e2e/__init__.py",
-    "tests/e2e/310p/",
-    "tests/e2e/conftest.py",
-    "tests/e2e/doctests/",
-    "tests/e2e/model_utils.py",
-    "tests/e2e/models/",
-    "tests/e2e/multicard/2-cards/",
+    # "tests/e2e/__init__.py",
+    # "tests/e2e/310p/",
+    # "tests/e2e/conftest.py",
+    # "tests/e2e/doctests/",
+    # "tests/e2e/model_utils.py",
+    # "tests/e2e/models/",
+    # "tests/e2e/multicard/2-cards/",
     
     # Batch (2)
     "tests/e2e/multicard/4-cards/",
