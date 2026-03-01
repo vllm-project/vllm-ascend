@@ -117,6 +117,20 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # Yuanrong worker endpoint in "<host>:<port>" format.
+    # If not set, the default value is None.
+    # This variable is required when using Yuanrong backend.
+    "VLLM_ASCEND_YUANRONG_WORKER_ADDR": lambda: os.getenv("VLLM_ASCEND_YUANRONG_WORKER_ADDR", None),
+    # Whether to enable exclusive connection mode for Yuanrong.
+    # 0: disable; 1: enable. If not set, the default value is 0.
+    "VLLM_ASCEND_YUANRONG_ENABLE_EXCLUSIVE_CONNECTION": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_YUANRONG_ENABLE_EXCLUSIVE_CONNECTION", "0"))
+    ),
+    # Whether to enable remote h2d in Yuanrong.
+    # 0: disable; 1: enable. If not set, the default value is 0.
+    "VLLM_ASCEND_YUANRONG_ENABLE_REMOTE_H2D": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_YUANRONG_ENABLE_REMOTE_H2D", "0"))
+    ),
 }
 
 # end-env-vars-definition
