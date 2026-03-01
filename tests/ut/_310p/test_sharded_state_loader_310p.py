@@ -52,7 +52,7 @@ class MockModel(torch.nn.Module):
 class TestShardedStateLoader310(TestBase):
     """Test cases for ShardedStateLoader310."""
 
-    @patch("vllm_ascend._310p.sharded_state_loader_310p.get_tensor_model_parallel_rank")
+    @patch("vllm.distributed.get_tensor_model_parallel_rank")
     @patch("safetensors.torch.save_file")
     @patch("torch_npu.get_npu_format")
     @patch("torch_npu.npu_format_cast")
@@ -76,7 +76,7 @@ class TestShardedStateLoader310(TestBase):
             call_args = mock_save_file.call_args[0]
             self.assertTrue(call_args[1].endswith("model-00000-of-00001.safetensors"))
 
-    @patch("vllm_ascend._310p.sharded_state_loader_310p.get_tensor_model_parallel_rank")
+    @patch("vllm.distributed.get_tensor_model_parallel_rank")
     @patch("safetensors.torch.save_file")
     @patch("torch_npu.get_npu_format")
     @patch("torch_npu.npu_format_cast")
