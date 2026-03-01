@@ -569,6 +569,38 @@ void transpose_kv_cache_by_block(
 
 }
 
+at::Tensor npu_causal_conv1d_update(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    const c10::optional<at::Tensor>& conv_state_indices,
+    const c10::optional<at::Tensor>& bias,
+    const c10::optional<at::Tensor>& num_accpted_tokens,
+    const c10::optional<at::Tensor>& query_start_loc,
+    c10::string_view activation_mode,
+    int64_t pad_slot_id
+    )
+{
+    at::Tensor y = at::empty(x.sizes(), x.options());
+
+    int64_t activation=(activation_mode.empty()?0:1);
+    EXEC_NPU_CMD(
+        aclnnCausalConv1dUpdate,
+        x,
+        weight,
+        conv_state,
+        conv_state_indices,
+        bias,
+        num_accpted_tokens,
+        query_start_loc,
+        activation,
+        pad_slot_id,
+        y
+    );
+
+    return y;
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -743,4 +775,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
     );
     ops.impl("transpose_kv_cache_by_block", torch::kPrivateUse1, &vllm_ascend::transpose_kv_cache_by_block);
+
+    ops.def(
+        "npu_causal_conv1d_update(Tensor x, "
+                            "Tensor weight, "
+                            "Tensor conv_state, "
+                            "Tensor? conv_state_indices=None, "
+                            "Tensor? bias=None, "
+                            "Tensor? num_accpted_tokens=None, "
+                            "Tensor? query_start_loc=None, "
+                            "str activation_mode='silu', "
+                            "int pad_slot_id=-1)"                           
+        "-> Tensor y"
+        );
+    ops.impl("npu_causal_conv1d_update", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_update);
 }
