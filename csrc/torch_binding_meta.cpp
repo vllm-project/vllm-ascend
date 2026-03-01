@@ -431,6 +431,51 @@ void transpose_kv_cache_by_block_meta(
     return;
 }
 
+at::Tensor matmul_gelu_meta(const at::Tensor &x, const at::Tensor &weight, const at::Tensor &bias)
+{
+    TORCH_CHECK(x.dim() == 2, "The x should be 2D");
+    TORCH_CHECK(weight.dim() == 2, "The weight should be 2D");
+    TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
+    TORCH_CHECK(weight.sym_size(0) == bias.sym_size(0), "The weight first dim should be same as bias first dim");
+    TORCH_CHECK(x.sym_size(1) == weight.sym_size(1), "The x second dim should be same as weight second dim");
+    TORCH_CHECK(
+        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat,
+        "float16 or float32 tensor expected but got a tensor with dtype: ",
+        x.scalar_type());
+     TORCH_CHECK(
+        x.scalar_type() == weight.scalar_type() && x.scalar_type() == bias.scalar_type(),
+        "The dtype of x, weight and bias should be same");
+
+    auto m = x.sym_size(0);
+    auto n = bias.sym_size(0);
+
+    at::Tensor gelu_output = at::empty_symint({m, n}, x.options());
+    return gelu_output;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> add_layer_norm_meta(
+    const at::Tensor& x1,
+    const at::Tensor& x2,
+    const at::Tensor& gamma,
+    const at::Tensor& beta,
+    double epsilon,
+    bool additional_output)
+{
+    c10::SymDimVector shape;
+    for (int64_t index = 0; index < x1.dim() - gamma.dim(); index++) {
+        shape.push_back(x1.sym_size(index));
+    }
+    shape.push_back(1);
+
+    at::Tensor y = at::empty_symint(x1.sym_sizes(), x1.options());
+    at::Tensor x = at::empty_symint(x1.sym_sizes(), x1.options());
+
+    at::Tensor mean = at::empty_symint(shape, x1.options().dtype(at::kFloat));
+    at::Tensor rstd = at::empty_symint(shape, x1.options().dtype(at::kFloat));
+
+    return std::make_tuple(y, mean, rstd, x);
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -471,5 +516,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
+    // matmul_gelu
+    ops.impl("matmul_gelu", &vllm_ascend::meta::matmul_gelu_meta);
+    // add_layer_norm
+    ops.impl("add_layer_norm", &vllm_ascend::meta::add_layer_norm_meta);
 }
 }
