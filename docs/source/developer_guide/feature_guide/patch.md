@@ -34,7 +34,7 @@ vllm_ascend
 
 ## How to write a patch
 
-Before writing a patch, following the principle above, we should patch the least code. If it's necessary, we can patch the code in either **platform** and **worker** folder. Here is an example to patch `distributed` module in vLLM.
+Before writing a patch, following the principle above, we should patch the least code. If it's necessary, we can patch the code in either **platform** or **worker** folder. Here is an example to patch `distributed` module in vLLM.
 
 1. Decide which version of vLLM we should patch. For example, after analysis, here we want to patch both `0.10.0` and `main` of vLLM.
 2. Decide which process we should patch. For example, here `distributed` belongs to the vLLM main process, so we should patch `platform`.

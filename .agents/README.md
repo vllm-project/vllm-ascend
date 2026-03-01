@@ -8,6 +8,7 @@ Note: Please copy the skills directory `.agents/skills` to `.claude/skills` if y
 
 - [vLLM Ascend Model Adapter Skill](#vllm-ascend-model-adapter-skill)
 - [vLLM Ascend main2main Skill](#vllm-ascend-main2main-skill)
+- [vLLM Ascend Release Note Writer Skill](#vllm-ascend-release-note-writer-skill)
 
 ## vLLM Ascend Model Adapter Skill
 
@@ -74,3 +75,41 @@ This skill facilitates the process of:
 1. Open a conversation with the AI agent inside the vllm-ascend dev container.
 2. Invoke the skill (e.g. `/main2main`).
 3. The agent follows the playbook and produces a ready-to-merge commit.
+
+## vLLM Ascend Release Note Writer Skill
+
+You just need to say: `Please help me write a 0.13.0 release note based on commits from v0.11.0 and releases/v0.13.0`
+
+### What it does
+
+This skill guides you through a structured workflow to:
+
+1. Fetch commits between two versions using the provided script.
+2. Analyze and categorize each commit in a CSV workspace.
+3. Draft highlights and write polished release notes.
+4. Generate release notes organized by category (Features, Hardware Support, Performance, Dependencies, etc.).
+
+### File layout
+
+| File | Purpose |
+| ---- | ------- |
+| `SKILL.md` | Skill definition, workflow, and writing guidelines |
+| `references/ref-past-release-notes-highlight.md` | Style and category reference for release notes |
+| `scripts/fetch_commits-optimize.py` | Script to fetch commits between versions |
+
+### Quick start
+
+1. Open a conversation with the AI agent.
+2. Invoke the skill (e.g. `/vllm-ascend-release-note-writer`).
+3. Follow the workflow steps:
+   - Fetch commits between versions
+   - Analyze commits in CSV format
+   - Draft and edit highlights
+4. Output files are saved to `vllm-ascend-release-note/output/$version`
+
+### Key guidelines
+
+- Use one-level headings (###) for sections in a specific order: Highlights, Features, Hardware and Operator Support, Performance, Dependencies, Deprecation & Breaking Changes, Documentation, Others.
+- Focus on user-facing impact and include context for practical usage.
+- Verify details by checking linked PRs (use GitHub API for descriptions if needed).
+- Keep notes concise and avoid unnecessary technical details.
