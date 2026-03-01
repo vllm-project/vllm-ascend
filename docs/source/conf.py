@@ -115,6 +115,18 @@ exclude_patterns = [
 html_title = project
 html_theme = "sphinx_book_theme"
 html_logo = "logos/vllm-ascend-logo-text-light.png"
+
+# Custom static files (CSS, JS)
+html_static_path = ["_static"]
+
+# Include custom CSS and JS files
+html_css_files = [
+    "custom.css",
+]
+html_js_files = [
+    "custom.js",
+]
+
 html_theme_options = {
     "path_to_docs": "docs/source",
     "repository_url": "https://github.com/vllm-project/vllm-ascend",
