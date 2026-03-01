@@ -13,6 +13,7 @@ import os
 
 import torch
 from vllm.triton_utils import tl, tldevice, triton
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 if os.environ.get("FLA_USE_FAST_OPS", "0") == "1":
     div = tldevice.fast_dividef
@@ -194,6 +195,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     scale,
     T,
     B: tl.constexpr,
+    N: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -207,114 +209,122 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     """
     Fused kernel that combines sigmoid gating computation with recurrent delta rule update.
     """
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    i_n, i_hv = i_nh // HV, i_nh % HV
-    i_h = i_hv // (HV // H)
+    pid = tl.program_id(0)
+    pnum = tl.num_programs(0)
+    NK, NV = tl.cdiv(K, BK), tl.cdiv(V, BV)
+    T = T.to(tl.int64)
+    
+    for t in tl.range(pid, NK * NV * HV * N, pnum):
+        i_k = (t % NK).to(tl.int64)
+        i_v = ((t // NK) % NV).to(tl.int64)
+        i_hv = ((t // (NK * NV)) % HV).to(tl.int64)
+        i_n = (t // (NK * NV * HV)).to(tl.int64)
+        i_h = i_hv // (HV // H)
 
-    if IS_VARLEN:
-        bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int64),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
-        )
-        all = T
-        T = eos - bos
-    else:
-        bos, eos = i_n * T, i_n * T + T
-        all = B * T
+        if IS_VARLEN:
+            bos, eos = (
+                tl.load(cu_seqlens + i_n).to(tl.int64),
+                tl.load(cu_seqlens + i_n + 1).to(tl.int64),
+            )
+            all = T
+            T = eos - bos
+        else:
+            bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
+            all = (B * T).to(tl.int64)
 
-    o_k = i_k * BK + tl.arange(0, BK)
-    o_v = i_v * BV + tl.arange(0, BV)
+        o_k = i_k * BK + tl.arange(0, BK)
+        o_v = i_v * BV + tl.arange(0, BV)
 
-    p_q = q + (bos * H + i_h) * K + o_k
-    p_k = k + (bos * H + i_h) * K + o_k
-    p_v = v + (bos * HV + i_hv) * V + o_v
-    p_b = b + bos * HV + i_hv
-    p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
+        p_q = q + (bos * H + i_h) * K + o_k
+        p_k = k + (bos * H + i_h) * K + o_k
+        p_v = v + (bos * HV + i_hv) * V + o_v
+        p_b = b + bos * HV + i_hv
+        p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
 
-    # Gating computation pointers
-    p_A_log = A_log + i_hv
-    p_a = a + bos * HV + i_hv
-    p_dt_bias = dt_bias + i_hv
+        # Gating computation pointers
+        p_A_log = A_log + i_hv
+        p_a = a + bos * HV + i_hv
+        p_dt_bias = dt_bias + i_hv
 
-    mask_k = o_k < K
-    mask_v = o_v < V
-    mask_h = mask_k[:, None] & mask_v[None, :]
+        mask_k = o_k < K
+        mask_v = o_v < V
+        mask_h = mask_k[:, None] & mask_v[None, :]
 
-    b_h = tl.zeros([BK, BV], dtype=tl.float32)
-    if USE_INITIAL_STATE:
-        idx = tl.load(h0_indices + i_n)
-        # if idx >= 0:
-        tmp0 = tl.where(idx < 0, 0, idx)
-        p_h0 = h0_source + tmp0 * HV * K * V + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-        temp1 = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
-        temp2 = tl.zeros_like(temp1)
-        value0 = tl.where(idx < 0, temp2, temp1)
-        b_h += value0  # tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+        b_h = tl.zeros([BK, BV], dtype=tl.float32)
+        if USE_INITIAL_STATE:
+            idx = tl.load(h0_indices + i_n)
+            # if idx >= 0:
+            tmp0 = tl.where(idx < 0, 0, idx)
+            p_h0 = h0_source + tmp0 * HV * K * V + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            temp1 = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+            temp2 = tl.zeros_like(temp1)
+            value0 = tl.where(idx < 0, temp2, temp1)
+            b_h += value0  # tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
-    for i in range(0, T):
-        # Load inputs
-        b_q = tl.load(p_q + i * H * K, mask=mask_k, other=0).to(tl.float32)
-        b_k = tl.load(p_k + i * H * K, mask=mask_k, other=0).to(tl.float32)
-        b_v = tl.load(p_v + i * HV * V, mask=mask_v, other=0).to(tl.float32)
-        b_b = tl.load(p_b + i * HV).to(tl.float32)
+        for i in range(0, T):
+            # Load inputs
+            b_q = tl.load(p_q + i * H * K, mask=mask_k, other=0).to(tl.float32)
+            b_k = tl.load(p_k + i * H * K, mask=mask_k, other=0).to(tl.float32)
+            b_v = tl.load(p_v + i * HV * V, mask=mask_v, other=0).to(tl.float32)
+            b_b = tl.load(p_b + i * HV).to(tl.float32)
 
-        # Compute sigmoid gating
-        # Load gating parameters
-        b_A_log = tl.load(p_A_log).to(tl.float32)
-        b_a = tl.load(p_a + i * HV).to(tl.float32)
-        b_dt_bias = tl.load(p_dt_bias).to(tl.float32)
+            # Compute sigmoid gating
+            # Load gating parameters
+            b_A_log = tl.load(p_A_log).to(tl.float32)
+            b_a = tl.load(p_a + i * HV).to(tl.float32)
+            b_dt_bias = tl.load(p_dt_bias).to(tl.float32)
 
-        # Compute g = -exp(A_log) * softplus(a + dt_bias)
-        x = b_a + b_dt_bias
-        beta_x = softplus_beta * x
-        # Apply softplus with numerical stability
-        softplus_x = tl.where(
-            beta_x <= softplus_threshold,
-            (1.0 / softplus_beta) * tl.log(1.0 + tl.exp(beta_x)),
-            x,
-        )
-        b_g = -tl.exp(b_A_log) * softplus_x
+            # Compute g = -exp(A_log) * softplus(a + dt_bias)
+            x = b_a + b_dt_bias
+            beta_x = softplus_beta * x
+            # Apply softplus with numerical stability
+            softplus_x = tl.where(
+                beta_x <= softplus_threshold,
+                (1.0 / softplus_beta) * tl.log(1.0 + tl.exp(beta_x)),
+                x,
+            )
+            b_g = -tl.exp(b_A_log) * softplus_x
 
-        # Compute beta = sigmoid(b)
-        b_beta = 1.0 / (1.0 + tl.exp(-b_b))
+            # Compute beta = sigmoid(b)
+            b_beta = 1.0 / (1.0 + tl.exp(-b_b))
 
-        # Apply L2 normalization if enabled
-        if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q)) + 1e-6)
-            b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
+            # Apply L2 normalization if enabled
+            if USE_QK_L2NORM_IN_KERNEL:
+                b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q)) + 1e-6)
+                b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
 
-        b_q = b_q * scale
+            b_q = b_q * scale
 
-        # Apply gating to hidden state: h *= exp(g)
-        b_h *= tl.exp(b_g)
+            # Apply gating to hidden state: h *= exp(g)
+            b_h *= tl.exp(b_g)
 
-        # Delta rule: v -= sum(h * k, dim=0)
-        b_v -= tl.sum(b_h * b_k[:, None], 0)
+            # Delta rule: v -= sum(h * k, dim=0)
+            b_v -= tl.sum(b_h * b_k[:, None], 0)
 
-        # Apply beta gating: v *= beta
-        b_v *= b_beta
+            # Apply beta gating: v *= beta
+            b_v *= b_beta
 
-        # Update hidden state: h += k[:, None] * v[None, :]
-        b_h += b_k[:, None] * b_v[None, :]
+            # Update hidden state: h += k[:, None] * v[None, :]
+            b_h += b_k[:, None] * b_v[None, :]
 
-        # Compute output: o = sum(h * q, dim=0)
-        b_o = tl.sum(b_h * b_q[:, None], 0)
-        tl.store(p_o + i * HV * V, b_o.to(p_o.dtype.element_ty), mask=mask_v)
+            # Compute output: o = sum(h * q, dim=0)
+            b_o = tl.sum(b_h * b_q[:, None], 0)
+            tl.store(p_o + i * HV * V, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-        # # Update pointers for next timestep
-        # p_q += H * K
-        # p_k += H * K
-        # p_o += HV * V
-        # p_v += HV * V
-        # p_b += HV
-        # p_a += HV
+            # # Update pointers for next timestep
+            # p_q += H * K
+            # p_k += H * K
+            # p_o += HV * V
+            # p_v += HV * V
+            # p_b += HV
+            # p_a += HV
 
-    # Store final state back to h0_source with bounds checking
-    if USE_INITIAL_STATE:
-        idx = tl.load(h0_indices + i_n)
-        if idx >= 0:
-            p_h0 = h0_source + idx * HV * K * V + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-            tl.store(p_h0, b_h.to(p_h0.dtype.element_ty), mask=mask_h)
+        # Store final state back to h0_source with bounds checking
+        if USE_INITIAL_STATE:
+            idx = tl.load(h0_indices + i_n)
+            if idx >= 0:
+                p_h0 = h0_source + idx * HV * K * V + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+                tl.store(p_h0, b_h.to(p_h0.dtype.element_ty), mask=mask_h)
 
 
 def fused_sigmoid_gating_delta_rule_update(
@@ -353,7 +363,8 @@ def fused_sigmoid_gating_delta_rule_update(
         assert scale > 0, "scale must be positive"
 
     o = q.new_empty(NK, *v.shape)
-    grid = (NK, NV, N * HV)
+    num_cores = get_vectorcore_num()
+    grid = (num_cores,)
 
     if not initial_state_indices.is_contiguous():
         initial_state_indices = initial_state_indices.contiguous()
@@ -379,6 +390,7 @@ def fused_sigmoid_gating_delta_rule_update(
         scale=scale,
         T=T,
         B=B,
+        N=N,
         H=H,
         HV=HV,
         K=K,
