@@ -62,10 +62,10 @@ class RecoveryHandlerManager:
     def __init__(self):
         self.handlers = []
 
-    def register_handler(self,handler:RecoveryHandler):
+    def register_handler(self, handler:RecoveryHandler):
         self.handlers.append(handler)
 
-    def find_handler(self,ctx:RecoveryContext) -> Optional[RecoveryHandler]:
+    def find_handler(self, ctx:RecoveryContext) -> Optional[RecoveryHandler]:
         for handler in self.handlers:
             if handler.can_handle(ctx):
                 return handler

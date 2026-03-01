@@ -11,8 +11,8 @@ from vllm_ascend.token_reinference.common import FaultStatus,FaultCommand
 class FaultAware:
     _fault_aware_group = None
 
-    def __init__(self,rank:int,world_size:int,fault_queue:queue.Queue,interval_s=1,
-                 aware_event:threading.Event=None,stop_event:threading.Event=None):
+    def __init__(self, rank:int, world_size:int, fault_queue:queue.Queue, interval_s=1,
+                 aware_event:threading.Event=None, stop_event:threading.Event=None):
         self.rank = rank
         self.world_size = world_size
         self.npu_id = torch.npu.current_device()
@@ -93,7 +93,7 @@ class FaultAware:
                 raise e
         logger.info(f"Fault aware handler exiting")
 
-    def _update_status_from_queue(self,current_status):
+    def _update_status_from_queue(self, current_status):
         try:
             msg = self.fault_queue.get_nowait()
             if msg:
@@ -108,7 +108,7 @@ class FaultAware:
 
         return current_status
 
-    def _gather_statuses(self,current_status,status_list):
+    def _gather_statuses(self, current_status,status_list):
         """ Gather statuses from all ranks to rank 0"""
         try:
             torch.distributed.gather(
@@ -121,7 +121,7 @@ class FaultAware:
             logger.error(f"Rank {self.rank} failed to gather status:{e}")
             raise e
 
-    def _determine_fault_command(self,status_list):
+    def _determine_fault_command(self, status_list):
         """Determine the command to run"""
         fault_cmd = FaultCommand.INIT_CMD
         if self.rank == 0:
@@ -131,7 +131,7 @@ class FaultAware:
                 fault_cmd = FaultCommand.STOP_DEVICE_CMD
         return fault_cmd
 
-    def broadcast_command(self,fault_cmd):
+    def broadcast_command(self, fault_cmd):
         """ BroadCast the fault command to all ranks"""
         try:
             torch.distributed.broadcast(
@@ -143,7 +143,7 @@ class FaultAware:
             logger.error(f"Rank {self.rank} failed to broadcast command:{e}")
             raise e
 
-    def _execute_command(self,fault_cmd,current_status):
+    def _execute_command(self, fault_cmd, current_status):
         """ Execute the fault command"""
         if torch.equal(fault_cmd,FaultCommand.SILENCE_CMD):
             time.sleep(self.interval_s)

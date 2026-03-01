@@ -23,7 +23,7 @@ class FaultTolerance:
     _recovery_group = None
     _sync_group = None
 
-    def __init__(self,vllm_config:VllmConfig,model_runner,execute_model_func):
+    def __init__(self, vllm_config:VllmConfig, model_runner, execute_model_func):
         self.model_runner = model_runner
         self.execute_model_func = execute_model_func
         self.vllm_config = vllm_config
@@ -83,7 +83,7 @@ class FaultTolerance:
 
         return recovery_handler_manager
 
-    def execute_model_decorator(self,func:Callable,max_retries: int,dummy_run: bool) -> Callable:
+    def execute_model_decorator(self, func:Callable, max_retries: int, dummy_run: bool) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             for attempt in range(max_retries + 1):
@@ -135,7 +135,7 @@ class FaultTolerance:
             return EMPTY_MODEL_RUNNER_OUTPUT
         return wrapper
 
-    def sample_token_decorator(self,func:Callable,max_retries: int) -> Callable:
+    def sample_token_decorator(self, func:Callable, max_retries: int) -> Callable:
         def wrapper(*args, **kwargs):
             for attempt in range(max_retries + 1):
                 try:
@@ -195,7 +195,7 @@ class FaultTolerance:
         recovery_action = self._coordinate_recovery(recovery_status)
         return recovery_action
 
-    def _coordinate_recovery(self,local_status:torch.Tensor) -> torch.Tensor:
+    def _coordinate_recovery(self, local_status:torch.Tensor) -> torch.Tensor:
         """
         Rank 0 gathers recovery status and determines fault actions for each rank
         Recovery status is categorized into clean status and recovery status
@@ -365,7 +365,7 @@ class FaultTolerance:
         key_json = json.dumps(key_data, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(key_json.encode('utf-8')).hexdigest()
 
-    def _create_essential_state_backup(self,*args,**kwargs) -> dict:
+    def _create_essential_state_backup(self, *args, **kwargs) -> dict:
         backup = {}
         if not hasattr(self.model_runner,'requests') or not hasattr(self.model_runner,'input_batch'):
             return backup
@@ -420,7 +420,7 @@ class FaultTolerance:
 
         return backup
 
-    def _restore_essential_state(self,backup):
+    def _restore_essential_state(self, backup):
         if not backup:
             return
         # clear execute_model_state
