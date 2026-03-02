@@ -377,6 +377,15 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
 
         if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
+            forward_context = get_forward_context()
+            max_tokens_across_pcp = forward_context.max_tokens_across_pcp
+
+            self.num_tokens_pcp = hidden_states.shape[0]
+            pad_size = max_tokens_across_pcp - self.num_tokens_pcp
+            if pad_size > 0:
+                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
                 dim=0,
