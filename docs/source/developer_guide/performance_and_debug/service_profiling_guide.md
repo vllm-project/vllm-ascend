@@ -44,7 +44,7 @@ python3 -m vllm.entrypoints.openai.api_server --port 8080
 --max-model-len 256
 ```
 
-> Note:**January 19, 2026: The vLLM mainline has deprecated the VLLM_TORCH_PROFILER_DIR environment variable.**[Related PR](https://github.com/vllm-project/vllm-ascend/pull/5928)  When using the vLLM Ascend mainline code to collect profiler data, remember to use the `--profiler-config`(online) parameter or the `profiler_config `(offline) parameter.
+> Note:**January 19, 2026: The vLLM mainline has deprecated the VLLM_TORCH_PROFILER_DIR environment variable.**[Related PR](https://github.com/vllm-project/vllm-ascend/pull/5928)  When using the vLLM Ascend mainline code to collect profiler data, remember to use the `--profiler-config` (online) parameter or the `profiler_config` (offline) parameter.
 
 ### 2. Start Collection
 
@@ -163,7 +163,7 @@ curl http://localhost:8000/v1/completions \
 }' | python3 -m json.tool
 ```
 
-### 4. Analyze Data 
+### 4. Analyze Data
 
 ```bash
 # xxxx-xxxx is the directory automatically created based on vLLM startup time
@@ -191,6 +191,7 @@ After analysis, the `output` directory will contain:
 ### 6. Appendix related to MS Service Profiler
 
 (profiling-configuration-file)=
+
 #### 6.1 Profiling Configuration File
 
 The profiling configuration file controls profiling parameters and behavior.
@@ -229,6 +230,7 @@ The configuration is in JSON format. Main parameters:
 ---
 
 (symbols-configuration-file)=
+
 #### 6.2 Symbols Configuration File
 
 The symbols configuration file defines which functions/methods to profile and supports flexible configuration with custom attribute collection.
