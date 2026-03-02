@@ -117,6 +117,18 @@ class AscendLinearMethod(LinearMethodBase):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
+    def get_computed_params(self) -> set[str]:
+        """Return parameter name patterns that are computed, not loaded.
+
+        These parameters are computed during process_weights_after_loading
+        rather than loaded from checkpoint:
+        - weight_offset: Zero for symmetric quantization
+        - quant_bias: Computed from weight statistics
+        - deq_scale: Computed as input_scale * weight_scale
+        - weight_scale: May be computed or have default values for some models
+        """
+        return {"weight_offset", "quant_bias", "deq_scale", "weight_scale"}
+
     def apply(
         self,
         layer: torch.nn.Module,

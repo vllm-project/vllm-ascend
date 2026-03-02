@@ -16,7 +16,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla, update_cos_sin
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
-from vllm_ascend.utils import lmhead_tp_enable, vllm_version_is
+from vllm_ascend.utils import lmhead_tp_enable
 
 
 class MtpProposer(EagleProposer):
@@ -39,11 +39,7 @@ class MtpProposer(EagleProposer):
         # Currently, both GLM and DS encounter issues when enabling the fullgraph mode and running on EagleProposer.
         # Therefore, we temporarily bypass this problem by adding a conditional check for fullgraph.
         # TODO: this conditional check should be removed after bug fixing.
-        if (
-            self.pcp_size * self.dcp_size == 1
-            and not self.speculative_config.disable_padded_drafter_batch
-            and not self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
+        if not self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             super().dummy_run(
                 num_tokens,
                 with_prefill,
@@ -130,11 +126,10 @@ class MtpProposer(EagleProposer):
                 is_draft_model=True,
                 in_profile_run=is_profile,
             ):
-                if not vllm_version_is("v0.15.0"):
-                    # Reset MOE layer index for each MTP step iteration
-                    forward_context = get_forward_context()
-                    if forward_context is not None:
-                        forward_context.moe_layer_index = 0
+                # Reset MOE layer index for each MTP step iteration
+                forward_context = get_forward_context()
+                if forward_context is not None:
+                    forward_context.moe_layer_index = 0
                 previous_hidden_states, positions = self.maybe_pad_and_reduce(previous_hidden_states, positions)
                 self.model(input_ids=input_ids, positions=positions, hidden_states=previous_hidden_states)
                 forward_context = get_forward_context()
@@ -176,11 +171,7 @@ class MtpProposer(EagleProposer):
         # Currently, both GLM and DS encounter issues when enabling the fullgraph mode and running on EagleProposer.
         # Therefore, we temporarily bypass this problem by adding a conditional check for fullgraph.
         # TODO: this conditional check should be removed after bug fixing.
-        if (
-            self.pcp_size * self.dcp_size == 1
-            and not self.speculative_config.disable_padded_drafter_batch
-            and not self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
+        if not self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             draft_token_ids = super()._propose(
                 target_token_ids,
                 target_positions,
@@ -341,11 +332,10 @@ class MtpProposer(EagleProposer):
                 num_actual_tokens=num_tokens,
                 is_draft_model=True,
             ):
-                if not vllm_version_is("v0.15.0"):
-                    # Reset MOE layer index for each MTP step to match all_moe_layers registration
-                    forward_context = get_forward_context()
-                    if forward_context is not None:
-                        forward_context.moe_layer_index = 0
+                # Reset MOE layer index for each MTP step to match all_moe_layers registration
+                forward_context = get_forward_context()
+                if forward_context is not None:
+                    forward_context.moe_layer_index = 0
 
                 with record_function_or_nullcontext("mtp_forward"):
                     model_kwargs = {}

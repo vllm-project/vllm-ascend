@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `Qwen2.5-7B-Instruct`(BF16 version): require 1 910B4 cards(32G × 1) [Qwen2.5-7B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)
+- `Qwen2.5-7B-Instruct`(BF16 version): require 1 Atlas 910B4 (32G × 1) card. [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)
 
 It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-7B-Instruct/`) for quick access during deployment.
 
