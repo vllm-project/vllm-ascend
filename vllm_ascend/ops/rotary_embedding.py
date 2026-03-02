@@ -224,7 +224,6 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
         _record_cos_sin_cache(self.cos_sin_cache)
         _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
-        self.cos_sin_cache = self.cos_sin_cache.view(-1, 2, rotary_dim // 2).repeat(1, 1, 2)
 
     def forward_oot(
         self,
