@@ -46,6 +46,7 @@ from vllm_ascend.utils import (
     dispose_layer,
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
+    enable_dsa_cp_with_o_proj_tp,
     get_weight_prefetch_method,
     maybe_trans_nz,
 )
@@ -423,11 +424,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_dsa_cp = enable_dsa_cp()
 
         # Enable layer sharding via DSA-CP on the P node in the PD-disaggregated setup.
-        self.enable_layer_sharding_in_dsa_cp = enable_dsa_cp_with_layer_shard()
+        self.enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
+
+        # use original TP o_proj weight in PD mix stage, and full gather
+        # for o_proj weight for prefill stage.
+        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
 
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
-            if self.enable_layer_sharding_in_dsa_cp:
+            if self.enable_dsa_cp_with_layer_shard:
                 self.layer_sharding_kwargs = []
                 for layer_name in get_ascend_config().layer_sharding or []:
                     if layer_name in kwargs:
@@ -473,7 +478,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
         dispose_layer(self.kv_b_proj)
         if self.enable_dsa_cp:
-            if self.enable_layer_sharding_in_dsa_cp:
+            if self.enable_dsa_cp_with_layer_shard:
                 for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
                         post_process_after_loading_for_shard_weight_series(layer)
@@ -676,7 +681,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
 
-    def _sfa_preprocess_mlapo(
+    def _sfa_preprocess_with_mlapo(
         self,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -748,7 +753,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         forward_context = get_forward_context()
         if attn_metadata is None:
             # Profiling run.
-            if self.enable_layer_sharding_in_dsa_cp and not forward_context.in_profile_run:
+            if self.enable_dsa_cp_with_layer_shard and not forward_context.in_profile_run:
                 for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
@@ -775,14 +780,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         o_proj_full_handle = None
         # if is PD mix stage, using original TP o_proj weight, and also need to full gather for o_proj
         # weight for prefill stage.
-        should_shard_weight = self.enable_layer_sharding_in_dsa_cp or attn_metadata.attn_state not in {
+        full_gather_o_proj_enabled = self.enable_dsa_cp_with_o_proj_tp and attn_metadata.attn_state not in {
             AscendAttentionState.DecodeOnly,
             AscendAttentionState.SpecDecoding,
         }
 
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
         if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
-            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(
+            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 cos=cos,
@@ -819,6 +824,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.enable_dsa_cp:
                 assert k_pe is not None
                 assert k_nope is not None
+                async_op = self.enable_dsa_cp_with_layer_shard or full_gather_o_proj_enabled
                 # support all_gather kv async for communication calculation overlap
                 fused_kv_no_split, kv_ag_handle = all_gather_async(
                     torch.cat(
@@ -826,7 +832,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         dim=1,
                     ),
                     get_tp_group(),
-                    async_op=should_shard_weight,
+                    async_op=async_op,
                 )
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
@@ -836,11 +842,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if kv_ag_handle is not None:
                     kv_ag_handle.wait()
 
-                if self.enable_layer_sharding_in_dsa_cp:
+                if self.enable_dsa_cp_with_layer_shard:
                     for layer in self.layer_sharding_kwargs or []:
                         if is_hidden_layer(layer):
                             reach_layer_for_shard_weight_series(layer)
-                elif should_shard_weight:
+                elif full_gather_o_proj_enabled:
                     _, o_proj_full_handle = all_gather_async(
                         self.o_proj_tp_weight, get_tp_group(), output=AscendSFAImpl.o_proj_full_pool
                     )
@@ -858,14 +864,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                     )
 
             k = self._get_full_kv(k, attn_metadata)
-            if kv_cache is not None:
-                if self.is_kv_producer:
-                    attn_metadata.reshape_cache_event = torch.npu.Event()
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[2].view(-1, k.shape[-1]), slot_mapping.view(-1, 1), k.view(-1, k.shape[-1])
-                )  # b, s, n, d
-                if self.is_kv_producer:
-                    attn_metadata.reshape_cache_event.record()
+
+        if kv_cache is not None:
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event = torch.npu.Event()
+            torch_npu.npu_scatter_nd_update_(
+                kv_cache[2].view(-1, k.shape[-1]), slot_mapping.view(-1, 1), k.view(-1, k.shape[-1])
+            )  # b, s, n, d
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event.record()
 
         topk_indices = self.indexer_select_post_process(
             x=hidden_states,
@@ -893,7 +900,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             linear_layer=self.o_proj,
         )
 
-        if self.enable_dsa_cp and not self.enable_layer_sharding_in_dsa_cp:
+        if self.enable_dsa_cp_with_o_proj_tp:
             # When using SFA-CP with pd mixed, o_proj has two cases:
             # 1. prefill: o_proj is a TP weight, we need to all-gather o_proj weight to switch TP=1.
             # 2. decode: all-to-all the hidden_state before the o_proj forward.
@@ -901,7 +908,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 attn_output=attn_output,
                 output=output,
                 o_proj_full_handle=o_proj_full_handle,
-                should_shard_weight=should_shard_weight,
+                should_shard_weight=full_gather_o_proj_enabled,
             )
             if not require_o_proj_forward:
                 return result
