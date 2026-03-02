@@ -71,7 +71,6 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "lm_head.": "language_model.lm_head.",
         "model.": "language_model.model.",
     },
-    
 }
 
 # key: model_type
