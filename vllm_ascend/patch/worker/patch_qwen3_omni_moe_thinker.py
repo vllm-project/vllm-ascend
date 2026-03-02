@@ -31,8 +31,6 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
     _get_feat_extract_output_lengths,
 )
 from transformers.utils import auto_docstring
-from vllm.model_executor.models.qwen3_omni_moe_thinker import Qwen3OmniMoeThinkerForConditionalGeneration
-from vllm.model_executor.models.utils import WeightsMapper
 
 
 class NPUQwen3OmniMoeAudioAttention(nn.Module):
