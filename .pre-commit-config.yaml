@@ -54,7 +54,6 @@ repos:
   rev: v0.9.29
   hooks:
   - id: pymarkdown
-    args: [fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
