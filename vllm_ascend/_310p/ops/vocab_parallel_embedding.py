@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+from typing import cast
+
 import torch
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import DEFAULT_VOCAB_PADDING_SIZE
@@ -71,6 +73,8 @@ class _AscendParallelLMHead310QuantMethod(QuantizeMethodBase):
 
 
 class AscendParallelLMHead310(AscendParallelLMHead):
+    quant_method: QuantizeMethodBase
+
     def __init__(
         self,
         num_embeddings: int,
@@ -92,4 +96,5 @@ class AscendParallelLMHead310(AscendParallelLMHead):
             quant_config,
             prefix,
         )
-        self.quant_method = _AscendParallelLMHead310QuantMethod(self.quant_method)
+        base_quant_method = cast(QuantizeMethodBase, self.quant_method)
+        self.quant_method = _AscendParallelLMHead310QuantMethod(base_quant_method)
