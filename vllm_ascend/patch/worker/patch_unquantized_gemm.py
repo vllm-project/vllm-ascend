@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 import torch
-import torch_npu
 import vllm.model_executor.layers.utils
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -25,8 +24,6 @@ def unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if torch_npu.get_npu_format(weight) == torch_npu.Format.ND:
-        weight = torch_npu.npu_format_cast_(weight, torch_npu.Format.FRACTAL_NZ)
     return torch.nn.functional.linear(x, weight, bias)
 
 
