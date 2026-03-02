@@ -1,0 +1,141 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Reusable workflow: Build and push a CI image (arm64 only) to Huawei Cloud SWR with registry cache.
+#
+# E2E tests run on ARM runners only, so we only build arm64 images for CI.
+# This significantly reduces build time compared to multi-arch builds.
+#
+# Cache behavior (following Apache Spark's pattern):
+# - PR test: reads cache from base branch, does NOT update cache
+# - Post-merge: reads and updates cache for future PRs
+#
+# Usage example (PR test - read-only cache):
+#   prebuild-ci-image:
+#     uses: ./.github/workflows/_e2e_prebuild_image.yaml
+#     with:
+#       dockerfile: Dockerfile
+#       image_name: vllm-ascend-ci-image
+#       image_tag: pr-123
+#       cache_tag: main
+#       update_cache: false  # default
+#     secrets: inherit
+#
+# Usage example (post-merge - read and update cache):
+#   postmerge-image:
+#     uses: ./.github/workflows/_e2e_prebuild_image.yaml
+#     with:
+#       dockerfile: Dockerfile
+#       image_name: vllm-ascend-ci-image
+#       image_tag: main
+#       cache_tag: main
+#       update_cache: true
+#     secrets: inherit
+#
+# The built image is accessible via:
+#   needs.prebuild-ci-image.outputs.image
+
+name: 'Prebuild CI Image'
+
+on:
+  workflow_call:
+    inputs:
+      dockerfile:
+        description: 'Path to the Dockerfile (relative to repo root)'
+        required: false
+        type: string
+        default: 'Dockerfile'
+      image_name:
+        description: 'Image repository name under swr.cn-north-4.myhuaweicloud.com/vllm-ascend/'
+        required: false
+        type: string
+        default: 'vllm-ascend-ci-image'
+      image_tag:
+        description: 'Tag for the built image (e.g. pr-123, main-12345)'
+        required: true
+        type: string
+      cache_tag:
+        description: 'Tag used for the registry cache (e.g. main, main-a3)'
+        required: true
+        type: string
+      update_cache:
+        description: 'Whether to update the registry cache (set true for post-merge builds)'
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      image:
+        description: 'Full image reference including registry, org, name, and tag'
+        value: ${{ jobs.prebuild.outputs.image }}
+    secrets:
+      SWR_USERNAME:
+        description: 'Huawei Cloud SWR username (cn-north-4@<AK>)'
+        required: true
+      SWR_PASSWORD:
+        description: 'Huawei Cloud SWR password (SK)'
+        required: true
+
+jobs:
+  prebuild:
+    name: build-image
+    runs-on: ubuntu-22.04-arm
+    outputs:
+      image: ${{ steps.set-output.outputs.image }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver: docker-container
+          use: true
+
+      - name: Login to Huawei Cloud SWR
+        uses: docker/login-action@v3
+        with:
+          registry: swr.cn-north-4.myhuaweicloud.com
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        id: build
+        with:
+          platforms: linux/arm64
+          context: .
+          file: ./${{ inputs.dockerfile }}
+          push: true
+          tags: swr.cn-north-4.myhuaweicloud.com/vllm-ascend/${{ inputs.image_name }}:${{ inputs.image_tag }}
+          build-args: |
+            PIP_INDEX_URL=https://pypi.org/simple
+          provenance: false
+          cache-from: |
+            type=registry,ref=swr.cn-north-4.myhuaweicloud.com/vllm-ascend/${{ inputs.image_name }}-cache:${{ inputs.cache_tag }}
+          cache-to: ${{ inputs.update_cache && format('type=registry,ref=swr.cn-north-4.myhuaweicloud.com/vllm-ascend/{0}-cache:{1},mode=max', inputs.image_name, inputs.cache_tag) || '' }}
+
+      - name: Set output
+        id: set-output
+        run: |
+          echo "image=swr.cn-north-4.myhuaweicloud.com/vllm-ascend/${{ inputs.image_name }}:${{ inputs.image_tag }}" >> $GITHUB_OUTPUT

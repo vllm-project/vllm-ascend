@@ -1,0 +1,89 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Update CI image cache after a PR is merged into a branch (push event).
+#
+# This workflow rebuilds CI images (A2/A3/310P, arm64 only) when relevant files
+# change, updating branch-level tags and registry caches so that the NEXT PR's
+# CI image build is fast.
+#
+# Trigger conditions:
+# - Push to main/*-dev/releases/v* branches
+# - AND changes to Dockerfile, vllm_ascend/**, csrc/**, cmake/**, etc.
+#
+# Note: Nightly images are NOT updated here - they are built fresh before
+# each nightly test run with registry cache for speed.
+#
+# Images updated after merge (arm64 only):
+#   vllm-ascend-ci-image:<branch>         (A2 base, built from Dockerfile)
+#   vllm-ascend-ci-image:<branch>-a3      (A3 base, built from Dockerfile.a3)
+#   vllm-ascend-ci-image:<branch>-310p    (310P base, built from Dockerfile.310p)
+#
+# Cache tags:
+#   vllm-ascend-ci-image-cache:<branch>
+#   vllm-ascend-ci-image-cache:<branch>-a3
+#   vllm-ascend-ci-image-cache:<branch>-310p
+
+name: PR E2E Build Image Cache
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'releases/v*'
+    paths:
+      # Only trigger when image-related files change
+      - 'Dockerfile'
+      - 'Dockerfile.a3'
+      - 'Dockerfile.310p'
+      - 'vllm_ascend/**'
+      - 'csrc/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'setup.py'
+      - 'requirements.txt'
+      - 'packages.txt'
+      - '.github/workflows/_e2e_prebuild_image.yaml'
+      - '.github/workflows/pr_e2e_build_image_cache.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update-ci-cache:
+    name: update ${{ matrix.config.name }} cache (${{ github.ref_name }}${{ matrix.config.tag_suffix }})
+    strategy:
+      matrix:
+        config:
+          - name: a2
+            dockerfile: Dockerfile
+            tag_suffix: ''
+          - name: a3
+            dockerfile: Dockerfile.a3
+            tag_suffix: '-a3'
+          - name: 310p
+            dockerfile: Dockerfile.310p
+            tag_suffix: '-310p'
+    uses: ./.github/workflows/_e2e_prebuild_image.yaml
+    with:
+      dockerfile: ${{ matrix.config.dockerfile }}
+      image_name: vllm-ascend-ci-image
+      image_tag: ${{ github.ref_name }}${{ matrix.config.tag_suffix }}
+      cache_tag: ${{ github.ref_name }}${{ matrix.config.tag_suffix }}
+      update_cache: true
+    secrets: inherit
