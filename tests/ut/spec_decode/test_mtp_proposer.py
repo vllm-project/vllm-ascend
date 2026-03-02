@@ -338,7 +338,7 @@ class TestMtpProposer:
                                                        dtype=torch.int32)
 
         (spec_common_attn_metadata, token_indices,
-         token_indices_to_sample) = proposer.prepare_inputs_padded(
+         token_indices_to_sample, num_rejected_tokens_gpu) = proposer.prepare_inputs_padded(
              common_attn_metadata=mock_common_attn_metadata,
              spec_decode_metadata=mock_spec_decode_metadata,
              valid_sampled_tokens_count=mock_valid_sampled_tokens_count)

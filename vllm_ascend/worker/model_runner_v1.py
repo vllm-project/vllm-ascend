@@ -1012,6 +1012,7 @@ class NPUModelRunner(GPUModelRunner):
                     long_seq_metadata = None  # type: ignore
                     num_prefill_reqs = 0
                     num_decode_reqs = 0
+                num_rejected_tokens_gpu = None
                 if spec_decode_metadata is None:
                     # update pcp related params
                     if self.pcp_size > 1:
@@ -1051,7 +1052,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
                     else:
                         assert self.drafter is not None
-                        common_attn_metadata, token_indices, token_indices_to_sample = (
+                        common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu = (
                             self.drafter.prepare_inputs_padded(
                                 common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
                             )
@@ -1078,6 +1079,7 @@ class NPUModelRunner(GPUModelRunner):
                     last_token_indices=token_indices_to_sample,
                     common_attn_metadata=common_attn_metadata,
                     sampling_metadata=sampling_metadata,
+                    num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                     req_scheduled_tokens=req_scheduled_tokens,
                     long_seq_metadata=long_seq_metadata,
                     num_prefill_reqs=num_prefill_reqs,

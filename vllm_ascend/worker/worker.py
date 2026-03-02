@@ -59,7 +59,6 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     register_ascend_customop,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -313,6 +312,9 @@ class NPUWorker(WorkerBase):
 
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
+            # use lazy import to make patch effective
+            from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
     @torch.inference_mode()
