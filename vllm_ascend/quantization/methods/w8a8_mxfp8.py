@@ -25,12 +25,12 @@ from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.quantization.mxfp_compat import (
+from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     ensure_mxfp8_linear_available,
     ensure_mxfp8_moe_available,
 )
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme

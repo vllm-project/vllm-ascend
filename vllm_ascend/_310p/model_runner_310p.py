@@ -43,7 +43,7 @@ class NPUModelRunner310(NPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # 310P limitation: KV transfer is not supported.
+        # 310P limitation: KV transfer is not supported
         if self.vllm_config.kv_transfer_config is not None:
             raise ValueError("KV cache transfer is not supported for 310P.")
         if self.use_sparse:
