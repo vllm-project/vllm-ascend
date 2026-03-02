@@ -63,11 +63,12 @@ def add_rms_norm(
     return x_, None, residual_
 
 
-def reduce_sum(x: torch.Tensor, dim: int = -1, keepdim: bool = False) -> torch.Tensor:
+def reduce_sum(x: torch.Tensor, dim: int | None, keepdim: bool = False) -> torch.Tensor:
     """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
-    doesn't require it, so we set dim to -1 by default.
+    doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
     """
-    if x.device.type == "npu":
+    dim = -1 if dim is None and x.dim() == 1 else dim
+    if x.device.type == "npu" and dim is not None:
         return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
     # cpu tensor can't use npu_reduce_sum_batch_invariant, so we use torch.sum instead.
     return torch_sum(x, dim, keepdim)
