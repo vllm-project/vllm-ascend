@@ -148,7 +148,7 @@ def _save_timing_json(
     partition_size: int | None,
     output_path: Path,
 ) -> None:
-    passed = [r.to_dict() for r in records if r.passed]
+    passed_suites = [r.to_dict() for r in records if r.passed]
     payload = {
         "suite": suite,
         "partition_id": partition_id,
@@ -156,11 +156,11 @@ def _save_timing_json(
         "commit_sha": os.environ.get("GITHUB_SHA", ""),
         "github_run_id": os.environ.get("GITHUB_RUN_ID", ""),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "tests": passed,
+        "tests": passed_suites,
     }
     output_path.write_text(json.dumps(payload, indent=2))
     print(
-        f"Timing data written to {output_path}  ({len(passed)}/{len(records)} passed)",
+        f"Timing data written to {output_path}  ({len(passed_suites)}/{len(records)} passed)",
         flush=True,
     )
 
@@ -202,12 +202,6 @@ timing data to improve estimates.",
         help="Continue running after a test failure (default: True)",
     )
     parser.add_argument(
-        "--timing-report",
-        type=Path,
-        default=Path("test_timing_report.md"),
-        help="Path to write the Markdown timing report",
-    )
-    parser.add_argument(
         "--timing-report-json",
         type=Path,
         default=Path("test_timing_data.json"),
@@ -232,7 +226,6 @@ timing data to improve estimates.",
     exit_code, records = run_tests(
         files,
         continue_on_error=args.continue_on_error,
-        report_path=args.timing_report,
     )
 
     _save_timing_json(records, args.suite, args.auto_partition_id, args.auto_partition_size, args.timing_report_json)

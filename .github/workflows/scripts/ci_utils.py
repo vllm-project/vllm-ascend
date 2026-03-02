@@ -1,7 +1,6 @@
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 
 class _Color:
@@ -34,31 +33,9 @@ class TestRecord:
         }
 
 
-def _write_timing_report(records: list[TestRecord], total_elapsed: float, path: Path) -> None:
-    """Write a Markdown timing report."""
-    lines = [
-        "# Test Timing Report",
-        "",
-        f"**Total elapsed: {total_elapsed:.2f}s**",
-        "",
-        "| Test File | Status | Elapsed (s) | Estimated (s) | Diff (s) |",
-        "|-----------|--------|------------:|---------------:|---------:|",
-    ]
-    for r in records:
-        status = "PASSED" if r.passed else "FAILED"
-        diff = r.elapsed - r.estimated
-        diff_str = f"+{diff:.0f}" if diff >= 0 else f"{diff:.0f}"
-        lines.append(f"| `{r.name}` | {status} | {r.elapsed:.0f} | {r.estimated:.0f} | {diff_str} |")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n")
-    print(f"Timing report written to: {path}")
-
-
 def run_tests(
     files: list[TestFile],
     continue_on_error: bool = False,
-    report_path: Path | None = None,
 ) -> tuple[int, list[TestRecord]]:
     """
     Run each TestFile with pytest and collect timing results.
@@ -112,8 +89,5 @@ def run_tests(
         icon = f"{_Color.GREEN}✓{_Color.RESET}" if r.passed else f"{_Color.RED}✗{_Color.RESET}"
         print(f"  {icon} {r.name}  ({r.elapsed:.0f}s)")
     print(flush=True)
-
-    if report_path is not None:
-        _write_timing_report(records, total_elapsed, report_path)
 
     return (0 if all_passed else -1), records
