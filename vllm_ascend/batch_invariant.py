@@ -31,10 +31,13 @@ logger = init_logger(__name__)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.batch_invariant.matmul import (
-        addmm_batch_invariant, bmm_batch_invariant, linear_batch_invariant,
-        matmul_batch_invariant, mm_batch_invariant)
-    from vllm_ascend.ops.triton.batch_invariant.softmax import \
-        softmax_batch_invariant
+        addmm_batch_invariant,
+        bmm_batch_invariant,
+        linear_batch_invariant,
+        matmul_batch_invariant,
+        mm_batch_invariant,
+    )
+    from vllm_ascend.ops.triton.batch_invariant.softmax import softmax_batch_invariant
 
 
 try:
