@@ -355,6 +355,10 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
+        # Force +rms_norm for Ascend to ensure custom op is registered
+        if "+rms_norm" not in compilation_config.custom_ops:
+            compilation_config.custom_ops.append("+rms_norm")
+
         if ascend_config.recompute_scheduler_enable:
             from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
