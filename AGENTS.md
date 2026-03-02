@@ -333,6 +333,8 @@ PR titles should follow the format: `[Type][Module] Description`
 
 When creating a PR, please follow the template in `.github/PULL_REQUEST_TEMPLATE.md` and ensure the following sections are completed:
 
+> **Note**: The PR description will be automatically updated by GitHub Actions to include vLLM version info at the bottom. If you update the PR description via API or CLI, make sure to preserve the `- vLLM version:` and `- vLLM main:` lines.
+
 - **What this PR does / why we need it?** - Clearly describe the changes and their purpose
 - **Does this PR introduce _any_ user-facing change?** - Indicate if there are any user-visible changes
 - **How was this patch tested?** - Describe how you tested the changes. Examples:
