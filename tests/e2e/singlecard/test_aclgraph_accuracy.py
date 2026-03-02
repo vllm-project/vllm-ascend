@@ -153,7 +153,7 @@ def test_full_decode_only_res_consistency(cur_case: LLMTestCase, monkeypatch):
         "max_model_len": 1024,
         "compilation_config": {"cudagraph_capture_sizes": [4, 8, 32, 64], "cudagraph_mode": "FULL_DECODE_ONLY"},
         "quantization": cur_case.quantization,
-        "additional_config": {"npugraph_ex_config": {"enable": False}},
+        "additional_config": {"ascend_compilation_config": {"enable_npugraph_ex": False}},
     }
     gen_and_valid(
         runner_kwargs=runner_kwargs,
@@ -171,7 +171,7 @@ def test_npugraph_ex_res_consistency(cur_case: LLMTestCase, monkeypatch):
         "quantization": cur_case.quantization,
         "max_model_len": 1024,
         "compilation_config": {"cudagraph_capture_sizes": [4, 8, 32, 64], "cudagraph_mode": "FULL_DECODE_ONLY"},
-        "additional_config": {"npugraph_ex_config": {"enable": True}},
+        "additional_config": {"ascend_compilation_config": {"enable_npugraph_ex": True}},
     }
     gen_and_valid(
         runner_kwargs=runner_kwargs,
@@ -193,8 +193,8 @@ def test_npugraph_ex_with_static_kernel(cur_case: LLMTestCase, monkeypatch):
         "max_model_len": 1024,
         "compilation_config": {"cudagraph_capture_sizes": [4, 8], "cudagraph_mode": "FULL_DECODE_ONLY"},
         "additional_config": {
-            "npugraph_ex_config": {
-                "enable": True,
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
                 "enable_static_kernel": True,
             }
         },
