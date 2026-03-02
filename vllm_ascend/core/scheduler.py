@@ -469,6 +469,8 @@ class AscendScheduler(Scheduler):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> EngineCoreOutputs:
+        prev_num_computed = {req.request_id: req.num_computed_tokens
+                             for req in self.running}
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
@@ -483,5 +485,10 @@ class AscendScheduler(Scheduler):
             if req_id in self.scheduled_req_ids:
                 self.scheduled_req_ids.remove(req_id)
 
-        return super().update_from_output(scheduler_output,
-                                          model_runner_output)
+        result = super().update_from_output(scheduler_output,
+                                            model_runner_output)
+        for request in self.running:
+            prev = prev_num_computed.get(request.request_id)
+            if prev is not None and request.num_computed_tokens < prev:
+                request.num_computed_tokens = prev
+        return result
