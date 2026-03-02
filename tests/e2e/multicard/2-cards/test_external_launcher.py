@@ -25,6 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
+import huggingface_hub
 
 import pytest
 import torch_npu
@@ -162,7 +163,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
         __file__
     ).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
-    model_path = snapshot_download("Qwen/Qwen3-8B")
+    model_path = snapshot_download("Qwen/Qwen3-8B", local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
     # TODO: Add moe model test
     cmd = [
         sys.executable,

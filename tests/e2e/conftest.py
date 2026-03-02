@@ -55,6 +55,7 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
+import huggingface_hub
 
 from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
@@ -1097,13 +1098,13 @@ class HfRunner:
 
 @pytest.fixture(scope="session")
 def ilama_lora_files():
-    return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
+    return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider", local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
 
 
 @pytest.fixture(scope="session")
 def llama32_lora_files():
     from huggingface_hub import snapshot_download as hf_snapshot_download
-    return hf_snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider", local_files_only=True)
+    return hf_snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider", local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
 
 
 def qwen_prompt(questions: list[str]) -> list[str]:
