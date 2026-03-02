@@ -91,7 +91,7 @@ def test_split_qkv_rmsnorm_rope(max_position_embeddings, num_tokens, num_q_heads
     cos_sin_cache = torch.from_numpy(
         np.random.uniform(0, 1,
                           [max_position_embeddings, rope_dim])).to(dtype).npu()
-    cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
+    cos_sin_cache_repeat = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
     positions = torch.randint(low=0, high=max_position_embeddings, size=(num_tokens,), dtype=torch.int64, device=device)
     # fused kernel
     q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(input=qkv,
@@ -101,7 +101,7 @@ def test_split_qkv_rmsnorm_rope(max_position_embeddings, num_tokens, num_q_heads
                                               kv_hidden_size=kv_hidden_size,
                                               head_dim=head_size,
                                               eps=eps,
-                                              cos_sin_cache=cos_sin_cache,
+                                              cos_sin_cache=cos_sin_cache_repeat,
                                               positions=positions)
     
     cos, sin = cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)
@@ -173,7 +173,7 @@ def test_split_qkv_rmsnorm_rope_with_bias(max_position_embeddings, num_tokens, n
     cos_sin_cache = torch.from_numpy(
         np.random.uniform(0, 1,
                           [max_position_embeddings, rope_dim])).to(dtype).npu()
-    cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
+    cos_sin_cache_repeat = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
     positions = torch.randint(low=0, high=max_position_embeddings, size=(num_tokens,), dtype=torch.int64, device=device)
     # fused kernel
     q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(input=qkv,
@@ -185,7 +185,7 @@ def test_split_qkv_rmsnorm_rope_with_bias(max_position_embeddings, num_tokens, n
                                               eps=eps,
                                               q_bias=q_bias,
                                               k_bias=k_bias,
-                                              cos_sin_cache=cos_sin_cache,
+                                              cos_sin_cache=cos_sin_cache_repeat,
                                               positions=positions)
     
     cos, sin = cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)
