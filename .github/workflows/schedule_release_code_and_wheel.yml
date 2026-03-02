@@ -76,7 +76,7 @@ jobs:
           ls dist
 
       - name: Archive tar.gz
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: vllm-ascend-src
           path: dist/*
@@ -168,7 +168,7 @@ jobs:
           done
 
       - name: Archive wheel
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: vllm-ascend-${{ matrix.os }}-py${{ matrix.python-version }}-wheel
           path: dist/*
