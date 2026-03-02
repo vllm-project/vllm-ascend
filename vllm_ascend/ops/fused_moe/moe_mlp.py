@@ -23,10 +23,10 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
-from vllm_ascend.quantization.mxfp_compat import (
+from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
