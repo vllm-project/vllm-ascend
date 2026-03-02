@@ -38,7 +38,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # get attention block size
     attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
     attn_head_size = model_config.get_head_size()
-    attn_single_block_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+    attn_single_token_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
 
     model_cls, _ = ModelRegistry.resolve_model_cls(
         model_config.architecture,
@@ -65,9 +65,9 @@ def verify_and_update_config(cls, vllm_config) -> None:
     ssm_block_page_size = int(np.prod(ssm_shape) * get_dtype_size(ssm_dtype))
     conv_block_page_size = int(np.prod(conv_shape) * get_dtype_size(conv_dtype))
     attn_block_size = block_alignment_bytes * cdiv(
-        ssm_block_page_size, block_alignment_bytes * attn_single_block_page_size
+        ssm_block_page_size, block_alignment_bytes * attn_single_token_page_size
     )
-    assert attn_single_block_page_size * block_alignment_bytes != ssm_block_page_size, (
+    assert attn_single_token_page_size * attn_block_size == ssm_block_page_size, (
         "Cannot align ssm_page_size and attn_page_size."
     )
 
