@@ -18,7 +18,7 @@
 import torch
 import torch_npu
 
-from vllm_ascend.quantization.mxfp_compat import (
+from vllm_ascend.device.mxfp_compat import (
     FLOAT4_E2M1FN_X2_DTYPE,
     FLOAT8_E8M0FNU_DTYPE,
     HIFLOAT8_DTYPE,
