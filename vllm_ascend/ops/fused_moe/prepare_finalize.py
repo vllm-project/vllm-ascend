@@ -76,7 +76,7 @@ class PrepareAndFinalize(ABC):
             router_logits (torch.Tensor): Router outputs, shape [num_tokens, num_experts]
             enable_shared_expert_dp (bool): Skip DP communication for shared experts
             replace_allreduce (bool): Bypass default all-reduce behavior
-            quant_type: none, w8a8 or w4a8
+            quant_type: none, w8a8, w4a8 or mxfp8
 
         Returns:
             Tuple of:
@@ -323,6 +323,10 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+        elif quant_type == QuantType.MXFP8:
+            # TODO(linfeng): MXFP8 with AllGather+EP currently does not pre-quantize
+            # per-token activations in prepare. Keep quantization in the MoE MLP path.
+            pass
 
         if self.multistream_overlap_gate:
             assert PrepareAndFinalize.quant_stream is not None
