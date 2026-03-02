@@ -385,8 +385,8 @@ class NPUModelRunner(GPUModelRunner):
         self.long_seq_metadata = None
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
-        self.state_update_stream = torch.npu.Stream()
-        self.sampling_done_event = torch.npu.Event()
+        self.state_update_stream = None
+        self.sampling_done_event = None
 
     @property
     def use_cp(self) -> bool:
@@ -1445,6 +1445,10 @@ class NPUModelRunner(GPUModelRunner):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         if self.need_accepted_tokens:
+            if self.state_update_stream is None:
+                self.state_update_stream = torch.npu.Stream()
+                self.sampling_done_event = torch.npu.Event()
+
             self.sampling_done_event.record()
 
         def propose_draft_token_ids(sampled_token_ids):
