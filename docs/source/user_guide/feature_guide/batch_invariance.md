@@ -21,12 +21,6 @@ Batch invariance currently requires Ascend NPUs for 910B,
 because only 910B supports batch invariance with HCCL communication for now, 
 we will support other NPUs in the future.
 
-## Software Requirements
-
-Batch invariance 包含通信和计算算子的batch不变性，通信的batch一致性依赖CANN包版本CANN 9.0.0 B020及以上，
-计算算子依赖 https://gitcode.com/cann/ops-batchinvariant-dev.git 算子仓库包。
-由于CANN 9.0.0还未对外发布，用户需要在26年Q1的CANN9.0.0商法计算算子的仓库暂未开源，用户需联系Ascend官方获取。
-
 ## Enabling Batch Invariance
 
 Batch invariance can be enabled by setting the `VLLM_BATCH_INVARIANT` environment variable to `1`:
@@ -40,7 +34,7 @@ export VLLM_BATCH_INVARIANT=1
 To start a vLLM server with batch invariance enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve meta-llama/Llama-3.1-8B-Instruct
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B
 ```
 
 Then use the OpenAI-compatible client:
@@ -56,7 +50,7 @@ client = OpenAI(
 # These requests will produce deterministic outputs
 # regardless of batch size or order
 response = client.completions.create(
-    model="meta-llama/Llama-3.1-8B-Instruct",
+    model="Qwen/Qwen3-8B",
     prompt="The future of AI is",
     max_tokens=100,
     temperature=0.7,
@@ -90,7 +84,7 @@ sampling_params = SamplingParams(
 )
 
 llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
+    model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
 )
 

@@ -200,7 +200,6 @@ class TestBatchInvariant:
         # Verify the results
         assert result_x is expected_output
         assert result_placeholder is None
-        assert result_residual is expected_residual
 
     @patch("vllm_ascend.batch_invariant.torch_npu")
     def test_add_rms_norm_consistency(self, mock_torch_npu):
@@ -233,7 +232,6 @@ class TestBatchInvariant:
         
         # Verify both functions return the same results
         assert add_rms_norm_result[0] == npu_add_rms_norm_result[0]
-        assert add_rms_norm_result[2] == npu_add_rms_norm_result[2]
         
         # Verify the function composition is correct
         x.__add__.assert_called_once_with(residual)

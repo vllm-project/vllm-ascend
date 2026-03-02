@@ -31,13 +31,10 @@ logger = init_logger(__name__)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.batch_invariant.matmul import (
-        addmm_batch_invariant,
-        bmm_batch_invariant,
-        linear_batch_invariant,
-        matmul_batch_invariant,
-        mm_batch_invariant,
-    )
-    from vllm_ascend.ops.triton.batch_invariant.softmax import softmax_batch_invariant
+        addmm_batch_invariant, bmm_batch_invariant, linear_batch_invariant,
+        matmul_batch_invariant, mm_batch_invariant)
+    from vllm_ascend.ops.triton.batch_invariant.softmax import \
+        softmax_batch_invariant
 
 
 try:
@@ -77,6 +74,8 @@ def override_envs_for_invariance():
     # enabling NZ mode introduces NZ format input to the triton operator,
     # resulting in accuracy anomalies.
     os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
+    # fused operator can't ensure batch invariant, so we disable it.
+    os.environ["VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE"] = "0"
 
     # communication determinism settings
     os.environ["HCCL_DETERMINISTIC"] = "strict"

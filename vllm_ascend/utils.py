@@ -245,7 +245,8 @@ def enable_custom_op():
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
-    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+    from vllm.model_executor.layers.batch_invariant import \
+        vllm_is_batch_invariant
 
     global _CUSTOM_OP_ENABLED
 
@@ -584,29 +585,24 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
-    from vllm_ascend.ops.linear import (
-        AscendColumnParallelLinear,
-        AscendMergedColumnParallelLinear,
-        AscendQKVParallelLinear,
-        AscendReplicatedLinear,
-        AscendRowParallelLinear,
-    )
+    from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
+                                                     AscendSharedFusedMoE)
+    from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm, AscendRMSNorm,
+                                           AscendRMSNormGated)
+    from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
+                                        AscendMergedColumnParallelLinear,
+                                        AscendQKVParallelLinear,
+                                        AscendReplicatedLinear,
+                                        AscendRowParallelLinear)
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
     from vllm_ascend.ops.rotary_embedding import (
-        AscendApplyRotaryEmb,
-        AscendDeepseekScalingRotaryEmbedding,
-        AscendMRotaryEmbedding,
-        AscendRotaryEmbedding,
-        AscendYaRNRotaryEmbedding,
-    )
+        AscendApplyRotaryEmb, AscendDeepseekScalingRotaryEmbedding,
+        AscendMRotaryEmbedding, AscendRotaryEmbedding,
+        AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
-        AscendLogitsProcessor,
-        AscendParallelLMHead,
-        AscendVocabParallelEmbedding,
-    )
+        AscendLogitsProcessor, AscendParallelLMHead,
+        AscendVocabParallelEmbedding)
 
     global REGISTERED_ASCEND_OPS
     REGISTERED_ASCEND_OPS = {
@@ -636,10 +632,13 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
-        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
+        from vllm_ascend._310p.fused_moe.fused_moe import (
+            AscendFusedMoE310, AscendSharedFusedMoE310)
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
-        from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
-        from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+        from vllm_ascend._310p.ops.layernorm import (AscendGemmaRMSNorm310,
+                                                     AscendRMSNorm310)
+        from vllm_ascend._310p.ops.rotary_embedding import \
+            AscendRotaryEmbedding310
 
         REGISTERED_ASCEND_OPS.update(
             {
