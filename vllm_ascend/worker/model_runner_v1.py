@@ -377,7 +377,7 @@ class NPUModelRunner(GPUModelRunner):
         self.long_seq_metadata = None
         self.cpu_slot_mapping = None
         self.state_update_stream = torch.npu.Stream()
-        self. sampling_done_event = torch.npu.Event()
+        self.sampling_done_event = torch.npu.Event()
 
     @property
     def use_cp(self) -> bool:
@@ -1386,7 +1386,7 @@ class NPUModelRunner(GPUModelRunner):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
             if self.need_accepted_tokens:
-                self. sampling_done_event.record()
+                self.sampling_done_event.record()
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -1466,10 +1466,10 @@ class NPUModelRunner(GPUModelRunner):
             self.debugger.stop()
             self.debugger.step()
 
-        if self.need_accepted_tokens: 
+        if self.need_accepted_tokens:
             with record_function_or_nullcontext("async_state_update"):
                 with torch.npu.stream(self.state_update_stream):
-                    self.state_update_stream.wait_event(self. sampling_done_event)
+                    self.state_update_stream.wait_event(self.sampling_done_event)
                     self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
