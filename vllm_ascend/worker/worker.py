@@ -52,6 +52,8 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.token_reinference.common import FaultToleranceLevel
+from vllm_ascend.token_reinference.fault_tolerance import FaultTolerance
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
@@ -314,6 +316,8 @@ class NPUWorker(WorkerBase):
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+
+        self.init_fault_tolerance()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -624,6 +628,26 @@ class NPUWorker(WorkerBase):
         except Exception as e:
             logger.info(f"query NPU card {self.local_rank} fail: {e}")
         return
+
+    def init_fault_tolerance(self):
+        additional_config = self.vllm_config.additional_config if self.vllm_config.additional_config is not None else {}
+        level = additional_config.get("fault_tolerance_level", 0) if additional_config else 0
+        max_reinference_times = additional_config.get("max_reinference_times", 3) if additional_config else 3
+        if level != FaultToleranceLevel.LEVEL_0.value:
+            self.fault_tolerance = FaultTolerance(
+                vllm_config=self.vllm_config,
+                model_runner=self.model_runner,
+                execute_model_func=self.execute_model,
+            )
+            self.execute_model = self.fault_tolerance.execute_model_decorator(
+                func=self.execute_model, max_retries=max_reinference_times, dummy_run=False
+            )  # type: ignore[method-assign]
+            self.execute_dummy_batch = self.fault_tolerance.execute_model_decorator(
+                func=self.execute_dummy_batch, max_retries=max_reinference_times, dummy_run=True
+            )  # type: ignore[method-assign]
+            self.sample_tokens = self.fault_tolerance.sample_token_decorator(
+                func=self.sample_tokens, max_retries=max_reinference_times
+            )  # type: ignore[method-assign]
 
 
 def parse_text_output(output) -> None:
