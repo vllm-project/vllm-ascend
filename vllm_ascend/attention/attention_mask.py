@@ -81,7 +81,7 @@ class AttentionMaskBuilder:
         indices = torch.arange(s2, device=device).unsqueeze(0).expand(b, -1)
         start_indices = torch.clamp(seq_lens - left_context, min=0)
         mask = (indices < start_indices) | (indices >= seq_lens)
-        self.swa_mask = mask.unsqueeze(1).npu()
+        self.swa_mask = mask.unsqueeze(1).to(self.device, non_blocking=True)
         return self.swa_mask
 
     def get_attention_mask(self, model_config: ModelConfig):

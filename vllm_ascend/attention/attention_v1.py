@@ -289,8 +289,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         attn_mask = self.attn_mask_builder.get_attention_mask(self.model_config)
 
         swa_mask = None
-        is_swa = hasattr(self.model_config.hf_text_config, "sliding_window")
-        if self.model_config is not None and is_swa:
+        is_swa = getattr(self.model_config.hf_text_config, "sliding_window", None)
+        if self.model_config is not None and is_swa is not None:
             block_size = 128
             max_model_len = block_table.shape[-1] * block_size
             swa_mask = self.attn_mask_builder.get_swa_mask(seq_lens, max_model_len)
