@@ -63,7 +63,15 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
     "kimi_k25": {
         "mm_projector.linear_1": "mm_projector.proj.0",
         "mm_projector.linear_2": "mm_projector.proj.2",
+    },"qwen3_omni_moe_thinker": {
+        "thinker.lm_head.": "language_model.lm_head.",
+        "thinker.model.": "language_model.model.",
+        "thinker.": "",
+
+        "lm_head.": "language_model.lm_head.",
+        "model.": "language_model.model.",
     },
+    
 }
 
 # key: model_type
@@ -186,6 +194,19 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         ],
         "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
     },
+    "qwen3_omni_moe_text": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
 }
 
 
@@ -246,11 +267,7 @@ def get_linear_quant_type(
                     f"use {quant_type}. Please check quantization config."
                 )
     else:
-        has_float_type = any(key.startswith(prefix) and key.endswith('.weight') and value == "FLOAT" for key, value in quant_description.items())
-        if has_float_type:
-            quant_type = "FLOAT"
-        else:
-            quant_type = "W8A8_DYNAMIC"
+        quant_type = quant_description[prefix + ".weight"]
     return quant_type
 
 
