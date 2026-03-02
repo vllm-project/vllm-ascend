@@ -539,7 +539,6 @@ def split_qkv_rmsnorm_rope_impl(
     # get available vector core
     num_vectorcore = get_vectorcore_num()
     rope_dim = cos_sin_cache.shape[1]
-    cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
     batch_size = input.shape[0]
     BIAS = q_bias is not None
     IS_PARTIAL_ROPE = rope_dim != head_dim

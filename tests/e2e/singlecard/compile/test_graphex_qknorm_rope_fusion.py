@@ -211,6 +211,7 @@ def test_rmsnorm_quant_fusion(
         seq_len = 5
         qkv = torch.randn(seq_len, qkv_size, device="npu", dtype=dtype)
         cos_sin_cache = torch.from_numpy(np.random.uniform(0, 1, [MAX_POSITION_EMBEDDING, head_dim])).to(dtype).npu()
+        cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
         positions = torch.randint(
             low=0, high=MAX_POSITION_EMBEDDING, size=(num_tokens,), dtype=torch.int64, device="npu"
         )

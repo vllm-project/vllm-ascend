@@ -91,6 +91,7 @@ def test_split_qkv_rmsnorm_rope(max_position_embeddings, num_tokens, num_q_heads
     cos_sin_cache = torch.from_numpy(
         np.random.uniform(0, 1,
                           [max_position_embeddings, rope_dim])).to(dtype).npu()
+    cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
     positions = torch.randint(low=0, high=max_position_embeddings, size=(num_tokens,), dtype=torch.int64, device=device)
     # fused kernel
     q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(input=qkv,
@@ -172,6 +173,7 @@ def test_split_qkv_rmsnorm_rope_with_bias(max_position_embeddings, num_tokens, n
     cos_sin_cache = torch.from_numpy(
         np.random.uniform(0, 1,
                           [max_position_embeddings, rope_dim])).to(dtype).npu()
+    cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
     positions = torch.randint(low=0, high=max_position_embeddings, size=(num_tokens,), dtype=torch.int64, device=device)
     # fused kernel
     q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(input=qkv,
