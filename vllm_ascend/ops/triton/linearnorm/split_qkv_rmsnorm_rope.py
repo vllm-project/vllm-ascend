@@ -77,7 +77,7 @@ def split_qkv_rmsnorm_rope_kernel(
             normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
 
         pos_values = tl.load(positions_gm_ptr + row_idx)
-        sin_cos_indices = (pos_values * ROPE_DIM + tl.arange(0, ROPE_DIM))
+        sin_cos_indices = pos_values * ROPE_DIM + tl.arange(0, ROPE_DIM)
         input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices).reshape(1, ROPE_DIM)
         cos = tl.extract_slice(
             input_values,
@@ -165,7 +165,7 @@ def split_qkv_rmsnorm_rope_kernel(
             normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
 
         pos_values = tl.load(positions_gm_ptr + row_idx)
-        sin_cos_indices = (pos_values * ROPE_DIM + tl.arange(0, ROPE_DIM))
+        sin_cos_indices = pos_values * ROPE_DIM + tl.arange(0, ROPE_DIM)
 
         input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices).reshape(1, ROPE_DIM)
         cos = tl.extract_slice(
