@@ -796,7 +796,9 @@ class PCPManager:
                     block_table_tensor = block_table_tensor[: num_decode_reqs_flatten + num_prefill_reqs]
                     if num_reqs_padded > num_reqs:
                         pad_size = num_reqs_padded - num_reqs
-                        ori_query_lens_cpu[-pad_size:] = torch.full([pad_size], ori_query_lens_cpu[-pad_size - 1].item())
+                        ori_query_lens_cpu[-pad_size:] = torch.full(
+                            [pad_size], ori_query_lens_cpu[-pad_size - 1].item()
+                        )
             pcp_unpad_mask = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length]
             long_seq_metadata = AscendPrefillContextParallelMetadata(
                 pcp_use_hybrid_attn=self.pcp_use_hybrid_attn,

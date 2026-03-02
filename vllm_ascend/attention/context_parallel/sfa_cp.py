@@ -45,9 +45,14 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
             self.block_size, self.cp_virtual_block_size
         )
-        self.slot_mapping_buf = torch.empty((vllm_config.scheduler_config.max_num_batched_tokens
-                                         + 2 * self.pcp_size * vllm_config.scheduler_config.max_num_seqs,),
-                                         dtype=torch.int32, device=device)
+        self.slot_mapping_buf = torch.empty(
+            (
+                vllm_config.scheduler_config.max_num_batched_tokens
+                + 2 * self.pcp_size * vllm_config.scheduler_config.max_num_seqs,
+            ),
+            dtype=torch.int32,
+            device=device,
+        )
 
     def build(
         self,
@@ -86,15 +91,22 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             assert long_seq_metadata is not None
             num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded
             self.slot_mapping_buf[:num_actual_tokens_pcp_padded].copy_(
-                common_attn_metadata.slot_mapping[:num_actual_tokens_pcp_padded],non_blocking=True)
+                common_attn_metadata.slot_mapping[:num_actual_tokens_pcp_padded], non_blocking=True
+            )
             if self.enable_mlapo:
-                self.slot_mapping_buf[:num_decode_tokens] = self.slot_mapping_buf[: num_decode_tokens * self.pcp_size : self.pcp_size]
+                self.slot_mapping_buf[:num_decode_tokens] = self.slot_mapping_buf[
+                    : num_decode_tokens * self.pcp_size : self.pcp_size
+                ]
                 self.slot_mapping_buf[num_decode_tokens : num_decode_tokens * self.pcp_size].fill_(-1)
             elif self.speculative_config is not None and num_decodes > 0:
                 # when mtp, pcp_allgather_restore_idx=[696,-1,697,-1,560,-1,561,-1,100,101,102], slot_mapping should be [696,697,-1,-1,560,561,-1,-1,100,101,102]
                 num_tokens_per_request = num_decode_tokens // num_decodes
-                decode_slot_mapping = self.slot_mapping_buf[:num_decode_tokens * self.pcp_size].reshape(num_decodes, -1)
-                decode_slot_mapping[:, : num_tokens_per_request] = decode_slot_mapping[:, : num_tokens_per_request * self.pcp_size : self.pcp_size]
+                decode_slot_mapping = self.slot_mapping_buf[: num_decode_tokens * self.pcp_size].reshape(
+                    num_decodes, -1
+                )
+                decode_slot_mapping[:, :num_tokens_per_request] = decode_slot_mapping[
+                    :, : num_tokens_per_request * self.pcp_size : self.pcp_size
+                ]
                 decode_slot_mapping[:, num_tokens_per_request : num_tokens_per_request * self.pcp_size].fill_(-1)
                 self.slot_mapping_buf[: num_decode_tokens * self.pcp_size] = decode_slot_mapping.flatten()
             metadata_cls.slot_mapping = self.slot_mapping_buf[:num_actual_tokens_pcp_padded]
