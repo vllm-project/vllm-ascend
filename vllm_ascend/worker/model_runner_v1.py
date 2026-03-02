@@ -1444,8 +1444,8 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-            if self.need_accepted_tokens:
-                self.sampling_done_event.record()
+        if self.need_accepted_tokens:
+            self.sampling_done_event.record()
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
