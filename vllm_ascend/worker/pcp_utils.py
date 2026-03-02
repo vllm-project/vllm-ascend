@@ -75,6 +75,12 @@ class PCPManager:
             device=device,
             pin_memory=pin_memory,
         )
+        self.pcp_exit_fa_scatter_idx = CpuGpuBuffer(
+            max_buffer_num_tokens,
+            dtype=torch.int64,
+            device=device,
+            pin_memory=pin_memory,
+        )
         self.pcp_padded_slot_mapping = torch.full(
             (max_buffer_num_tokens,),
             fill_value=-1,
@@ -301,6 +307,17 @@ class PCPManager:
                 num_scheduled_tokens[: self.num_decode_reqs], arange_np
             )[1]
 
+        # Build the restore index used after allgather.
+        all_positions_lst = [
+            get_current_rank_positions(padded_pos_start_loc, rank_i) for rank_i in range(self.pcp_world_size)
+        ]
+        all_positions = np.concatenate(all_positions_lst)
+        self.pcp_allgather_restore_idx.np[: all_positions.shape[0]] = all_positions.argsort()
+        self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
+
+        self.pcp_tokens[: self.num_reqs] = pcp_tokens[: self.num_reqs]
+        self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_reqs].sum()
+
         if self.pcp_use_hybrid_attn:
             max_scheduled_prefill_tokens = 0
             self.pcp_padded_tokens_fla = 0
@@ -405,7 +422,7 @@ class PCPManager:
                     for rank_i in range(self.pcp_world_size)
                 ]
                 all_positions_prefill_tensor = torch.from_numpy(np.concatenate(all_positions_prefill))
-                all_enter_fla_restore_idx = all_positions_prefill_tensor.float().argsort()
+                all_exit_fa_restore_idx = all_positions_prefill_tensor.float().argsort()
                 unpad_mask_prefill = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length][
                     self.num_decode_reqs * self.pcp_world_size :
                 ]
@@ -413,14 +430,15 @@ class PCPManager:
                 ori_tokens_start_loc = np.roll(np.cumsum(num_scheduled_tokens[self.num_decode_tokens :]), 1)
                 ori_tokens_start_loc[0] = 0
                 # [0,1,2] [3,4] | [0,1,7,8] [2,3,9] [4,5,10] [6,11]
-                enter_fla_scatter_idx = positions_linear[self.num_decode_reqs :] + np.repeat(
+                exit_fa_scatter_indices = positions_linear[self.num_decode_reqs :] + np.repeat(
                     ori_tokens_start_loc, num_prefill_scheduled_tokens_linear
                 )
-                enter_fla_restore_idx = torch.index_select(
-                    all_enter_fla_restore_idx[unpad_mask_prefill], 0, torch.from_numpy(enter_fla_scatter_idx)
+
+                exit_fa_scatter_idx = torch.index_select(
+                    all_exit_fa_restore_idx[unpad_mask_prefill], 0, torch.from_numpy(exit_fa_scatter_indices)
                 )
-                self.pcp_allgather_restore_idx.gpu[: enter_fla_restore_idx.shape[0]].copy_(
-                    enter_fla_restore_idx.long(), non_blocking=True
+                self.pcp_exit_fa_scatter_idx.gpu[: exit_fa_scatter_idx.shape[0]].copy_(
+                    exit_fa_scatter_idx.long(), non_blocking=True
                 )
 
                 positions_prefill = all_positions_prefill[self.pcp_world_rank]
@@ -434,18 +452,7 @@ class PCPManager:
             self.pcp_tokens_padded = pcp_tokens[: self.num_reqs]
             self.num_scheduled_tokens_padded = np.array(self.pcp_tokens_padded, dtype=np.int32)
             return num_padded_scheduled_tokens, positions_linear
-        else:
-            # Build the restore index used after allgather.
-            all_positions_lst = [
-                get_current_rank_positions(padded_pos_start_loc, rank_i) for rank_i in range(self.pcp_world_size)
-            ]
-            all_positions = np.concatenate(all_positions_lst)
-            self.pcp_allgather_restore_idx.np[: all_positions.shape[0]] = all_positions.argsort()
-            self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
-
-            self.pcp_tokens[: self.num_reqs] = pcp_tokens[: self.num_reqs]
-            self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_reqs].sum()
-            return pcp_tokens[: self.num_reqs], positions
+        return pcp_tokens[: self.num_reqs], positions
 
     def get_logits_indices(
         self,
@@ -906,12 +913,11 @@ class PCPManager:
                     "head_attn_nomask_seqlens": head_attn_nomask_seqlens,
                     "tail_attn_nomask_seqlens": tail_attn_nomask_seqlens,
                 }
-                if not self.pcp_use_hybrid_attn:
-                    long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
-                        :num_actual_tokens_pcp_padded
-                    ]
-                else:
-                    long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
+                long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
+                    :num_actual_tokens_pcp_padded
+                ]
+                if self.pcp_use_hybrid_attn:
+                    long_seq_metadata.pcp_exit_fa_scatter_idx = self.pcp_exit_fa_scatter_idx.gpu[
                         : num_scheduled_tokens.sum() - num_decodes
                     ]
                     long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[
