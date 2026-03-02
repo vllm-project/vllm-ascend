@@ -180,6 +180,7 @@ def update_quant_description(json_file: str) -> None:
         new_file_path = config_path.parent / "quant_model_description.json"
         with new_file_path.open("w", encoding="utf-8") as file:
             json.dump(updated_config, file, indent=2, ensure_ascii=False)
+        os.remove(json_file)
     except OSError as e:
         raise RuntimeError(f"Failed to write updated configuration to {json_file}: {e}")
 
@@ -282,7 +283,7 @@ def main(args):
             if not all(res):
                 raise RuntimeError("Compression failed. Check logs above for details.")
             ori_quant_desc_file = FileHandler.validate_path(
-                args.output / "ori_quant_model_description.json", must_exist=True
+                os.path.join(args.output, "ori_quant_model_description.json"), must_exist=True
             )
             update_quant_description(str(ori_quant_desc_file))
             print("Compression completed successfully.")
