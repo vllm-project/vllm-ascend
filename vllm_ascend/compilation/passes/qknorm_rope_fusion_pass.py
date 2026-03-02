@@ -80,7 +80,7 @@ class QKNormRopeFusionPattern(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
+            cos_sin_cache = cos_sin_cache.view(-1, 2, self.head_dim // 2).repeat(1, 1, 2)
             results = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=qkv,
                 q_weight=q_weight,
@@ -163,7 +163,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            cos_sin_cache = cos_sin_cache.view(-1, 2, rope_dim // 2).repeat(1, 1, 2)
+            cos_sin_cache = cos_sin_cache.view(-1, 2, self.head_dim // 2).repeat(1, 1, 2)
             results = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=qkv,
                 q_weight=q_weight,
