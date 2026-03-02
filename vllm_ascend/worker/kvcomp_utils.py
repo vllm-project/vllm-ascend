@@ -796,3 +796,21 @@ def init_and_bind_hashk_cache(
             kvcomp_meta_data.hashk_caches,
             num_attn_module
         )
+
+def recover_request_lengths(cu_num_tokens: torch.Tensor) -> torch.Tensor:
+    """
+    从累积和张量cu_num_tokens恢复每个请求的原始长度
+    参数:
+        cu_num_tokens: 请求长度的累积和张量，shape为[num_requests]，如tensor([2,7,10])
+    返回:
+        每个请求的原始长度张量，shape为[num_requests]，如tensor([2,5,3])
+    """
+    # 边界处理：空张量直接返回空
+    if cu_num_tokens.numel() == 0:
+        return torch.tensor([], dtype=cu_num_tokens.dtype, device=cu_num_tokens.device)
+    
+    # 步骤1：计算差分（后项 - 前项），得到除第一个外的所有请求长度
+    # 如 [2,7,10] → diff = [5,3]
+    request_lengths = cu_num_tokens[1:] - cu_num_tokens[:-1]
+    
+    return request_lengths
