@@ -270,12 +270,20 @@ Reviewers must verify:
 
 ### Commit Message Format
 
-Follow the [Conventional Commits](https://www.conventionalcommits.org/) format:
+Follow the [Conventional Commits](https://www.conventionalcommits.org/) format and **must include a sign-off**:
+
+```bash
+git commit -s -m "<type>: <summary>" -m "<body - explaining what changed and why>"
+```
+
+Or using the full message format:
 
 ```txt
 <type>: <summary>
 
 <body - explaining what changed and why>
+
+Signed-off-by: Your Name <your.email@example.com>
 ```
 
 **Valid Types**: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`
@@ -306,6 +314,33 @@ fix bug
 add feature
 update code
 ```
+
+### Pull Request Title Format
+
+PR titles should follow the format: `[Type][Module] Description`
+
+- **Type**: The type of change (e.g., `CI`, `Doc`, `Bugfix`, `Feat`, `Platform`, `Refactor`)
+- **Module**: The affected module (optional, e.g., `Misc`, `Model`, `Worker`)
+- **Description**: Brief description of the change
+
+**Examples:**
+
+- `[Doc][Misc] Update contribution guidelines`
+- `[Bugfix] Fix CPU binding logic`
+- `[CI] Update image build workflow`
+
+### Pull Request Template
+
+When creating a PR, please follow the template in `.github/PULL_REQUEST_TEMPLATE.md` and ensure the following sections are completed:
+
+> **Note**: The PR description will be automatically updated by GitHub Actions to include vLLM version info at the bottom. If you update the PR description via API or CLI, make sure to preserve the `- vLLM version:` and `- vLLM main:` lines.
+
+- **What this PR does / why we need it?** - Clearly describe the changes and their purpose
+- **Does this PR introduce _any_ user-facing change?** - Indicate if there are any user-visible changes
+- **How was this patch tested?** - Describe how you tested the changes. Examples:
+    - Unit tests added/updated: list the test files
+    - Manual testing: provide the test steps and commands
+    - CI testing: indicate if only CI verification is needed
 
 ---
 
@@ -341,8 +376,10 @@ Before merging, verify:
 
 ### Commit and PR
 
-- [ ] Commit messages are clear and descriptive
-- [ ] PR description is complete
+- [ ] Commit messages are clear and descriptive, following Conventional Commits format
+- [ ] **All commits are signed off** (`git commit -s`)
+- [ ] PR is created from your fork repository, not directly from the main repository
+- [ ] PR description is complete, following the PR template
 - [ ] All review comments addressed
 
 ---
@@ -356,7 +393,20 @@ Before merging, verify:
 5. Make your changes following guidelines in this document
 6. Add tests for new behavior
 7. Run full test suite before committing
-8. Create a PR with clear description
+8. Commit with sign-off: `git commit -s`
+9. Run linting check before pushing:
+   ```bash
+   bash format.sh ci
+   ```
+   > **Note**: This check is required for **all file types**, including markdown files. If `markdownlint` modifies files, re-add them with `git add` and commit again.
+10. Push to your fork repository (NOT the main repository):
+
+   ```bash
+   git remote add myfork https://github.com/YOUR_USERNAME/vllm-ascend.git
+   git push -u myfork your-branch-name
+   ```
+
+11. Create a PR from your fork to the main repository with clear description
 
 ---
 
