@@ -82,7 +82,7 @@ class AscendMetadataForPrefill:
 
     """ Prefill Specific Metadata for Ascend"""
     pcp_metadata: AscendPCPMetadata | None = None
-    pcp_exit_fa_scatter_idx: list[int] | None = None
+    pcp_exit_fa_scatter_idx: torch.Tensor | None = None
     chunked_context: ChunkedContextMetadata | None = None
     block_tables: torch.Tensor = None
     actual_seq_lengths_q: torch.Tensor = None
