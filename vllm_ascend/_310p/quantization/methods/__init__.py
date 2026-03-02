@@ -18,4 +18,5 @@
 from . import (
     w8a8_dynamic,  # noqa: F401
     w8a8_static,  # noqa: F401
+    w8a8s,  # noqa: F401
 )
