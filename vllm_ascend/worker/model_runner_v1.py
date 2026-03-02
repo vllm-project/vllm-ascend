@@ -1467,10 +1467,12 @@ class NPUModelRunner(GPUModelRunner):
             self.debugger.step()
 
         if self.need_accepted_tokens:
-            with record_function_or_nullcontext("async_state_update"):
-                with torch.npu.stream(self.state_update_stream):
-                    self.state_update_stream.wait_event(self.sampling_done_event)
-                    self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
+            with (
+                record_function_or_nullcontext("async_state_update"),
+                torch.npu.stream(self.state_update_stream),
+            ):
+                self.state_update_stream.wait_event(self.sampling_done_event)
+                self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
             return model_runner_output
