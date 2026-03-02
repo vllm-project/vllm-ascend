@@ -464,6 +464,8 @@ class NPUWorker(WorkerBase):
         set_random_seed(self.model_config.seed)
         return self.vllm_config.compilation_config.compilation_time
 
+        return self.vllm_config.compilation_config.compilation_time
+
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()
         weight = torch.rand((2, 4), dtype=torch.float16).npu()
