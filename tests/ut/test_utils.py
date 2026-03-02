@@ -25,7 +25,6 @@ from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
-from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 class TestUtils(TestBase):
@@ -242,10 +241,32 @@ class TestUtils(TestBase):
         # ascend custom op is not registered
         utils.register_ascend_customop()
         self.assertEqual(mock_customop.register_oot.call_count,
-                         len(REGISTERED_ASCEND_OPS))
+                         len(utils.REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
         self.assertEqual(mock_customop.register_oot.call_count,
-                         len(REGISTERED_ASCEND_OPS))
+                         len(utils.REGISTERED_ASCEND_OPS))
+
+    @mock.patch("vllm.model_executor.custom_op.CustomOp")
+    @mock.patch("vllm_ascend.utils.is_310p", return_value=True)
+    def test_register_ascend_customop_310p_linear_override(self, _mock_is_310p, mock_customop):
+        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
+        utils.register_ascend_customop()
+
+        from vllm_ascend._310p.ops.linear import (
+            AscendColumnParallelLinear310,
+            AscendMergedColumnParallelLinear310,
+            AscendQKVParallelLinear310,
+            AscendReplicatedLinear310,
+            AscendRowParallelLinear310,
+        )
+
+        self.assertIs(utils.REGISTERED_ASCEND_OPS["ColumnParallelLinear"], AscendColumnParallelLinear310)
+        self.assertIs(utils.REGISTERED_ASCEND_OPS["RowParallelLinear"], AscendRowParallelLinear310)
+        self.assertIs(utils.REGISTERED_ASCEND_OPS["MergedColumnParallelLinear"], AscendMergedColumnParallelLinear310)
+        self.assertIs(utils.REGISTERED_ASCEND_OPS["QKVParallelLinear"], AscendQKVParallelLinear310)
+        self.assertIs(utils.REGISTERED_ASCEND_OPS["ReplicatedLinear"], AscendReplicatedLinear310)
+        self.assertNotIn("MRotaryEmbedding", utils.REGISTERED_ASCEND_OPS)
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
