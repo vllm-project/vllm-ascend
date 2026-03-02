@@ -13,43 +13,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from torch import nn
 
 from tests.ut.base import TestBase
-from vllm_ascend._310p.ops.vocab_parallel_embedding import AscendParallelLMHead310
-from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend._310p.ops.vocab_parallel_embedding import (
+    AscendParallelLMHead310,
+    _AscendParallelLMHead310QuantMethod,
+)
 
 
 class TestAscendParallelLMHead310(TestBase):
-    def _fake_embedding_init(
-        self,
-        module: nn.Module,
-        num_embeddings: int,
-        embedding_dim: int,
-        params_dtype: torch.dtype | None = None,
-        org_num_embeddings: int | None = None,
-        padding_size: int = 64,
-        quant_config=None,
-        prefix: str = "",
-    ) -> None:
-        del num_embeddings, embedding_dim, params_dtype, org_num_embeddings
-        del padding_size, quant_config, prefix
-        nn.Module.__init__(module)
-        module.quant_method = SimpleNamespace()
+    def test_init_wraps_quant_method(self):
+        base_method = MagicMock()
 
-    @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_casts_weight_to_nz(self, mock_npu_format_cast):
-        mock_npu_format_cast.side_effect = lambda weight, fmt: weight
+        def fake_lm_head_init(
+            module,
+            num_embeddings: int,
+            embedding_dim: int,
+            bias: bool = False,
+            params_dtype: torch.dtype | None = None,
+            org_num_embeddings: int | None = None,
+            padding_size: int = 64,
+            quant_config=None,
+            prefix: str = "",
+        ) -> None:
+            del num_embeddings, embedding_dim, bias, params_dtype
+            del org_num_embeddings, padding_size, quant_config, prefix
+            module.quant_method = base_method
 
-        with patch.object(
-            AscendVocabParallelEmbedding,
-            "__init__",
-            new=self._fake_embedding_init,
+        with patch(
+            "vllm_ascend._310p.ops.vocab_parallel_embedding.AscendParallelLMHead.__init__",
+            new=fake_lm_head_init,
         ):
             lm_head = AscendParallelLMHead310(
                 num_embeddings=32,
@@ -59,15 +55,39 @@ class TestAscendParallelLMHead310(TestBase):
                 prefix="lm_head",
             )
 
+        self.assertIsInstance(lm_head.quant_method, _AscendParallelLMHead310QuantMethod)
+        self.assertIs(lm_head.quant_method._base_method, base_method)
+
+    def test_apply_delegates_to_base_method(self):
+        base_method = MagicMock()
+        expected_output = MagicMock()
+        base_method.apply.return_value = expected_output
+        wrapped_method = _AscendParallelLMHead310QuantMethod(base_method)
+
+        layer = MagicMock()
+        hidden_states = torch.randn(2, 4)
+        bias = torch.randn(4)
+
+        output = wrapped_method.apply(layer, hidden_states, bias=bias)
+
+        base_method.apply.assert_called_once_with(layer, hidden_states, bias=bias)
+        self.assertIs(output, expected_output)
+
+    @patch("vllm_ascend._310p.ops.vocab_parallel_embedding.maybe_trans_nz")
+    def test_process_weights_after_loading_casts_weight_to_nz(self, mock_maybe_trans_nz):
+        base_method = MagicMock()
+        wrapped_method = _AscendParallelLMHead310QuantMethod(base_method)
+
+        original_weight = torch.randn(32, 16, dtype=torch.float16)
+        converted_weight = torch.randn(32, 16, dtype=torch.float16)
+        mock_maybe_trans_nz.return_value = converted_weight
+
         layer = MagicMock()
         layer.weight = MagicMock()
-        layer.weight.data = torch.randn(32, 16, dtype=torch.float16)
-        original_weight = layer.weight.data
+        layer.weight.data = original_weight
 
-        lm_head.quant_method.process_weights_after_loading(layer)
+        wrapped_method.process_weights_after_loading(layer)
 
-        mock_npu_format_cast.assert_called_once()
-        args, kwargs = mock_npu_format_cast.call_args
-        self.assertIs(args[0], original_weight)
-        self.assertEqual(args[1], ACL_FORMAT_FRACTAL_NZ)
-        self.assertEqual(kwargs, {})
+        base_method.process_weights_after_loading.assert_called_once_with(layer)
+        mock_maybe_trans_nz.assert_called_once_with(original_weight)
+        self.assertIs(layer.weight.data, converted_weight)

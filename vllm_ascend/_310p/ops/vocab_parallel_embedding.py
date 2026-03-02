@@ -14,16 +14,60 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import types
 
 import torch
-import torch_npu
-from torch import nn
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import DEFAULT_VOCAB_PADDING_SIZE
 
 from vllm_ascend.ops.vocab_parallel_embedding import AscendParallelLMHead
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.utils import maybe_trans_nz
+
+
+class _AscendParallelLMHead310QuantMethod(QuantizeMethodBase):
+    def __init__(self, base_method: QuantizeMethodBase):
+        self._base_method = base_method
+
+    def __getattr__(self, name: str):
+        return getattr(self._base_method, name)
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        self._base_method.create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self._base_method.apply(layer, x, bias=bias)
+
+    def embedding(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._base_method.embedding(layer, x)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self._base_method.process_weights_after_loading(layer)
+        layer.weight.data = maybe_trans_nz(layer.weight.data)
 
 
 class AscendParallelLMHead310(AscendParallelLMHead):
@@ -39,12 +83,13 @@ class AscendParallelLMHead310(AscendParallelLMHead):
         prefix: str = "",
     ):
         super().__init__(
-            num_embeddings, embedding_dim, bias, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
+            num_embeddings,
+            embedding_dim,
+            bias,
+            params_dtype,
+            org_num_embeddings,
+            padding_size,
+            quant_config,
+            prefix,
         )
-
-        def patched_process_weights_after_loading(self, layer: nn.Module) -> None:
-            layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
-
-        self.quant_method.process_weights_after_loading = types.MethodType(
-            patched_process_weights_after_loading, self.quant_method
-        )
+        self.quant_method = _AscendParallelLMHead310QuantMethod(self.quant_method)
