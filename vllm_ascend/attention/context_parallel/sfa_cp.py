@@ -99,7 +99,8 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
                 ]
                 self.slot_mapping_buf[num_decode_tokens : num_decode_tokens * self.pcp_size].fill_(-1)
             elif self.speculative_config is not None and num_decodes > 0:
-                # when mtp, pcp_allgather_restore_idx=[696,-1,697,-1,560,-1,561,-1,100,101,102], slot_mapping should be [696,697,-1,-1,560,561,-1,-1,100,101,102]
+                # when mtp, pcp_allgather_restore_idx=[696,-1,697,-1,560,-1,561,-1,100,101,102],
+                # slot_mapping should be [696,697,-1,-1,560,561,-1,-1,100,101,102]
                 num_tokens_per_request = num_decode_tokens // num_decodes
                 decode_slot_mapping = self.slot_mapping_buf[: num_decode_tokens * self.pcp_size].reshape(
                     num_decodes, -1
