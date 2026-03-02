@@ -46,9 +46,7 @@ import json
 import multiprocessing as mp
 import os
 import shutil
-from multiprocessing import Queue
 from pathlib import Path
-from typing import Any
 
 import torch
 from vllm import LLM, EngineArgs
@@ -257,35 +255,21 @@ def main(args):
             if quant_type == "W16A16S":
                 raise NotImplementedError("W16A16SC is not supported yet.")
 
-            # Use Queue to collect worker results
-            result_queue: Queue[Any] = mp.Queue()
             tasks = []
             for i in range(args.tensor_parallel_size):
                 file_name = DEFAULT_PATTERN.format(rank=i, part="0")
                 full_path = output_dir / file_name
 
-                def worker_wrapper(file_path: str, qd: dict, pn: int, q: mp.Queue):
-                    """Wrapper to put result into queue."""
-                    result = weight_compress_worker(file_path, qd, pn)
-                    q.put(result)
-
                 p = mp.Process(
-                    target=worker_wrapper, args=(str(full_path), quant_desc, args.compress_process_num, result_queue)
+                    target=weight_compress_worker, args=(str(full_path), quant_desc, args.compress_process_num)
                 )
                 tasks.append(p)
                 p.start()
 
-            res = []
             for p in tasks:
                 p.join()
-                res.append(result_queue.get())
 
-            if not all(res):
-                raise RuntimeError("Compression failed. Check logs above for details.")
-            ori_quant_desc_file = FileHandler.validate_path(
-                os.path.join(args.output, "ori_quant_model_description.json"), must_exist=True
-            )
-            update_quant_description(str(ori_quant_desc_file))
+            update_quant_description(os.path.join(args.output, "ori_quant_model_description.json"))
             print("Compression completed successfully.")
         else:
             print(f"Skipping compression: Unsupported type {quant_type}")

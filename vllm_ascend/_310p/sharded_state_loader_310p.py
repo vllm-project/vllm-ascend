@@ -54,7 +54,7 @@ class ShardedStateLoader310(ShardedStateLoader):
         quantize_type = model.quant_config.quant_description.get("model_quant_type", "FLOAT")
         quant_description["model_quant_type"] = quantize_type
         quant_description["version"] = "1.0.0"
-        state_dict = model.state_dict()
+        state_dict = ShardedStateLoader._filter_subtensors(model.state_dict())
         for name, tensor in state_dict.items():
             if name.endswith(".weight") or name.endswith(".bias"):
                 if tensor.dtype in [torch.int8, torch.int32, torch.int64]:
