@@ -30,6 +30,7 @@ class QuantType(Enum):
     NONE = 0
     W8A8 = 1
     W4A8 = 2
+    MXFP8 = 3
 
 
 class AscendLinearScheme(ABC):
