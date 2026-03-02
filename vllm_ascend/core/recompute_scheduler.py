@@ -23,7 +23,6 @@ from collections import defaultdict
 from dataclasses import dataclass, fields
 
 import numpy as np
-from vllm._bc_linter import bc_linter_include
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.distributed.kv_events import KVEventBatch
@@ -75,7 +74,6 @@ class RecomputeReqInfo:
     client_index: int = 0
 
 
-@bc_linter_include
 @dataclass
 class RecomputeSchedulerOutput(SchedulerOutput):
     recomputed_reqs: list[RecomputeReqInfo] | None = None
