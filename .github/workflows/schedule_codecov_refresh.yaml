@@ -40,3 +40,6 @@ jobs:
       runner: linux-amd64-cpu-16-hk
       image: quay.nju.edu.cn/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
       type: schedule
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
