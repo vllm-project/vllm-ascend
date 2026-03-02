@@ -39,7 +39,6 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     check_kv_extra_config,
-    enable_sp,
     flashcomm2_enable,
     get_ascend_device_type,
     is_moe_model,
@@ -48,7 +47,7 @@ from vllm_ascend.utils import (
     update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
     is_310p,
-    enable_flash_comm_v1,
+    enable_sp,
 )
 
 if TYPE_CHECKING:
@@ -161,6 +160,13 @@ class NPUPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return torch.npu.get_device_name(device_id)
+
+    @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        device_props = torch.npu.get_device_properties(device_id)
+        if not hasattr(device_props, "uuid") or device_props.uuid is None:
+            raise RuntimeError(f"Device {device_id} does not have a valid UUID.")
+        return device_props.uuid
 
     @classmethod
     def inference_mode(cls):
@@ -395,7 +401,7 @@ class NPUPlatform(Platform):
             )
             vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
 
-        if enable_flash_comm_v1():
+        if enable_sp(vllm_config):
             assert not is_vl_model(vllm_config), """Flash Comm V1 is not supported for VL models. \
                 Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
                 For optimal performance with VL models, we recommend enabling Sequence Parallelism \
@@ -468,7 +474,7 @@ class NPUPlatform(Platform):
         _CUSTOM_OP_REGISTERED = True
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, attn_selector_config):
+    def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
         backend_map = {

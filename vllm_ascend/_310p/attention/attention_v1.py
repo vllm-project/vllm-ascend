@@ -110,7 +110,19 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
                 device=query.device,
                 non_blocking=True,
             )
-        return super().forward_paged_attention(query, attn_metadata, output)
+
+        torch_npu._npu_paged_attention(
+            query=query,
+            key_cache=self.key_cache,
+            value_cache=self.value_cache,
+            num_kv_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            scale_value=self.scale,
+            block_table=attn_metadata.block_tables,
+            context_lens=attn_metadata.seq_lens,
+            out=output,
+        )
+        return output
 
     def forward_prefill_310(self, query, key, value, attn_metadata, output):
         """
