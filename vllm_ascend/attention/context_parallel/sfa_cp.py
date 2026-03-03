@@ -56,7 +56,7 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
         )
 
         self.block_arange_buffer = torch.arange(
-            self.max_blocks * self.pcp_size * self.dcp_size, dtype=torch.int32, device=device
+            self.pcp_size * self.dcp_size, dtype=torch.int32, device=device
         )
 
     def build(
@@ -313,7 +313,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         if block_tables is not None and block_arange is not None:
             block_tables = (
                 block_tables.unsqueeze(-1)
-                + block_arange[: (self.pcp_size * self.dcp_size) * block_num].view(1, 1, -1).to(block_tables)
+                + (block_arange * block_num).view(1, 1, -1).to(block_tables)
             ).reshape(block_tables.shape[0], -1)
         return kv_cache, block_tables
 
