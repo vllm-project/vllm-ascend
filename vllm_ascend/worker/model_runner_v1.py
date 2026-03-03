@@ -1734,6 +1734,7 @@ class NPUModelRunner(GPUModelRunner):
         # be improved in model runner v2)
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
+        force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
@@ -1748,7 +1749,12 @@ class NPUModelRunner(GPUModelRunner):
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
-        has_lora = len(self.input_batch.lora_id_to_lora_request) > 0 if force_has_lora is None else force_has_lora
+        num_active_loras = (
+            force_num_active_loras
+            if force_num_active_loras is not None
+            else len(self.input_batch.lora_id_to_lora_request)
+        )
+        has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         # ruff: noqa: E731
         dispatch_cudagraph = (
@@ -1757,6 +1763,7 @@ class NPUModelRunner(GPUModelRunner):
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
                 disable_full=disable_full,
+                num_active_loras=num_active_loras,
             )
             if not force_eager
             else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
@@ -2031,7 +2038,6 @@ class NPUModelRunner(GPUModelRunner):
         allow_microbatching: bool = True,
         skip_eplb: bool = False,
         remove_lora: bool = True,
-        activate_lora: bool = False,
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2092,7 +2098,8 @@ class NPUModelRunner(GPUModelRunner):
             # `force_has_lora` is used for cudagraph capture; because LoRA is
             # activated later in the context manager, but we need to know the
             # LoRA state when determining the batch descriptor for capture
-            force_has_lora=activate_lora,
+            force_has_lora=num_active_loras > 0,
+            force_num_active_loras=num_active_loras,
         )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
@@ -2167,6 +2174,12 @@ class NPUModelRunner(GPUModelRunner):
             self.lora_config,
             num_scheduled_tokens,
             num_sampled_tokens,
+            remove_lora,
+            num_active_loras=(
+                self.lora_config.max_loras
+                if self.lora_config is not None
+                else num_active_loras
+            ),
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
