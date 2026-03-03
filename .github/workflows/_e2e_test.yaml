@@ -157,7 +157,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -221,7 +221,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -293,7 +293,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: m.daocloud.io/quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -353,7 +353,7 @@ jobs:
     runs-on: linux-aarch64-310p-1
     if: ${{ inputs.contains_310 }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-310p-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -411,7 +411,7 @@ jobs:
     runs-on: linux-aarch64-310p-4
     if: ${{ inputs.contains_310 }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-310p-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
