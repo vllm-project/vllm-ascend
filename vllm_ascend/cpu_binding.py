@@ -12,7 +12,7 @@ from vllm.logger import logger
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MASK_BIT = 32  # Number of bits in a CPU affinity mask group
-MIN_CPUS_PER_NPU = 5  # 2(IRQ) + 1(main min) + 1(acl) + 1(release)
+MIN_CPUS_PER_NPU = 5  # 2(IRQ) + 1(main, at least 1 CPU) + 1(acl) + 1(release) = 5 CPUs per NPU
 ALLOWED_CPUS_PATH = "/proc/self/status"
 ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 
@@ -63,9 +63,15 @@ class DeviceInfo:
         return allowed_cpus_list
 
     def get_all_logic_npus(self) -> list[int]:
+        """Collect all logical NPU IDs from the NPU mapping.
+
+        self.npu_map_info maps a board_id (A3) or npu_id (A2) to a per-chip map.
+        The per-chip map uses chip_id as the key and the logical NPU ID string
+        as the value.
+        """
         logic_ids: set[int] = set()
-        for _, chip_map in self.npu_map_info.items():  # keys are board_id (A3) or npu_id (A2)
-            for _, logic_str in chip_map.items():      # keys are chip_id
+        for _, chip_map in self.npu_map_info.items():
+            for _, logic_str in chip_map.items():
                 if logic_str and logic_str.isdigit():
                     logic_ids.add(int(logic_str))
         return sorted(logic_ids)
@@ -250,15 +256,14 @@ class CpuAlloc:
         total_cpu = len(allowed)
         if total_cpu == 0:
             return
-
-        # Prefer topo affinity keys
-        if self.device_info.npu_affinity:
-            total_npus = max(self.device_info.npu_affinity.keys()) + 1
-        elif self.device_info.total_logic_npus > 0:
+        
+        # Prefer mapping info (npu-smi info -m), fallback to topo keys, then visible list
+        if self.device_info.total_logic_npus > 0:
             total_npus = self.device_info.total_logic_npus
+        elif self.device_info.npu_affinity:
+            total_npus = len(self.device_info.npu_affinity)
         else:
-            # last-resort fallback (should rarely happen)
-            total_npus = max(running) + 1
+            total_npus = len(running)
 
         if total_npus <= 0:
             return
@@ -296,7 +301,7 @@ class CpuAlloc:
                 raise RuntimeError(f"Invalid NPU id {npu}, total_npus={total_npus}.")
             cpus = _slice_for_npu(npu)
             # Extra safety: should always be >= base >= 5
-            if len(cpus) < 5:
+            if len(cpus) < MIN_CPUS_PER_NPU:
                 raise RuntimeError(
                     f"NPU{npu} got too few CPUs: {len(cpus)} (<5). "
                     f"total_allowed={total_cpu}, total_npus={total_npus}, base={base}, extra={extra}"
@@ -348,10 +353,6 @@ class CpuAlloc:
         for npu, pool in self.npu_cpu_pool.items():
             if len(pool) >= MIN_CPUS_PER_NPU:
                 main = pool[2:-2]
-                if not main:
-                    raise RuntimeError(
-                        f"NPU{npu} main CPU list is empty after reservation. pool={pool}"
-                    )
                 acl = [pool[-2]]
                 rel = [pool[-1]]
             else:
@@ -415,7 +416,7 @@ class CpuAlloc:
     def bind_npu_irq(self) -> None:
         if not os.access("/proc/irq", os.W_OK):
             return
-        
+
         # Only bind IRQ for current rank's NPU to avoid multi-process overwrite.
         current_npu = self.device_info.running_npu_list[self.rank_id]
         if current_npu not in self.npu_cpu_pool:
