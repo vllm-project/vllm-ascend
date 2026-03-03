@@ -42,7 +42,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 [LoRA]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/lora.html
 [graph_mode]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html
 [apc]: https://github.com/vllm-project/vllm-ascend/issues/732
-[cp]: https://docs.vllm.ai/en/stable/performance/optimization.html#chunked-prefill
+[cp]: https://docs.vllm.ai/en/stable/configuration/optimization.html#chunked-prefill
 [1P1D]: https://github.com/vllm-project/vllm-ascend/pull/950
 [context_parallel]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html
 [sleep_mode]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html
