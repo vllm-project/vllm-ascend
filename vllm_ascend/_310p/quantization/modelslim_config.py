@@ -27,7 +27,6 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
 
@@ -104,9 +103,9 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
         if isinstance(layer, LinearBase):
             packed = getattr(self, "packed_modules_mapping", {})
             if self.is_layer_skipped_ascend(prefix, packed):
-                from vllm_ascend._310p.ops.linear import AscendUnquantizedLinearMethod310
+                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
-                return AscendUnquantizedLinearMethod310()
+                return AscendUnquantizedLinearMethod()
 
             scheme = create_scheme_for_layer(
                 quant_description=self.quant_description,
@@ -125,6 +124,8 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
             return AscendFusedMoEMethod(scheme, layer.moe_config)
 
         elif isinstance(layer, VocabParallelEmbedding):
-            return UnquantizedEmbeddingMethod()
+            from vllm_ascend._310p.ops.vocab_parallel_embedding import AscendUnquantizedEmbeddingMethod310
+
+            return AscendUnquantizedEmbeddingMethod310()
 
         return super().get_quant_method(layer, prefix)

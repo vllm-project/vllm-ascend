@@ -21,7 +21,7 @@ import torch
 import torch_npu
 
 from vllm_ascend.quantization.methods.base import AscendLinearScheme
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.utils import maybe_trans_nz
 
 from .registry import register_scheme
 
@@ -84,4 +84,4 @@ class AscendW8A8SLinearMethod310(AscendLinearScheme):
         layer.aclnn_input_scale = layer.input_scale.data.repeat(expanding_factor)
         layer.aclnn_input_scale_reciprocal = 1.0 / layer.aclnn_input_scale.data
         layer.aclnn_input_offset = layer.input_offset.data.repeat(expanding_factor).to(layer.aclnn_input_scale.dtype)
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.weight.data = maybe_trans_nz(layer.weight.data)
