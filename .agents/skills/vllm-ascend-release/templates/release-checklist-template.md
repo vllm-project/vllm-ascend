@@ -60,9 +60,9 @@ ${FUNCTIONAL_TEST_RESULTS}
 
 - [ ] Release note PR is merged.
 - [ ] Post the release on GitHub release page.
-- [ ] Generate official doc page on https://app.readthedocs.org/dashboard/
-- [ ] Wait for the wheel package to be available on https://pypi.org/project/vllm-ascend
-- [ ] Wait for the docker image to be available on https://quay.io/ascend/vllm-ascend
+- [ ] Generate official doc page on <https://app.readthedocs.org/dashboard/>
+- [ ] Wait for the wheel package to be available on <https://pypi.org/project/vllm-ascend>
+- [ ] Wait for the docker image to be available on <https://quay.io/ascend/vllm-ascend>
 - [ ] Upload 310p wheel to Github release page
 - [ ] Broadcast the release news (By message, blog , etc)
 - [ ] Close this issue
