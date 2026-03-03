@@ -5,6 +5,7 @@ import queue
 from unittest.mock import MagicMock, patch, call, ANY
 import torch
 import numpy as np
+from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -50,7 +51,15 @@ class TestFaultTolerance(TestBase):
         self.mock_current_device = patcher_npu_current_device.start()
         self.addCleanup(patcher_npu_current_device.stop)
 
-        patcher_npu_sync = patch('torch_npu.npu.synchronize')
+        patcher_gc_collect = patch('gc.collect', return_value=0)
+        self.mock_gc_collect = patcher_gc_collect.start()
+        self.addCleanup(patcher_gc_collect.stop)
+
+        patcher_npu_empty_cache = patch('torch_npu.npu.empty_cache', return_value=0)
+        self.mock_empty_cache = patcher_npu_empty_cache.start()
+        self.addCleanup(patcher_npu_empty_cache.stop)
+
+        patcher_npu_sync = patch('torch.npu.synchronize')
         self.mock_npu_sync = patcher_npu_sync.start()
         self.addCleanup(patcher_npu_sync.stop)
 
@@ -215,7 +224,7 @@ class TestFaultTolerance(TestBase):
         self.assertTrue(torch.equal(result, FaultAction.RECOMPUTE))
 
     def test_clean_fault_queue(self):
-        q = queue.Queue()
+        q:queue.Queue = queue.Queue()
         q.put(1)
         q.put(2)
         self.ft.fault_queue = q
@@ -280,7 +289,8 @@ class TestFaultTolerance(TestBase):
         FaultTolerance._sync_group = MagicMock()
         self.ft.world_size = 2
         with patch('torch.distributed.all_gather') as mock_all_gather:
-            self.ft._all_gather_for_sync_group()
+            with patch('torch.tensor', return_value=torch.tensor(0)):
+                self.ft._all_gather_for_sync_group()
             mock_all_gather.assert_called_once()
             args, kwargs = mock_all_gather.call_args
             self.assertEqual(len(args[0]), 2)
@@ -370,11 +380,11 @@ class TestFaultTolerance(TestBase):
         self.assertEqual(mock_warn.call_count, 2)
 
     def test_scatter_ft_actions(self):
-        ft_actions = [torch.tensor([FaultAction.RECOMPUTE]), torch.tensor([FaultAction.RETURN])]
+        ft_actions = [torch.zeros_like(FaultAction.RECOMPUTE), torch.zeros_like(FaultAction.RETURN)]
         FaultTolerance._recovery_group = MagicMock()
         with patch('torch.distributed.scatter') as mock_scatter:
             def scatter_side_effect(recv_tensor, *args, **kwargs):
-                recv_tensor.copy_(torch.tensor([FaultAction.RECOMPUTE]))
+                recv_tensor.copy_(torch.zeros_like(FaultAction.RECOMPUTE))
             mock_scatter.side_effect = scatter_side_effect
             result = self.ft._scatter_ft_actions(ft_actions)
             mock_scatter.assert_called_once_with(
@@ -383,13 +393,13 @@ class TestFaultTolerance(TestBase):
                 src=0,
                 group=FaultTolerance._recovery_group
             )
-            self.assertTrue(torch.equal(result, torch.tensor([FaultAction.RECOMPUTE])))
+            self.assertTrue(torch.equal(result, torch.zeros_like(FaultAction.RECOMPUTE)))
 
     def test_receive_ft_actions(self):
         FaultTolerance._recovery_group = MagicMock()
         with patch('torch.distributed.scatter') as mock_scatter:
             def scatter_side_effect(recv_tensor, *args, **kwargs):
-                recv_tensor.copy_(torch.tensor([FaultAction.RETURN]))
+                recv_tensor.copy_(torch.zeros_like(FaultAction.RETURN))
 
             mock_scatter.side_effect = scatter_side_effect
 
@@ -401,7 +411,7 @@ class TestFaultTolerance(TestBase):
                 src=0,
                 group=FaultTolerance._recovery_group
             )
-            self.assertTrue(torch.equal(result, torch.tensor([FaultAction.RETURN])))
+            self.assertTrue(torch.equal(result, torch.zeros_like(FaultAction.RETURN)))
 
     def test_generate_scheduler_output_key_normal(self):
         mock_out = MagicMock()
@@ -434,7 +444,7 @@ class TestFaultTolerance(TestBase):
         mock_cached.num_computed_tokens = []
         mock_out.scheduled_cached_reqs = mock_cached
 
-        expected_data = {
+        expected_data: dict[str,Any] = {
             'new_req_ids': [],
             'cached_req_ids': [],
             'cached_num_tokens': []
@@ -594,6 +604,9 @@ class TestFaultTolerance(TestBase):
         self.assertEqual(eplb.update_info_all, {'info2': 'test2'})
         self.assertEqual(eplb.reqs, ['r2'])
         self.assertEqual(eplb.cur_iterations, 3)
+
+        self.mock_empty_cache.assert_called_once()
+        self.mock_gc_collect.assert_called_once()
 
     def test_restore_essential_state_empty_backup(self):
         self.ft._restore_essential_state({})

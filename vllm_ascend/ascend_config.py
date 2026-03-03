@@ -135,6 +135,8 @@ class AscendConfig:
                 raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
+        fault_tolerance_config = additional_config.get("fault_tolerance", {})
+        self.fault_tolerance_config = FaultToleranceConfig(fault_tolerance_config)
 
     def _construct_weight_prefetch_config(self, additional_config):
         weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
@@ -425,6 +427,12 @@ class EplbConfig:
 
         logger.info(f"Dynamic EPLB is {self.config['dynamic_eplb']}")
         logger.info(f"The number of redundant experts is {self.config['num_redundant_experts']}")
+
+
+class FaultToleranceConfig:
+    def __init__(self, fault_tolerance_config):
+        self.level = fault_tolerance_config.get("level", 0)
+        self.max_reinference_times = fault_tolerance_config.get("max_reinference_times", 3)
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

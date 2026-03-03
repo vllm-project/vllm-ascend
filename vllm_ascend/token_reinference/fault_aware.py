@@ -18,7 +18,7 @@ class FaultAware:
         rank: int,
         world_size: int,
         fault_queue: queue.Queue,
-        interval_s=5,
+        interval_s: int = 1,
         aware_event: threading.Event | None = None,
         stop_event: threading.Event | None = None,
     ):
@@ -47,14 +47,14 @@ class FaultAware:
         if not torch.distributed.is_gloo_available():
             raise RuntimeError("Gloo backend must be available")
 
-        logger.info(f"init fault aware process group: rank={self.rank},world_size={self.world_size},backend=gloo")
+        logger.info("init fault aware process group: rank=%s,world_size=%s,backend=gloo", self.rank, self.world_size)
         try:
             FaultAware._fault_aware_group = torch.distributed.new_group(
                 ranks=None, timeout=timedelta(minutes=5), backend="gloo"
             )
-            logger.info(f"Rank {self.rank} successfully initialized fault aware process group")
+            logger.info("Rank %s successfully initialized fault aware process group", self.rank)
         except Exception as e:
-            logger.error(f"Rank {self.rank} failed to initialize fault aware group:{e}")
+            logger.error("Rank %s failed to initialize fault aware group:%s", self.rank, e)
             raise e
 
     def start(self):
@@ -63,7 +63,7 @@ class FaultAware:
             logger.warning("Fault aware thread is already running")
             return
         self.init_fault_aware_group()
-        logger.info(f"Rank {self.rank} starting fault aware thread")
+        logger.info("Rank %s starting fault aware thread", self.rank)
         try:
             self._fault_aware_thread = threading.Thread(
                 target=self._handler_loop,
@@ -72,14 +72,14 @@ class FaultAware:
             )
             assert self._fault_aware_thread is not None
             self._fault_aware_thread.start()
-            logger.info(f"Rank {self.rank} successfully started fault aware thread")
+            logger.info("Rank %s successfully started fault aware thread", self.rank)
         except Exception as e:
-            logger.error(f"Rank {self.rank} failed to start fault aware thread:{e}")
+            logger.error("Rank %s failed to start fault aware thread:%s", self.rank, e)
             raise e
 
     def _handler_loop(self):
         current_status = FaultStatus.ACTIVE.value
-        status_list = [torch.zeros([1], dtype=torch.int64) for _ in range(self.world_size)] if self.rank == 0 else None
+        status_list = [torch.zeros_like(current_status) for _ in range(self.world_size)] if self.rank == 0 else None
         while True:
             try:
                 current_status = self._update_status_from_queue(current_status)
@@ -88,7 +88,7 @@ class FaultAware:
                 self.broadcast_command(fault_cmd)
                 current_status = self._execute_command(fault_cmd, current_status)
             except Exception as e:
-                logger.error(f"Exception in fault aware handler:{e}")
+                logger.error("Exception in fault aware handler:%s", e)
                 if not threading.main_thread().is_alive():
                     break
                 raise e
@@ -98,13 +98,13 @@ class FaultAware:
         try:
             msg = self.fault_queue.get_nowait()
             if msg:
-                logger.info(f"Received new status: {msg.name},updating status")
+                logger.info("Received new status: %s,updating status", msg.name)
                 current_status = msg.value
         except queue.Empty:
             if not threading.main_thread().is_alive():
                 raise RuntimeError("Main thread is not alive")
         except Exception as e:
-            logger.error(f"Error reading from fault queue:{e}")
+            logger.error("Error reading from fault queue:%s", e)
             raise e
 
         return current_status
@@ -119,7 +119,7 @@ class FaultAware:
                 group=FaultAware._fault_aware_group,
             )
         except Exception as e:
-            logger.error(f"Rank {self.rank} failed to gather status:{e}")
+            logger.error("Rank %s failed to gather status:%s", self.rank, e)
             raise e
 
     def _determine_fault_command(self, status_list):
@@ -141,7 +141,7 @@ class FaultAware:
                 group=FaultAware._fault_aware_group,
             )
         except Exception as e:
-            logger.error(f"Rank {self.rank} failed to broadcast command:{e}")
+            logger.error("Rank %s failed to broadcast command:", self.rank, e)
             raise e
 
     def _execute_command(self, fault_cmd, current_status):
@@ -149,11 +149,11 @@ class FaultAware:
         if torch.equal(fault_cmd, FaultCommand.SILENCE_CMD):
             time.sleep(self.interval_s)
         elif torch.equal(fault_cmd, FaultCommand.STOP_DEVICE_CMD):
-            logger.info(f"Error detected in cluster,executing stop_device on NPU {self.npu_id}")
+            logger.info("Error detected in cluster,executing stop_device on NPU %s", self.npu_id)
             self._stop_device()
             current_status = FaultStatus.ACTIVE.value
         else:
-            logger.error(f"Unknown fault command received:{fault_cmd}")
+            logger.error("Unknown fault command received:%s", fault_cmd)
 
         return current_status
 
@@ -161,7 +161,7 @@ class FaultAware:
         try:
             torch_npu.npu.stop_device(self.npu_id)
             if self.stop_event:
-                logger.info(f"NPU {self.npu_id} execute stop device")
+                logger.info("NPU %s execute stop device", self.npu_id)
                 self.stop_event.set()
 
             if self.aware_event:
@@ -170,5 +170,5 @@ class FaultAware:
                 self.aware_event.clear()
                 logger.info("Recovery event received,resuming operation")
         except Exception as e:
-            logger.error(f"Error during stop_device or recovery:{e}")
+            logger.error("Error during stop_device or recovery:%s", e)
             raise e

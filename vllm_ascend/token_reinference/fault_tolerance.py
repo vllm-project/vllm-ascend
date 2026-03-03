@@ -1,5 +1,6 @@
 import copy
 import functools
+import gc
 import hashlib
 import json
 import queue
@@ -11,11 +12,11 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 
-from vllm_ascend.token_reinference.common import FaultAction, RecoveryStatus
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.token_reinference.common import FaultAction, FaultToleranceLevel, RecoveryStatus
 from vllm_ascend.token_reinference.fault_aware import FaultAware
 from vllm_ascend.token_reinference.recovery_context import RecoveryContext
 from vllm_ascend.token_reinference.recovery_handler import ForceStopHandler, NetworkHandler, RecoveryHandlerManager
@@ -25,11 +26,14 @@ class FaultTolerance:
     _recovery_group = None
     _sync_group = None
 
-    def __init__(self, vllm_config: VllmConfig, model_runner, execute_model_func, interval_s=5, max_backup_batches=2):
+    def __init__(
+        self, vllm_config, model_runner, execute_model_func, max_retry_times=3, interval_m=5, max_backup_batches=2
+    ):
         self.model_runner = model_runner
         self.execute_model_func = execute_model_func
         self.vllm_config = vllm_config
-        self.interval_s = interval_s
+        self.max_retry_times = max_retry_times
+        self.interval_m = interval_m
         self.max_backup_batches = max_backup_batches
 
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
@@ -49,6 +53,24 @@ class FaultTolerance:
             self.rank, self.world_size, self.fault_queue, aware_event=self.aware_event, stop_event=self.stop_event
         ).start()
 
+    @classmethod
+    def init_fault_tolerance(cls, worker, vllm_config, model_runner):
+        additional_config = get_ascend_config()
+        fault_tolerance_config = additional_config.fault_tolerance_config
+        level = fault_tolerance_config.level
+        max_reinference_times = fault_tolerance_config.max_reinference_times
+
+        if level == FaultToleranceLevel.LEVEL_0.value:
+            return None
+
+        ft = cls(
+            vllm_config=vllm_config,
+            model_runner=model_runner,
+            execute_model_func=worker.execute_model,
+            max_retry_times=max_reinference_times,
+        )
+        return ft
+
     def _init_recovery_group(self):
         """
         Initialize the global communication group for status collection
@@ -58,11 +80,11 @@ class FaultTolerance:
 
         FaultTolerance._recovery_group = dist.new_group(
             ranks=None,
-            timeout=timedelta(minutes=self.interval_s),
+            timeout=timedelta(minutes=self.interval_m),
             backend="gloo",
         )
 
-        logger.info(f"Recovery group initialization successful for rank {self.rank}")
+        logger.info("Recovery group initialization successful for rank %s", self.rank)
 
     def _init_sync_group(self):
         """
@@ -71,7 +93,7 @@ class FaultTolerance:
         if not dist.is_initialized() or self.world_size == 1:
             return
         FaultTolerance._sync_group = dist.new_group(
-            ranks=None, timeout=timedelta(minutes=self.interval_s), backend="hccl"
+            ranks=None, timeout=timedelta(minutes=self.interval_m), backend="hccl"
         )
 
     def _build_recovery_handler_manager(self) -> RecoveryHandlerManager:
@@ -86,100 +108,121 @@ class FaultTolerance:
 
         return recovery_handler_manager
 
-    def execute_model_decorator(self, func: Callable, max_retries: int, dummy_run: bool) -> Callable:
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_retries + 1):
-                if not dummy_run:
-                    batch_key = self._generate_scheduler_output_key(args[0])
-                    if batch_key in self.async_batch_to_backup:
-                        logger.info("Current batch is token reinference batch")
-                        self.state_backup = self.async_batch_to_backup[batch_key]
-                        self._restore_essential_state(self.state_backup)
-                        keys_to_remove = [k for k in self.async_batch_to_backup if k != batch_key]
-                        for key in keys_to_remove:
-                            del self.async_batch_to_backup[key]
+    @classmethod
+    def execute_model_decorator(cls, dummy_run: bool) -> Callable:
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(worker_self, *args, **kwargs):
+                ft = getattr(worker_self, "fault_tolerance", None)
+                if ft is None:
+                    return func(worker_self, *args, **kwargs)
+                for attempt in range(ft.max_retry_times + 1):
+                    if not dummy_run:
+                        batch_key = ft._generate_scheduler_output_key(args[0])
+                        if batch_key in ft.async_batch_to_backup:
+                            logger.debug("Current batch might be token reinference batch")
+                            ft.state_backup = ft.async_batch_to_backup[batch_key]
+                            ft._restore_essential_state(ft.state_backup)
+                            keys_to_remove = [k for k in ft.async_batch_to_backup if k != batch_key]
+                            for key in keys_to_remove:
+                                del ft.async_batch_to_backup[key]
+                        else:
+                            map_size = len(ft.async_batch_to_backup)
+                            if map_size >= ft.max_backup_batches:
+                                oldest_key = next(iter(ft.async_batch_to_backup))
+                                del ft.async_batch_to_backup[oldest_key]
+                            ft.state_backup = ft._create_essential_state_backup(*args, **kwargs)
+                            ft.async_batch_to_backup[batch_key] = ft.state_backup
                     else:
-                        map_size = len(self.async_batch_to_backup)
-                        if map_size >= self.max_backup_batches:
-                            oldest_key = next(iter(self.async_batch_to_backup))
-                            del self.async_batch_to_backup[oldest_key]
-                        self.state_backup = self._create_essential_state_backup(*args, **kwargs)
-                        self.async_batch_to_backup[batch_key] = self.state_backup
-                else:
-                    self.state_backup = self._create_essential_state_backup(*args, **kwargs)
-                try:
-                    output = func(*args, **kwargs)
-                    if dummy_run:
-                        self._all_gather_for_sync_group()
-                    return output
-                except Exception as e:
-                    if attempt >= max_retries:
-                        logger.warning(
-                            f"Max retries {max_retries} exceeded at rank {self.rank}，raising exception: {e}"
+                        ft.state_backup = ft._create_essential_state_backup(*args, **kwargs)
+                    try:
+                        output = func(worker_self, *args, **kwargs)
+                        if dummy_run:
+                            ft._all_gather_for_sync_group()
+                        return output
+                    except Exception as e:
+                        if attempt >= ft.max_retry_times:
+                            logger.warning(
+                                "Max retries %s exceeded at rank %s，raising exception: %s",
+                                ft.max_retry_times,
+                                ft.rank,
+                                e,
+                            )
+                            raise e
+                        # Encapsulate the context information required for fault recovery.
+                        recovery_context = RecoveryContext(
+                            exception=e, fault_queue=ft.fault_queue, back_up=ft.state_backup, is_dummy_run=dummy_run
                         )
-                        raise e
-                    # Encapsulate the context information required for fault recovery.
-                    recovery_context = RecoveryContext(
-                        exception=e, fault_queue=self.fault_queue, back_up=self.state_backup, is_dummy_run=dummy_run
-                    )
-                    ft_action = self._handle_exception(recovery_context)
-                    if torch.equal(ft_action, FaultAction.RECOMPUTE):
-                        self.aware_event.set()
-                        logger.info(f"Begin token re-inference at rank {self.rank}")
-                        continue
-                    elif torch.equal(ft_action, FaultAction.RAISE_EXCEPTION):
-                        logger.info(f"Raise exception at rank {self.rank}")
-                        raise e
-                    elif torch.equal(ft_action, FaultAction.RETURN):
-                        logger.info(f"Abort current batch at rank {self.rank}")
-                        return EMPTY_MODEL_RUNNER_OUTPUT
-                    else:
-                        logger.error(f"Unexpected FaultAction {ft_action}, aborting")
-                        raise RuntimeError("Unknown fault action")
-            return EMPTY_MODEL_RUNNER_OUTPUT
+                        ft_action = ft._handle_exception(recovery_context)
+                        if torch.equal(ft_action, FaultAction.RECOMPUTE):
+                            ft.aware_event.set()
+                            logger.info("Begin token re-inference at rank %s", ft.rank)
+                            continue
+                        elif torch.equal(ft_action, FaultAction.RAISE_EXCEPTION):
+                            logger.info("Raise exception at rank %s", ft.rank)
+                            raise e
+                        elif torch.equal(ft_action, FaultAction.RETURN):
+                            logger.info("Abort current batch at rank %s", ft.rank)
+                            return EMPTY_MODEL_RUNNER_OUTPUT
+                        else:
+                            logger.error("Unexpected FaultAction %s, aborting", ft_action)
+                            raise RuntimeError("Unknown fault action")
+                return EMPTY_MODEL_RUNNER_OUTPUT
 
-        return wrapper
+            return wrapper
 
-    def sample_token_decorator(self, func: Callable, max_retries: int) -> Callable:
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_retries + 1):
-                try:
-                    output = func(*args, **kwargs)
-                    if output is not None:
-                        self._all_gather_for_sync_group()
-                    return output
-                except Exception as e:
-                    if attempt >= max_retries:
-                        logger.warning(
-                            f"Max retries {max_retries} exceeded at rank {self.rank}，raising exception: {e}"
+        return decorator
+
+    @classmethod
+    def sample_token_decorator(cls) -> Callable:
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(worker_self, *args, **kwargs):
+                ft = getattr(worker_self, "fault_tolerance", None)
+                if ft is None:
+                    return func(worker_self, *args, **kwargs)
+                for attempt in range(ft.max_retry_times + 1):
+                    try:
+                        output = func(worker_self, *args, **kwargs)
+                        if output is not None:
+                            ft._all_gather_for_sync_group()
+                        return output
+                    except Exception as e:
+                        if attempt >= ft.max_retry_times:
+                            logger.warning(
+                                "Max retries %s exceeded at rank %s，raising exception: %s",
+                                ft.max_retry_times,
+                                ft.rank,
+                                e,
+                            )
+                            raise e
+                        # Encapsulate the context information required for fault recovery.
+                        recovery_context = RecoveryContext(
+                            exception=e, fault_queue=ft.fault_queue, back_up=ft.state_backup, is_dummy_run=False
                         )
-                        raise e
-                    # Encapsulate the context information required for fault recovery.
-                    recovery_context = RecoveryContext(
-                        exception=e, fault_queue=self.fault_queue, back_up=self.state_backup, is_dummy_run=False
-                    )
-                    ft_action = self._handle_exception(recovery_context)
-                    if torch.equal(ft_action, FaultAction.RECOMPUTE):
-                        self.aware_event.set()
-                        logger.info(f"Begin re-execute model at rank {self.rank}")
-                        # re-execute model first
-                        self.execute_model_func(*self.state_backup["args"], **self.state_backup["kwargs"])
-                        logger.info(f"Begin token re-inference at rank {self.rank}")
-                        continue
-                    elif torch.equal(ft_action, FaultAction.RAISE_EXCEPTION):
-                        logger.info(f"Raise exception at rank {self.rank}")
-                        raise e
-                    elif torch.equal(ft_action, FaultAction.RETURN):
-                        logger.info(f"Abort current batch at rank {self.rank}")
-                        return EMPTY_MODEL_RUNNER_OUTPUT
-                    else:
-                        logger.error(f"Unexpected FaultAction {ft_action}, aborting")
-                        raise RuntimeError("Unknown fault action")
+                        ft_action = ft._handle_exception(recovery_context)
+                        if torch.equal(ft_action, FaultAction.RECOMPUTE):
+                            ft.aware_event.set()
+                            logger.info("Begin re-execute model at rank %s", ft.rank)
+                            # re-execute model first
+                            ft.execute_model_func(*ft.state_backup["args"], **ft.state_backup["kwargs"])
+                            logger.info("Begin token re-inference at rank %s", ft.rank)
+                            continue
+                        elif torch.equal(ft_action, FaultAction.RAISE_EXCEPTION):
+                            logger.info("Raise exception at rank %s", ft.rank)
+                            raise e
+                        elif torch.equal(ft_action, FaultAction.RETURN):
+                            logger.info("Abort current batch at rank %s", ft.rank)
+                            return EMPTY_MODEL_RUNNER_OUTPUT
+                        else:
+                            logger.error("Unexpected FaultAction %s, aborting", ft_action)
+                            raise RuntimeError("Unknown fault action")
 
-            return EMPTY_MODEL_RUNNER_OUTPUT
+                return EMPTY_MODEL_RUNNER_OUTPUT
 
-        return wrapper
+            return wrapper
+
+        return decorator
 
     def _handle_exception(self, ctx: RecoveryContext) -> torch.Tensor:
         """
@@ -250,30 +293,30 @@ class FaultTolerance:
                 self._restore_essential_state(ctx.back_up)
             reinit_status = RecoveryStatus.SUCCESS
         except Exception as inner_e:
-            logger.error(f"Failed to clean fault for rank {self.rank},get exception :{inner_e}")
+            logger.error("Failed to clean fault for rank %s,get exception :%s", self.rank, inner_e)
             ctx.exception = inner_e
             reinit_status = RecoveryStatus.FAILED
         return reinit_status
 
     def _all_gather_for_recovery_group(self):
-        local_status = torch.tensor([self.rank])
+        local_status = torch.tensor(self.rank)
         gather_list = [torch.zeros_like(local_status) for _ in range(self.world_size)]
-        logger.debug(f"Rank {self.rank} waiting for all ranks to throw exceptions")
+        logger.debug("Rank %s waiting for all ranks to throw exceptions", self.rank)
         try:
             dist.all_gather(gather_list, local_status, group=FaultTolerance._recovery_group)
         except Exception as inner_e:
-            logger.error(f"All gather failed for _recovery_group,exception for recovery_group:{inner_e}")
+            logger.error("All gather failed for _recovery_group,exception for recovery_group:%s", inner_e)
             raise inner_e
 
     def _all_gather_for_sync_group(self):
-        local_status = torch.tensor([self.rank], dtype=torch.int32, device="npu")
+        local_status = torch.tensor(self.rank, dtype=torch.int32, device="npu")
         gather_list = [torch.zeros_like(local_status) for _ in range(self.world_size)]
-        logger.debug(f"Rank {self.rank} waiting for all ranks to finish execute_model")
+        logger.debug("Rank %s waiting for all ranks to finish execute_model", self.rank)
         try:
             dist.all_gather(gather_list, local_status, group=FaultTolerance._sync_group)
-            torch.npu.synchronize()
+            torch.npu.current_stream().synchronize()
         except Exception as inner_e:
-            logger.error(f"All gather failed for _sync_group,exception :{inner_e}")
+            logger.error("All gather failed for _sync_group,exception :%s", inner_e)
             raise inner_e
 
     def _gather_statuses(self, local_status: torch.Tensor) -> list[torch.Tensor]:
@@ -289,7 +332,7 @@ class FaultTolerance:
                 dist.gather(local_status, gather_list=None, dst=0, group=FaultTolerance._recovery_group)
                 return []
         except Exception as inner_e:
-            logger.error(f"Gather status failed,get exception:{inner_e}")
+            logger.error("Gather status failed,get exception:%s", inner_e)
             if self.rank == 0:
                 return [RecoveryStatus.FAILED for _ in range(self.world_size)]
             return []
@@ -307,10 +350,10 @@ class FaultTolerance:
             elif torch.equal(recovery_status, RecoveryStatus.FAILED):
                 failure_ranks.append(rank)
             else:
-                logger.warning(f"Unknown status tensor from rank {rank}: {recovery_status}")
+                logger.warning("Unknown status tensor from rank %s: %s", rank, recovery_status)
                 failure_ranks.append(rank)
 
-        logger.info(f"Global recovery: {len(success_ranks)} success, {len(failure_ranks)} failure")
+        logger.info("Global recovery: %s success, %s failure", len(success_ranks), len(failure_ranks))
 
         decisions = []
         if not failure_ranks:
@@ -320,7 +363,7 @@ class FaultTolerance:
             logger.warning("All ranks failed, Determine RAISE_EXCEPTION for all rank")
             decisions = [FaultAction.RAISE_EXCEPTION] * self.world_size
         else:
-            logger.warning(f"Partial recovery - success ranks: {success_ranks}")
+            logger.warning("Partial recovery - success ranks: %s", success_ranks)
             for rank in range(self.world_size):
                 if rank in success_ranks:
                     decisions.append(FaultAction.RETURN)
@@ -333,7 +376,7 @@ class FaultTolerance:
         """
         Rank 0 distributed fault action to each rank
         """
-        recv_ft_action = torch.tensor([0])
+        recv_ft_action = torch.tensor(0)
         dist.scatter(recv_ft_action, scatter_list=ft_actions, src=0, group=FaultTolerance._recovery_group)
         return recv_ft_action
 
@@ -341,7 +384,7 @@ class FaultTolerance:
         """
         Rank 1 ...N receive fault action
         """
-        recv_ft_action = torch.tensor([0])
+        recv_ft_action = torch.tensor(0)
         dist.scatter(recv_ft_action, scatter_list=None, src=0, group=FaultTolerance._recovery_group)
         return recv_ft_action
 
@@ -349,11 +392,12 @@ class FaultTolerance:
         new_req_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
         cached_req_ids = [req_id for req_id in scheduler_output.scheduled_cached_reqs.req_ids]
         cached_num_tokens = [num_tokens for num_tokens in scheduler_output.scheduled_cached_reqs.num_computed_tokens]
-
+        finished_req_ids = sorted(scheduler_output.finished_req_ids)
         key_data = {
             "new_req_ids": new_req_ids,
             "cached_req_ids": cached_req_ids,
             "cached_num_tokens": cached_num_tokens,
+            "finished_req_ids": finished_req_ids,
         }
 
         key_json = json.dumps(key_data, sort_keys=True, ensure_ascii=False)
@@ -455,7 +499,7 @@ class FaultTolerance:
                 for i, bt in enumerate(ib.block_table.block_tables):
                     bt.num_blocks_per_row[:] = backup["num_blocks_per_row"][i]
             if "spec_token_ids" in backup:
-                ib.spec_token_ids = backup["spec_token_ids"]
+                ib.spec_token_ids[:] = backup["spec_token_ids"]
 
             if "_removed" in backup:
                 ib.batch_update_builder._removed[:] = backup["_removed"]
@@ -485,3 +529,7 @@ class FaultTolerance:
                 eplb.reqs = backup["reqs"]
             if "cur_iterations" in backup:
                 eplb.cur_iterations = backup["cur_iterations"]
+
+        # clean up cache after rollback
+        gc.collect()
+        torch_npu.npu.empty_cache()

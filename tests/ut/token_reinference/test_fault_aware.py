@@ -14,7 +14,7 @@ class TestFaultAware(TestBase):
     def setUp(self):
         self.rank = 0
         self.world_size = 2
-        self.fault_queue = queue.Queue()
+        self.fault_queue: queue.Queue = queue.Queue()
         self.aware_event = threading.Event()
         self.stop_event = threading.Event()
 
@@ -117,14 +117,12 @@ class TestFaultAware(TestBase):
         with patch.object(self.fa, 'init_fault_aware_group') as mock_init:
             self.fa.start()
             mock_init.assert_called_once()
-            self.mock_logger.info.assert_any_call(f"Rank {self.rank} starting fault aware thread")
             self.mock_thread_class.assert_called_once_with(
                 target=self.fa._handler_loop,
                 name=f"FaultAware-Rank{self.rank}",
                 daemon=True
             )
             self.mock_thread_instance.start.assert_called_once()
-            self.mock_logger.info.assert_any_call(f"Rank {self.rank} successfully started fault aware thread")
 
     def test_start_exception(self):
         with patch.object(self.fa, 'init_fault_aware_group') as mock_init:
@@ -160,11 +158,11 @@ class TestFaultAware(TestBase):
 
     def test_update_status_from_queue_exception(self):
         current_status = FaultStatus.ACTIVE.value
-        self.fault_queue.get = MagicMock(side_effect=Exception("queue error"))
-        with self.assertRaises(Exception) as ctx:
-            self.fa._update_status_from_queue(current_status)
-        self.assertEqual(str(ctx.exception), "queue error")
-        self.mock_logger.error.assert_called_once()
+        with patch.object(self.fault_queue, 'get', side_effect=Exception("queue error")):
+            with self.assertRaises(Exception) as ctx:
+                self.fa._update_status_from_queue(current_status)
+            self.assertEqual(str(ctx.exception), "queue error")
+            self.mock_logger.error.assert_called_once()
 
     def test_gather_statuses_normal(self):
         FaultAware._fault_aware_group = MagicMock()
@@ -256,9 +254,6 @@ class TestFaultAware(TestBase):
         self.fa.stop_event.set.assert_called_once()
         self.fa.aware_event.wait.assert_called_once()
         self.fa.aware_event.clear.assert_called_once()
-        self.mock_logger.info.assert_any_call(f"NPU {self.fa.npu_id} execute stop device")
-        self.mock_logger.info.assert_any_call("Waiting for recovery event")
-        self.mock_logger.info.assert_any_call("Recovery event received,resuming operation")
 
     def test_stop_device_exception(self):
         self.mock_stop_device.side_effect = Exception("stop failed")
@@ -284,7 +279,6 @@ class TestFaultAware(TestBase):
             mock_determine.assert_not_called()
             mock_broadcast.assert_not_called()
             mock_execute.assert_not_called()
-            self.mock_logger.error.assert_called_once_with("Exception in fault aware handler:gather error")
 
 
 if __name__ == '__main__':

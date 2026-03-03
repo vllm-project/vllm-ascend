@@ -52,7 +52,6 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.token_reinference.common import FaultToleranceLevel
 from vllm_ascend.token_reinference.fault_tolerance import FaultTolerance
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -317,7 +316,7 @@ class NPUWorker(WorkerBase):
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
-        self.init_fault_tolerance()
+        self.fault_tolerance = FaultTolerance.init_fault_tolerance(self, self.vllm_config, self.model_runner)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -367,6 +366,7 @@ class NPUWorker(WorkerBase):
         )
         return int(self.available_kv_cache_memory_bytes)
 
+    @FaultTolerance.execute_model_decorator(dummy_run=False)
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -415,6 +415,7 @@ class NPUWorker(WorkerBase):
         output.kv_connector_output = kv_connector_output
         return output
 
+    @FaultTolerance.sample_token_decorator()
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
@@ -538,6 +539,7 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    @FaultTolerance.execute_model_decorator(dummy_run=True)
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
 
@@ -628,26 +630,6 @@ class NPUWorker(WorkerBase):
         except Exception as e:
             logger.info(f"query NPU card {self.local_rank} fail: {e}")
         return
-
-    def init_fault_tolerance(self):
-        additional_config = self.vllm_config.additional_config if self.vllm_config.additional_config is not None else {}
-        level = additional_config.get("fault_tolerance_level", 0) if additional_config else 0
-        max_reinference_times = additional_config.get("max_reinference_times", 3) if additional_config else 3
-        if level != FaultToleranceLevel.LEVEL_0.value:
-            self.fault_tolerance = FaultTolerance(
-                vllm_config=self.vllm_config,
-                model_runner=self.model_runner,
-                execute_model_func=self.execute_model,
-            )
-            self.execute_model = self.fault_tolerance.execute_model_decorator(
-                func=self.execute_model, max_retries=max_reinference_times, dummy_run=False
-            )  # type: ignore[method-assign]
-            self.execute_dummy_batch = self.fault_tolerance.execute_model_decorator(
-                func=self.execute_dummy_batch, max_retries=max_reinference_times, dummy_run=True
-            )  # type: ignore[method-assign]
-            self.sample_tokens = self.fault_tolerance.sample_token_decorator(
-                func=self.sample_tokens, max_retries=max_reinference_times
-            )  # type: ignore[method-assign]
 
 
 def parse_text_output(output) -> None:

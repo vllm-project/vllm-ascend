@@ -59,5 +59,5 @@ class RecoveryHandlerManager:
         for handler in self.handlers:
             if handler.can_handle(ctx):
                 return handler
-        logger.warning("Can't find corresponding handler,assuming,maybe a non-target failure scenario.")
+        logger.warning("Can't find corresponding handler,assuming maybe a non-target failure scenario.")
         return None
