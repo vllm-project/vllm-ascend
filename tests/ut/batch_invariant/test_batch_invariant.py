@@ -22,11 +22,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-# Mock torch_npu before any imports that might need it
-mock_torch_npu = MagicMock()
-sys.modules['torch_npu'] = mock_torch_npu
-sys.modules['torch_npu._inductor'] = MagicMock()
-
 # Now import the module under test
 import vllm_ascend.batch_invariant as batch_invariant
 

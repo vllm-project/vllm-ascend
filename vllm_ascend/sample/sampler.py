@@ -1,7 +1,7 @@
 import torch
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
-
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
 
@@ -73,6 +73,10 @@ class AscendTopKTopPSampler(TopKTopPSampler):
 
     def forward_native(self, logits, generators, k, p):
         """Override pytorch native implementation to torch_npu"""
+        # when batch_invariant mode is enabled, we should use vllm's implementation.
+        # or it will make batch_invariant mode not working.
+        if vllm_is_batch_invariant():
+            return super().forward_native(logits, generators, k, p)
         logits = self.apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
