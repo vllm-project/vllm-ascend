@@ -2489,13 +2489,13 @@ public:
         if constexpr (quantMode == QuantMode::PER_TENSOR_ASYMM_QUANT) {
             rmsNormQuant2.Init(gamma2GmTensor, beta2GmTensor, quantScale2GmTensor, quantOffset2GmTensor,
                                s5Gm + row_work * vectorBlockIdx * sizeof(float), descale1Gm, s3Gm, s1Gm, splitSizeOne_,
-                               num_col_2, 1.0f / static_cast<float>(num_col_2), vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
+                               num_col_2, mlaParams.avgFactor, vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
                                vectorBlockIdx * static_cast<uint64_t>(row_work) * splitSizeTwo_, row_work_, mlaParams);
         } else {
             // quantMode == QuantMode::PER_TOKEN_SYMM_QUANT
             rmsNormQuant2.Init(gamma2GmTensor, beta2GmTensor, quantScale2GmTensor, quantOffset2GmTensor,
                                s5Gm + row_work * vectorBlockIdx * sizeof(float), descale1Gm, s2Gm, s1Gm, splitSizeOne_,
-                               num_col_2, 1.0f / static_cast<float>(num_col_2), vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
+                               num_col_2, mlaParams.avgFactor, vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
                                vectorBlockIdx * static_cast<uint64_t>(row_work) * splitSizeTwo_, row_work_, mlaParams);
         }
         ropeFp16.RopeInit(s4Gm, cos2GmTensor, sin2GmTensor, qGmTensor, qGmTensor2, mlaParams);

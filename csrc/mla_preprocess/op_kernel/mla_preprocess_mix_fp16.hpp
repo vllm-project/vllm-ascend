@@ -2122,7 +2122,7 @@ public:
                     vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_1, row_work_, mlaParams);
 
         rmsNormQuant2.Init(gamma2GmTensor, beta2GmTensor, quantScale2GmTensor, quantOffset2GmTensor, s3GmTensor,
-                           s1GmTensor, splitSizeOne_, num_col_2, 1.0f / static_cast<float>(num_col_2),
+                           s1GmTensor, splitSizeOne_, num_col_2, mlaParams.avgFactor,
                            vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
                            vectorBlockIdx * static_cast<uint64_t>(row_work) * splitSizeTwo_, row_work_, mlaParams);
         ropeFp16.RopeInit(s2GmTensor, cos2GmTensor, sin2GmTensor, qGmTensor, qGmTensor2, mlaParams);

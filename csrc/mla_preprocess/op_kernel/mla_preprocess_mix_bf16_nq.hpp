@@ -999,7 +999,7 @@ public:
         }
         this->splitN = mlaParams.perTaskNum;
         rmsNormQuant2.Init(gamma2GmTensor, beta2GmTensor, s3Gm, s1Gm, splitSizeOne_,
-                           num_col_2, 1.0f / static_cast<float>(num_col_2), vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
+                           num_col_2, mlaParams.avgFactor, vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
                            vectorBlockIdx * static_cast<uint64_t>(row_work) * splitSizeTwo_, row_work_, mlaParams);
         ropeFp16.RopeInit(s2Gm, cos2GmTensor, sin2GmTensor, qGmTensor, qGmTensor2, mlaParams);
 #endif

@@ -146,6 +146,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
     mlaTilingData.ropeSplitSizeTwo = tilingData->ropeSplitSizeTwo;
     mlaTilingData.hiddenStrideRope = tilingData->hiddenStrideRope;
     mlaTilingData.qkNopeHeadDim = tilingData->qkNopeHeadDim;
+    mlaTilingData.avgFactor = tilingData->avgFactor;
 
     GM_ADDR s1 = workspace + static_cast<uint64_t>(mlaTilingData.s1Offset);
     GM_ADDR s2 = workspace + static_cast<uint64_t>(mlaTilingData.s2Offset);

@@ -106,6 +106,7 @@ struct MlaTilingData {
     uint32_t ropeSplitSizeTwo{128};    // qk_nope_head_dim
     uint32_t hiddenStrideRope{192};    // qk_nope_head_dim + qk_rope_head_dim
     uint32_t qkNopeHeadDim{128};       // for RoPE offset calc
+    float avgFactor{0.000651041666f};  // 1/splitSizeTwo (1/qLoraRank), for RmsNorm avg
 };
 
 #endif  // MLAPREPROCESS_TILING_H

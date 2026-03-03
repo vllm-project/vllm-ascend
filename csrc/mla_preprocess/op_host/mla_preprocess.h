@@ -627,6 +627,7 @@ void MlaPreprocessTiling::Init()
     tilingData->ropeSplitSizeTwo = opParam.qkNopeHeadDim;
     tilingData->hiddenStrideRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
     tilingData->qkNopeHeadDim = opParam.qkNopeHeadDim;
+    tilingData->avgFactor = 1.0f / static_cast<float>(opParam.qLoraRank);
 
     return;
 }
