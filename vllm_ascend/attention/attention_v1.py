@@ -338,35 +338,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         return attn_metadata
 
 
-def _pad_attention_seq_params(
-    actual_seq_lengths_q: list[int], seq_lens: list[int], runtime_shape: int, num_speculative_tokens: int | None = None
-) -> tuple[list[int], list[int]]:
-    if not actual_seq_lengths_q:
-        padded_actual_seq_lengths_q = [runtime_shape]
-    else:
-        last_val = actual_seq_lengths_q[-1]
-        if last_val >= runtime_shape:
-            padded_actual_seq_lengths_q = actual_seq_lengths_q
-        else:
-            step = 1
-            if num_speculative_tokens is not None:
-                step += num_speculative_tokens
-            interpolated = list(range(last_val + 1, runtime_shape + 1, step))
-            if interpolated and interpolated[-1] < runtime_shape:
-                interpolated.append(runtime_shape)
-            elif not interpolated and last_val < runtime_shape:
-                interpolated = [runtime_shape]
-            padded_actual_seq_lengths_q = actual_seq_lengths_q + interpolated
-
-    target_len = len(padded_actual_seq_lengths_q)
-    if len(seq_lens) >= target_len:
-        padded_seq_lens = seq_lens
-    else:
-        padded_seq_lens = seq_lens + [0] * (target_len - len(seq_lens))
-
-    return padded_actual_seq_lengths_q, padded_seq_lens
-
-
 class AscendAttentionBackendImpl(AttentionImpl):
     def __init__(
         self,
@@ -518,12 +489,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[draft_step][key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                         attn_count = attn_count + 1
-                        num_speculative_tokens = None
-                        if vllm_config and vllm_config.speculative_config:
-                            num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
-                        actual_seq_lengths_q, seq_lens = _pad_attention_seq_params(
-                            actual_seq_lengths_q, seq_lens, num_tokens, num_speculative_tokens
-                        )
                     else:
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q

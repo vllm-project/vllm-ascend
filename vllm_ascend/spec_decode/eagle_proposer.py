@@ -143,7 +143,7 @@ class EagleProposer(VllmEagleProposer):
         slot_mapping_lens = self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs
         self.slot_mapping_group = [
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
-            for _ in range(self.num_speculative_tokens)
+            for _ in range(self.num_speculative_tokens + 1)
         ]
 
         self._runnable = self._run_merged_draft
@@ -551,7 +551,7 @@ class EagleProposer(VllmEagleProposer):
         # The first step of speculative.
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
-        multi_steps_attn_metadata = [per_layer_attn_metadata]
+        multi_steps_attn_metadata = []
 
         attn_metadata_i = per_layer_attn_metadata[self.attn_layer_names[0]]
         if self.pcp_size * self.dcp_size > 1:
@@ -601,7 +601,7 @@ class EagleProposer(VllmEagleProposer):
                 common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
 
                 # Copy the old attn_metadata and update
-                for draft_step in range(1, self.num_speculative_tokens):
+                for draft_step in range(1, self.num_speculative_tokens + 1):
                     common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
                         draft_step,
                         attn_metadata,
