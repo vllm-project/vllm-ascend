@@ -28,7 +28,8 @@ from vllm_ascend.utils import enable_custom_op
 
 class AddRMSNormQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
 
     def get_inputs(self):
         """
@@ -88,7 +89,8 @@ class AddRMSNormQuantPattern(BasePattern):
 
 class AddRMSNormQuantPatternWithBias(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
 
     def get_inputs(self):
         """
@@ -151,7 +153,8 @@ class AddRMSNormQuantPatternWithBias(BasePattern):
 
 class AddRMSNormQuantSPPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
 
     def get_inputs(self):
         """
@@ -213,7 +216,8 @@ class AddRMSNormQuantSPPattern(BasePattern):
 
 class AddRMSNormQuantSPPatternWithBias(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
 
     def get_inputs(self):
         """
@@ -278,7 +282,8 @@ class AddRMSNormQuantSPPatternWithBias(BasePattern):
 
 class AddRMSNormDynamicQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
 
     def get_inputs(self):
         """
@@ -321,7 +326,8 @@ class AddRMSNormDynamicQuantPattern(BasePattern):
 
 class AddRMSNormDynamicQuantPatternWithBias(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
 
     def get_inputs(self):
         """
@@ -377,7 +383,8 @@ class AddRMSNormDynamicQuantPatternWithBias(BasePattern):
 
 class AddRMSNormDynamicQuantSPPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
 
     def get_inputs(self):
         """
@@ -420,7 +427,8 @@ class AddRMSNormDynamicQuantSPPattern(BasePattern):
 
 class AddRMSNormDynamicQuantSPPatternWithBias(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
 
     def get_inputs(self):
         """

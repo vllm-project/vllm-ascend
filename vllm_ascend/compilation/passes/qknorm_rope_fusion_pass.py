@@ -28,7 +28,8 @@ from vllm_ascend.compilation.passes.base_pattern import BasePattern
 
 class QKNormRopeFusionPattern(BasePattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -101,7 +102,8 @@ class QKNormRopeFusionPattern(BasePattern):
 
 class QKNormRopeFusionPatternWithBias(BasePattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads

@@ -99,7 +99,8 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
 
 class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
     def __init__(self, vllm_config, eps=1e-6):
-        super().__init__(vllm_config, eps)
+        super().__init__(vllm_config)
+        self.eps = eps
         device_group = get_tp_group().device_group
         backend = device_group._get_backend(torch.device("npu"))
         self.local_rank = torch.distributed.get_rank(group=device_group)

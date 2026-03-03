@@ -14,10 +14,10 @@ _registered_patterns: set[str] = set()
 
 
 class BasePattern(ABC):
-    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
+    def __init__(self, vllm_config: VllmConfig, pattern_id: str | None = None):
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
-        self.eps = eps
+        self.pattern_id = pattern_id or self.__class__.__name__
 
     @abstractmethod
     def get_inputs(self) -> list[torch.Tensor]:
@@ -35,11 +35,8 @@ class BasePattern(ABC):
         return extra_stream_scope_check
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        # Create a unique identifier for this pattern based on class name and eps
-        pattern_id = f"{self.__class__.__name__}_{self.eps}"
-
         # Skip registration if this pattern has already been registered globally
-        if pattern_id in _registered_patterns:
+        if self.pattern_id in _registered_patterns:
             return
 
         pattern_fn = self.get_pattern()
@@ -56,4 +53,4 @@ class BasePattern(ABC):
         )
 
         # Mark this pattern as registered
-        _registered_patterns.add(pattern_id)
+        _registered_patterns.add(self.pattern_id)

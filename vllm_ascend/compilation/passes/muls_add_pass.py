@@ -39,8 +39,8 @@ class MulsAddPattern(BasePattern):
     and replaces it with a call to the muls_add_triton kernel.
     """
 
-    def __init__(self, vllm_config: VllmConfig, scale: float = 1.0):
-        super().__init__(vllm_config)
+    def __init__(self, vllm_config: VllmConfig, scale: float = 1.0, pattern_id: str | None = None):
+        super().__init__(vllm_config, pattern_id=pattern_id)
         self.scale = scale
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -96,7 +96,8 @@ class MulsAddFusionPass(VllmInductorPass):
             return
 
         routed_scaling_factor = getattr(vllm_config.model_config.hf_text_config, "routed_scaling_factor", 1.0)
-        MulsAddPattern(vllm_config, scale=routed_scaling_factor).register(self.pattern_match_passes)
+        pattern_id = f"MulsAddPattern_scale_{routed_scaling_factor}"
+        MulsAddPattern(vllm_config, scale=routed_scaling_factor, pattern_id=pattern_id).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph) -> None:  # type: ignore[override]
         self.begin()
