@@ -256,7 +256,7 @@ class CpuAlloc:
         total_cpu = len(allowed)
         if total_cpu == 0:
             return
-        
+
         # Prefer mapping info (npu-smi info -m), fallback to topo keys, then visible list
         if self.device_info.total_logic_npus > 0:
             total_npus = self.device_info.total_logic_npus
