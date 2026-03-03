@@ -29,7 +29,7 @@ from test_utils import run_vl_model_test
 def test_qwen3_vl_4b_tp1_fp16():
     """Qwen3-VL-4B 单卡 FP16 测试"""
     run_vl_model_test(
-        model_name="Qwen/Qwen3-VL-4B",
+        model_name="Qwen/Qwen3-VL-4B-Instruct",
         tensor_parallel_size=1,
         max_tokens=5
     )
@@ -38,7 +38,7 @@ def test_qwen3_vl_4b_tp1_fp16():
 def test_qwen3_vl_8b_tp1_fp16():
     """Qwen3-VL-8B 单卡 FP16 测试"""
     run_vl_model_test(
-        model_name="Qwen/Qwen3-VL-8B",
+        model_name="Qwen/Qwen3-VL-32B-Instruct",
         tensor_parallel_size=1,
         max_tokens=10
     )
