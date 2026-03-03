@@ -38,13 +38,14 @@ class TestNPUCommunicator(unittest.TestCase):
                 torch.tensor([50, 60])
             ])
 
-        torch.distributed.all_to_all = patched_all_to_all
+        dist.all_to_all = patched_all_to_all
 
         scatter_sizes = [2, 2]
         gather_sizes = [2, 2]
         input_ = torch.tensor([10, 20, 30, 40])
 
-        comm = NPUCommunicator(cpu_group=dist.group.WORLD)
+        with patch.dict(dist.distributed_c10d._world.pg_map, {dist.group.WORLD: object()}, clear=False):
+            comm = NPUCommunicator(cpu_group=dist.group.WORLD)
 
         output = comm.all_to_all(input_,
                                  scatter_sizes=scatter_sizes,
@@ -80,11 +81,12 @@ class TestNPUCommunicator(unittest.TestCase):
                 torch.tensor([[50, 60]])
             ])
 
-        torch.distributed.all_to_all = patched_all_to_all
+        dist.all_to_all = patched_all_to_all
 
         input_ = torch.tensor([[10, 20], [30, 40]])
 
-        comm = NPUCommunicator(cpu_group=dist.group.WORLD)
-        output = comm.all_to_all(input_, scatter_dim=0, gather_dim=0)
+        with patch.dict(dist.distributed_c10d._world.pg_map, {dist.group.WORLD: object()}, clear=False):
+            comm = NPUCommunicator(cpu_group=dist.group.WORLD)
+            output = comm.all_to_all(input_, scatter_dim=0, gather_dim=0)
 
         assert output.tolist() == [[10, 20], [50, 60]]
