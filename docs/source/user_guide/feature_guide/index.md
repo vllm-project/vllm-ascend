@@ -15,6 +15,7 @@ netloader
 Multi_Token_Prediction
 dynamic_batch
 kv_pool
+kv_cache_cpu_offload
 external_dp
 large_scale_ep
 ucm_deployment
