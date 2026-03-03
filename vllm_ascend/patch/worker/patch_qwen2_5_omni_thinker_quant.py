@@ -20,9 +20,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 
 def _patch_qwen2_5_omni_thinker_mapper() -> None:
     try:
-        from vllm.model_executor.models.qwen2_5_omni_thinker import (
-            Qwen2_5OmniThinkerForConditionalGeneration
-        )
+        from vllm.model_executor.models.qwen2_5_omni_thinker import Qwen2_5OmniThinkerForConditionalGeneration
     except Exception:
         return
 
