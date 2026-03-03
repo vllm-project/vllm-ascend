@@ -23,7 +23,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 try:
-    import triton.language.extra.cann.extension as extension
+    import triton.language.extra.cann.extension as extension  # type: ignore
 
     insert_slice = extension.insert_slice
     extract_slice = extension.extract_slice

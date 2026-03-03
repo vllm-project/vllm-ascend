@@ -15,7 +15,7 @@ from vllm.triton_utils import tl, triton
 from .utils import prepare_chunk_indices
 
 try:
-    import triton.language.extra.cann.extension as extension
+    import triton.language.extra.cann.extension as extension  # type: ignore
 
     insert_slice = extension.insert_slice
     extract_slice = extension.extract_slice
