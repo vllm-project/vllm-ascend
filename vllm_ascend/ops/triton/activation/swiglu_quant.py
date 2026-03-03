@@ -3,6 +3,11 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
+try:
+    import triton.language.extra.cann.extension as extension
+    extract_slice = extension.extract_slice
+except ImportError:
+    extract_slice = tl.extract_slice
 
 @triton.jit
 def _swiglu_quant_kernel(
@@ -40,8 +45,8 @@ def _swiglu_quant_kernel(
         # swiglu
         x_offsets = row_idx * TOTAL_COLS + tl.arange(0, TOTAL_COLS)
         cur_x = tl.load(x_ptr + x_offsets)
-        x1 = tl.extract_slice(cur_x, offsets=(0,), sizes=(HALF_COLS,), strides=(1,))
-        x2 = tl.extract_slice(cur_x, offsets=(HALF_COLS,), sizes=(HALF_COLS,), strides=(1,))
+        x1 = extract_slice(cur_x, offsets=(0,), sizes=(HALF_COLS,), strides=(1,))
+        x2 = extract_slice(cur_x, offsets=(HALF_COLS,), sizes=(HALF_COLS,), strides=(1,))
         out = x1 * tl.sigmoid(x1) * x2
 
         # quant
@@ -50,7 +55,7 @@ def _swiglu_quant_kernel(
             # store scale
             tl.store(scale_ptr + row_idx, scale.to(scale_ptr.dtype.element_ty))
             for col_blk_idx in range(0, HALF_COLS, COL_BLOCK_SIZE):
-                tmp_out = tl.extract_slice(out, offsets=(col_blk_idx,), sizes=(COL_BLOCK_SIZE,), strides=(1,))
+                tmp_out = extract_slice(out, offsets=(col_blk_idx,), sizes=(COL_BLOCK_SIZE,), strides=(1,))
                 tmp_out = (tmp_out.to(tl.float32) / scale).to(x_ptr.dtype.element_ty)
                 tmp_out = tmp_out.cast(tl.int8, overflow_mode="saturate")
 
