@@ -59,7 +59,6 @@ def test_models_pcp_dcp_basic():
     model = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
     with VllmRunner(
             model,
-            enforce_eager=True,
             max_model_len=1024,
             tensor_parallel_size=2,
             prefill_context_parallel_size=2,
