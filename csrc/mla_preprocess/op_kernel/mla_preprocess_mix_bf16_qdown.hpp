@@ -54,7 +54,7 @@ public:
         lastCoreLoopTime = ropeConcatParams.lastCoreLoopTime;
         lastCoreLoopNLast = ropeConcatParams.lastCoreLoopNLast;
         concatSize = ropeConcatParams.concatSize;
-        hiddenStrateRope_ = ropeConcatParams.hiddenStrateRope;
+        hiddenStrideRope_ = ropeConcatParams.hiddenStrideRope;
         qkNopeHeadDim_ = ropeConcatParams.qkNopeHeadDim;
         blockIdx_ = (blockIdx_ / 2) * 2 + static_cast<uint64_t>(GetSubBlockidx());
         loopTime = (blockIdx_ == realCore - 1) ? lastCoreLoopTime : preCoreLoopTime;
@@ -94,7 +94,7 @@ public:
             AscendC::LocalTensor<float> inputQCastFP32 = buf.GetBuffer<BufferType::ASCEND_UB, float>(dataSizeFp16);
             AscendC::LocalTensor<float> reverseQ =
                 buf.GetBuffer<BufferType::ASCEND_UB, float>(dataSizeFp32 + dataSizeFp16);
-            uint64_t qOffset = startHead * hiddenStrateRope_ + qkNopeHeadDim_;
+            uint64_t qOffset = startHead * hiddenStrideRope_ + qkNopeHeadDim_;
             CopyQGenReverseQ(inputQ, inputQCastFP32, reverseQ, qOffset, loopN);
 
             // move in cos/sin
@@ -232,7 +232,7 @@ private:
     uint32_t lastCoreLoopTime;
     uint32_t lastCoreLoopNLast;
     uint32_t concatSize;
-    uint32_t hiddenStrateRope_;
+    uint32_t hiddenStrideRope_;
     uint32_t qkNopeHeadDim_;
     uint32_t blockIdx_;
     uint32_t loopTime{0};
@@ -2422,7 +2422,7 @@ public:
         this->splitRmsNormSizeTwo_ = mlaParams_.splitRmsNormSizeTwo;
         this->ropeSplitSizeOne_ = mlaParams_.ropeSplitSizeOne;
         this->ropeSplitSizeTwo_ = mlaParams_.ropeSplitSizeTwo;
-        this->hiddenStrateRope_ = mlaParams_.hiddenStrateRope;
+        this->hiddenStrideRope_ = mlaParams_.hiddenStrideRope;
         this->qkNopeHeadDim_ = mlaParams_.qkNopeHeadDim;
     }
 
@@ -2510,13 +2510,13 @@ public:
         if constexpr (quantMode == QuantMode::PER_TENSOR_ASYMM_QUANT) {
             rmsNormQuant2.Init(gamma2GmTensor, beta2GmTensor, quantScale2GmTensor, quantOffset2GmTensor,
                                s5Gm + row_work * vectorBlockIdx * sizeof(float), descale1Gm, s3Gm, s1Gm, splitSizeOne_,
-                               num_col_2, 0.000651041666, vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
+                               num_col_2, 1.0f / static_cast<float>(num_col_2), vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
                                vectorBlockIdx * static_cast<uint64_t>(row_work) * splitSizeTwo_, row_work_, mlaParams, innerGmTensor);
         } else {
             // quantMode == QuantMode::PER_TOKEN_SYMM_QUANT
             rmsNormQuant2.Init(gamma2GmTensor, beta2GmTensor, quantScale2GmTensor, quantOffset2GmTensor,
                                s5Gm + row_work * vectorBlockIdx * sizeof(float), descale1Gm, s2Gm, s1Gm, splitSizeOne_,
-                               num_col_2, 0.000651041666, vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
+                               num_col_2, 1.0f / static_cast<float>(num_col_2), vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
                                vectorBlockIdx * static_cast<uint64_t>(row_work) * splitSizeTwo_, row_work_, mlaParams, innerGmTensor);
         }
         ropeFp16.RopeInit(s4Gm, cos2GmTensor, sin2GmTensor, qGmTensor, qGmTensor2, mlaParams);
@@ -2537,7 +2537,7 @@ private:
     uint32_t splitRmsNormSizeTwo_;
     uint32_t ropeSplitSizeOne_;
     uint32_t ropeSplitSizeTwo_;
-    uint32_t hiddenStrateRope_;
+    uint32_t hiddenStrideRope_;
     uint32_t qkNopeHeadDim_;
 
     constexpr static uint32_t C0_SIZE = 16;

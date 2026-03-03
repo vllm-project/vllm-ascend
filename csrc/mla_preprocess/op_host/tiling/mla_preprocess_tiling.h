@@ -104,7 +104,7 @@ struct MlaTilingData {
     uint32_t splitRmsNormSizeTwo{64};  // qk_rope_head_dim
     uint32_t ropeSplitSizeOne{64};     // qk_rope_head_dim
     uint32_t ropeSplitSizeTwo{128};    // qk_nope_head_dim
-    uint32_t hiddenStrateRope{192};    // qk_nope_head_dim + qk_rope_head_dim
+    uint32_t hiddenStrideRope{192};    // qk_nope_head_dim + qk_rope_head_dim
     uint32_t qkNopeHeadDim{128};       // for RoPE offset calc
 };
 

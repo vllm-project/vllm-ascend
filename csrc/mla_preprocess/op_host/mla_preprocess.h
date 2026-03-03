@@ -513,16 +513,16 @@ void MlaPreprocessTiling::EinSumQuantTiling()
 
 void MlaPreprocessTiling::SetMlapoWorkSpace()
 {
-    uint32_t hiddenStrateRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
+    uint32_t hiddenStrideRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
     uint32_t hiddenStrateMm = opParam.qLoraRank + opParam.kvLoraRank + opParam.qkRopeHeadDim;
     uint64_t s1wsFactor =
         static_cast<uint64_t>(opParam.cacheMode == 2 ? std::max(opParam.hiddenStateDim * sizeof(int8_t),
                                                                 opParam.headNum * opParam.kvLoraRank * sizeof(uint16_t))
                                                      : opParam.hiddenStateDim * sizeof(int8_t));
     uint64_t workSizeS1 = s1wsFactor;
-    uint64_t workSizeS2 = opParam.headNum * hiddenStrateRope * sizeof(uint16_t);
+    uint64_t workSizeS2 = opParam.headNum * hiddenStrideRope * sizeof(uint16_t);
     uint64_t workSizeS3 = hiddenStrateMm * sizeof(uint16_t);
-    uint64_t workSizeS4 = std::max(opParam.headNum * hiddenStrateRope, hiddenStrateMm) * sizeof(uint32_t);
+    uint64_t workSizeS4 = std::max(opParam.headNum * hiddenStrideRope, hiddenStrateMm) * sizeof(uint32_t);
 
     uint64_t maxWorkspaceSize = workSizeS1;
     maxWorkspaceSize = std::max(maxWorkspaceSize, workSizeS2);
@@ -625,7 +625,7 @@ void MlaPreprocessTiling::Init()
     tilingData->splitRmsNormSizeTwo = opParam.qkRopeHeadDim;
     tilingData->ropeSplitSizeOne = opParam.qkRopeHeadDim;
     tilingData->ropeSplitSizeTwo = opParam.qkNopeHeadDim;
-    tilingData->hiddenStrateRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
+    tilingData->hiddenStrideRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
     tilingData->qkNopeHeadDim = opParam.qkNopeHeadDim;
 
     return;
