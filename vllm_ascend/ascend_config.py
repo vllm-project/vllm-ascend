@@ -18,8 +18,8 @@ import warnings
 from typing import TYPE_CHECKING
 
 from vllm.logger import logger
-from vllm.utils.math_utils import cdiv
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

@@ -1,7 +1,8 @@
 import torch
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
 
