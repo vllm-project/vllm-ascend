@@ -132,9 +132,9 @@ jobs:
         id: suffix
         run: |
           if [ -n "${{ inputs.suffix }}" ]; then
-            echo "SUFFIX=-${{ inputs.suffix }}" >> $GITHUB_ENV
+            echo "SUFFIX=-${{ inputs.suffix }}" >> "$GITHUB_ENV"
           else
-            echo "SUFFIX=" >> $GITHUB_ENV
+            echo "SUFFIX=" >> "$GITHUB_ENV"
           fi
 
       - name: Docker meta
@@ -175,7 +175,7 @@ jobs:
           IMAGE: quay.io/ascend/vllm-ascend
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          DIGESTS=$(printf "$IMAGE@sha256:%s " "$(ls ${{ runner.temp }}/digests)")
 
           echo "Digests: $DIGESTS"
           echo "Current tags:"
@@ -183,6 +183,7 @@ jobs:
 
           for tag in $TAGS; do
             echo "Creating tag $tag"
+            # shellcheck disable=SC2086
             docker buildx imagetools create \
               -t "$tag" \
               $DIGESTS

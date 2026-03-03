@@ -59,7 +59,6 @@ jobs:
         PRE_COMMIT_COLOR: always
         FORCE_COLOR: "1"
         TERM: xterm-256color
-        SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       run: |
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pre-commit run --all-files --hook-stage manual --show-diff-on-failure

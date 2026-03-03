@@ -35,10 +35,9 @@ check_command() {
 
 check_command pre-commit
 
-# TODO: cleanup SC exclude
-export SHELLCHECK_OPTS="--exclude=SC2046,SC2006,SC2086"
 if [[ "$1" != 'ci' ]]; then
     pre-commit run --all-files
 else
     pre-commit run --all-files --hook-stage manual
+    ./tools/mypy.sh
 fi
