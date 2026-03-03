@@ -85,6 +85,7 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         "VLLM_ASCEND_ENABLE_MLAPO": "1",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+        "VLLM_ENGINE_READY_TIMEOUT_S": "1800"
     }
 
     server_args = [
