@@ -24,11 +24,13 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 try:
     import triton.language.extra.cann.extension as extension
+
     insert_slice = extension.insert_slice
     extract_slice = extension.extract_slice
 except ImportError:
     insert_slice = tl.insert_slice
     extract_slice = tl.extract_slice
+
 
 @triton.jit
 def split_qkv_rmsnorm_rope_kernel(

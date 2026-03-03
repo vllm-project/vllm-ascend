@@ -16,11 +16,13 @@ from .utils import prepare_chunk_indices
 
 try:
     import triton.language.extra.cann.extension as extension
+
     insert_slice = extension.insert_slice
     extract_slice = extension.extract_slice
 except ImportError:
     insert_slice = tl.insert_slice
     extract_slice = tl.extract_slice
+
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.jit(do_not_specialize=["T"])

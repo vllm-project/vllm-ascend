@@ -5,9 +5,11 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 try:
     import triton.language.extra.cann.extension as extension
+
     extract_slice = extension.extract_slice
 except ImportError:
     extract_slice = tl.extract_slice
+
 
 @triton.jit
 def _swiglu_quant_kernel(
