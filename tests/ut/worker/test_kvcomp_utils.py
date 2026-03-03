@@ -23,6 +23,7 @@ import torch_npu
 from vllm_ascend.worker.kvcomp_utils import (
     KVCompConfig,
     KVCompMetaData,
+    build_kvcomp_metadata,
     HashEncoder,
     bind_hashk_cache,
     bind_hashk_cache_nope,
@@ -104,35 +105,74 @@ def test_kvcomp_config_from_json_existing_file_for_qwen3_32b():
         raise FileNotFoundError("KVComp_Qwen3_32B_config.json not found")
 
 
+def test_get_kvcomp_config_path_supported_model_for_qwen3_32b():
+    """Test get_kvcomp_config_path_for_model returns path for supported model."""
+    vllm_config = MagicMock()
+    vllm_config.model_config = MagicMock()
+    vllm_config.model_config.model = "Qwen/Qwen3-32B"
+    result = get_kvcomp_config_path_for_model(vllm_config)
+    assert result is not None
+    assert "KVComp_Qwen3_32B_config.json" in result
+
+
 # # =============================================================================
 # # test KVCompMetaData
 # # =============================================================================
 
 
-# def test_kvcomp_metadata_creation():
-#     """Test KVCompMetaData creation with required fields."""
-#     config = KVCompConfig()
-#     config.num_hidden_layers = 4
-#     config.vllm_hash_attention_topk = 256
+def test_kvcomp_metadata_creation():
+    """Test KVCompMetaData creation with required fields."""
+    config = KVCompConfig()
+    config.num_hidden_layers = 4
+    config.vllm_hash_attention_topk = 256
 
-#     metadata = KVCompMetaData(
-#         kvcomp_config=config,
-#         chunk_sizes_for_hamming_full=torch.full([4], 128, dtype=torch.int32),
-#         topk_for_hamming_full=torch.full([4], 2, dtype=torch.int32),
-#         topk_for_hamming_full_cpu=torch.full([4], 2, dtype=torch.int32),
-#         seq_lens_for_hamming=torch.zeros([4], dtype=torch.int32),
-#         hamming_output=torch.zeros([4, 8, 32], dtype=torch.int32),
-#         hash_encoder=None,
-#         hashk_caches=None,
-#     )
+    metadata = KVCompMetaData(
+        kvcomp_config=config,
+        chunk_sizes_for_hamming_full=torch.full([4], 128, dtype=torch.int32),
+        topk_for_hamming_full=torch.full([4], 2, dtype=torch.int32),
+        topk_for_hamming_full_cpu=torch.full([4], 2, dtype=torch.int32),
+        seq_lens_for_hamming=torch.zeros([4], dtype=torch.int32),
+        hamming_output=torch.zeros([4, 8, 32], dtype=torch.int32),
+        hash_encoder=None,
+        hashk_caches=None,
+    )
 
-#     assert metadata.kvcomp_config is config
-#     assert metadata.chunk_sizes_for_hamming_full.shape == (4,)
-#     assert metadata.topk_for_hamming_full.shape == (4,)
-#     assert metadata.hash_encoder is None
-#     assert metadata.hashk_caches is None
-#     assert metadata.hash_encoder_nope is None
-#     assert metadata.hash_encoder_rope is None
+    assert metadata.kvcomp_config is config
+    assert metadata.chunk_sizes_for_hamming_full.shape == (4,)
+    assert metadata.topk_for_hamming_full.shape == (4,)
+    assert metadata.hash_encoder is None
+    assert metadata.hashk_caches is None
+    assert metadata.hash_encoder_nope is None
+    assert metadata.hash_encoder_rope is None
+
+def test_build_kvcomp_metadata():
+    """Test build_kvcomp_metadata."""
+    vllm_config = MagicMock()
+    vllm_config.model_config = MagicMock()
+    vllm_config.model_config.model = "Qwen/Qwen3-32B"
+    vllm_config.model_config.get_num_kv_heads = MagicMock(return_value=8)
+    parallel_config = MagicMock()
+
+    metadata = build_kvcomp_metadata(
+        max_num_reqs=4,
+        block_size=128,
+        device=torch.device("npu:0"),
+        vllm_config=vllm_config,
+        parallel_config=parallel_config,
+        dtype=torch.float16,
+    )
+    # assert metadata.kvcomp_config is config
+    # assert metadata.chunk_sizes_for_hamming_full.shape == (4,)
+    # assert metadata.topk_for_hamming_full.shape == (4,)
+    # assert metadata.hash_encoder is None
+    # assert metadata.hashk_caches is None
+    # assert metadata.hamming_output.shape[:-1] == (4, 8)
+    # assert metadata.hamming_output.dtype == torch.int32
+    # assert metadata.hash_encoder.input_dim == 128
+    # assert metadata.hash_encoder.hash_bits == 128
+    # assert metadata.hash_encoder.hash_weights.shape == (128, 128)
+    # assert metadata.hash_encoder.hash_weights.dtype == torch.float16
+    # assert metadata.hashk_caches is None
 
 
 # # =============================================================================
