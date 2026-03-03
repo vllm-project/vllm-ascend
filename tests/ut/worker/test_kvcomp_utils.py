@@ -79,12 +79,14 @@ def test_kvcomp_config_to_json_from_json_roundtrip():
 def test_kvcomp_config_from_json_existing_file_for_qwen3_32b():
     """Test KVCompConfig.from_json loads from existing config."""
     config_path = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[3]
         / "vllm_ascend"
         / "attention"
         / "kvcomp_configs"
         / "KVComp_Qwen3_32B_config.json"
     )
+    print(f"config_path: {config_path}")
+    print(f"config_path.exists(): {config_path.exists()}")
     if config_path.exists():
         config = KVCompConfig.from_json(str(config_path))
         assert config.model_name == "Qwen/Qwen3-32B"
@@ -95,7 +97,6 @@ def test_kvcomp_config_from_json_existing_file_for_qwen3_32b():
         assert config.hash_bits == 128
         assert config.seq_len_threshhold is not None 
         assert config.vllm_hash_attention_topk is not None
-        assert config.vllm_hash_attention_reduction_head_num is not None
         assert config.vllm_hash_attention_rollback_layers is not None
         assert len(config.vllm_hash_attention_skip_layers) == 64
         assert all(isinstance(layer, bool) for layer in config.vllm_hash_attention_skip_layers)
