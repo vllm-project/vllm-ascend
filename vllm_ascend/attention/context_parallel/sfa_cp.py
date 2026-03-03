@@ -188,7 +188,7 @@ class AscendSFACPImpl(AscendSFAImpl):
 
         block_table = attn_metadata.block_table
         assert attn_metadata.sfa_cp_metadata is not None
-        block_arange = attn_metadata.sfa_cp_metadataata.block_arange
+        block_arange = attn_metadata.sfa_cp_metadata.block_arange
         kv, block_table = self.gather_kv_cross_cp(kv, block_table, block_arange)
         key_rope, _ = self.gather_kv_cross_cp(key_rope)
         assert block_table is not None
