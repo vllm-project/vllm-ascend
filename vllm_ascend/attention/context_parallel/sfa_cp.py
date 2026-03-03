@@ -312,8 +312,7 @@ class AscendSFACPImpl(AscendSFAImpl):
             kv_cache = get_pcp_group().all_gather(kv_cache, 0)
         if block_tables is not None and block_arange is not None:
             block_tables = (
-                block_tables.unsqueeze(-1)
-                + (block_arange * block_num).view(1, 1, -1).to(block_tables)
+                block_tables.unsqueeze(-1) + (block_arange * block_num).view(1, 1, -1).to(block_tables)
             ).reshape(block_tables.shape[0], -1)
         return kv_cache, block_tables
 
