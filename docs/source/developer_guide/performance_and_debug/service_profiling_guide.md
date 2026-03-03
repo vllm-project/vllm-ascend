@@ -28,19 +28,22 @@ Two performance collection solutions are provided below: Ascend PyTorch Profiler
 
 ### 0. Installation and Configuration
 
-No additional packages need to be installed; it can be enabled through command-line configuration. Currently, vLLM enables **python stack** by default, which can significantly inflate the collected performance data. If you do not wish to collect **python stack**, you can disable it using `export VLLM_TORCH_PROFILER_WITH_STACK=0`.
+No additional packages need to be installed; it can be enabled through command-line configuration. Currently, vLLM enables **python stack** by default, which can significantly inflate the collected performance data. If you do not wish to collect **python stack**, you can disable it using `torch_profiler_with_stack=false`.
 
 ### 1. Preparation for Collection
 
-Start the online service and set the `VLLM_TORCH_PROFILER_DIR` environment variable to control the performance file save path. Setting this variable effectively enables the collection switch.
+Start the online service and set the `--profiler-config` parameter to control the path for saving performance files. After the parameter is set, the collection function is enabled.
 
 ```bash
-export VLLM_TORCH_PROFILER_DIR=./vllm_profile
-
-VLLM_PROMPT_SEQ_BUCKET_MAX=128 VLLM_PROMPT_SEQ_BUCKET_MIN=128
-python3 -m vllm.entrypoints.openai.api_server --port 8080
---model "facebook/opt-125m" --tensor-parallel-size 1
---max-num-seqs 128 --dtype bfloat16
+VLLM_PROMPT_SEQ_BUCKET_MAX=128
+VLLM_PROMPT_SEQ_BUCKET_MIN=128
+python3 -m vllm.entrypoints.openai.api_server \
+--port 8080 \
+--model "facebook/opt-125m" \
+--tensor-parallel-size 1 \
+--max-num-seqs 128 \
+--profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
+--dtype bfloat16 \
 --max-model-len 256
 ```
 
