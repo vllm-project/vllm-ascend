@@ -361,17 +361,6 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        # Upstream removed automatic +rms_norm forcing for SP (PR #35410),
-        # but Ascend needs it because torch.ops._C.rms_norm (CUDA kernel) is
-        # not available. Re-force it so the custom op wrapper routes to the
-        # OOT (NPU) implementation.
-        if (
-            compilation_config.pass_config.enable_sp
-            and "+rms_norm" not in compilation_config.custom_ops
-            and "-rms_norm" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rms_norm")
-
         if ascend_config.recompute_scheduler_enable:
             from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
