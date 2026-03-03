@@ -7,7 +7,7 @@ from typing import Any
 import yaml
 from vllm.utils.network_utils import get_open_port
 
-CONFIG_BASE_PATH = "tests/e2e/nightly/single_node/models/models_yaml"
+CONFIG_BASE_PATH = "tests/e2e/nightly/single_node/models/configs"
 
 logger = logging.getLogger(__name__)
 

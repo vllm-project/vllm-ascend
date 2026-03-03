@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Any
 
 import openai
@@ -142,16 +141,9 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
     if "benchmark_comparisons" in config.test_content:
         run_benchmark_comparisons(config, result)
 
-def _print_case_start(config: SingleNodeConfig) -> None:
-    title = f"[single-node][START] {config.name}"
-    if os.getenv("GITHUB_ACTIONS") == "true":
-        print(f"::notice title=SingleNodeCase::{title}")
-    print(f"\033[1;36m{title}\033[0m")
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
-    _print_case_start(config)
     if config.service_mode == "epd":
         with (
             RemoteEPDServer(vllm_serve_args=config.epd_server_cmds, env_dict=config.envs) as _,

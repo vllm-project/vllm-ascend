@@ -8,7 +8,7 @@ To achieve high readability, extensibility, and decoupling of configuration from
 
 It consists of the following core components:
 
-* **Configuration Parser (`single_node_config.py`)**: Responsible for reading `models/models_yaml/*.yaml` files and parsing them into a strongly-typed `@dataclass` (`SingleNodeConfig`) via `SingleNodeConfigLoader`, while handling regex replacement for environment variables.
+* **Configuration Parser (`single_node_config.py`)**: Responsible for reading `models/configs/*.yaml` files and parsing them into a strongly-typed `@dataclass` (`SingleNodeConfig`) via `SingleNodeConfigLoader`, while handling regex replacement for environment variables.
 * **Service Manager Framework (`test_single_node.py` and `conftest.py`)**: Based on the `service_mode` (`openai` or `epd`), it utilizes context managers to safely start/stop server processes.
 * **Test Function Dispatcher (`TEST_HANDLERS` Registry)**: Specific test logic is encapsulated into independent functions and registered in the global `TEST_HANDLERS` dictionary.
 * **Performance Benchmarking (`_run_benchmarks`)**: Calls `aisbench` for performance and TTFT testing based on the `benchmarks` parameters in the YAML.
@@ -17,7 +17,7 @@ It consists of the following core components:
 
 * `tests/e2e/nightly/single_node/models/scripts/single_node_config.py`
     * Defines `SingleNodeConfig` and `SingleNodeConfigLoader`
-    * Loads YAML from `tests/e2e/nightly/single_node/models/models_yaml/<CONFIG_YAML_PATH>`
+    * Loads YAML from `tests/e2e/nightly/single_node/models/configs/<CONFIG_YAML_PATH>`
     * Auto-assigns ports when `envs` contains `DEFAULT_PORT` / missing values
     * Expands `$VAR` / `${VAR}` placeholders inside commands via `_expand_values`
 
@@ -125,7 +125,7 @@ pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
 
 ### 3.1 File Location and Selection Rules
 
-* YAML files live under: `tests/e2e/nightly/single_node/models/models_yaml/`
+* YAML files live under: `tests/e2e/nightly/single_node/models/configs/`
 * Selected by env var: `CONFIG_YAML_PATH=<YourConfig>.yaml`
 * If not set, the loader uses `SingleNodeConfigLoader.DEFAULT_CONFIG_NAME`
 
