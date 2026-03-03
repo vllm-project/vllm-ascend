@@ -1,0 +1,95 @@
+# Version Files Reference
+#
+# This file documents all files that need version updates
+# during a release and the patterns to update.
+
+files:
+  - path: README.md
+    description: Main README with getting started instructions
+    updates:
+      - section: "Getting Started"
+        pattern: "pip install vllm-ascend==X.X.X"
+      - section: "Docker"
+        pattern: "quay.io/ascend/vllm-ascend:vX.X.X"
+      - section: "Branch"
+        description: "Update branch compatibility table"
+
+  - path: README.zh.md
+    description: Chinese README
+    updates:
+      - section: "快速开始"
+        pattern: "pip install vllm-ascend==X.X.X"
+      - section: "Docker"
+        pattern: "quay.io/ascend/vllm-ascend:vX.X.X"
+      - section: "分支"
+        description: "Update branch compatibility table"
+
+  - path: docs/conf.py
+    description: Sphinx documentation configuration
+    updates:
+      - variable: version
+        pattern: 'version = "X.X.X"'
+      - variable: release
+        pattern: 'release = "X.X.X"'
+
+  - path: docs/source/faqs.md
+    description: FAQs page with feedback issue link
+    updates:
+      - section: "Feedback"
+        pattern: "https://github.com/vllm-project/vllm-ascend/issues/XXXX"
+        description: "Update to new feedback issue URL"
+
+  - path: docs/source/user_guide/release_notes.md
+    description: Release notes document
+    updates:
+      - action: "Add new release notes section"
+        description: "Add complete release notes for new version"
+
+  - path: docs/source/community/versioning_policy.md
+    description: Version compatibility and release policy
+    updates:
+      - section: "Release compatibility matrix"
+        description: "Add row for new version with vLLM compatibility"
+      - section: "Release window"
+        description: "Update current release window dates"
+      - section: "Branch states"
+        description: "Update branch status (stable/development)"
+
+  - path: docs/source/community/contributors.md
+    description: Contributors list
+    updates:
+      - action: "Add new contributors"
+        description: "Add contributors from this release cycle"
+
+  - path: .github/workflows/*.yml
+    description: CI workflow files
+    updates:
+      - variable: VLLM_VERSION
+        description: "Update vLLM version for CI testing"
+
+  - path: docker/Dockerfile
+    description: Docker build file
+    updates:
+      - variable: VLLM_VERSION
+        description: "Update base vLLM version"
+
+# Update order
+# Files should be updated in this order to ensure consistency
+update_order:
+  1: docs/conf.py
+  2: README.md
+  3: README.zh.md
+  4: docs/source/faqs.md
+  5: docs/source/user_guide/release_notes.md
+  6: docs/source/community/versioning_policy.md
+  7: docs/source/community/contributors.md
+  8: .github/workflows/*.yml
+  9: docker/Dockerfile
+
+# Validation
+# After updates, verify these conditions
+validation:
+  - "grep -r 'vX.X.X' docs/ README* should return consistent version"
+  - "Version in docs/conf.py matches release version"
+  - "Release notes section exists for new version"
+  - "Compatibility matrix includes new version row"
