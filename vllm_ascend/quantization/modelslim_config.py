@@ -71,13 +71,6 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "lm_head.": "language_model.lm_head.",
         "model.": "language_model.model.",
     },
-    "qwen3_omni_moe_thinker": {
-        "thinker.lm_head.": "language_model.lm_head.",
-        "thinker.model.": "language_model.model.",
-        "thinker.": "",
-        "lm_head.": "language_model.lm_head.",
-        "model.": "language_model.model.",
-    },
     "qwen2_5_omni_thinker": {
         "thinker.lm_head.": "language_model.lm_head.",
         "thinker.model.": "language_model.model.",
