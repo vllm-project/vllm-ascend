@@ -18,15 +18,15 @@
 import sys
 import os
 
-# 将 310p 目录添加到 sys.path
+# Add 310p directory to sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)  # 310p 目录
+parent_dir = os.path.dirname(current_dir)  # 310p directory
 sys.path.insert(0, parent_dir)
 
 from test_utils import run_vl_model_test
 
 def test_qwen3_vl_8b_tp1_fp16():
-    """Qwen3-VL-8B 单卡 FP16 测试"""
+    """Qwen3-VL-8B single-card FP16 test"""
     run_vl_model_test(
         model_name="Qwen/Qwen3-VL-8B-Instruct",
         tensor_parallel_size=1,

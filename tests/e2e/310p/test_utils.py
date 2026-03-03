@@ -21,14 +21,14 @@ import os
 
 
 def get_test_image():
-    """获取测试用的图片对象"""
+    """Get the image object for testing"""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     image_path = os.path.join(current_dir, "data", "qwen.png")
     return Image.open(image_path)
 
 
 def get_test_prompts():
-    """获取测试用的提示词"""
+    """Get the prompts for testing"""
     return ["<|image_pad|>Describe this image in detail."]
 
 
@@ -38,14 +38,14 @@ def run_vl_model_test(model_name: str,
                       dtype: str = "float16",
                       enforce_eager: bool = True):
     """
-    通用的视觉语言模型测试函数
+    Generic visual language model test function
     
     Args:
-        model_name: 模型名称，如 "Qwen/Qwen3-VL-4B"
-        tensor_parallel_size: 张量并行大小
-        max_tokens: 最大生成 token 数
-        dtype: 数据类型，默认 float16
-        enforce_eager: 是否强制使用 eager 模式
+        model_name: Model name, e.g., "Qwen/Qwen3-VL-4B"
+        tensor_parallel_size: Tensor parallel size
+        max_tokens: Maximum number of generated tokens
+        dtype: Data type, default is float16
+        enforce_eager: Whether to enforce eager mode
     """
     image = get_test_image()
     images = [image]
