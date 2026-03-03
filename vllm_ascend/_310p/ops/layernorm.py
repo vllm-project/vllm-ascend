@@ -32,8 +32,8 @@ class AscendGemmaRMSNorm310(AscendGemmaRMSNorm):
             orig_dtype = residual.dtype
             x = x + residual.to(x.dtype)
             residual = x.to(orig_dtype)
-            x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight, self.variance_epsilon)
+            x, _ = ir.ops.rms_norm(x, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
-        x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight, self.variance_epsilon)
+        x, _ = ir.ops.rms_norm(x, 1.0 + self.weight, self.variance_epsilon)
         return x
