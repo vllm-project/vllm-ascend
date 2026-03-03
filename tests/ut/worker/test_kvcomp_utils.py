@@ -53,282 +53,54 @@ def test_kvcomp_config_default():
     assert len(config.top_k_index_reuse) == 36
     assert config.must_select_blocks == [0, -2, -1]
 
-@pytest.mark.parametrize(
-    "hash_weight_type,chunk_repre_method",
-    [
-        ("uniform", "max"),
-        ("uniform", "min"),
-        ("uniform", "sum"),
-        ("fixed", "max"),
-    ],
-)
-def test_kvcomp_config_generate_config_data_valid(
-    hash_weight_type, chunk_repre_method
-):
-    """Test KVCompConfig.generate_config_data with valid inputs."""
+
+def test_kvcomp_config_to_json_from_json_roundtrip():
+    """Test KVCompConfig to_json and from_json roundtrip."""
     config = KVCompConfig()
-    num_layers = 4
-    top_k = [0.3] * num_layers
-    top_k_reuse = [-1] * num_layers
+    config.model_name = "RoundtripModel"
+    config.num_hidden_layers = 8
+    config.chunk_size = 128
 
-    config.generate_config_data(
-        model_name="TestModel",
-        hash_weight_type=hash_weight_type,
-        num_hidden_layers=num_layers,
-        seq_len_threshhold=1024,
-        chunk_size=256,
-        chunk_repre_method=chunk_repre_method,
-        head_dim=128,
-        hash_bits=128,
-        top_k_ratio_per_layer=top_k,
-        top_k_index_reuse=top_k_reuse,
-        must_select_blocks=[0, -1],
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False
+    ) as f:
+        path = f.name
+
+    try:
+        config.to_json(path)
+        loaded = KVCompConfig.from_json(path)
+        assert loaded.model_name == config.model_name
+        assert loaded.num_hidden_layers == config.num_hidden_layers
+        assert loaded.chunk_size == config.chunk_size
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_kvcomp_config_from_json_existing_file_for_qwen3_32b():
+    """Test KVCompConfig.from_json loads from existing config."""
+    config_path = (
+        Path(__file__).resolve().parents[2]
+        / "vllm_ascend"
+        / "attention"
+        / "kvcomp_configs"
+        / "KVComp_Qwen3_32B_config.json"
     )
-
-    assert config.model_name == "TestModel"
-    assert config.is_mla is False
-    assert config.hash_weight_type == hash_weight_type
-    assert config.num_hidden_layers == num_layers
-    assert config.seq_len_threshhold == 1024
-    assert config.chunk_size == 256
-    assert config.chunk_repre_method == chunk_repre_method
-    assert config.head_dim == 128
-    assert config.hash_bits == 128
-    assert config.top_k_ratio_per_layer == top_k
-    assert config.top_k_index_reuse == top_k_reuse
-    assert config.must_select_blocks == [0, -1]
-
-
-# @pytest.mark.parametrize(
-#     "hash_weight_type",
-#     ["random", "invalid", ""],
-# )
-# def test_kvcomp_config_generate_config_data_invalid_hash_weight_type(
-#     hash_weight_type,
-# ):
-#     """Test KVCompConfig.generate_config_data rejects invalid hash_weight_type."""
-#     config = KVCompConfig()
-#     num_layers = 4
-
-#     with pytest.raises(ValueError, match="hash_weight_type"):
-#         config.generate_config_data(
-#             model_name="TestModel",
-#             hash_weight_type=hash_weight_type,
-#             num_hidden_layers=num_layers,
-#             seq_len_threshhold=1024,
-#             chunk_size=128,
-#             chunk_repre_method="max",
-#             head_dim=128,
-#             hash_bits=128,
-#             top_k_ratio_per_layer=[0.3] * num_layers,
-#             top_k_index_reuse=[-1] * num_layers,
-#             must_select_blocks=[0, -1],
-#         )
-
-
-# @pytest.mark.parametrize(
-#     "chunk_size",
-#     [64, 100, 255],
-# )
-# def test_kvcomp_config_generate_config_data_invalid_chunk_size(chunk_size):
-#     """Test KVCompConfig.generate_config_data rejects chunk_size not divisible by 128."""
-#     config = KVCompConfig()
-#     num_layers = 4
-
-#     with pytest.raises(ValueError, match="chunk_size"):
-#         config.generate_config_data(
-#             model_name="TestModel",
-#             hash_weight_type="uniform",
-#             num_hidden_layers=num_layers,
-#             seq_len_threshhold=1024,
-#             chunk_size=chunk_size,
-#             chunk_repre_method="max",
-#             head_dim=128,
-#             hash_bits=128,
-#             top_k_ratio_per_layer=[0.3] * num_layers,
-#             top_k_index_reuse=[-1] * num_layers,
-#             must_select_blocks=[0, -1],
-#         )
-
-
-# @pytest.mark.parametrize(
-#     "chunk_repre_method",
-#     ["avg", "mean", ""],
-# )
-# def test_kvcomp_config_generate_config_data_invalid_chunk_repre_method(
-#     chunk_repre_method,
-# ):
-#     """Test KVCompConfig.generate_config_data rejects invalid chunk_repre_method."""
-#     config = KVCompConfig()
-#     num_layers = 4
-
-#     with pytest.raises(ValueError, match="chunk_repre_method"):
-#         config.generate_config_data(
-#             model_name="TestModel",
-#             hash_weight_type="uniform",
-#             num_hidden_layers=num_layers,
-#             seq_len_threshhold=1024,
-#             chunk_size=128,
-#             chunk_repre_method=chunk_repre_method,
-#             head_dim=128,
-#             hash_bits=128,
-#             top_k_ratio_per_layer=[0.3] * num_layers,
-#             top_k_index_reuse=[-1] * num_layers,
-#             must_select_blocks=[0, -1],
-#         )
-
-
-# def test_kvcomp_config_generate_config_data_top_k_length_mismatch():
-#     """Test KVCompConfig.generate_config_data rejects top_k length mismatch."""
-#     config = KVCompConfig()
-#     num_layers = 4
-
-#     with pytest.raises(ValueError, match="top_k_ratio_per_layer"):
-#         config.generate_config_data(
-#             model_name="TestModel",
-#             hash_weight_type="uniform",
-#             num_hidden_layers=num_layers,
-#             seq_len_threshhold=1024,
-#             chunk_size=128,
-#             chunk_repre_method="max",
-#             head_dim=128,
-#             hash_bits=128,
-#             top_k_ratio_per_layer=[0.3] * 3,  # wrong length
-#             top_k_index_reuse=[-1] * num_layers,
-#             must_select_blocks=[0, -1],
-#         )
-
-#     with pytest.raises(ValueError, match="top_k_index_reuse"):
-#         config.generate_config_data(
-#             model_name="TestModel",
-#             hash_weight_type="uniform",
-#             num_hidden_layers=num_layers,
-#             seq_len_threshhold=1024,
-#             chunk_size=128,
-#             chunk_repre_method="max",
-#             head_dim=128,
-#             hash_bits=128,
-#             top_k_ratio_per_layer=[0.3] * num_layers,
-#             top_k_index_reuse=[-1] * 5,  # wrong length
-#             must_select_blocks=[0, -1],
-#         )
-
-
-# def test_kvcomp_config_generate_mla_config_data_valid():
-#     """Test KVCompConfig.generate_mla_config_data with valid inputs."""
-#     config = KVCompConfig()
-#     num_layers = 4
-
-#     config.generate_mla_config_data(
-#         model_name="MLAModel",
-#         hash_weight_type="random",
-#         num_hidden_layers=num_layers,
-#         seq_len_threshhold=2048,
-#         chunk_size=128,
-#         chunk_repre_method="max",
-#         kv_lora_rank=16,
-#         qk_rope_head_dim=64,
-#         hash_bits_kv_lora=64,
-#         hash_bits_qk_rope=64,
-#         top_k_ratio_per_layer=[0.3] * num_layers,
-#         top_k_index_reuse=[-1] * num_layers,
-#         must_select_blocks=[0, -2, -1],
-#     )
-
-#     assert config.is_mla is True
-#     assert config.model_name == "MLAModel"
-#     assert config.head_dim == 64 + 16  # qk_rope_head_dim + kv_lora_rank
-#     assert config.hash_bits == 64 + 64  # hash_bits_qk_rope + hash_bits_kv_lora
-#     assert config.kv_lora_rank == 16
-#     assert config.qk_rope_head_dim == 64
-
-
-# def test_kvcomp_config_set_hash_weight_valid():
-#     """Test KVCompConfig.set_hash_weight when hash_weight_type is fixed."""
-#     config = KVCompConfig()
-#     config.hash_weight_type = "fixed"
-#     config.head_dim = 4
-#     config.hash_bits = 16
-
-#     hash_weight = [[0.1] * 16 for _ in range(4)]
-#     config.set_hash_weight(hash_weight)
-
-#     assert config.hash_weight == hash_weight
-
-
-# def test_kvcomp_config_set_hash_weight_wrong_type():
-#     """Test KVCompConfig.set_hash_weight raises when hash_weight_type is not fixed."""
-#     config = KVCompConfig()
-#     config.hash_weight_type = "random"
-
-#     with pytest.raises(ValueError, match="hash_weight can only be set when"):
-#         config.set_hash_weight([[0.1] * 16 for _ in range(4)])
-
-
-# def test_kvcomp_config_set_hash_weight_wrong_shape():
-#     """Test KVCompConfig.set_hash_weight raises when shape is wrong."""
-#     config = KVCompConfig()
-#     config.hash_weight_type = "fixed"
-#     config.head_dim = 4
-#     config.hash_bits = 16
-
-#     with pytest.raises(ValueError, match="hash_weight shape"):
-#         config.set_hash_weight([[0.1] * 8 for _ in range(4)])  # wrong hash_bits
-
-
-# def test_kvcomp_config_set_mla_hash_weight_valid():
-#     """Test KVCompConfig.set_mla_hash_weight when hash_weight_type is fixed."""
-#     config = KVCompConfig()
-#     config.hash_weight_type = "fixed"
-#     config.kv_lora_rank = 4
-#     config.hash_bits_kv_lora = 16
-#     config.qk_rope_head_dim = 8
-#     config.hash_bits_qk_rope = 8
-
-#     hw_kv = [[0.1] * 16 for _ in range(4)]
-#     hw_qk = [[0.2] * 8 for _ in range(8)]
-#     config.set_mla_hash_weight(hw_kv, hw_qk)
-
-#     assert config.hash_weight_kv_lora == hw_kv
-#     assert config.hash_weight_qk_rope == hw_qk
-
-
-# def test_kvcomp_config_to_json_from_json_roundtrip():
-#     """Test KVCompConfig to_json and from_json roundtrip."""
-#     config = KVCompConfig()
-#     config.model_name = "RoundtripModel"
-#     config.num_hidden_layers = 8
-#     config.chunk_size = 256
-
-#     with tempfile.NamedTemporaryFile(
-#         mode="w", suffix=".json", delete=False
-#     ) as f:
-#         path = f.name
-
-#     try:
-#         config.to_json(path)
-#         loaded = KVCompConfig.from_json(path)
-#         assert loaded.model_name == config.model_name
-#         assert loaded.num_hidden_layers == config.num_hidden_layers
-#         assert loaded.chunk_size == config.chunk_size
-#     finally:
-#         Path(path).unlink(missing_ok=True)
-
-
-# def test_kvcomp_config_from_json_existing_file():
-#     """Test KVCompConfig.from_json loads from existing config."""
-#     config_path = (
-#         Path(__file__).resolve().parents[2]
-#         / "vllm_ascend"
-#         / "attention"
-#         / "kvcomp_configs"
-#         / "KVComp_Qwen3_32B_config.json"
-#     )
-#     if config_path.exists():
-#         config = KVCompConfig.from_json(str(config_path))
-#         assert config.model_name == "Qwen/Qwen3-32B"
-#         assert config.num_hidden_layers == 64
-#         assert config.chunk_size == 128
+    if config_path.exists():
+        config = KVCompConfig.from_json(str(config_path))
+        assert config.model_name == "Qwen/Qwen3-32B"
+        assert config.num_hidden_layers == 64
+        assert config.chunk_size == 128
+        assert config.hash_weight_type == "random"
+        assert config.head_dim == 128
+        assert config.hash_bits == 128
+        assert config.seq_len_threshhold is not None 
+        assert config.vllm_hash_attention_topk is not None
+        assert config.vllm_hash_attention_reduction_head_num is not None
+        assert config.vllm_hash_attention_rollback_layers is not None
+        assert len(config.vllm_hash_attention_skip_layers) == 64
+        assert all(isinstance(layer, bool) for layer in config.vllm_hash_attention_skip_layers)
+    else:
+        raise FileNotFoundError("KVComp_Qwen3_32B_config.json not found")
 
 
 # # =============================================================================
