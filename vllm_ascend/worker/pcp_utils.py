@@ -116,9 +116,9 @@ class PCPManager:
                 self.max_num_tokens, dtype=torch.int64, device="cpu", pin_memory=pin_memory
             )
             self.positions_pcp_full_np = self.positions_pcp_full.numpy()
-            self.query_lens_pcp_full = CpuGpuBuffer(
-                self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=pin_memory
-            )
+        self.query_lens_pcp_full = CpuGpuBuffer(
+            self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=pin_memory
+        )
         self.pcp_fa_query_idx = torch.zeros(
             self.max_num_tokens + 2 * self.max_num_reqs, dtype=torch.int32, device=self.device
         )
@@ -169,6 +169,10 @@ class PCPManager:
         self.num_decode_reqs = first_prefill
         self.num_prefill_reqs = num_reqs - self.num_decode_reqs
         self.num_decode_tokens = num_scheduled_tokens[: self.num_decode_reqs].sum()
+
+        self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens)
+        self.query_lens_pcp_full.cpu[self.num_reqs :].fill_(0)
+        self.query_lens_pcp_full.copy_to_gpu()
 
     def update_tokens_for_pcp(
         self,
@@ -546,7 +550,6 @@ class PCPManager:
         num_scheduled_tokens_pcp_full = np.empty(self.num_reqs, dtype=np.int32)
         for i, req_id in enumerate(input_batch.req_ids):
             num_scheduled_tokens_pcp_full[i] = num_scheduled_tokens[req_id]
-        self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens_pcp_full)
         req_indices_pcp_full = np.repeat(arange_np[: self.num_reqs], num_scheduled_tokens_pcp_full)
         cu_num_tokens_pcp_full = np.cumsum(num_scheduled_tokens_pcp_full)
         self.query_start_loc_pcp_full.np[0] = 0
@@ -574,7 +577,6 @@ class PCPManager:
                 cu_num_tokens_pcp_full,
                 num_spec_tokens,
             )
-        self.query_lens_pcp_full.copy_to_gpu()
         self.query_start_loc_pcp_full.copy_to_gpu()
         self.input_ids_pcp_full.copy_to_gpu(total_num_scheduled_tokens_pcp_full)
         self.cu_num_tokens_pcp_full = cu_num_tokens_pcp_full
@@ -726,15 +728,10 @@ class PCPManager:
         if self.pcp_world_size > 1 and self.pcp_use_hybrid_attn:
             assert self.num_scheduled_tokens_padded is not None
             total_num_scheduled_tokens = self.num_scheduled_tokens_padded.sum()
-        query_lens_new = (
-            self.query_lens_pcp_full.cpu[:num_reqs]
-            if self.pcp_world_size > 1 and self.speculative_config
-            else query_lens
-        )
-        num_decodes = (query_lens_new <= self.decode_threshold).sum().item()
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_world_size
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
         long_seq_metadata = None
+        ori_query_lens_cpu = self.query_lens_pcp_full.cpu[:num_reqs_padded]
         if self.pcp_world_size * self.dcp_world_size > 1:
             assert num_scheduled_tokens is not None
             decode_context_lens = (
@@ -760,7 +757,6 @@ class PCPManager:
                         self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
                     )
                 )
-            ori_query_lens_cpu = None
             if self.decode_threshold > 1:
                 num_computed_tokens_of_pcp_dcp_list = []
                 if self.num_decode_reqs:
@@ -788,7 +784,6 @@ class PCPManager:
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
                 # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
                 # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens_cpu = self.query_lens_pcp_full.cpu[:num_reqs_padded]
                 ori_query_lens = self.query_lens_pcp_full.gpu[:num_reqs_padded]
                 num_prefill_reqs = self.num_prefill_reqs
                 num_decode_reqs = self.num_decode_reqs
@@ -813,10 +808,9 @@ class PCPManager:
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_of_pcp_dcp.numpy(),
                 pcp_unpad_mask=torch.from_numpy(pcp_unpad_mask),
                 pcp_padded_tokens_fla=self.pcp_padded_tokens_fla,
+                query_lens_pcp_full_cpu=ori_query_lens_cpu,
+                max_query_len_pcp_full=ori_query_lens_cpu.max().item(),
             )
-            if ori_query_lens_cpu is not None:
-                long_seq_metadata.query_lens_pcp_full_cpu = ori_query_lens_cpu
-                long_seq_metadata.max_query_len_pcp_full = ori_query_lens_cpu.max().item()
             if self.pcp_world_size > 1:
                 q_head_idx, q_tail_idx = [], []
                 kv_with_q_head_nomask_idx, kv_with_q_head_mask_idx = [], []
@@ -918,13 +912,13 @@ class PCPManager:
                 ]
                 if self.pcp_use_hybrid_attn:
                     long_seq_metadata.pcp_exit_fa_scatter_idx = self.pcp_exit_fa_scatter_idx.gpu[
-                        : num_scheduled_tokens.sum() - num_decodes
+                        : num_scheduled_tokens.sum() - self.num_decode_reqs
                     ]
                     long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[
-                        : num_actual_tokens_pcp_padded // self.pcp_world_size - num_decodes
+                        : num_actual_tokens_pcp_padded // self.pcp_world_size - self.num_decode_reqs
                     ]
                     long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
-                        : pcp_unpad_mask.sum() + num_decodes * (self.pcp_world_size - 1)
+                        : pcp_unpad_mask.sum() + self.num_decode_reqs * (self.pcp_world_size - 1)
                     ]
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor

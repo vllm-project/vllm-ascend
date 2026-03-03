@@ -77,7 +77,6 @@ class AscendMetadataForPrefill:
         local_context_lens_allranks: list[list[int]] | None = None
         cp_kv_recover_idx_for_chunk: list[int] | None = None
         kv_inverse_idx_for_chunk: list[int] | None = None
-        batch_chunk_seq_mask: list[bool] | None = None
         local_total_toks: int | None = None
 
     """ Prefill Specific Metadata for Ascend"""
