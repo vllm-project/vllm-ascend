@@ -23,6 +23,8 @@ import atexit
 import functools
 import math
 import os
+import types
+from abc import ABCMeta
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
@@ -1131,3 +1133,83 @@ def check_gdn_layer(vllm_config) -> bool:
         return False
 
     return "linear_attention" in hf_config.layer_types
+
+
+def add_abc_meta(cls):
+    """
+    Reconstructs the given class with ABCMeta as its metaclass.
+
+    This function dynamically creates a new class type that inherits from
+    the same bases and contains the same attributes as the original class,
+    but uses the abc.ABCMeta metaclass to enable abstract method support.
+    """
+    new_cls = ABCMeta(cls.__name__, cls.__bases__, dict(cls.__dict__))
+
+    return new_cls
+
+
+def make_cls(name, bases, dict_):
+    """
+    Dynamically creates a new class using the type metaclass.
+    """
+    cls = type(name, bases, dict(dict_))
+
+    return cls
+
+
+def fix_new_class_closures(new_cls):
+    """
+    Directly redirects the '__class__' closure references in all methods
+    of a newly constructed class to point to the new_cls itself.
+
+    This fixes the 'TypeError: super(type, obj): obj must be an instance
+    or subtype of type' that occurs when a class is cloned or
+    reconstructed (e.g., via ABCMeta) without updating its internal cells.
+    """
+    for name, attr in new_cls.__dict__.items():
+        # 1. Unpack descriptors if the attribute is a staticmethod or classmethod
+        func = attr
+        is_static = isinstance(attr, staticmethod)
+        is_class = isinstance(attr, classmethod)
+
+        if is_static or is_class:
+            func = attr.__func__
+
+        # 2. Skip if it's not a standard function or has no closure cells
+        if not isinstance(func, types.FunctionType) or not func.__closure__:
+            continue
+
+        # 3. Locate the index of the '__class__' variable within the closure
+        # The co_freevars attribute contains the names of variables captured by the closure
+        if "__class__" not in func.__code__.co_freevars:
+            continue
+
+        class_idx = func.__code__.co_freevars.index("__class__")
+
+        # 4. Construct a new tuple of closure cells
+        # Since cell objects are read-only in CPython, we must create a new one
+        new_cells = list(func.__closure__)
+
+        # Internal Magic: Create a new cell object pointing to new_cls
+        # We use a double-lambda factory to capture the new_cls in a fresh cell
+        new_cell = (lambda x: lambda: x)(new_cls).__closure__[0]  # type: ignore
+
+        # Replace the specific slot previously occupied by the old class reference
+        new_cells[class_idx] = new_cell
+
+        # 5. Rebuild the function object with the updated closure tuple
+        # This creates a clone of the function that is identical in logic
+        # but bound to the new class context.
+        fixed_func = types.FunctionType(
+            func.__code__, func.__globals__, name=func.__name__, argdefs=func.__defaults__, closure=tuple(new_cells)
+        )
+
+        # 6. Re-bind the fixed function back to the class dictionary
+        if is_static:
+            setattr(new_cls, name, staticmethod(fixed_func))
+        elif is_class:
+            setattr(new_cls, name, classmethod(fixed_func))
+        else:
+            setattr(new_cls, name, fixed_func)
+
+    return new_cls
