@@ -620,7 +620,7 @@ class EagleProposer(VllmEagleProposer):
                     multi_steps_attn_metadata.append(per_layer_attn_metadata)
         else:
             # Copy the old attn_metadata and update
-            for draft_step in range(1, self.num_speculative_tokens):
+            for draft_step in range(1, self.num_speculative_tokens + 1):
                 common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
                     draft_step,
                     attn_metadata,
