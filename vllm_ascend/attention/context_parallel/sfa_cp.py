@@ -300,7 +300,7 @@ class AscendSFACPImpl(AscendSFAImpl):
             q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
             q_li_pe = q_li_pe.squeeze(2)
             q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)  # [b*s,64,128]
-            
+
         q = q_li
 
         key = kv_cache[2]

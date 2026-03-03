@@ -30,6 +30,7 @@ from vllm_ascend.attention.utils import (
     transdata,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
@@ -1076,11 +1077,14 @@ class AscendSFAImpl(MLAAttentionImpl):
                     k_pe, k_nope, k_li = fused_kv_no_split.split(
                         [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim], dim=-1
                     )
-                    torch_npu.npu_scatter_nd_update_(
-                        kv_cache[0].view(-1, k_nope.shape[-1]), slot_mapping.view(-1, 1), k_nope
-                    )
-                    torch_npu.npu_scatter_nd_update_(
-                        kv_cache[1].view(-1, k_pe.shape[-1]), slot_mapping.view(-1, 1), k_pe
+                    k_nope = k_nope.view(k_nope.shape[0], 1, -1)
+                    k_pe = k_pe.view(k_pe.shape[0], 1, -1)
+                    DeviceOperator.reshape_and_cache(
+                        key=k_nope[: attn_metadata.num_actual_tokens],
+                        value=k_pe[: attn_metadata.num_actual_tokens],
+                        key_cache=kv_cache[0],
+                        value_cache=kv_cache[1],
+                        slot_mapping=slot_mapping[: attn_metadata.num_actual_tokens],
                     )
 
             k_li = self._get_full_kv(k_li, attn_metadata)
