@@ -11,12 +11,12 @@ class AscendRMSNorm310(AscendRMSNorm):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is not None:
-            x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
+            x, _, residual = ir.ops.fused_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
             if self.bias is not None:
                 x.add_(self.bias)
             return x, residual
 
-        x, _ = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
+        x, _ = ir.ops.rms_norm(x, self.weight, self.variance_epsilon)
         if self.bias is not None:
             x.add_(self.bias)
         return x

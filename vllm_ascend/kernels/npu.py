@@ -54,7 +54,7 @@ def rms_norm(
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
     x, _ = torch_npu.npu_rms_norm(x, weight, epsilon)
-    return x
+    return x, _
 
 
 @ir.ops.fused_add_rms_norm.register_impl(
@@ -76,4 +76,4 @@ def fused_add_rms_norm(
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
     x, _, x_residual = torch_npu.npu_add_rms_norm(x, x_residual, weight, epsilon)
-    return x, x_residual
+    return x, _, x_residual
