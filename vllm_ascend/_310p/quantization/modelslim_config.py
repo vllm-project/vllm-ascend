@@ -125,6 +125,7 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
             return AscendFusedMoEMethod(scheme, layer.moe_config)
 
         elif isinstance(layer, VocabParallelEmbedding):
-            return UnquantizedEmbeddingMethod()
+            from vllm_ascend._310p.ops.vocab_parallel_embedding import AscendUnquantizedEmbeddingMethod310
+            return AscendUnquantizedEmbeddingMethod310()
 
         return super().get_quant_method(layer, prefix)

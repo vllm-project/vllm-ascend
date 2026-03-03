@@ -644,7 +644,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
         from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
-        from vllm_ascend._310p.ops.vocab_parallel_embedding import AscendParallelLMHead310
+        from vllm_ascend._310p.ops.vocab_parallel_embedding import (
+            AscendParallelLMHead310,
+            AscendVocabParallelEmbedding310,
+        )
 
         REGISTERED_ASCEND_OPS.update(
             {
@@ -655,6 +658,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "FusedMoE": AscendFusedMoE310,
                 "SharedFusedMoE": AscendSharedFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
+                "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
             }
         )
 
