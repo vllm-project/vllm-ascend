@@ -78,7 +78,6 @@ prompts = [
 
 sampling_params = SamplingParams(
     temperature=0.7,
-    top_p=0.95,
     max_tokens=100,
     seed=42,
 )
