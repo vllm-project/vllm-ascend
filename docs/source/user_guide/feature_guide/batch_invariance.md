@@ -126,4 +126,4 @@ The batch invariance feature is under active development. Planned improvements i
 - Performance optimizations
 - Additional testing and validation
 
-For the latest status and to contribute ideas, see the [tracking issue](https://github.com/vllm-project/vllm/issues/27433).
+For the latest status and to contribute ideas, see the [tracking issue](https://github.com/vllm-project/vllm-ascend/issues/5487).
