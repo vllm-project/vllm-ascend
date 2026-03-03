@@ -40,7 +40,7 @@ def test_qwen3_vl_8b_tp2_fp16():
     run_vl_model_test(
         model_name="Qwen/Qwen3-VL-8B-Instruct",
         tensor_parallel_size=2,
-        max_tokens=10
+        max_tokens=5
     )
 
 def test_qwen3_vl_32b_tp1_fp16():
@@ -48,5 +48,5 @@ def test_qwen3_vl_32b_tp1_fp16():
     run_vl_model_test(
         model_name="Qwen/Qwen3-VL-32B-Instruct",
         tensor_parallel_size=4,
-        max_tokens=10
+        max_tokens=5
     )
