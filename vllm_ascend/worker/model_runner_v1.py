@@ -385,8 +385,8 @@ class NPUModelRunner(GPUModelRunner):
         self.long_seq_metadata = None
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
-        self.state_update_stream = None
-        self.sampling_done_event = None
+        self.state_update_stream: torch.npu.Stream | None = None
+        self.sampling_done_event: torch.npu.Event | None = None
 
     @property
     def use_cp(self) -> bool:
@@ -1449,6 +1449,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.state_update_stream = torch.npu.Stream()
                 self.sampling_done_event = torch.npu.Event()
 
+            assert self.sampling_done_event is not None
             self.sampling_done_event.record()
 
         def propose_draft_token_ids(sampled_token_ids):
@@ -1530,6 +1531,8 @@ class NPUModelRunner(GPUModelRunner):
             self.debugger.step()
 
         if self.need_accepted_tokens:
+            assert self.state_update_stream is not None
+            assert self.sampling_done_event is not None
             with (
                 record_function_or_nullcontext("async_state_update"),
                 torch.npu.stream(self.state_update_stream),
