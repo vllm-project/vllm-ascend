@@ -12,6 +12,7 @@ from vllm.logger import logger
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MASK_BIT = 32  # Number of bits in a CPU affinity mask group
+MIN_CPUS_PER_NPU = 5  # 2(IRQ) + 1(main min) + 1(acl) + 1(release)
 ALLOWED_CPUS_PATH = "/proc/self/status"
 ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 
@@ -275,11 +276,12 @@ class CpuAlloc:
         # Enforce per-NPU slice length >= 5.
         # Because with remainder distribution, some NPUs may get 'base' cores and some get 'base+1'.
         # The minimum slice size is 'base'.
-        if base < 5:
+        if base < MIN_CPUS_PER_NPU:
             raise RuntimeError(
                 "Insufficient CPUs for binding with IRQ/ACL/REL reservations: "
                 f"total_allowed={total_cpu}, total_npus={total_npus}, "
-                f"min_per_npu={base} (<5). Need at least {total_npus * 5} CPUs in cpuset."
+                f"min_per_npu={base} (<{MIN_CPUS_PER_NPU}). "
+                f"Need at least {total_npus * MIN_CPUS_PER_NPU} CPUs in cpuset."
             )
 
         def _slice_for_npu(global_npu_id: int) -> list[int]:
@@ -344,13 +346,17 @@ class CpuAlloc:
 
     def allocate(self) -> None:
         for npu, pool in self.npu_cpu_pool.items():
-            if len(pool) >= 3:
-                main = pool[2:-2]  # Reserve first two CPUs for IRQ binding
+            if len(pool) >= MIN_CPUS_PER_NPU:
+                main = pool[2:-2]
+                if not main:
+                    raise RuntimeError(
+                        f"NPU{npu} main CPU list is empty after reservation. pool={pool}"
+                    )
                 acl = [pool[-2]]
                 rel = [pool[-1]]
             else:
                 raise RuntimeError(
-                    "The number of CPUs is insufficient to bind to the NPUs. Each NPU requires at least 3 CPUs."
+                    f"The number of CPUs is insufficient. Each NPU requires at least {MIN_CPUS_PER_NPU} CPUs."
                 )
             self.assign_main[npu] = main
             self.assign_acl[npu] = acl
@@ -361,7 +367,7 @@ class CpuAlloc:
         current_npu = self.device_info.running_npu_list[self.rank_id]
         main = " ".join(map(str, self.assign_main[current_npu]))
         acl = " ".join(map(str, self.assign_acl[current_npu]))
-        rel = " ".join(map(str, self.assign_rel[current_npu]))
+        rel = str(self.assign_rel[current_npu]) if self.assign_rel[current_npu] else ""
         logger.info(f"NPU{current_npu}: main=[{main}]  acl=[{acl}]  release=[{rel}]")
 
     def bind_memory(self, pid: str, npu: int) -> None:
@@ -409,6 +415,13 @@ class CpuAlloc:
     def bind_npu_irq(self) -> None:
         if not os.access("/proc/irq", os.W_OK):
             return
+        
+        # Only bind IRQ for current rank's NPU to avoid multi-process overwrite.
+        current_npu = self.device_info.running_npu_list[self.rank_id]
+        if current_npu not in self.npu_cpu_pool:
+            logger.warning(f"[irq] rank:{self.rank_id} -> NPU{current_npu} has no cpu pool, skip irq binding.")
+            return
+
         if shutil.which("systemctl"):
             output, _ = execute_command(["systemctl", "list-unit-files"])
             if "irqbalance.service" in output:
@@ -419,48 +432,66 @@ class CpuAlloc:
                         "You can run the systemctl start irqbalance command to restart it."
                     )
                     execute_command(["systemctl", "stop", "irqbalance"])
+
         sq_irqs = []
         with open("/proc/interrupts") as f:
             for line in f:
                 if "sq_send_trigger_irq" in line:
                     irq = line.split(":")[0].strip()
                     sq_irqs.append(irq)
-        for npu in sorted(self.npu_cpu_pool.keys()):
-            cpus = self.npu_cpu_pool[npu]
-            if len(cpus) < 2:
-                continue
-            sq_cpu, cq_cpu = cpus[0], cpus[1]  # Reserved for IRQ binding
+
+        npu = current_npu
+        cpus = self.npu_cpu_pool[npu]
+        if len(cpus) < 2:
+            logger.warning(f"[irq] NPU{npu} cpu pool too small (<2), skip irq binding.")
+            return
+
+        sq_cpu, cq_cpu = cpus[0], cpus[1]  # Reserved for IRQ binding
+        pci_addr = ""
+
+        device_type = get_ascend_device_type()
+        if device_type == AscendDeviceType.A3:
+            # A3: logical npu_id = card_id*2 + chip_id
+            card_id = npu // 2
+            chip_id = npu % 2
+            info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(card_id), "-c", str(chip_id)])
+        else:
+            # A2 / others: logical npu_id is card id
             info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(npu)])
-            pci_addr = ""
-            for line in info.splitlines():
-                if "PCIe Bus Info" in line:
-                    pci_addr = line.split()[-1].lower()
-                    break
-            if not pci_addr:
-                logger.warning(f"Can't find pci address of NPU{npu} .")
-                continue
-            try:
-                npu_irq_list = sorted(os.listdir(f"/sys/bus/pci/devices/{pci_addr}/msi_irqs/"), key=lambda x: int(x))
-            except FileNotFoundError:
-                logger.warning(f"The msi_irqs folder cannot be found under /sys/bus/pci/devices/{pci_addr} .")
-                continue
-            sq_irq, cq_irq = "", ""
-            for irq in sq_irqs:
-                if irq in npu_irq_list:
-                    sq_irq = irq
-                    cq_irq = str(int(irq) + 1)
-                    break
-            if not sq_irq:
-                logger.warning(f"The sq_send_trigger_irq of NPU{npu} is not found.")
-                continue
-            logger.info(
-                f"NPU{npu}(PCI {pci_addr}): sq_send_trigger_irq IRQ_ID={sq_irq} -> CPU{sq_cpu}, "
-                f"cq_update_irq IRQ_ID={cq_irq} -> CPU{cq_cpu}"
-            )
-            with open(f"/proc/irq/{sq_irq}/smp_affinity", "w") as f:
-                f.write(self.cpu_to_mask(sq_cpu))
-            with open(f"/proc/irq/{cq_irq}/smp_affinity", "w") as f:
-                f.write(self.cpu_to_mask(cq_cpu))
+
+        for line in info.splitlines():
+            if "PCIe Bus Info" in line:
+                pci_addr = line.split()[-1].lower()
+                break
+
+        if not pci_addr:
+            logger.warning(f"Can't find pci address of NPU{npu} .")
+            return
+
+        try:
+            npu_irq_list = sorted(os.listdir(f"/sys/bus/pci/devices/{pci_addr}/msi_irqs/"), key=lambda x: int(x))
+        except FileNotFoundError:
+            logger.warning(f"The msi_irqs folder cannot be found under /sys/bus/pci/devices/{pci_addr} .")
+            return
+
+        sq_irq, cq_irq = "", ""
+        for irq in sq_irqs:
+            if irq in npu_irq_list:
+                sq_irq = irq
+                cq_irq = str(int(irq) + 1)
+                break
+        if not sq_irq:
+            logger.warning(f"The sq_send_trigger_irq of NPU{npu} is not found.")
+            return
+
+        logger.info(
+            f"NPU{npu}(PCI {pci_addr}): sq_send_trigger_irq IRQ_ID={sq_irq} -> CPU{sq_cpu}, "
+            f"cq_update_irq IRQ_ID={cq_irq} -> CPU{cq_cpu}"
+        )
+        with open(f"/proc/irq/{sq_irq}/smp_affinity", "w") as f:
+            f.write(self.cpu_to_mask(sq_cpu))
+        with open(f"/proc/irq/{cq_irq}/smp_affinity", "w") as f:
+            f.write(self.cpu_to_mask(cq_cpu))
 
     def run_all(self) -> None:
         self.build_cpu_pools()
