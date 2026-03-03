@@ -32,7 +32,7 @@ from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType
+from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
 
 
@@ -291,3 +291,59 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             del layer.w13_weight_scale_fp32
             del layer.w2_weight_scale
             torch.npu.empty_cache()
+
+
+class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
+    """C8 (INT8) KV cache quantization for standard GQA attention models.
+
+    Works with all standard GQA models (Qwen3-235B, Qwen3-32B, Qwen2.5-72B VL, etc.).
+    Stores K/V in INT8 format using static per-projection quantization scales
+    and offsets. Uses npu_fused_infer_attention_score_v2 for fused dequantization
+    during attention computation.
+    """
+
+    def __init__(self, quant_description: dict[str, Any], prefix: str):
+        self.quant_description = quant_description
+        self.prefix = prefix
+
+    def create_weights(self, layer: torch.nn.Module) -> None:
+        layer.c8_kv_cache_enabled = True
+        layer.k_cache_scale = torch.nn.Parameter(
+            torch.ones(1, dtype=torch.float32), requires_grad=False
+        )
+        layer.k_cache_offset = torch.nn.Parameter(
+            torch.zeros(1, dtype=torch.float32), requires_grad=False
+        )
+        layer.v_cache_scale = torch.nn.Parameter(
+            torch.ones(1, dtype=torch.float32), requires_grad=False
+        )
+        layer.v_cache_offset = torch.nn.Parameter(
+            torch.zeros(1, dtype=torch.float32), requires_grad=False
+        )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if hasattr(layer, "k_cache_scale"):
+            layer.k_cache_scale.data = layer.k_cache_scale.data.flatten()
+        if hasattr(layer, "k_cache_offset"):
+            layer.k_cache_offset.data = layer.k_cache_offset.data.flatten()
+        if hasattr(layer, "v_cache_scale"):
+            layer.v_cache_scale.data = layer.v_cache_scale.data.flatten()
+        if hasattr(layer, "v_cache_offset"):
+            layer.v_cache_offset.data = layer.v_cache_offset.data.flatten()
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache,
+        attn_metadata,
+        attn_type,
+        scale,
+        output,
+    ) -> torch.Tensor:
+        raise RuntimeError(
+            "AscendC8KVCacheAttentionMethod.apply should not be called. "
+            "C8 KV cache quantization is handled by the attention backend."
+        )

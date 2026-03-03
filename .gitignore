@@ -213,3 +213,7 @@ csrc/output/
 
 # claude code skills
 .claude/skills/*
+
+/full-pd
+
+/vllm

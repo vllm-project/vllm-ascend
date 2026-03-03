@@ -22,7 +22,7 @@ import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
@@ -2928,6 +2928,8 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                    if getattr(attn_module, "c8_kv_cache_enabled", False):
+                        spec = replace(spec, dtype=torch.int8)
                     kv_cache_spec[layer_name] = spec
 
             elif isinstance(attn_module, MLAAttention):
