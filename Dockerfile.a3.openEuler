@@ -48,6 +48,9 @@ RUN yum update -y && \
     rm -fr /vllm-workspace/Mooncake/build && \
     rm -rf /var/cache/yum/*
 
+# To keep mooncake can be found
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.16.0

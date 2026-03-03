@@ -46,6 +46,9 @@ RUN apt-get update -y && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
+# To keep mooncake can be found
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 # Install vLLM
