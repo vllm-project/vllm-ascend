@@ -27,7 +27,6 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
 
@@ -126,6 +125,7 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
 
         elif isinstance(layer, VocabParallelEmbedding):
             from vllm_ascend._310p.ops.vocab_parallel_embedding import AscendUnquantizedEmbeddingMethod310
+
             return AscendUnquantizedEmbeddingMethod310()
 
         return super().get_quant_method(layer, prefix)
