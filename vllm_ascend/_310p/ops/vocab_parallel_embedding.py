@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE,
