@@ -714,7 +714,14 @@ class EagleProposer(VllmEagleProposer):
             hidden_states = torch.index_select(
                 hidden_states, 0, self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
             )
-            last_hidden_states = hidden_states  # TODO: check it
+            if self.method == "mtp":
+                last_hidden_states = hidden_states
+            else:
+                last_hidden_states = last_hidden_states[:num_tokens]
+                last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
+                last_hidden_states = torch.index_select(
+                    last_hidden_states, 0, self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: last_hidden_states.shape[0]]
+                )
 
         num_indices = last_token_indices.shape[0]
         if lmhead_tp_enable() and not is_dummy:
@@ -951,7 +958,7 @@ class EagleProposer(VllmEagleProposer):
 
         if self.pcp_size * self.dcp_size > 1:
             num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
-                ori_seq_len + draft_step,
+                ori_seq_len + draft_step + 1,
                 self.pcp_size,
                 self.dcp_size,
                 self.runner.parallel_config.cp_kv_cache_interleave_size,
