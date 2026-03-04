@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm_ascend.utils import get_weight_prefetch_method
+from vllm_ascend.utils import get_weight_prefetch_method, enable_custom_op
 
 
 def select_experts(
@@ -70,7 +70,7 @@ def select_experts(
         custom_routing_function=custom_routing_function,
     )
 
-    if is_support_npu_moe_gating_top_k:
+    if enable_custom_op() and is_support_npu_moe_gating_top_k:
         topk_weights, topk_ids = _select_experts_with_fusion_ops(
             hidden_states=hidden_states,
             router_logits=router_logits,

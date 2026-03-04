@@ -137,6 +137,8 @@ def quant_apply_mlp(
         dispose_tensor(unquantized_hidden_states)
         quantized_hidden_states = None
     else:
+        if use_mxfp_quant and dynamic_scale.ndim == 2:
+            dynamic_scale = dynamic_scale.reshape(dynamic_scale.shape[0], dynamic_scale.shape[1] // 2, 2)
         unquantized_hidden_states = None
         pertoken_scale = dynamic_scale
         quantized_hidden_states = hidden_states

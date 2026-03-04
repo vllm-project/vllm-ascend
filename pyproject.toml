@@ -18,7 +18,7 @@ requires = [
     "setuptools>=64",
     "setuptools-scm>=8",
     "transformers>=4.57.4",
-    "torch-npu==2.9.0",
+    "torch-npu==2.9.0.post1.dev20260115",
     "torch==2.9.0",
     "torchvision",
     "wheel",
@@ -30,7 +30,7 @@ requires = [
     "opencv-python-headless<=4.11.0.86", # Required to avoid numpy version conflict with vllm
     "compressed_tensors>=0.11.0",
     "arctic-inference==0.1.1",
-    "triton-ascend==3.2.0"
+    "triton-ascend==3.4.0.dev2026022722"
 ]
 build-backend = "setuptools.build_meta"
 
