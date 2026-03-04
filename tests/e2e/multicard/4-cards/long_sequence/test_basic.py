@@ -64,6 +64,7 @@ def test_models_pcp_dcp_basic():
             prefill_context_parallel_size=2,
             decode_context_parallel_size=2,
             enable_expert_parallel=True,
+            gpu_memory_utilization=0.8,
             block_size=128,
             quantization="ascend",
     ) as runner:
