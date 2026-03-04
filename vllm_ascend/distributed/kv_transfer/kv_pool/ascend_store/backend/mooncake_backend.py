@@ -71,11 +71,9 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-         soc_version = get_ascend_device_type()
+        soc_version = get_ascend_device_type()
         if soc_version in {AscendDeviceType.A2}:
             global_te.register_buffer(ptrs, lengths)
-        else:
-            pass
 
     def exists(self, keys: list[str]) -> list[int]:
         return self.store.batch_is_exist(keys)
