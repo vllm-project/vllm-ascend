@@ -521,7 +521,6 @@ class TestNPUWorker(TestBase):
                 num_tokens=mock_decode_token_per_req, uniform_decode=True)
 
     @patch("vllm_ascend.worker.worker.envs_ascend")
-    @patch("vllm_ascend.worker.worker.logger")
     @patch("torch_npu.profiler._ExperimentalConfig")
     @patch("torch_npu.profiler.profile")
     @patch("torch_npu.profiler.tensorboard_trace_handler")
@@ -538,7 +537,6 @@ class TestNPUWorker(TestBase):
         mock_trace_handler,
         mock_profile,
         mock_experimental_config,
-        mock_logger,
         mock_envs_ascend,
     ):
         """Test _create_profiler - profiler enabled with worker_name for trace naming (RFC #6954)"""
@@ -575,10 +573,6 @@ class TestNPUWorker(TestBase):
 
             result = worker._create_profiler("warmup_dp0_pp0_tp0_dcp0_ep0_rank0")
 
-            mock_logger.info.assert_called_once_with(
-                "Profiling enabled. Traces will be saved to: %s",
-                "/path/to/traces")
-
             mock_experimental_config.assert_called_once()
             config_call = mock_experimental_config.call_args
             config_kwargs = config_call.kwargs
@@ -611,7 +605,7 @@ class TestNPUWorker(TestBase):
             self.assertEqual(result, mock_profiler_instance)
 
     def test_create_profiler_disabled(self):
-        """Test _create_profiler returns None when profiler disabled"""
+        """Test _create_profiler raises when profiler disabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
         profiler_config = ProfilerConfig(
@@ -623,12 +617,12 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.profiler_config = profiler_config
 
-            result = worker._create_profiler("test_trace")
-
-            self.assertIsNone(result)
+            with self.assertRaises(RuntimeError) as cm:
+                worker._create_profiler("test_trace")
+            self.assertIn("Unrecognized profiler: None", str(cm.exception))
 
     def test_create_profiler_empty_dir(self):
-        """Test _create_profiler returns None when torch_profiler_dir is empty/falsy"""
+        """Test _create_profiler raises when torch_profiler_dir is empty/falsy"""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Use MagicMock to bypass ProfilerConfig validation (empty dir not allowed)
@@ -640,9 +634,9 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.profiler_config = profiler_config
 
-            result = worker._create_profiler("test_trace")
-
-            self.assertIsNone(result)
+            with self.assertRaises(RuntimeError) as cm:
+                worker._create_profiler("test_trace")
+            self.assertIn("torch_profiler_dir cannot be empty", str(cm.exception))
 
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
