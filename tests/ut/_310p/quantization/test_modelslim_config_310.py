@@ -21,7 +21,7 @@ from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
-from vllm_ascend._310p.ops.linear import AscendUnquantizedLinearMethod310
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig310
 
 
@@ -50,7 +50,7 @@ class TestAscendModelSlimConfig310(TestBase):
             patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
         ):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
-            self.assertIsInstance(method, AscendUnquantizedLinearMethod310)
+            self.assertIsInstance(method, AscendUnquantizedLinearMethod)
 
         # Test quantized layer
         mock_scheme = MagicMock()
