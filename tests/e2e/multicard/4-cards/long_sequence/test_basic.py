@@ -25,6 +25,7 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 os.environ["HCCL_BUFFSIZE"] = "768"
 
 
+@wait_until_npu_memory_free()
 def test_models_pcp_dcp_basic():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -84,6 +85,7 @@ def test_models_pcp_dcp_basic():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_models_pcp_dcp_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
