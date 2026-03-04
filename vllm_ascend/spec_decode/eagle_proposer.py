@@ -720,7 +720,9 @@ class EagleProposer(VllmEagleProposer):
                 last_hidden_states = last_hidden_states[:num_tokens]
                 last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
                 last_hidden_states = torch.index_select(
-                    last_hidden_states, 0, self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: last_hidden_states.shape[0]]
+                    last_hidden_states,
+                    0,
+                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: last_hidden_states.shape[0]],
                 )
 
         num_indices = last_token_indices.shape[0]
