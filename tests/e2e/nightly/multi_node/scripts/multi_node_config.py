@@ -136,8 +136,8 @@ class ProxyLauncher:
         if not self.is_master or self.cfg is None:
             logger.info("Not launching proxy on non-master node")
             return self
-        prefiller_ips = [self.nodes[i].ip for i in self.cfg.prefiller_indices]
-        decoder_ips = [self.nodes[i].ip for i in self.cfg.decoder_indices]
+        prefiller_ips = [self.nodes[i].ip for i in self.cfg.prefiller_indices if not self.nodes[i].headless]
+        decoder_ips = [self.nodes[i].ip for i in self.cfg.decoder_indices if not self.nodes[i].headless]
 
         cmd = [
             "python",
