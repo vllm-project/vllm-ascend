@@ -20,7 +20,7 @@ import triton  # type: ignore
 import triton.language as tl  # type: ignore
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice, get_element
 
 
 @triton.jit
@@ -79,40 +79,40 @@ def split_qkv_rmsnorm_rope_kernel(
         pos_values = tl.load(positions_gm_ptr + row_idx)
         sin_cos_indices = pos_values * ROPE_DIM + tl.arange(0, ROPE_DIM)
         input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices).reshape(1, ROPE_DIM)
-        cos = tl.extract_slice(
+        cos = extract_slice(
             input_values,
             offsets=(0, 0),
             sizes=(1, HALF_ROPE_DIM),
             strides=(1, 1),
         )
-        sin = tl.extract_slice(
+        sin = extract_slice(
             input_values,
             offsets=(0, HALF_ROPE_DIM),
             sizes=(1, HALF_ROPE_DIM),
             strides=(1, 1),
         )
 
-        x1 = tl.extract_slice(
+        x1 = extract_slice(
             normalized_values,
             offsets=(0, 0),
             sizes=(Q_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
             strides=(1, 1),
         )
-        x2 = tl.extract_slice(
+        x2 = extract_slice(
             normalized_values,
             offsets=(0, HALF_ROPE_DIM),
             sizes=(Q_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
             strides=(1, 1),
         )
         cat_x = tl.zeros((Q_BLOCK_SIZE // HEAD_DIM, ROPE_DIM), dtype=tl.bfloat16)
-        cat_x = tl.insert_slice(
+        cat_x = insert_slice(
             cat_x,
             x1 * cos - x2 * sin,
             offsets=(0, 0),
             sizes=(Q_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
             strides=(1, 1),
         )
-        cat_x = tl.insert_slice(
+        cat_x = insert_slice(
             cat_x,
             x2 * cos + x1 * sin,
             offsets=(0, HALF_ROPE_DIM),
@@ -120,7 +120,7 @@ def split_qkv_rmsnorm_rope_kernel(
             strides=(1, 1),
         )
         if IS_PARTIAL_ROPE:
-            normalized_values = tl.insert_slice(
+            normalized_values = insert_slice(
                 normalized_values,
                 cat_x,
                 offsets=(0, 0),
@@ -168,40 +168,40 @@ def split_qkv_rmsnorm_rope_kernel(
         sin_cos_indices = pos_values * ROPE_DIM + tl.arange(0, ROPE_DIM)
 
         input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices).reshape(1, ROPE_DIM)
-        cos = tl.extract_slice(
+        cos = extract_slice(
             input_values,
             offsets=(0, 0),
             sizes=(1, HALF_ROPE_DIM),
             strides=(1, 1),
         )
-        sin = tl.extract_slice(
+        sin = extract_slice(
             input_values,
             offsets=(0, HALF_ROPE_DIM),
             sizes=(1, HALF_ROPE_DIM),
             strides=(1, 1),
         )
 
-        x1 = tl.extract_slice(
+        x1 = extract_slice(
             normalized_values,
             offsets=(0, 0),
             sizes=(KV_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
             strides=(1, 1),
         )
-        x2 = tl.extract_slice(
+        x2 = extract_slice(
             normalized_values,
             offsets=(0, HALF_ROPE_DIM),
             sizes=(KV_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
             strides=(1, 1),
         )
         cat_x = tl.zeros((KV_BLOCK_SIZE // HEAD_DIM, ROPE_DIM), dtype=tl.bfloat16)
-        cat_x = tl.insert_slice(
+        cat_x = insert_slice(
             cat_x,
             x1 * cos - x2 * sin,
             offsets=(0, 0),
             sizes=(KV_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
             strides=(1, 1),
         )
-        cat_x = tl.insert_slice(
+        cat_x = insert_slice(
             cat_x,
             x2 * cos + x1 * sin,
             offsets=(0, HALF_ROPE_DIM),
@@ -209,7 +209,7 @@ def split_qkv_rmsnorm_rope_kernel(
             strides=(1, 1),
         )
         if IS_PARTIAL_ROPE:
-            normalized_values = tl.insert_slice(
+            normalized_values = insert_slice(
                 normalized_values,
                 cat_x,
                 offsets=(0, 0),
@@ -251,7 +251,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
     q_bias_ptr,
     k_weight_ptr,
     k_bias_ptr,
-    batch_size: tl.constexpr,
+    batch_size,
     q_hidden_size: tl.constexpr,
     kv_hidden_size: tl.constexpr,
     total_hidden_size: tl.constexpr,
@@ -261,15 +261,13 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
     ROPE_DIM: tl.constexpr,
     HALF_ROPE_DIM: tl.constexpr,
     IS_PARTIAL_ROPE: tl.constexpr,
-    batch_size_per_vec: tl.constexpr,
-    iter_num_per_vec: tl.constexpr,
+    num_vectorcore: tl.constexpr,
     batch_size_per_iter_per_vec: tl.constexpr,
     qk_head_nums_per_iter_per_vec: tl.constexpr,
     q_head_num: tl.constexpr,
     kv_head_num: tl.constexpr,
     qk_head_num_sum: tl.constexpr,
     v_batch_size_per_iter_per_vec: tl.constexpr,
-    v_iter_num_per_vec: tl.constexpr,
     positions_gm_ptr,
     cos_sin_cache_gm_ptr,
 ):
@@ -278,6 +276,9 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
     q_weight_values = tl.load(q_weight_ptr + tl.arange(0, HEAD_DIM))
     k_weight_values = tl.load(k_weight_ptr + tl.arange(0, HEAD_DIM))
 
+    batch_size_per_vec = tl.cdiv(batch_size, num_vectorcore)
+    iter_num_per_vec = tl.cdiv(batch_size_per_vec, batch_size_per_iter_per_vec)
+    v_iter_num_per_vec = tl.cdiv(batch_size_per_vec, v_batch_size_per_iter_per_vec)
     input_batch_offset = row_pid * batch_size_per_vec
     mblk_idx = tl.arange(0, batch_size_per_iter_per_vec) + input_batch_offset
     nblk_idx = tl.arange(0, q_hidden_size + kv_hidden_size)
@@ -308,8 +309,8 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
 
         values_tmp3 = tl.zeros((batch_size_per_iter_per_vec, ROPE_DIM), dtype=tl.bfloat16)
         for i in tl.range(batch_size_per_iter_per_vec):
-            pos = tl.get_element(x, (i,))
-            values_tmp3 = tl.insert_slice(
+            pos = get_element(x, (i,))
+            values_tmp3 = insert_slice(
                 values_tmp3.reshape(batch_size_per_iter_per_vec, ROPE_DIM),
                 tl.load(pos * ROPE_DIM + cos_sin_cache_offset[:, None]).reshape(1, ROPE_DIM),
                 offsets=(i, 0),
@@ -317,13 +318,13 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
                 strides=(1, 1),
             )
         values_tmp3 = values_tmp3.reshape(batch_size_per_iter_per_vec, 1, ROPE_DIM)
-        cos = tl.extract_slice(
+        cos = extract_slice(
             values_tmp3,
             offsets=(0, 0, 0),
             sizes=(batch_size_per_iter_per_vec, 1, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        sin = tl.extract_slice(
+        sin = extract_slice(
             values_tmp3,
             offsets=(0, 0, HALF_ROPE_DIM),
             sizes=(batch_size_per_iter_per_vec, 1, HALF_ROPE_DIM),
@@ -336,7 +337,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
         normalized_values = 1 / tl.sqrt(normalized_values + eps).reshape(qk_head_nums_per_iter_per_vec, 1)
         normalized_values = values_tmp1 * normalized_values
 
-        normalized_values_tmp = tl.extract_slice(
+        normalized_values_tmp = extract_slice(
             normalized_values.reshape(batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM),
             offsets=(0, 0, 0),
             sizes=(batch_size_per_iter_per_vec, q_head_num, HEAD_DIM),
@@ -350,26 +351,26 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
 
         # q rope
         values_tmp = tl.zeros((batch_size_per_iter_per_vec, q_head_num, ROPE_DIM), dtype=tl.bfloat16)
-        x1 = tl.extract_slice(
+        x1 = extract_slice(
             normalized_values_tmp,
             offsets=(0, 0, 0),
             sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        x2 = tl.extract_slice(
+        x2 = extract_slice(
             normalized_values_tmp,
             offsets=(0, 0, HALF_ROPE_DIM),
             sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        values_tmp = tl.insert_slice(
+        values_tmp = insert_slice(
             values_tmp,
             x1 * cos - x2 * sin,
             offsets=(0, 0, 0),
             sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        values_tmp = tl.insert_slice(
+        values_tmp = insert_slice(
             values_tmp,
             x2 * cos + x1 * sin,
             offsets=(0, 0, HALF_ROPE_DIM),
@@ -379,7 +380,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
         q_output_idx = output_q_nblk_idx[None, :] + (mblk_idx + pos_offset)[:, None] * q_hidden_size
         mask = (mmask[:, None]) & (output_q_nmask[None, :])
         if IS_PARTIAL_ROPE:
-            normalized_values_tmp = tl.insert_slice(
+            normalized_values_tmp = insert_slice(
                 normalized_values_tmp,
                 values_tmp,
                 offsets=(0, 0, 0),
@@ -399,7 +400,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
             )
 
         # k rope
-        normalized_values_tmp1 = tl.extract_slice(
+        normalized_values_tmp1 = extract_slice(
             normalized_values.reshape(batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM),
             offsets=(0, q_head_num, 0),
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HEAD_DIM),
@@ -413,26 +414,26 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
 
         values_tmp2 = tl.zeros((batch_size_per_iter_per_vec, kv_head_num, ROPE_DIM), dtype=tl.bfloat16)
 
-        x1 = tl.extract_slice(
+        x1 = extract_slice(
             normalized_values_tmp1,
             offsets=(0, 0, 0),
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        x2 = tl.extract_slice(
+        x2 = extract_slice(
             normalized_values_tmp1,
             offsets=(0, 0, HALF_ROPE_DIM),
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        values_tmp2 = tl.insert_slice(
+        values_tmp2 = insert_slice(
             values_tmp2,
             x1 * cos - x2 * sin,
             offsets=(0, 0, 0),
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        values_tmp2 = tl.insert_slice(
+        values_tmp2 = insert_slice(
             values_tmp2,
             x2 * cos + x1 * sin,
             offsets=(0, 0, HALF_ROPE_DIM),
@@ -443,7 +444,7 @@ def split_qkv_rmsnorm_rope_prefill_kernel(
         kv_output_idx = output_kv_nblk_idx[None, :] + (mblk_idx + pos_offset)[:, None] * kv_hidden_size
         mask = (mmask[:, None]) & (output_kv_nmask[None, :])
         if IS_PARTIAL_ROPE:
-            normalized_values_tmp1 = tl.insert_slice(
+            normalized_values_tmp1 = insert_slice(
                 normalized_values_tmp1,
                 values_tmp2,
                 offsets=(0, 0, 0),
@@ -494,7 +495,7 @@ def split_qkv_rmsnorm_rope_impl(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # get available vector core
     num_vectorcore = get_vectorcore_num()
-    rope_dim = cos_sin_cache.shape[1]
+    rope_dim = cos_sin_cache.shape[-1]
     batch_size = input.shape[0]
     BIAS = q_bias is not None
     IS_PARTIAL_ROPE = rope_dim != head_dim
@@ -506,7 +507,7 @@ def split_qkv_rmsnorm_rope_impl(
     v_output = torch.empty(batch_size, kv_hidden_size, device=input.device, dtype=input.dtype)
 
     # prefill or decode
-    if batch_size < num_vectorcore:  # decode
+    if batch_size <= num_vectorcore:  # decode
         KV_BLOCK_SIZE = triton.next_power_of_2(head_dim)
         assert head_dim == KV_BLOCK_SIZE
         assert q_hidden_size % kv_hidden_size == 0
@@ -542,11 +543,8 @@ def split_qkv_rmsnorm_rope_impl(
         )
 
     else:  # prefill
-        KV_BLOCK_SIZE = triton.next_power_of_2(head_dim) * batch_size
-        Q_BLOCK_SIZE = q_hidden_size // kv_hidden_size * KV_BLOCK_SIZE
         q_head_num = q_hidden_size // head_dim
         kv_head_num = kv_hidden_size // head_dim
-        batch_size_per_vec = triton.cdiv(batch_size, num_vectorcore)
 
         # set number of line loading from GM data is x
         # x*(q_head_num + kv_head_num)*HEAD_DIM: values_tmp
@@ -554,26 +552,22 @@ def split_qkv_rmsnorm_rope_impl(
         # x*ROPE_DIM*2 : cos/sin
         # x*q_head_num*HEAD_DIM*2： normalized_values_tmp
         # x*q_head_num*ROPE_DIM*(0.5) (not IS_PARTIAL_ROPE) x*q_head_num*ROPE_DIM*(0.5): y
-        UB_SIZE = 85 * 1024
+        UB_SIZE = 87040 # 85K = 85 * 1024
         # the factor is the sum of elements number
         if IS_PARTIAL_ROPE:
-            factor = 5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 4 + q_head_num * rope_dim
+            factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 4 + q_head_num * rope_dim
             batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
         else:
-            factor = 5 * q_head_num * head_dim + 3 * kv_head_num * head_dim + rope_dim * 2 + q_head_num * rope_dim // 2
+            factor = 5 * q_hidden_size * head_dim + 3 * kv_hidden_size * head_dim + rope_dim * 2 + q_head_num * rope_dim // 2
             batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
-        batch_size_per_iter_per_vec = min(batch_size_per_iter_per_vec, batch_size_per_vec)
         batch_size_per_iter_per_vec = max(1, batch_size_per_iter_per_vec)
         qk_head_num_sum = int(q_head_num + kv_head_num)
         qk_head_nums_per_iter_per_vec = batch_size_per_iter_per_vec * qk_head_num_sum
 
-        iter_num_per_vec = triton.cdiv(batch_size_per_vec, batch_size_per_iter_per_vec)
-
-        grid = (min(num_vectorcore, batch_size), 1, 1)
+        grid = (num_vectorcore, 1, 1)
         # v tiling
         v_batch_size_per_iter_per_vec = UB_SIZE / torch.bfloat16.itemsize // (kv_hidden_size + 1)
-        v_batch_size_per_iter_per_vec = min(v_batch_size_per_iter_per_vec, batch_size_per_vec)
-        v_iter_num_per_vec = triton.cdiv(batch_size_per_vec, v_batch_size_per_iter_per_vec)
+
         split_qkv_rmsnorm_rope_prefill_kernel[grid](
             input,
             q_output,
@@ -593,15 +587,13 @@ def split_qkv_rmsnorm_rope_impl(
             rope_dim,
             rope_dim // 2,
             IS_PARTIAL_ROPE,
-            int(batch_size_per_vec),
-            int(iter_num_per_vec),
+            num_vectorcore,
             int(batch_size_per_iter_per_vec),
             int(qk_head_nums_per_iter_per_vec),
             q_head_num,
             kv_head_num,
             qk_head_num_sum,
             int(v_batch_size_per_iter_per_vec),
-            int(v_iter_num_per_vec),
             positions,
             cos_sin_cache,
         )
