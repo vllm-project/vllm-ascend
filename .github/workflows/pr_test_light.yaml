@@ -84,7 +84,7 @@ jobs:
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-amd64-cpu-16-hk
-      image: quay.nju.edu.cn/ascend/cann:8.5.0-910b-ubuntu22.04-py3.11
+      image: quay.nju.edu.cn/ascend/cann:8.5.1-910b-ubuntu22.04-py3.11
       type: pr
 
   e2e-light:
@@ -100,5 +100,5 @@ jobs:
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-aarch64-a2b3
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       type: light
