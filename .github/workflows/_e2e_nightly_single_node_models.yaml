@@ -63,7 +63,6 @@ jobs:
       env:
         VLLM_USE_MODELSCOPE: True
         GHA_VLLM_ASCEND_VERSION: ${{ inputs.vllm-ascend }}
-        LD_LIBRARY_PATH: /usr/local/lib:${{ env.LD_LIBRARY_PATH }}
     steps:
       - name: Check npu and CANN info
         run: |
@@ -187,6 +186,7 @@ jobs:
           TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
         run: |
           mkdir -p ./benchmarks/accuracy
+          echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Received model_list: ${{ inputs.model_list }}"
           models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
           any_failure=0
