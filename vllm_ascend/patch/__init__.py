@@ -97,7 +97,6 @@
 # ** 6. File: platform/patch_fusion_matcher_compat_ops.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.ops._C.rms_norm`, `torch.ops._C.fused_add_rms_norm`,
-#      `torch.ops._C.rotary_embedding`, `torch.ops.vllm.flashinfer_rotary_embedding`
 #    Why:
 #       upstream vLLM initializes fusion matcher global operators at import time.
 #       On Ascend environment these symbols may be absent and cause import failure.
