@@ -9,6 +9,7 @@ Note: Please copy the skills directory `.agents/skills` to `.claude/skills` if y
 - [vLLM Ascend Model Adapter Skill](#vllm-ascend-model-adapter-skill)
 - [vLLM Ascend main2main Skill](#vllm-ascend-main2main-skill)
 - [vLLM Ascend Release Note Writer Skill](#vllm-ascend-release-note-writer-skill)
+- [vLLM Ascend main2main Error Analysis Skill](#vllm-ascend-main2main-error-analysis-skill)
 
 ## vLLM Ascend Model Adapter Skill
 
@@ -113,3 +114,30 @@ This skill guides you through a structured workflow to:
 - Focus on user-facing impact and include context for practical usage.
 - Verify details by checking linked PRs (use GitHub API for descriptions if needed).
 - Keep notes concise and avoid unnecessary technical details.
+
+## vLLM Ascend main2main Error Analysis Skill
+
+Automates root-cause analysis and fixing of vLLM-Ascend CI failures triggered by upstream vLLM main branch updates.
+
+### What it does
+
+This skill implements a 4-phase pipeline to diagnose and fix CI failures:
+
+1. **Context Acquisition**: Extracts failed test cases and mines error logs to figure out the true root causes (filtering out environment flakes).
+2. **Change Analysis**: Traces failures to specific upstream vLLM commits based on code diffs.
+3. **Report Generation**: Generates a structured diagnostic report (`vllm_error_analyze.md`).
+4. **Automated Fix**: Applies adaptation fixes and submits a PR.
+
+### File layout
+
+| File | Purpose |
+| ---- | ------- |
+| `SKILL.md` | Skill definition, execution playbook and token budget strategy |
+| `scripts/extract_and_analyze.py` | Script to parse GitHub Action logs and generate structured JSON reports |
+
+### Quick start
+
+1. Open a conversation with the AI agent inside the vllm-ascend dev container.
+2. Invoke the skill (e.g. `/main2main-error-analysis`).
+3. Provide a GitHub Actions URL or run ID related to the CI failures (e.g., schedule test failures).
+4. The agent will run the analysis script, trace root causes, provide a report, and push a fix PR.
