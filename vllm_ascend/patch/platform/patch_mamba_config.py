@@ -1,4 +1,6 @@
 # mypy: ignore-errors
+import math
+
 import numpy as np
 import vllm.model_executor.models.config
 from vllm.logger import init_logger
@@ -38,7 +40,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # get attention block size
     attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
     attn_head_size = model_config.get_head_size()
-    attn_single_token_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+    attn_single_token_k_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
 
     model_cls, _ = ModelRegistry.resolve_model_cls(
         model_config.architecture,
@@ -46,28 +48,20 @@ def verify_and_update_config(cls, vllm_config) -> None:
     )
 
     # get mamba block size
-    dummy_mamba_spec = MambaSpec(
-        shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
-        dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
-        block_size=model_config.max_model_len,
-    )
-    ssm_shape, ssm_dtype = None, None
-    conv_shape, conv_dtype = None, None
-    for shape, dtype in zip(dummy_mamba_spec.shapes, dummy_mamba_spec.dtypes):
-        if len(shape) == 3:
-            ssm_shape, ssm_dtype = shape, dtype
-        else:
-            conv_shape, conv_dtype = shape, dtype
+    mamba_shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
+    mamba_dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
+    mamba_sizes = []
+    for shape, dtype in zip(mamba_shapes, mamba_dtypes):
+        mamba_sizes.append(math.prod(shape) * get_dtype_size(dtype))
+    ssm_block_page_size, conv_block_page_size = max(mamba_sizes), min(mamba_sizes)
 
     # NOTE(zxr): because of the limit of Ascend Hardware, we need to keep
     # all cache tensors contiguous, so we align the page size of ssm_block
     # and single attn_block
-    ssm_block_page_size = int(np.prod(ssm_shape) * get_dtype_size(ssm_dtype))
-    conv_block_page_size = int(np.prod(conv_shape) * get_dtype_size(conv_dtype))
     attn_block_size = block_alignment_bytes * cdiv(
-        ssm_block_page_size, block_alignment_bytes * attn_single_token_page_size
+        ssm_block_page_size, block_alignment_bytes * attn_single_token_k_page_size
     )
-    assert attn_single_token_page_size * attn_block_size == ssm_block_page_size, (
+    assert attn_single_token_k_page_size * attn_block_size == ssm_block_page_size, (
         "Cannot align ssm_page_size and attn_page_size."
     )
 
@@ -97,6 +91,10 @@ def verify_and_update_config(cls, vllm_config) -> None:
             "exactly equal.",
             mamba_padding_pct,
         )
+    if cache_config.enable_prefix_caching and cache_config.mamba_cache_mode = "align":
+        cache_config.mamba_block_size = cache_config.block_size
+    else:
+        cache_config.mamba_block_size = cache_config.max_model_len
 
 
 vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config = verify_and_update_config

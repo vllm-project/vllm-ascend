@@ -2518,12 +2518,7 @@ class NPUModelRunner(GPUModelRunner):
         layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
         for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
             for layer_name in group_kv_cache_spec.layer_names:
-                if layer_name not in layer_kv_cache_spec:
-                    layer_kv_cache_spec[layer_name] = []
-                layer_kv_cache_spec[layer_name].append(group_kv_cache_spec.kv_cache_spec)
-                assert len(layer_kv_cache_spec[layer_name]) <= 1, (
-                    "vLLM-Ascned does not support multi kv_cache_spec on one layer now."
-                )
+                layer_kv_cache_spec[layer_name] = group_kv_cache_spec.kv_cache_spec
         # If some tensors are shared by linear layers and attention layers,
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
@@ -2531,12 +2526,11 @@ class NPUModelRunner(GPUModelRunner):
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             use_mamba, use_attn = False, False
             for layer_name in kv_cache_tensor.shared_by:
-                if isinstance(layer_kv_cache_spec[layer_name][0], MambaSpec):
+                if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
                     use_mamba = True
-                if isinstance(layer_kv_cache_spec[layer_name][0], AttentionSpec):
+                if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
                     use_attn = True
-            if use_mamba and use_attn:
-                use_attn_linear_hybrid = True
+            use_attn_linear_hybrid = use_attn_linear_hybrid or (use_mamba and use_attn)
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
                 if ("linear_attn" in layer_name or use_attn_linear_hybrid) and layer_name not in kv_cache_raw_tensors:
