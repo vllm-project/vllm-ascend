@@ -576,12 +576,14 @@ class NPUWorker(WorkerBase):
     def _create_profiler(self, trace_name: str):
         """Create torch_npu profiler with trace naming for unique files per worker (RFC #6954)."""
         profiler_config = self.profiler_config
-        if profiler_config.profiler != "torch" or not profiler_config.torch_profiler_dir:
-            return None
+
+        if profiler_config.profiler != "torch":
+            raise RuntimeError(f"Unrecognized profiler: {profiler_config.profiler}")
+        if not profiler_config.torch_profiler_dir:
+            raise RuntimeError("torch_profiler_dir cannot be empty.")
         if envs_ascend.MSMONITOR_USE_DAEMON:
             raise RuntimeError("MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time.")
-        torch_profiler_trace_dir = profiler_config.torch_profiler_dir
-        logger.info("Profiling enabled. Traces will be saved to: %s", torch_profiler_trace_dir)
+
 
         experimental_config = torch_npu.profiler._ExperimentalConfig(
             export_type=torch_npu.profiler.ExportType.Text,
@@ -607,7 +609,7 @@ class NPUWorker(WorkerBase):
             with_modules=profiler_config.torch_profiler_with_stack,
             experimental_config=experimental_config,
             on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
-                torch_profiler_trace_dir,
+                profiler_config.torch_profiler_dir,
                 worker_name=trace_name,
             ),
         )
