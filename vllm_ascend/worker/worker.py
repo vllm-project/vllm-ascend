@@ -138,8 +138,8 @@ class NPUWorker(WorkerBase):
 
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
 
-        npugraph_ex_config = get_ascend_config().npugraph_ex_config
-        if npugraph_ex_config.enable and npugraph_ex_config.enable_static_kernel:
+        ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
             # Prevent duplicate triggers, execute the exit logic only once
             shutdown_request = False
 
@@ -530,6 +530,9 @@ class NPUWorker(WorkerBase):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
+
+    def reset_encoder_cache(self) -> None:
+        self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
