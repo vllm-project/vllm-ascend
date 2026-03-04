@@ -123,6 +123,7 @@ def test_models_pcp_dcp_full_graph():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_models_pcp_dcp_piece_wise():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -174,6 +175,7 @@ def test_pcp_basic():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_pcp_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -197,6 +199,7 @@ def test_pcp_full_graph():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_pcp_piece_wise():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -216,6 +219,7 @@ def test_pcp_piece_wise():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_dcp_basic():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -235,6 +239,7 @@ def test_dcp_basic():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_dcp_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -258,6 +263,7 @@ def test_dcp_full_graph():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_dcp_piece_wise():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
