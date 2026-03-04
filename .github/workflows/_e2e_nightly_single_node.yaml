@@ -60,6 +60,7 @@ jobs:
     env:
       HF_HUB_OFFLINE: 1
       VLLM_USE_MODELSCOPE: True
+      LD_LIBRARY_PATH: /usr/local/lib:${{ env.LD_LIBRARY_PATH }}
     steps:
       - name: Check npu and CANN info
         run: |
@@ -130,6 +131,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
+          LD_LIBRARY_PATH: /usr/local/lib:${{ env.LD_LIBRARY_PATH }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           echo "Running pytest with tests path: ${{ inputs.tests }}"
@@ -143,6 +145,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
           CONFIG_YAML_PATH: ${{ inputs.config_file_path }}
+          LD_LIBRARY_PATH: /usr/local/lib:${{ env.LD_LIBRARY_PATH }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
