@@ -60,9 +60,6 @@ constexpr uint32_t SPLIT_RMSNRORM_SIZE_TWO = 64;
 constexpr uint32_t ROPE_SPLIT_SIZE_ONE = 64;
 constexpr uint32_t ROPE_SPLIT_SIZE_TWO = 128;
 
-constexpr uint32_t MMSIZE1 = 128 * 192;  // 24576
-constexpr uint32_t MMSIZE2 = 64 * 128;   // 8192
-
 constexpr uint64_t L0_PINGPONG_BUFFER_LEN = 32768;   // 32 KB
 constexpr uint64_t L1_PINGPONG_BUFFER_LEN = 262144;  // 256 KB
 constexpr uint64_t BLOCK_SIZE_16 = 16;
