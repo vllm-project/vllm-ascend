@@ -49,6 +49,8 @@ from vllm_ascend.utils import (
     get_weight_prefetch_method,
     maybe_trans_nz,
     weak_ref_tensors,
+    get_ascend_device_type,
+    AscendDeviceType,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -997,24 +999,46 @@ class AscendMLAImpl(MLAAttentionImpl):
         cache_k_pe = kv_c_and_k_pe_cache[1]
         num_heads = cache_k_pe.size(2)
         latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+
+        chunk_outputs = []
+        chunk_lses = []
+
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             # chunk_seq_lens will be padded when pcp&dcp
             context_seq_len = prefill_metadata.chunked_context.chunk_seq_lens[i]
-            seq_len = torch.stack([current_seq_len, context_seq_len])
-            context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
-            kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=q_nope.dtype, device=q_nope.device)
-            k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_nope.dtype, device=q_nope.device)
-
-            torch_npu.atb.npu_paged_cache_load(
-                cache_kv_c,
-                cache_k_pe,
-                prefill_metadata.block_table,
-                context_seq_len_npu,
-                seq_starts=prefill_metadata.chunked_context.starts[i],
-                key=kv_c_normed,
-                value=k_pe,
-            )
+            context_seq_len_npu = self.get_context_seq_len_npu(
+                i, attn_metadata)
+            kv_c_normed = torch.empty(toks,
+                                      num_heads,
+                                      latent_kv_dim,
+                                      dtype=q_nope.dtype,
+                                      device=q_nope.device)
+            k_pe = torch.empty(toks,
+                               num_heads,
+                               rope_dim,
+                               dtype=q_nope.dtype,
+                               device=q_nope.device)
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                torch_npu.npu_gather_pa_kv_cache(
+                    cache_kv_c,
+                    cache_k_pe,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    seq_offset=prefill_metadata.chunked_context.starts[i],
+                    key=kv_c_normed,
+                    value=k_pe,
+                )
+            else:
+                torch_npu.atb.npu_paged_cache_load(
+                    cache_kv_c,
+                    cache_k_pe,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    seq_starts=prefill_metadata.chunked_context.starts[i],
+                    key=kv_c_normed,
+                    value=k_pe,
+                )
             kv_c_normed, k_pe = self._reorg_kvcache(
                 kv_c_normed,
                 k_pe,
@@ -1027,27 +1051,79 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
-            mask = attn_metadata.attn_mask
-            torch_npu.atb.npu_ring_mla(
-                q_nope=q_nope,
-                q_rope=q_pe,
-                k_nope=k_nope,
-                k_rope=k_pe,
-                value=v,
-                mask=mask,
-                seqlen=seq_len,
-                head_num=self.num_heads,
-                kv_head_num=self.num_heads,
-                pre_out=prefix_output,
-                prev_lse=prefix_lse,
-                qk_scale=self.scale,
-                kernel_type="kernel_type_high_precision",
-                mask_type="no_mask",
-                input_layout="type_bsnd",
-                calc_type="calc_type_default",
-                output=prefix_output,
-                softmax_lse=prefix_lse,
-            )
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(
+                    q_nope,
+                    k_nope,
+                    v,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_heads,
+                    input_layout='TND',
+                    atten_mask=None,
+                    sparse_mode=0,
+                    scale=self.scale,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    softmax_lse_flag=True,
+                    actual_seq_lengths=current_seq_len.cumsum(0).tolist(),
+                    actual_seq_lengths_kv=context_seq_len.cumsum(0).tolist(),
+                )
+                chunk_outputs.append(chunk_out)
+                chunk_lses.append(chunk_lse)
+            else:
+                torch_npu.atb.npu_ring_mla(
+                    q_nope=q_nope,
+                    q_rope=q_pe,
+                    k_nope=k_nope,
+                    k_rope=k_pe,
+                    value=v,
+                    mask=mask,
+                    seqlen=seq_len,
+                    head_num=self.num_heads,
+                    kv_head_num=self.num_heads,
+                    pre_out=prefix_output,
+                    prev_lse=prefix_lse,
+                    qk_scale=self.scale,
+                    kernel_type="kernel_type_high_precision",
+                    mask_type="no_mask",
+                    input_layout="type_bsnd",
+                    calc_type="calc_type_default",
+                    output=prefix_output,
+                    softmax_lse=prefix_lse)
+        if len(chunk_outputs) > 0:
+            num_tokens = q_nope.size(0)
+            D = self.v_head_dim
+            H = self.num_heads
+
+            # Normalize prefix output/lse to [num_tokens, H, D] and [num_tokens, H, 1]
+            prefix_output = prefix_output.to(torch.float32)
+            prefix_lse = prefix_lse.to(torch.float32)
+            if prefix_lse.dim() == 2:
+                prefix_lse = prefix_lse.transpose(0, 1).unsqueeze(-1)
+
+            # Concat output and lse: [num_tokens, H, D+1]
+            all_out_lse = [torch.cat([prefix_output, prefix_lse], dim=-1)]
+            for chunk_out, chunk_lse in zip(chunk_outputs, chunk_lses):
+                chunk_out = chunk_out.to(torch.float32)
+                chunk_lse = chunk_lse.to(torch.float32)
+                if chunk_lse.dim() == 2:
+                    chunk_lse = chunk_lse.transpose(0, 1).unsqueeze(-1)
+                all_out_lse.append(torch.cat([chunk_out, chunk_lse], dim=-1))
+
+            # Stack and split: [N, num_tokens, H, D+1]
+            all_out_lse = torch.stack(all_out_lse, dim=0)
+            N = all_out_lse.size(0)
+            out_flat, lse_flat = torch.split(all_out_lse, [D, 1], dim=-1)
+
+            # Flatten and unbind for npu_attention_update
+            out_list = out_flat.view(N, num_tokens * H, D).unbind(0)
+            lse_list = lse_flat.view(N, num_tokens * H).unbind(0)
+
+            output_final, _ = torch_npu.npu_attention_update(
+                lse_list, out_list, 0)
+            return output_final.view(num_tokens, H, D), None
         return prefix_output, prefix_lse
 
     def _forward_prefill(
@@ -1063,28 +1139,50 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert attn_metadata.prefill is not None
         assert len(kv_c_and_k_pe_cache) > 1
         num_tokens = q_nope.size(0)
-        attn_output = torch.empty(num_tokens, self.num_heads, self.v_head_dim, dtype=q_nope.dtype, device=q_nope.device)
-        attn_lse = torch.empty(self.num_heads, num_tokens, dtype=torch.float32, device=q_nope.device)
-        torch_npu.atb.npu_ring_mla(
-            q_nope=q_nope,
-            q_rope=q_pe,
-            k_nope=k_nope,
-            k_rope=k_pe,
-            value=value,
-            mask=attn_metadata.attn_mask,
-            seqlen=attn_metadata.prefill.query_lens,
-            head_num=self.num_heads,
-            kv_head_num=self.num_heads,
-            pre_out=None,
-            prev_lse=None,
-            qk_scale=self.scale,
-            kernel_type="kernel_type_high_precision",
-            mask_type="mask_type_triu",
-            input_layout="type_bsnd",
-            calc_type="calc_type_first_ring",
-            output=attn_output,
-            softmax_lse=attn_lse,
-        )
+        attn_output = torch.empty(num_tokens,
+                                  self.num_heads,
+                                  self.v_head_dim,
+                                  dtype=q_nope.dtype,
+                                  device=q_nope.device)
+        attn_lse = torch.empty(self.num_heads,
+                               num_tokens,
+                               dtype=torch.float32,
+                               device=q_nope.device)
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(
+                    query=q_nope,
+                    key=k_nope,
+                    value=value,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    atten_mask=attn_metadata.attn_mask.to(torch.bool),
+                    actual_seq_lengths=attn_metadata.prefill.query_lens.cumsum(0).tolist(),
+                    actual_seq_lengths_kv=attn_metadata.prefill.query_lens.cumsum(0).tolist(),
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_heads,
+                    input_layout="TND",
+                    scale=self.scale,
+                    sparse_mode=3,
+                    softmax_lse_flag=True)
+        else:
+            torch_npu.atb.npu_ring_mla(q_nope=q_nope,
+                                    q_rope=q_pe,
+                                    k_nope=k_nope,
+                                    k_rope=k_pe,
+                                    value=value,
+                                    mask=attn_metadata.attn_mask,
+                                    seqlen=attn_metadata.prefill.query_lens,
+                                    head_num=self.num_heads,
+                                    kv_head_num=self.num_heads,
+                                    pre_out=None,
+                                    prev_lse=None,
+                                    qk_scale=self.scale,
+                                    kernel_type="kernel_type_high_precision",
+                                    mask_type="mask_type_triu",
+                                    input_layout="type_bsnd",
+                                    calc_type="calc_type_first_ring",
+                                    output=attn_output,
+                                    softmax_lse=attn_lse)
         attn_output, attn_lse = self._compute_prefill_context(
             q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
         )

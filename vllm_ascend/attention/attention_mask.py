@@ -16,7 +16,7 @@ import torch
 from vllm.distributed import get_pcp_group
 
 from vllm_ascend.platform import ModelConfig
-from vllm_ascend.utils import singleton
+from vllm_ascend.utils import singleton, get_ascend_device_type, AscendDeviceType
 
 
 def _generate_attn_mask(max_seq_len, dtype):
@@ -64,13 +64,19 @@ class AttentionMaskBuilder:
                 mask_value = torch.finfo(torch.float32).min
             else:
                 mask_value = 1
-            prefill_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=dtype), 1)
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                prefill_mask = torch.triu(torch.ones(2048, 2048, device=self.device, dtype=dtype), 1)
+            else:
+                prefill_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=dtype), 1)
             self.mla_mask = torch.where(prefill_mask == 1, mask_value, 0).to(dtype)
         return self.mla_mask
 
     def get_pcp_mla_mask(self, dtype: torch.dtype):
         if self.pcp_mla_mask is None or self.pcp_mla_mask.dtype != dtype:
-            self.pcp_mla_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=dtype), 1)
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                self.pcp_mla_mask = torch.triu(torch.ones(2048, 2048, device=self.device, dtype=dtype), 1)
+            else:
+                self.pcp_mla_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=dtype), 1)
         return self.pcp_mla_mask
 
     def get_swa_mask(self, dtype: torch.dtype, sliding_window):
