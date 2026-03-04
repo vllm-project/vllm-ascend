@@ -2176,7 +2176,7 @@ class NPUModelRunner(GPUModelRunner):
             num_sampled_tokens,
             remove_lora,
             # TODO: The next line is a temporary workaround
-            # to fix the accuracy issue of test_llama32_lora.py, 
+            # to fix the accuracy issue of test_llama32_lora.py,
             # which is introduced by vllm-project/vllm#32005
             num_active_loras=(self.lora_config.max_loras if self.lora_config is not None else num_active_loras),
         ):
