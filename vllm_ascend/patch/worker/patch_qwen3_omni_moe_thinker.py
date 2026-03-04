@@ -19,12 +19,10 @@ from vllm.model_executor.models.utils import WeightsMapper
 
 def _patch_qwen3_omni_thinker_mapper() -> None:
     try:
-        from vllm.model_executor.models.qwen3_omni_moe_thinker import (
-            Qwen3OmniMoeThinkerForConditionalGeneration
-        )
+        from vllm.model_executor.models.qwen3_omni_moe_thinker import Qwen3OmniMoeThinkerForConditionalGeneration
     except Exception:
         return
-    
+
     extra_mapper = WeightsMapper(
         orig_to_new_prefix={
             "lm_head.": "language_model.lm_head.",
