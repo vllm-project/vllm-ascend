@@ -565,10 +565,6 @@ class SpecDecodeBaseProposer(VllmEagleProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
 
-        # copy inputs to buffer for cudagraph
-        # self._set_positions(num_tokens, target_positions)
-        # self.hidden_states[:num_tokens] = target_hidden_states
-
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
             inputs_embeds = self.model.embed_input_ids(
@@ -592,8 +588,6 @@ class SpecDecodeBaseProposer(VllmEagleProposer):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
-        attn_metadata.seq_lens = common_attn_metadata.seq_lens
-        attn_metadata.seq_lens_list = common_attn_metadata.seq_lens.tolist()
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
