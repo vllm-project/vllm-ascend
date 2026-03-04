@@ -107,6 +107,17 @@
 #    Future Plan:
 #       remove this patch once upstream no longer requires these global symbols or
 #       provides a backend-safe initialization path.
+# ** 7. File: platform/patch_metrics_prompt_token_stats.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.metrics.stats.PromptTokenStats.update_from_output`
+#    Why:
+#       Invalid prompt-token breakdown values may lead to negative increments in Prometheus Counter.
+#    How：
+#       Normalize prompt/cached/external token stats to valid ranges before updating metrics.
+#    Related PR (if no, explain why):
+#       No, this is a compatibility guard for current upstream behavior.
+#    Future Plan:
+#       Remove this patch when upstream metrics path guarantees non-negative per-source counters.
 #
 # * Worker Patch:
 # ===============
