@@ -1,8 +1,13 @@
 import torch
+from vllm.triton_utils import HAS_TRITON
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import make_tensor_with_pad
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.triton.penalty import apply_penalties_triton
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
@@ -34,6 +39,44 @@ def random_sample(
     return probs.div_(q).argmax(dim=-1).view(-1)
 
 
+def apply_all_penalties(
+    logits: torch.Tensor,
+    prompt_token_ids: torch.Tensor,
+    presence_penalties: torch.Tensor,
+    frequency_penalties: torch.Tensor,
+    repetition_penalties: torch.Tensor,
+    output_token_ids: list[list[int]],
+) -> torch.Tensor:
+    _, vocab_size = logits.shape
+    output_tokens_t = _convert_to_tensors(output_token_ids, vocab_size, logits.device)
+
+    return apply_penalties_triton(
+        logits,
+        prompt_token_ids,
+        output_tokens_t,
+        presence_penalties,
+        frequency_penalties,
+        repetition_penalties,
+    )
+
+
+def _convert_to_tensors(
+    output_token_ids: list[list[int]],
+    vocab_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    output_tokens_tensor = make_tensor_with_pad(
+        output_token_ids,
+        # Use the value of vocab_size as a pad since we don't have a
+        # token_id of this value.
+        pad=vocab_size,
+        device="cpu",
+        dtype=torch.int64,
+        pin_memory=is_pin_memory_available(),
+    )
+    return output_tokens_tensor.to(device, non_blocking=True)
+
+
 class AscendSampler(Sampler):
     def __init__(self, logprobs_mode=DEFAULT_LOGPROBS_MODE):
         # TODO: support logprobs_mode in vllm-ascend
@@ -58,6 +101,28 @@ class AscendSampler(Sampler):
                     q[i].exponential_(generator=generator)
             self.async_exponential_event.record()
         self.set_q_event(q, self.async_exponential_event)
+
+    def apply_penalties(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        output_token_ids: list[list[int]],
+    ) -> torch.Tensor:
+        if sampling_metadata.no_penalties:
+            return logits
+
+        if not HAS_TRITON:
+            return super().apply_penalties(logits, sampling_metadata, output_token_ids)
+
+        assert sampling_metadata.prompt_token_ids is not None
+        return apply_all_penalties(
+            logits,
+            sampling_metadata.prompt_token_ids,
+            sampling_metadata.presence_penalties,
+            sampling_metadata.frequency_penalties,
+            sampling_metadata.repetition_penalties,
+            output_token_ids,
+        )
 
 
 class AscendTopKTopPSampler(TopKTopPSampler):
