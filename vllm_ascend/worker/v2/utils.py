@@ -15,6 +15,7 @@ def torch_cuda_wrapper():
         torch.cuda.CUDAGraph = torch.npu.NPUGraph
         torch.cuda.graph = torch.npu.graph
         torch.cuda.synchronize = torch.npu.synchronize
+        torch.cuda.set_stream = torch.npu.set_stream
         yield
     finally:
         pass
