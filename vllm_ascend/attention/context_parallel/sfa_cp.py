@@ -54,10 +54,7 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             dtype=torch.int32,
             device=device,
         )
-
-        self.block_arange_buffer = torch.arange(
-            self.pcp_size * self.dcp_size, dtype=torch.int32, device=device
-        )
+        self.block_arange_buffer = torch.arange(self.pcp_size * self.dcp_size, dtype=torch.int32, device=device)
 
     def build(
         self,
