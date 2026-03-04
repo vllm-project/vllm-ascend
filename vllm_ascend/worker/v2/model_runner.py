@@ -216,7 +216,7 @@ class NPUModelRunner(GPUModelRunner):
             self.req_states.next_prefill_tokens,
             idx_mapping,
             query_start_loc,
-            self.req_states.prefill_token_ids.gpu,
+            self.req_states.all_token_ids.gpu,
             self.req_states.prefill_len.gpu,
             self.req_states.num_computed_tokens.gpu,
         )
