@@ -1,8 +1,9 @@
 # Batch Invariance
 
-!!! note
-    Batch invariance is currently in beta. Some features are still under active development.
-    Track progress and planned improvements at <https://github.com/vllm-project/vllm-ascend/issues/5487>
+```{note}
+Batch invariance is currently in beta. Some features are still under active development.
+Track progress and planned improvements at <https://github.com/vllm-project/vllm-ascend/issues/5487>
+```
 
 This document shows how to enable batch invariance in vLLM-Ascend. Batch invariance ensures that the output of a model is deterministic and independent of the batch size or the order of requests in a batch.
 
@@ -20,6 +21,11 @@ Batch invariance is crucial for several use cases:
 Batch invariance currently requires Ascend NPUs for 910B,
 because only 910B supports batch invariance with HCCL communication for now,
 we will support other NPUs in the future.
+
+## Software Requirements
+
+Batch invariance requires a customed operator library for 910B.
+We will release the customed operator library in future versions.
 
 ## Enabling Batch Invariance
 
@@ -114,8 +120,9 @@ When batch invariance is enabled, vLLM:
 2. Ensures consistent numerical behavior across different batch sizes
 3. Disables certain optimizations that may introduce non-determinism
 
-!!! note
-    Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
+```{note}
+Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
+```
 
 ## Future Improvements
 
