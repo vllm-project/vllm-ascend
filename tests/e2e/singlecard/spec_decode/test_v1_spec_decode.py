@@ -27,8 +27,8 @@ MODELS = {
     },
 }
 
-PARD_MODELS = {
-    "pard": {
+DRAFT_PARALLEL_MODELS = {
+    "draft_parallel": {
         "main": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
         "spec": "amd/PARD-Llama-3.2-1B",
     },
@@ -39,7 +39,7 @@ PARD_MODELS = {
 BASELINES = {
     "eagle": [0.74, 0.44, 0.29],
     "eagle3": [0.68, 0.40, 0.18],
-    "pard": [0.83, 0.50, 0.33, 0.17, 0.17, 0.17, 0.17, 0.00],
+    "draft_parallel": [0.83, 0.50, 0.33, 0.17, 0.17, 0.17, 0.17, 0.00],
 }
 
 
@@ -441,7 +441,7 @@ def test_llama_qwen_eagle_acceptance(
     assert match
 
 
-@pytest.mark.parametrize("method", PARD_MODELS.keys())
+@pytest.mark.parametrize("method", DRAFT_PARALLEL_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
 def test_parallel_drafting_acceptance(
@@ -451,11 +451,10 @@ def test_parallel_drafting_acceptance(
 ):
     """
     Test acceptance rate for parallel drafting speculative decoding
-    using a smaller draft model (e.g. PARD-Llama-3.2-1B) with
-    parallel_drafting enabled.
+    using a smaller draft model with parallel_drafting enabled.
     """
-    main_model_name = PARD_MODELS[method]["main"]
-    spec_model_name = PARD_MODELS[method]["spec"]
+    main_model_name = DRAFT_PARALLEL_MODELS[method]["main"]
+    spec_model_name = DRAFT_PARALLEL_MODELS[method]["spec"]
 
     tokenizer = AutoTokenizer.from_pretrained(
         main_model_name,
