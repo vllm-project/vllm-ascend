@@ -13,11 +13,13 @@ from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
+DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 
+def is_false(value: str) -> bool:
+    """Check if the given string value is equivalent to 'false'."""
+    return value.lower() in ("false", "0", "no", "n", "off")
 
 class MooncakeBackend(Backend):
     def __init__(self, parallel_config: ParallelConfig):
@@ -34,8 +36,10 @@ class MooncakeBackend(Backend):
         self.rank = parallel_config.rank
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
-            soc_version = get_ascend_device_type()
-            if soc_version in {AscendDeviceType.A2}:
+            # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
+            # and only can be uesd for 800 I/T A3 series. 
+            # Required supporting hardware versions are as follows:
+            if is_false(os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM",'0')):
                 transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
                 self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
                 ret = self.store.setup(
@@ -70,8 +74,7 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-        soc_version = get_ascend_device_type()
-        if soc_version in {AscendDeviceType.A2}:
+        if is_false(os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM",'0')):
             global_te.register_buffer(ptrs, lengths)
 
     def exists(self, keys: list[str]) -> list[int]:
