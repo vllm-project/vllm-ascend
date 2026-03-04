@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import torch
 
 # Third Party
-from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip

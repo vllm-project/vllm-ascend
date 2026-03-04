@@ -125,7 +125,7 @@ Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and 
 
 `export ASCEND_ENABLE_USE_FABRIC_MEM=1`: Enable unified memory address direct transmission scheme.
 `export ASCEND_BUFFER_POOL=4:8`: ASCEND_BUFFER_POOL is the environment variable for configuring the number and size of buffer on NPU Device for aggregation and KV transfer，the value 4:8 means we allocate 4 buffers of size 8MB.
-Only one of the above two parameters can be enabled at a time. We recommend enabling `export ASCEND_BUFFER_POOL=4:8` for the A2 series and `export ASCEND_ENABLE_USE_FABRIC_MEM=1` for the A3 series.
+Only one of the above two parameters can be enabled at a time. `export ASCEND_BUFFER_POOL=4:8` is recommended for 800 I/T A2 series and `export ASCEND_ENABLE_USE_FABRIC_MEM=1` is recommended for 800 I/T A3 series.
 
 
 `prefill` Node：
