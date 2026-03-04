@@ -362,8 +362,8 @@ class TestNPUWorker(TestBase):
             mock_create.assert_called_once()
             self.assertIsNotNone(worker.profiler)
 
-    def test_profile_restart_keeps_trace_name(self):
-        """[RFC #6954] Restarting profile reuses existing profiler, keeps original trace name"""
+    def test_profile_restart_reuses_existing_profiler(self):
+        """[RFC #6954] Restarting profile (stop then start) reuses existing profiler, does not call _create_profiler again"""
         from vllm_ascend.worker.worker import NPUWorker
 
         profiler_config = ProfilerConfig(
