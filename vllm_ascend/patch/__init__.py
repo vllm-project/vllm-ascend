@@ -107,6 +107,27 @@
 #    Future Plan:
 #       remove this patch once upstream no longer requires these global symbols or
 #       provides a backend-safe initialization path.
+# ** 7. File: platform/patch_glm_thinking_mode.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionRequest.build_chat_params`
+#    Why:
+#       When caller sets `"thinking": {"type": "disabled"}` in the Chat Completion API request,
+#       vLLM silently ignores the field because it is an undeclared extra-field on the Pydantic
+#       model.  Without forwarding it to the chat template, GLM-5 (and similar GLM models) still
+#       generate a full `<think>…reasoning…</think>` block.  The `<think>` special token is then
+#       filtered by `skip_special_tokens=True`, while the `</think>` text and all reasoning
+#       content remain visible in the API response `content` field – violating the non-thinking
+#       contract.
+#    How：
+#       Monkey-patch `build_chat_params` to extract the `thinking` extra-field value and inject
+#       the corresponding `enable_thinking` boolean into `chat_template_kwargs`.  A user-supplied
+#       `enable_thinking` in `chat_template_kwargs` always takes precedence.
+#    Related PR (if no, explain why):
+#       This is a GLM-specific mapping between the OpenAI `thinking` parameter and the GLM chat
+#       template's `enable_thinking` kwarg.  Upstream vLLM does not have this mapping.
+#    Future Plan:
+#       Push a generic `thinking` -> `enable_thinking` translation upstream to vLLM so that the
+#       patch can be removed.
 #
 # * Worker Patch:
 # ===============
