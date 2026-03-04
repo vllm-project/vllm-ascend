@@ -65,6 +65,7 @@ class NPUModelRunner(GPUModelRunner):
         self.cudagraph_manager: AclGraphManager = AclGraphManager(
             self.vllm_config,
             self.uses_mrope,
+            self.use_aux_hidden_state_outputs,
             self.device,
         )
 
@@ -263,7 +264,7 @@ class NPUModelRunner(GPUModelRunner):
         # vllm gpu_model_runner_v2, maybe we don't overwrite `prepare_inputs`
         # method like this.
         attn_metadata = build_attn_metadata(
-            attn_metadata_builders=self.attn_metadata_builders,
+            attn_groups=self.attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
             query_start_loc_gpu=query_start_loc,

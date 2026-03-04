@@ -39,6 +39,7 @@ class AclGraphManager(CudaGraphManager):
         self,
         vllm_config: VllmConfig,
         use_mrope: bool,
+        use_aux_hidden_state_outputs: bool,
         device: torch.device,
     ):
         with torch_cuda_wrapper():
