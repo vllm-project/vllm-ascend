@@ -451,33 +451,6 @@ class NPUPlatform(Platform):
             speculative_config.enforce_eager = False
 
     @classmethod
-    def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
-        """
-        Apply the platform-specific default values to the config.
-
-        This function is called during the initialization of global VllmConfig,
-        after parsing cli arguments but BEFORE sequence parallelism imports.
-
-        We must disable enable_sp and fuse_gemm_comms here because the vLLM
-        sequence parallelism code imports matcher_utils.py which accesses
-        CUDA-specific torch.ops._C ops at module level, causing import errors
-        on NPU platform.
-        """
-        # Disable sequence parallelism to prevent import of CUDA-specific ops
-        # in vllm/compilation/passes/fusion/matcher_utils.py
-        if vllm_config.compilation_config is not None:
-            pass_config = vllm_config.compilation_config.pass_config
-            if pass_config.enable_sp:
-                logger.info(
-                    "Sequence Parallelism (enable_sp) is not supported on NPU, "
-                    "disabling. Use vllm-ascend's Flash Comm instead."
-                )
-                pass_config.enable_sp = False
-            if pass_config.fuse_gemm_comms:
-                logger.info("fuse_gemm_comms is not supported on NPU, disabling.")
-                pass_config.fuse_gemm_comms = False
-
-    @classmethod
     def import_kernels(cls) -> None:
         # Directly importing vllm_ascend_C prevents ASCEND_RT_VISIBLE_DEVICES
         # from being applied during runtime initialization, which causes bugs
