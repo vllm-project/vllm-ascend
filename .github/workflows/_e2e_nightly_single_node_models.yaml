@@ -186,6 +186,7 @@ jobs:
           TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
         run: |
           mkdir -p ./benchmarks/accuracy
+          echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Received model_list: ${{ inputs.model_list }}"
           models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
           any_failure=0
