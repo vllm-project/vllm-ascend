@@ -20,7 +20,7 @@ import triton  # type: ignore
 import triton.language as tl  # type: ignore
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice, get_element
+from vllm_ascend.ops.triton.triton_utils import extract_slice, get_element, get_vectorcore_num, insert_slice
 
 
 @triton.jit
@@ -552,13 +552,13 @@ def split_qkv_rmsnorm_rope_impl(
         # x*ROPE_DIM*2 : cos/sin
         # x*q_head_num*HEAD_DIM*2： normalized_values_tmp
         # x*q_head_num*ROPE_DIM*(0.5) (not IS_PARTIAL_ROPE) x*q_head_num*ROPE_DIM*(0.5): y
-        UB_SIZE = 87040 # 85K = 85 * 1024
+        UB_SIZE = 87040  # 85K = 85 * 1024
         # the factor is the sum of elements number
         if IS_PARTIAL_ROPE:
             factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 4 + q_head_num * rope_dim
             batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
         else:
-            factor = 5 * q_hidden_size * head_dim + 3 * kv_hidden_size * head_dim + rope_dim * 2 + q_head_num * rope_dim // 2
+            factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 2 + q_head_num * rope_dim // 2
             batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
         batch_size_per_iter_per_vec = max(1, batch_size_per_iter_per_vec)
         qk_head_num_sum = int(q_head_num + kv_head_num)
