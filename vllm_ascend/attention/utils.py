@@ -116,6 +116,11 @@ class AscendPrefillContextParallelMetadata:
     # the number of tokens padded in linear-attn per rank
     pcp_padded_tokens_fla: int = 0
 
+    # the max number of unpadded tokens in all ranks
+    max_num_tokens_across_pcp: int = 0
+
+    # to be renamed 每个rank上处理的pad前的token数
+    total_num_scheduled_tokens: int = 0
 
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):

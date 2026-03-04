@@ -431,6 +431,7 @@ class PCPManager:
             self.max_num_tokens_across_pcp = max_scheduled_tokens
             self.pcp_tokens_padded = pcp_tokens[: self.num_reqs]
             self.num_scheduled_tokens_padded = np.array(self.pcp_tokens_padded, dtype=np.int32)
+            self.total_num_scheduled_tokens = num_padded_scheduled_tokens[:self.num_reqs].sum()
             return num_padded_scheduled_tokens, positions_linear
         else:
             # Build the restore index used after allgather.
@@ -473,11 +474,10 @@ class PCPManager:
         if self.pcp_use_hybrid_attn:
             assert self.num_scheduled_tokens_padded is not None
             num_tokens = self.num_scheduled_tokens_padded.sum()
-        pcp_padded_slot_mapping = (
-            self.pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
-            if not self.pcp_use_hybrid_attn
-            else self.pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size]
-        )
+        if not self.pcp_use_hybrid_attn or self.total_num_sampled_tokens_pcp != num_tokens_padded:
+            pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
+        else:
+            pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size]
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[: num_tokens * self.pcp_world_size]
         pcp_padded_slot_mapping.fill_(-1)
         pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping
@@ -506,11 +506,11 @@ class PCPManager:
                 restore_idx,
             )
         else:
-            if self.pcp_padded_tokens_fla > 0:
+            if hidden_states.shape[0] == self.total_num_scheduled_tokens and self.pcp_padded_tokens_fla > 0:
                 hidden_states = F.pad(
                     hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode="constant", value=0
                 )
-            hidden_states = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
+            hidden_states = get_pcp_group().all_gather(hidden_states[:self.max_num_tokens_across_pcp].contiguous(), dim=0)
             restore_idx = self.pcp_enter_fa_restore_idx[: hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
             return torch.index_select(hidden_states, 0, restore_idx)
 
@@ -915,6 +915,8 @@ class PCPManager:
                     long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
                         : pcp_unpad_mask.sum() + num_decodes * (self.pcp_world_size - 1)
                     ]
+                    long_seq_metadata.max_num_tokens_across_pcp = self.max_num_tokens_across_pcp
+                    long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
                 long_seq_metadata.q_full_idx = self.q_full_idx

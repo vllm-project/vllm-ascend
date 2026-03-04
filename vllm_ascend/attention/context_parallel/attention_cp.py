@@ -216,6 +216,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 pcp_fa_query_idx=common_long_seq_metadata.pcp_fa_query_idx,
                 pcp_padded_tokens_fla=common_long_seq_metadata.pcp_padded_tokens_fla,
                 pcp_enter_fa_restore_idx=common_long_seq_metadata.pcp_enter_fa_restore_idx,
+                max_num_tokens_across_pcp=common_long_seq_metadata.max_num_tokens_across_pcp,
+                total_num_scheduled_tokens=common_long_seq_metadata.total_num_scheduled_tokens,
             )
 
             prefill_metadata = AscendMetadataForPrefill(
@@ -475,9 +477,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         kv_with_q_head_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_head_mask_idx
         kv_with_q_tail_nomask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_nomask_idx
         kv_with_q_tail_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx
-        if attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
-            fa_query_idx = attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx
-            query = torch.index_select(query, 0, fa_query_idx)
 
         q_head = torch.index_select(query, 0, q_head_idx)
         q_tail = torch.index_select(query, 0, q_tail_idx)
@@ -830,10 +829,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             [query.reshape(num_tokens, -1), key.reshape(num_tokens, -1), value.reshape(num_tokens, -1)],
             dim=-1,
         )
-        if pcp_padded_tokens_fla > 0:
-            qkv_fla = F.pad(qkv_fla, pad=(0, 0, 0, pcp_padded_tokens_fla), mode="constant", value=0)
-        all_qkv = get_pcp_group().all_gather(qkv_fla[:num_tokens_pcp_padded_fla].contiguous(), dim=0)
-
+        if num_tokens == attn_metadata.prefill.pcp_metadata.total_num_scheduled_tokens:
+            if pcp_padded_tokens_fla > 0:
+                qkv_fla = F.pad(qkv_fla, pad=(0, 0, 0, pcp_padded_tokens_fla), mode="constant", value=0)
+        all_qkv = get_pcp_group().all_gather(qkv_fla[:attn_metadata.prefill.pcp_metadata.max_num_tokens_across_pcp].contiguous(), dim=0)
         # Restore the original sequence order using pre-computed indices
         pcp_enter_fa_restore_idx = (
             attn_metadata.prefill.pcp_metadata.pcp_enter_fa_restore_idx if attn_metadata.prefill.pcp_metadata else None
@@ -857,9 +856,14 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             ],
             dim=-1,
         )
-
+        q_fa = query.new_empty(
+            (num_actual_tokens_pcp_padded // self.pcp_size, self.num_heads * self.head_size)
+        )
+        q_fa[:attn_metadata.num_decode_tokens] = q[:decode_offset:self.pcp_size]
+        pcp_fa_query_idx = attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx
+        q_fa[attn_metadata.num_decode_tokens:] = torch.index_select(q[decode_offset:],0,pcp_fa_query_idx)
         return (
-            q.reshape(-1, self.num_heads, self.head_size),
+            q_fa.reshape(-1, self.num_heads, self.head_size),
             k.reshape(-1, self.num_kv_heads, self.head_size),
             v.reshape(-1, self.num_kv_heads, self.head_size),
         )
