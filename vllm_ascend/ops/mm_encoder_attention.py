@@ -102,7 +102,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         is_reshaped = query.dim() == 4
 
         # Directly use seq_lens cpu cache to avoid d2h copy.
-        global seq_lens_cpu_cache
         if cu_seqlens is None:
             cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
         seq_lens_cpu = torch.diff(cu_seqlens).to("cpu")
