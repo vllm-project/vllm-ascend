@@ -99,6 +99,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_reqs=self.max_num_reqs,
             vocab_size=self.vocab_size,
             device=self.device,
+            req_states=self.req_states,
             logprobs_mode=self.model_config.logprobs_mode,
             num_speculative_tokens=self.num_speculative_steps + 1,
         )
