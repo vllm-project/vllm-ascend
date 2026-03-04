@@ -532,7 +532,11 @@ class NPUWorker(WorkerBase):
             if self.profiler is None:
                 self.profiler = self._create_profiler(trace_name)
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
-            self.profiler.start()
+                self.profiler.start()  # type: ignore[attr-defined]
+            else:
+                # Profiler already initialized. Restart profiling but keep
+                # the original trace name from the first initialization.
+                self.profiler.start()
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
@@ -583,7 +587,6 @@ class NPUWorker(WorkerBase):
             raise RuntimeError("torch_profiler_dir cannot be empty.")
         if envs_ascend.MSMONITOR_USE_DAEMON:
             raise RuntimeError("MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time.")
-
 
         experimental_config = torch_npu.profiler._ExperimentalConfig(
             export_type=torch_npu.profiler.ExportType.Text,
