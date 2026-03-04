@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (  # noqa
     ReplicatedLinear,
     RowParallelLinear,
     UnquantizedLinearMethod,
+    register_weight_loader_v2_supported_method,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
@@ -43,6 +44,7 @@ from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import enable_sp, maybe_trans_nz
 
 
+@register_weight_loader_v2_supported_method
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
     """Linear method without quantization"""
 
