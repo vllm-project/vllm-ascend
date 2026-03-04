@@ -106,6 +106,7 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
+from vllm_ascend.patch.worker.patch_qwen3_quarot import patch_load_weights
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
@@ -2422,6 +2423,8 @@ class NPUModelRunner(GPUModelRunner):
                 model_register(self.model)
             if self.drafter:
                 logger.info("Loading drafter model...")
+                if self.vllm_config.quant_config is not None:
+                    patch_load_weights(self.vllm_config)
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
