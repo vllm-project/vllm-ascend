@@ -537,6 +537,14 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request, block_ids)
+
     def request_finished_all_groups(
         self,
         request: "Request",
@@ -817,6 +825,18 @@ class MooncakeLayerwiseConnectorScheduler:
                 logger.error(f"Failed to connect to metaserver: {url}, retry {retry} time.")
                 if retry == 3:
                     raise e
+
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """
+        Once a request is finished, determine whether request blocks
+        should be freed now or will be sent asynchronously and freed later.
+        """
+        # layer_wise push, not need delay_free_blocks
+        return False, None
 
     def request_finished_all_groups(
         self,
