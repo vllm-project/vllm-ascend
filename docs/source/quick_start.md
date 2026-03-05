@@ -82,7 +82,7 @@ yum update -y && yum install -y curl
 ::::
 :::::
 
-The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developers immediately make changes effective without requiring a new installation.
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developers make changes effective immediately without requiring a new installation.
 
 ## Usage
 
@@ -99,7 +99,7 @@ There are two ways to start vLLM on Ascend NPU:
 :::::{tab-set}
 ::::{tab-item} Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing).
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inference).
 
 Try to run below Python script directly or use `python3` shell to generate texts:
 

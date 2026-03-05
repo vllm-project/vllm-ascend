@@ -39,7 +39,7 @@ export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
 docker run --rm \
 --name $NAME \
 --net=host \
@@ -70,7 +70,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## Deployment
 
-### Service-oriented  Deployment
+### Service-oriented Deployment
 
 - `DeepSeek-R1-W8A8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8).
 
@@ -303,7 +303,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model path/DeepSeek-R1-W8A8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model path/DeepSeek-R1-W8A8  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
