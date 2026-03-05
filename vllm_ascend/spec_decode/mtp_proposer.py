@@ -15,11 +15,11 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla, update_cos_sin
-from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
+from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import lmhead_tp_enable
 
 
-class MtpProposer(EagleProposer):
+class AscendMtpProposer(AscendEagleProposer):
     # TODO: Find out why ModelRunner does not this explicit typing?
     model: nn.Module | ACLGraphWrapper
 
