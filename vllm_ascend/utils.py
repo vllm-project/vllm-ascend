@@ -258,10 +258,19 @@ def enable_custom_op():
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
+    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
     global _CUSTOM_OP_ENABLED
 
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
+
+    # There are some customed operators which aren't implemented
+    # with batch invariant in vllm-ascend, we need to disable them.
+    if vllm_is_batch_invariant():
+        _CUSTOM_OP_ENABLED = False
+        return _CUSTOM_OP_ENABLED
+
     try:
         # isort: off
         # register custom ops into torch_library here
