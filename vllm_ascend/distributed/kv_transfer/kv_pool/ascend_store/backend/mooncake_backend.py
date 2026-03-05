@@ -17,9 +17,11 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import g
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 
+
 def is_false(value: str) -> bool:
     """Check if the given string value is equivalent to 'false'."""
     return value.lower() in ("false", "0", "no", "n", "off")
+
 
 class MooncakeBackend(Backend):
     def __init__(self, parallel_config: ParallelConfig):
