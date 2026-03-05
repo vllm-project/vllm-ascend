@@ -1144,9 +1144,6 @@ class NPUModelRunner(GPUModelRunner):
                         "it when the requests need prompt logprobs"
                     )
 
-                if self.dynamic_eplb:
-                    self.eplb_updator.forward_before()
-
                 num_reqs = self.input_batch.num_reqs
                 req_ids = self.input_batch.req_ids
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
@@ -1255,11 +1252,12 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors,
             )
 
-            if self.dynamic_eplb:
-                self.eplb_updator.take_update_info_from_eplb_process()
-
             # update global cos, sin
             update_cos_sin(positions)
+
+        if self.dynamic_eplb:
+            with record_function_or_nullcontext("EPLB weight D2D"):
+                self.eplb_updator.forward_before()
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
@@ -1507,7 +1505,8 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         if self.dynamic_eplb:
-            self.eplb_updator.forward_end()
+            with record_function_or_nullcontext("EPLB update"):
+                self.eplb_updator.forward_end()
 
         if self.debugger is not None:
             self.debugger.stop()
@@ -2354,7 +2353,6 @@ class NPUModelRunner(GPUModelRunner):
             if is_profile and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if self.dynamic_eplb:
-                self.eplb_updator.take_update_info_from_eplb_process()
                 self.eplb_updator.forward_end()
             return hidden_states, hidden_states
 
