@@ -17,7 +17,6 @@
 #
 import torch
 import torch_npu
-
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.device.mxfp_compat import (

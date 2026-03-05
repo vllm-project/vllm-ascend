@@ -150,7 +150,7 @@ static aclnnStatus ParamsDataContiguous(MoeGroupedMatmulParams &params, aclOpExe
 }
 
 static aclnnStatus GetGMMResultByL0Api(MoeGroupedMatmulParams &params, uint64_t *workspaceSize, aclOpExecutor **executor) {
-  auto uniqueExecutor = CREATE_EXECUTOR();  // fixed writen style, create OpExecutor
+  auto uniqueExecutor = CREATE_EXECUTOR();  // fixed written style, create OpExecutor
   aclOpExecutor *executorPtr = uniqueExecutor.get();
   CHECK_RET(executorPtr != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
   // op::Shape wqbmmNzShape = (*params.weight)[0]->GetStorageShape();
