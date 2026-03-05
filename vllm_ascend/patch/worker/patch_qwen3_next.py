@@ -18,11 +18,6 @@
 import torch
 import torch_npu
 from einops import rearrange
-<<<<<<< HEAD
-from torch import nn
-=======
-from vllm.config import CUDAGraphMode
->>>>>>> c0a7943a (Fix Lint)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
@@ -55,7 +50,6 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
         projected_states_ba, _ = self.in_proj_ba(hidden_states)
-<<<<<<< HEAD
 
         mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
             projected_states_qkvz,
@@ -65,25 +59,6 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
             self.head_k_dim,
             self.head_v_dim,
         )
-=======
-        forward_context = get_forward_context()
-        is_cuda_graph = forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
-        # triton grid should be less than 66536
-        divide_grid = projected_states_qkvz.shape[0] * triton.cdiv(self.num_k_heads, self.tp_size)
-        if self.num_v_heads // self.num_k_heads in [1, 2, 4] and is_cuda_graph and divide_grid < 65536:
-            mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
-                projected_states_qkvz,
-                projected_states_ba,
-                triton.cdiv(self.num_k_heads, self.tp_size),
-                triton.cdiv(self.num_v_heads, self.tp_size),
-                self.head_k_dim,
-                self.head_v_dim,
-            )
-        else:
-            query, key, value, z, b, a = self.fix_query_key_value_ordering(projected_states_qkvz, projected_states_ba)
-            query, key, value = map(lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value))
-            mixed_qkv = torch.cat((query, key, value), dim=-1)
->>>>>>> c0a7943a (Fix Lint)
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
