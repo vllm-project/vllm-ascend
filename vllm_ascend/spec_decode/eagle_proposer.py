@@ -181,7 +181,8 @@ class SpecDecodeBaseProposer(EagleProposer):
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
         target_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
 
-        self.model = self._get_model()
+        with self.maybe_eager_context:
+            self.model = self._get_model()
 
         indexer_layers = get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys()
         draft_attn_layer = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
