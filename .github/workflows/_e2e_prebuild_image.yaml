@@ -65,13 +65,18 @@ on:
         type: string
         default: 'vllm-ascend-ci-image'
       image_tag:
-        description: 'Tag for the built image (e.g. pr-123, main-12345)'
+        description: 'Tag for the built image (e.g. pr-123-v0.16.0, main-12345)'
         required: true
         type: string
       cache_tag:
         description: 'Tag used for the registry cache (e.g. main, main-a3)'
         required: true
         type: string
+      vllm_tag:
+        description: 'vLLM version tag or commit hash (e.g. v0.16.0, 15d76f74)'
+        required: false
+        type: string
+        default: 'v0.16.0'
       update_cache:
         description: 'Whether to update the registry cache (set true for post-merge builds)'
         required: false
@@ -130,6 +135,7 @@ jobs:
           tags: swr.cn-north-4.myhuaweicloud.com/vllm-ascend/${{ inputs.image_name }}:${{ inputs.image_tag }}
           build-args: |
             PIP_INDEX_URL=https://pypi.org/simple
+            VLLM_TAG=${{ inputs.vllm_tag }}
           provenance: false
           cache-from: |
             type=registry,ref=swr.cn-north-4.myhuaweicloud.com/vllm-ascend/${{ inputs.image_name }}-cache:${{ inputs.cache_tag }}

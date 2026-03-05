@@ -20,7 +20,7 @@
 # - Full tests: triggered when PR has BOTH 'ready' AND 'ready-for-test' labels
 # CI images (A2/A3/310P) are built once and shared between light and full tests.
 
-name: PR-E2E-Test
+name: PR-Test
 
 on:
   pull_request:
@@ -107,11 +107,11 @@ jobs:
       type: pr
 
   # Prebuild CI images (A2/A3/310P) using matrix strategy.
-  # Images are pushed to SWR with PR number based tags.
+  # Images are pushed to SWR with PR number and vLLM version based tags.
   # Built once and shared between light and full E2E tests.
   # Build condition: e2e changes detected AND (light test OR full test will run)
   prebuild-ci-images:
-    name: prebuild-${{ matrix.config.name }}-image
+    name: prebuild-${{ matrix.config.name }}-${{ matrix.vllm_version }}-image
     needs: [changes]
     if: >-
       ${{
@@ -133,21 +133,23 @@ jobs:
           - name: 310p
             dockerfile: Dockerfile.310p
             tag_suffix: '-310p'
+        vllm_version: [v0.16.0, 15d76f74e2fdb12a95ea00f0ca283acf6219a2b7]
     uses: ./.github/workflows/_e2e_prebuild_image.yaml
     with:
       dockerfile: ${{ matrix.config.dockerfile }}
       image_name: vllm-ascend-ci-image
-      image_tag: pr-${{ github.event.pull_request.number }}${{ matrix.config.tag_suffix }}
+      image_tag: pr-${{ github.event.pull_request.number }}-${{ matrix.vllm_version }}${{ matrix.config.tag_suffix }}
       cache_tag: ${{ github.base_ref }}${{ matrix.config.tag_suffix }}
+      vllm_tag: ${{ matrix.vllm_version }}
     secrets: inherit
 
   # Light E2E tests - triggered when PR does NOT have 'ready' label
   # This is the default behavior for PRs without special labels
   e2e-light:
-    name: e2e-light
+    name: e2e-light-${{ matrix.vllm_version }}
     strategy:
       matrix:
-        vllm_version: [15d76f74e2fdb12a95ea00f0ca283acf6219a2b7, v0.16.0]
+        vllm_version: [v0.16.0, 15d76f74e2fdb12a95ea00f0ca283acf6219a2b7]
     needs: [lint, changes, prebuild-ci-images]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
     # AND the PR does NOT have 'ready' label (mutually exclusive with full tests)
@@ -161,18 +163,17 @@ jobs:
       }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
-      vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-north-4.myhuaweicloud.com/vllm-ascend/vllm-ascend-ci-image:pr-${{ github.event.pull_request.number }}
+      image: swr.cn-north-4.myhuaweicloud.com/vllm-ascend/vllm-ascend-ci-image:pr-${{ github.event.pull_request.number }}-${{ matrix.vllm_version }}
       contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
       type: light
 
   # Full E2E tests - triggered when PR has BOTH 'ready' AND 'ready-for-test' labels
   # This is mutually exclusive with light tests
   e2e-full:
-    name: e2e-full
+    name: e2e-full-${{ matrix.vllm_version }}
     strategy:
       matrix:
-        vllm_version: [15d76f74e2fdb12a95ea00f0ca283acf6219a2b7, v0.16.0]
+        vllm_version: [v0.16.0, 15d76f74e2fdb12a95ea00f0ca283acf6219a2b7]
     needs: [lint, changes, prebuild-ci-images]
     # Full tests require both 'ready' AND 'ready-for-test' labels
     if: >-
@@ -185,7 +186,6 @@ jobs:
       }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
-      vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-north-4.myhuaweicloud.com/vllm-ascend/vllm-ascend-ci-image:pr-${{ github.event.pull_request.number }}
+      image: swr.cn-north-4.myhuaweicloud.com/vllm-ascend/vllm-ascend-ci-image:pr-${{ github.event.pull_request.number }}-${{ matrix.vllm_version }}
       contains_310: false
       type: full

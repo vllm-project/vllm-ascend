@@ -3,9 +3,6 @@ name: 'e2e test'
 on:
   workflow_call:
     inputs:
-      vllm:
-        required: true
-        type: string
       image:
         required: true
         type: string
@@ -40,15 +37,6 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-
-      - name: Switch vLLM version
-        working-directory: /vllm-workspace/vllm
-        run: |
-          # vLLM is installed in editable mode, switch to target version
-          git fetch --depth 1 origin ${{ inputs.vllm }}
-          git checkout ${{ inputs.vllm }}
-          # Reinstall vLLM with the new version
-          VLLM_TARGET_DEVICE="empty" pip install -e .[audio] --extra-index https://download.pytorch.org/whl/cpu/
 
       - name: Install test dependencies
         working-directory: /vllm-workspace/vllm-ascend
@@ -156,15 +144,6 @@ jobs:
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-      - name: Switch vLLM version
-        working-directory: /vllm-workspace/vllm
-        run: |
-          # vLLM is installed in editable mode, switch to target version
-          git fetch --depth 1 origin ${{ inputs.vllm }}
-          git checkout ${{ inputs.vllm }}
-          # Reinstall vLLM with the new version
-          VLLM_TARGET_DEVICE="empty" pip install -e .[audio] --extra-index https://download.pytorch.org/whl/cpu/
-
       - name: Install test dependencies
         working-directory: /vllm-workspace/vllm-ascend
         run: |
@@ -219,15 +198,6 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-
-      - name: Switch vLLM version
-        working-directory: /vllm-workspace/vllm
-        run: |
-          # vLLM is installed in editable mode, switch to target version
-          git fetch --depth 1 origin ${{ inputs.vllm }}
-          git checkout ${{ inputs.vllm }}
-          # Reinstall vLLM with the new version
-          VLLM_TARGET_DEVICE="empty" pip install -e .[audio] --extra-index https://download.pytorch.org/whl/cpu/
 
       - name: Install test dependencies
         working-directory: /vllm-workspace/vllm-ascend
@@ -292,15 +262,6 @@ jobs:
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-      - name: Switch vLLM version
-        working-directory: /vllm-workspace/vllm
-        run: |
-          # vLLM is installed in editable mode, switch to target version
-          git fetch --depth 1 origin ${{ inputs.vllm }}
-          git checkout ${{ inputs.vllm }}
-          # Reinstall vLLM with the new version
-          VLLM_TARGET_DEVICE="empty" pip install -e .[audio] --extra-index https://download.pytorch.org/whl/cpu/
-
       - name: Install test dependencies
         working-directory: /vllm-workspace/vllm-ascend
         run: |
@@ -351,15 +312,6 @@ jobs:
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-      - name: Switch vLLM version
-        working-directory: /vllm-workspace/vllm
-        run: |
-          # vLLM is installed in editable mode, switch to target version
-          git fetch --depth 1 origin ${{ inputs.vllm }}
-          git checkout ${{ inputs.vllm }}
-          # Reinstall vLLM with the new version
-          VLLM_TARGET_DEVICE="empty" pip install -e .[audio] --extra-index https://download.pytorch.org/whl/cpu/
-
       - name: Install test dependencies
         working-directory: /vllm-workspace/vllm-ascend
         run: |
@@ -388,15 +340,6 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-
-      - name: Switch vLLM version
-        working-directory: /vllm-workspace/vllm
-        run: |
-          # vLLM is installed in editable mode, switch to target version
-          git fetch --depth 1 origin ${{ inputs.vllm }}
-          git checkout ${{ inputs.vllm }}
-          # Reinstall vLLM with the new version
-          VLLM_TARGET_DEVICE="empty" pip install -e .[audio] --extra-index https://download.pytorch.org/whl/cpu/
 
       - name: Install test dependencies
         working-directory: /vllm-workspace/vllm-ascend
