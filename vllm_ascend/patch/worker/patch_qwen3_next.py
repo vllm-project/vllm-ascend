@@ -51,6 +51,7 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
         projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        num_tokens = projected_states_qkvz.size(0)
 
         mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
             projected_states_qkvz,
