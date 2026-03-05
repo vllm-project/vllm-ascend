@@ -22,24 +22,9 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import Range
 from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
+from vllm_ascend.utils import get_rope_dim
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-
-
-def get_rope_dim(vllm_config):
-    model_config = vllm_config.model_config
-
-    if model_config.use_mla:
-        rope_dim = model_config.hf_text_config.qk_rope_head_dim
-    else:
-        rope_dim = model_config.get_head_size()
-        # For models using partial rope like Qwen3-Next.
-        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
-            rope_dim = int(rope_dim * model_config.hf_text_config.partial_rotary_factor)
-        elif hasattr(model_config.hf_text_config, "rotary_dim"):
-            rope_dim = int(model_config.hf_text_config.rotary_dim)
-
-    return rope_dim
 
 
 class QKNormRopeFusionPattern(BasePattern):
