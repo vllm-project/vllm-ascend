@@ -17,12 +17,63 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
-
+from unittest.mock import patch
 import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
+
+@patch.dict(os.environ, {"LOCAL_WORLD_SIZE": "2"})
+def test_qwen3_moe_npugraph_ex_static_kernel_tp2():
+    if 'HCCL_OP_EXPANSION_MODE' in os.environ:
+        del os.environ['HCCL_OP_EXPANSION_MODE']
+    prompts = [
+        "Hello, my name is", "The president of the United States is",
+        "The capital of France is", "The future of AI is"
+    ]
+    model = "Qwen/Qwen3-30B-A3B"
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+    with VllmRunner(model,
+                    max_model_len=1024,
+                    tensor_parallel_size=2,
+                    compilation_config={
+                        "cudagraph_mode": "FULL_DECODE_ONLY",
+                        "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
+                    },
+                    additional_config={
+                        "ascend_compilation_config": {
+                            "enable_npugraph_ex": True,
+                            "enable_static_kernel": True
+                        }
+                    }) as runner:
+        vllm_fullgraph_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
+
+    with VllmRunner(
+            model,
+            max_model_len=1024,
+            cudagraph_capture_sizes=[4, 8, 24, 48, 60],
+            tensor_parallel_size=2,
+    ) as runner:
+        vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
+
+    vllm_fullgraph_outputs_list = []
+    for output in vllm_fullgraph_outputs:
+        vllm_fullgraph_outputs_list.append(
+            (output.outputs[0].index, output.outputs[0].text))
+
+    vllm_eager_outputs_list = []
+    for output in vllm_eager_outputs:
+        vllm_eager_outputs_list.append(
+            (output.outputs[0].index, output.outputs[0].text))
+
+    check_outputs_equal(
+        outputs_0_lst=vllm_eager_outputs_list,
+        outputs_1_lst=vllm_fullgraph_outputs_list,
+        name_0="vllm_eager_outputs",
+        name_1="vllm_fullgraph_outputs",
+    )
 
 
 def test_qwen3_moe_full_decode_only_tp2():
