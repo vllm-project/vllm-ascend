@@ -1,14 +1,12 @@
 # mypy: ignore-errors
 import math
 
-import numpy as np
 import vllm.model_executor.models.config
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
-from vllm.v1.kv_cache_interface import MambaSpec
 
 
 @classmethod
