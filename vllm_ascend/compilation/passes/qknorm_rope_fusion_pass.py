@@ -23,7 +23,6 @@ from vllm.config.compilation import Range
 from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 
-
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.utils import get_rope_dim
 
