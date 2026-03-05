@@ -35,7 +35,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
     elif method in ("eagle", "eagle3"):
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "draft_model":
-        return DraftModelProposer(vllm_config, device, runner)
+        return AscendDraftModelProposer(vllm_config, device, runner)
     elif method == "mtp":
         return AscendMtpProposer(vllm_config, device, runner)
     else:
