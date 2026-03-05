@@ -390,6 +390,13 @@ class LlamaModel(nn.Module):
 class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
+        target_layer_num = vllm_config.model_config.get_num_layers(
+            vllm_config.parallel_config
+        )
+        # over write model
+        self.model = LlamaModel(
+            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
