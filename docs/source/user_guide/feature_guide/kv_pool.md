@@ -42,7 +42,7 @@ export PYTHONHASHSEED=0
         First, we need to obtain the Mooncake project. Refer to the following command:
 
         ```shell
-        git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+        git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
         ```
 
         (Optional) Replace go install url if the network is poor
@@ -84,6 +84,15 @@ export PYTHONHASHSEED=0
         ```shell
         export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
         ```
+
+### Environment Variables Description
+
+`export ASCEND_ENABLE_USE_FABRIC_MEM=1`: Enable unified memory address direct transmission scheme and only can be used for 800 I/T A3 series. Required supporting hardware versions are as follows:
+
+    HDK >=26.0
+    CANN >= 9.0
+
+`export ASCEND_BUFFER_POOL=4:8`: ASCEND_BUFFER_POOL is the environment variable for configuring the number and size of buffer on NPU Device for aggregation and KV transfer，the value 4:8 means we allocate 4 buffers of size 8MB. It only can be used for 800 I/T A2 series.
 
 ### Run Mooncake Master
 
