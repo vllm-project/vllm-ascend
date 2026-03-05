@@ -51,7 +51,7 @@ from vllm_ascend.utils import (
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.ascend_forward_context import is_capturing
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -1249,7 +1249,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if is_capturing():
+        if ExtraForwardContext.capturing:
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
@@ -1506,7 +1506,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
-        o_proj_input_shape = (forward_context.num_tokens, self.num_heads * self.v_head_dim)
+        o_proj_input_shape = (ExtraForwardContext.num_tokens, self.num_heads * self.v_head_dim)
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess

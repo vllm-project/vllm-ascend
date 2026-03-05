@@ -6,6 +6,7 @@ from vllm.config import get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 
 from vllm_ascend.ascend_config import WeightPrefetchConfig
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.ops.linear import AscendQKVParallelLinear, AscendRowParallelLinear
 from vllm_ascend.utils import is_moe_model
 
@@ -123,8 +124,8 @@ class WeightPrefetchMethod:
             return
         self.mlp.is_active_this_forward = (
             forward_context.layer_idx is not None
-            and forward_context.num_tokens is not None
-            and forward_context.num_tokens < 500
+            and ExtraForwardContext.num_tokens is not None
+            and ExtraForwardContext.num_tokens < 500
         )
         if not self.mlp.is_active_this_forward:
             return

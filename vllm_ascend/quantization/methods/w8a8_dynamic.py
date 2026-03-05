@@ -26,7 +26,7 @@ from vllm.forward_context import get_forward_context
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ascend_forward_context import ExtraForwardContext, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
@@ -234,7 +234,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
-        moe_comm_method = get_forward_context().moe_comm_method
+        moe_comm_method = ExtraForwardContext.moe_comm_method
         if self.dynamic_eplb:
             w1 = layer.w13_weight_list
             w1_scale = layer.w13_weight_scale_fp32_list

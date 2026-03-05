@@ -39,7 +39,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
 from vllm_ascend.utils import weak_ref_tensors
-from vllm_ascend.ascend_forward_context import is_capturing
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
@@ -665,7 +665,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if is_capturing():
+        if ExtraForwardContext.capturing:
             stream = torch_npu.npu.current_stream()
             event = torch.npu.ExternalEvent()
             event.wait(stream)

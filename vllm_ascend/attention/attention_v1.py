@@ -57,7 +57,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
-from vllm_ascend.ascend_forward_context import is_capturing
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -621,7 +621,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
-        if is_capturing():
+        if ExtraForwardContext.capturing:
             # Get workspace from cache or calculate it if not present.
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
@@ -805,7 +805,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if is_capturing():
+        if ExtraForwardContext.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
         torch_npu._npu_paged_attention(
             query=query,

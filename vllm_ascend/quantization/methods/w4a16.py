@@ -24,6 +24,7 @@ from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 
 from .base import AscendMoEScheme
@@ -215,7 +216,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         topk_ids = topk_ids.to(torch.int32)
         topk_weights = topk_weights.to(x.dtype)
 
-        moe_comm_method = get_forward_context().moe_comm_method
+        moe_comm_method = ExtraForwardContext.moe_comm_method
         return moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight_packed,

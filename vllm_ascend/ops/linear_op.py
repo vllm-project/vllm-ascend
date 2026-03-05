@@ -60,6 +60,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.distributed.parallel_state import (
     get_flashcomm2_odp_group,
     get_flashcomm2_otp_group,
@@ -311,8 +312,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             input_parallel = splitted_input[tp_rank].contiguous()
 
         # padding for all-to-all
-        forward_context = get_forward_context()
-        num_padding_tokens = forward_context.pad_size
+        num_padding_tokens = ExtraForwardContext.pad_size
         if num_padding_tokens > 0:
             input_parallel = nn.functional.pad(input_parallel, (0, 0, 0, num_padding_tokens))
 
@@ -368,7 +368,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         else:
             output = output_parallel
 
-        if not forward_context.flash_comm_v1_enabled:
+        if not ExtraForwardContext.flash_comm_v1_enabled:
             # flashcomm1 not enabled
             output = get_tp_group().all_gather(output, 0)
             if num_padding_tokens > 0:
@@ -515,8 +515,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         assert self.quant_method is not None
         try:
             forward_context = get_forward_context()
-            flash_comm_v1_enabled = forward_context.flash_comm_v1_enabled
-            mmrs_fusion = forward_context.mmrs_fusion
+            flash_comm_v1_enabled = ExtraForwardContext.flash_comm_v1_enabled
+            mmrs_fusion = ExtraForwardContext.mmrs_fusion
         except AssertionError:
             flash_comm_v1_enabled = False
             mmrs_fusion = False
@@ -527,7 +527,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
             return tensor_model_parallel_all_reduce(output_parallel)
 
-        pad_size = forward_context.pad_size
+        pad_size = ExtraForwardContext.pad_size
         if pad_size > 0 and not (enable_dsa_cp() and "o_proj" in self.layer.prefix):
             x = F.pad(x, (0, 0, 0, pad_size))
 

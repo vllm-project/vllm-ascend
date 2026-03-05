@@ -43,6 +43,7 @@ from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.utils import (
     enable_sp,
@@ -148,7 +149,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             random_matrix = torch.rand(topk_ids.size(0), global_num_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
-        moe_comm_method = get_forward_context().moe_comm_method
+        moe_comm_method = ExtraForwardContext.moe_comm_method
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
@@ -408,7 +409,7 @@ class AscendFusedMoE(FusedMoE):
                 assert fc3_context.shared_experts is not None
                 shared_out = fc3_context.shared_experts(hidden_states)
                 # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
-                moe_comm_type = forward_context.moe_comm_type
+                moe_comm_type = ExtraForwardContext.moe_comm_type
                 if (
                     moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
                     and not shared_expert_dp_enabled()
@@ -431,16 +432,16 @@ class AscendFusedMoE(FusedMoE):
                     global_num_experts=self.global_num_experts,
                 )
 
-                if isinstance(forward_context.moe_comm_method, AllGatherCommImpl):
+                if isinstance(ExtraForwardContext.moe_comm_method, AllGatherCommImpl):
                     topk_weights = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(topk_weights, True, True)
                     topk_ids = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(topk_ids, True, True)
 
                 set_flash_common3_context(topk_weights=topk_weights, topk_ids=topk_ids)
 
-        hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
+        hidden_states, router_logits, mc2_mask, context_metadata = ExtraForwardContext.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            replace_allreduce=forward_context.flash_comm_v1_enabled,
+            replace_allreduce=ExtraForwardContext.flash_comm_v1_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type,
         )
@@ -491,7 +492,7 @@ class AscendFusedMoE(FusedMoE):
                 else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
             )
             self.moe_load.add_(local_load)
-        routed_out = forward_context.moe_comm_method.finalize(
+        routed_out = ExtraForwardContext.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata,
@@ -652,8 +653,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
         # NOTE: This is exactly the opposite of
         # `maybe_all_reduce_tensor_model_parallel`
-        forward_context = get_forward_context()
-        moe_comm_type = forward_context.moe_comm_type
+        moe_comm_type = ExtraForwardContext.moe_comm_type
         if (
             moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
             and not shared_expert_dp_enabled()
