@@ -51,6 +51,7 @@ from vllm_ascend.utils import (
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+from vllm_ascend.ascend_forward_context import is_capturing
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -1248,7 +1249,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if forward_context.capturing:
+        if is_capturing():
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()

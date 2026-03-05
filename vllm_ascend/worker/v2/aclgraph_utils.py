@@ -21,15 +21,21 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import numpy as np
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionMetadataBuilder
+from vllm.forward_context import set_forward_context, get_forward_context
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.cudagraph_utils import prepare_inputs_to_capture as prepare_inputs_to_capture_gpu
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
 
 class AclGraphManager(CudaGraphManager):
@@ -49,6 +55,35 @@ class AclGraphManager(CudaGraphManager):
                 use_aux_hidden_state_outputs,
                 device,
             )
+
+    def _capture_full_graph(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        model: nn.Module,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None,
+        num_tokens_across_dp: torch.Tensor,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        has_lora: bool = False,
+    ) -> None:
+        """Override _capture_full_graph because we need to set capturing=True in forward context."""
+        # set capturing=True in before model forward.
+        model = ModelWithContext(model)
+        return super()._capture_full_graph(
+            num_tokens,
+            num_reqs,
+            model,
+            input_ids,
+            positions,
+            inputs_embeds,
+            num_tokens_across_dp,
+            attn_metadata,
+            slot_mappings,
+            has_lora,
+        )
 
     def capture_graph(
         self,
@@ -89,9 +124,67 @@ def prepare_inputs_to_capture(
     num_tokens: int,
     input_buffers: InputBuffers,
     block_tables: BlockTables,
-    attn_metadata_builders: list[AttentionMetadataBuilder],
+    attn_groups: list[list[AttentionGroup]],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
-) -> dict[str, Any]:
-    # TODO(Ronald1995): Implement NPU specific input preparation.
-    return {}
+    uniform_decode_query_len: int = 0,
+) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+    if uniform_decode_query_len > 0:
+        num_tokens_per_req = uniform_decode_query_len
+    else:
+        num_tokens_per_req = num_tokens // num_reqs
+
+    query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32) * num_tokens_per_req
+    query_start_loc_np[-1] = num_tokens
+    query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
+    input_buffers.query_start_loc[: num_reqs + 1] = query_start_loc_cpu
+    input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
+    query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
+
+    # HACK(woosuk): For faster warmup, we set seq_lens (GPU) to num_tokens
+    # rather than max_model_len.
+    input_buffers.seq_lens[:num_reqs] = num_tokens
+    input_buffers.seq_lens[num_reqs:] = 0
+    input_buffers.seq_lens_cpu[:num_reqs] = num_tokens
+    input_buffers.seq_lens_cpu[num_reqs:] = 0
+
+    input_buffers.dcp_local_seq_lens[:num_reqs] = num_tokens
+    input_buffers.dcp_local_seq_lens[num_reqs:] = 0
+
+    input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
+    slot_mappings = block_tables.slot_mappings[:, :num_tokens]
+    slot_mappings_by_layer = build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
+
+    attn_metadata = build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=num_reqs,
+        num_tokens=num_tokens,
+        query_start_loc_gpu=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        max_query_len=num_tokens_per_req,
+        seq_lens=input_buffers.seq_lens,
+        max_seq_len=max_model_len,
+        block_tables=input_block_tables,
+        slot_mappings=slot_mappings,
+        kv_cache_config=kv_cache_config,
+        seq_lens_np=input_buffers.seq_lens_np,
+    )
+    return attn_metadata, slot_mappings_by_layer
+
+
+class ModelWithContext(nn.Module):
+    """Define a wrapper model to inject forward context.
+    so we can inherit vllm's CudaGraphManager._capture_full_graph.
+    """
+
+    def __init__(self, original_model):
+        super().__init__()
+        self.original_model = original_model
+
+    def forward(self, *args, **kwargs):
+        # In warmup phase, capturing=False by default.
+        # when capturing, we need to set capturing=True in forward context.
+        forward_context = get_forward_context()
+        forward_context.additional_kwargs.setdefault("capturing", True)
+
+        return self.original_model(*args, **kwargs)

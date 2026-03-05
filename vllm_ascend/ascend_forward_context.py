@@ -7,6 +7,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
+import vllm.envs as envs_vllm
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -272,3 +273,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     return moe_comm_type
+
+
+def is_capturing():
+    """A flag to indicate whether to capture graph."""
+    # TODO(Ronald1995): Unify the method how model runner v1 and v2
+    # set additional forward context.
+    forward_context = get_forward_context()
+    if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        return forward_context.additional_kwargs.get("capturing", False)
+    return forward_context.capturing

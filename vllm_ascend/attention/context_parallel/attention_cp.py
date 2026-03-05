@@ -52,6 +52,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.compilation.acl_graph import get_graph_params, update_graph_params_workspaces
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
+from vllm_ascend.ascend_forward_context import is_capturing
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
@@ -567,7 +568,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         graph_params = get_graph_params()
         forward_context: ForwardContext = get_forward_context()
         num_tokens = query.shape[0]
-        if forward_context.capturing:
+        if is_capturing():
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
