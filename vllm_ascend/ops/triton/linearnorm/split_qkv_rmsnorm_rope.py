@@ -25,224 +25,6 @@ from vllm_ascend.ops.triton.triton_utils import extract_slice, get_element, get_
 
 @triton.jit
 def split_qkv_rmsnorm_rope_kernel(
-    input_ptr,
-    q_ptr,
-    k_ptr,
-    v_ptr,
-    q_weight_ptr,
-    q_bias_ptr,
-    k_weight_ptr,
-    k_bias_ptr,
-    batch_size,
-    q_hidden_size: tl.constexpr,
-    kv_hidden_size: tl.constexpr,
-    total_hidden_size: tl.constexpr,
-    eps: tl.constexpr,
-    Q_BLOCK_SIZE: tl.constexpr,
-    KV_BLOCK_SIZE: tl.constexpr,
-    BIAS: tl.constexpr,
-    HEAD_DIM: tl.constexpr,
-    ROPE_DIM: tl.constexpr,
-    HALF_ROPE_DIM: tl.constexpr,
-    IS_PARTIAL_ROPE: tl.constexpr,
-    positions_gm_ptr,
-    cos_sin_cache_gm_ptr,
-):
-    row_pid = tl.program_id(0)
-    col_pid = tl.program_id(1)
-    row_step = tl.num_programs(0)
-    # q
-    weight_values = tl.load(q_weight_ptr + tl.arange(0, HEAD_DIM))
-    if BIAS:
-        bias_values = tl.load(q_bias_ptr + tl.arange(0, HEAD_DIM))
-    input_offset = row_pid * total_hidden_size
-    output_offset = row_pid * q_hidden_size
-    input_offset_step = row_step * total_hidden_size
-    output_offset_step = row_step * q_hidden_size
-    for row_idx in tl.range(row_pid, batch_size, row_step):
-        col_indices = col_pid * Q_BLOCK_SIZE + tl.arange(0, Q_BLOCK_SIZE)
-        valid_mask = col_indices < q_hidden_size
-        input_values = (
-            tl.load(input_ptr + input_offset + col_indices, mask=valid_mask, other=0.0)
-            .to(tl.float32)
-            .reshape(Q_BLOCK_SIZE // HEAD_DIM, HEAD_DIM)
-        )
-        squares = input_values * input_values
-        variances = tl.sum(squares, axis=1) / HEAD_DIM
-        reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(Q_BLOCK_SIZE // HEAD_DIM, 1)
-        normalized_values = input_values * reciprocal_std  # (Q_BLOCK_SIZE//HEAD_DIM, HEAD_DIM)
-        if BIAS:
-            normalized_values = (normalized_values * weight_values + bias_values).to(tl.bfloat16)
-        else:
-            normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
-
-        pos_values = tl.load(positions_gm_ptr + row_idx)
-        sin_cos_indices = pos_values * ROPE_DIM + tl.arange(0, ROPE_DIM)
-        input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices).reshape(1, ROPE_DIM)
-        cos = extract_slice(
-            input_values,
-            offsets=(0, 0),
-            sizes=(1, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-        sin = extract_slice(
-            input_values,
-            offsets=(0, HALF_ROPE_DIM),
-            sizes=(1, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-
-        x1 = extract_slice(
-            normalized_values,
-            offsets=(0, 0),
-            sizes=(Q_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-        x2 = extract_slice(
-            normalized_values,
-            offsets=(0, HALF_ROPE_DIM),
-            sizes=(Q_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-        cat_x = tl.zeros((Q_BLOCK_SIZE // HEAD_DIM, ROPE_DIM), dtype=tl.bfloat16)
-        cat_x = insert_slice(
-            cat_x,
-            x1 * cos - x2 * sin,
-            offsets=(0, 0),
-            sizes=(Q_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-        cat_x = insert_slice(
-            cat_x,
-            x2 * cos + x1 * sin,
-            offsets=(0, HALF_ROPE_DIM),
-            sizes=(Q_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-        if IS_PARTIAL_ROPE:
-            normalized_values = insert_slice(
-                normalized_values,
-                cat_x,
-                offsets=(0, 0),
-                sizes=(Q_BLOCK_SIZE // HEAD_DIM, ROPE_DIM),
-                strides=(1, 1),
-            )
-            tl.store(
-                q_ptr + output_offset + col_indices,
-                normalized_values.reshape(Q_BLOCK_SIZE).to(q_ptr.dtype.element_ty),
-                mask=valid_mask,
-            )
-        else:
-            tl.store(
-                q_ptr + output_offset + col_indices,
-                cat_x.reshape(Q_BLOCK_SIZE).to(q_ptr.dtype.element_ty),
-                mask=valid_mask,
-            )
-        input_offset += input_offset_step
-        output_offset += output_offset_step
-
-    weight_values = tl.load(k_weight_ptr + tl.arange(0, HEAD_DIM))
-    if BIAS:
-        bias_values = tl.load(k_bias_ptr + tl.arange(0, HEAD_DIM))
-    input_offset = row_pid * total_hidden_size + q_hidden_size
-    output_offset = row_pid * kv_hidden_size
-    output_offset_step = row_step * kv_hidden_size
-    for row_idx in tl.range(row_pid, batch_size, row_step):
-        col_indices = col_pid * KV_BLOCK_SIZE + tl.arange(0, KV_BLOCK_SIZE)
-        valid_mask = col_indices < kv_hidden_size
-        input_values = (
-            tl.load(input_ptr + input_offset + col_indices, mask=valid_mask, other=0.0)
-            .to(tl.float32)
-            .reshape(KV_BLOCK_SIZE // HEAD_DIM, HEAD_DIM)
-        )
-        squares = input_values * input_values
-        variances = tl.sum(squares, axis=1) / HEAD_DIM
-        reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(KV_BLOCK_SIZE // HEAD_DIM, 1)
-        normalized_values = input_values * reciprocal_std  # (KV_BLOCK_SIZE/HEAD_DIM, HEAD_DIM)
-        if BIAS:
-            normalized_values = (normalized_values * weight_values + bias_values).to(tl.bfloat16)
-        else:
-            normalized_values = (normalized_values * weight_values).to(tl.bfloat16)
-
-        pos_values = tl.load(positions_gm_ptr + row_idx)
-        sin_cos_indices = pos_values * ROPE_DIM + tl.arange(0, ROPE_DIM)
-
-        input_values = tl.load(cos_sin_cache_gm_ptr + sin_cos_indices).reshape(1, ROPE_DIM)
-        cos = extract_slice(
-            input_values,
-            offsets=(0, 0),
-            sizes=(1, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-        sin = extract_slice(
-            input_values,
-            offsets=(0, HALF_ROPE_DIM),
-            sizes=(1, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-
-        x1 = extract_slice(
-            normalized_values,
-            offsets=(0, 0),
-            sizes=(KV_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-        x2 = extract_slice(
-            normalized_values,
-            offsets=(0, HALF_ROPE_DIM),
-            sizes=(KV_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-        cat_x = tl.zeros((KV_BLOCK_SIZE // HEAD_DIM, ROPE_DIM), dtype=tl.bfloat16)
-        cat_x = insert_slice(
-            cat_x,
-            x1 * cos - x2 * sin,
-            offsets=(0, 0),
-            sizes=(KV_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-        cat_x = insert_slice(
-            cat_x,
-            x2 * cos + x1 * sin,
-            offsets=(0, HALF_ROPE_DIM),
-            sizes=(KV_BLOCK_SIZE // HEAD_DIM, HALF_ROPE_DIM),
-            strides=(1, 1),
-        )
-        if IS_PARTIAL_ROPE:
-            normalized_values = insert_slice(
-                normalized_values,
-                cat_x,
-                offsets=(0, 0),
-                sizes=(KV_BLOCK_SIZE // HEAD_DIM, ROPE_DIM),
-                strides=(1, 1),
-            )
-            tl.store(
-                k_ptr + output_offset + col_indices,
-                normalized_values.reshape(KV_BLOCK_SIZE).to(k_ptr.dtype.element_ty),
-                mask=valid_mask,
-            )
-        else:
-            tl.store(
-                k_ptr + output_offset + col_indices,
-                cat_x.to(tl.bfloat16).reshape(KV_BLOCK_SIZE),
-                mask=valid_mask,
-            )
-        input_offset += input_offset_step
-        output_offset += output_offset_step
-
-    input_offset = row_pid * total_hidden_size + q_hidden_size + kv_hidden_size
-    output_offset = row_pid * kv_hidden_size
-    for _ in tl.range(row_pid, batch_size, row_step):
-        col_indices = col_pid * KV_BLOCK_SIZE + tl.arange(0, KV_BLOCK_SIZE)
-        valid_mask = col_indices < kv_hidden_size
-        input_values = tl.load(input_ptr + input_offset + col_indices, mask=valid_mask, other=0.0)
-        tl.store(v_ptr + output_offset + col_indices, input_values, mask=valid_mask)
-        input_offset += input_offset_step
-        output_offset += output_offset_step
-
-
-@triton.jit
-def split_qkv_rmsnorm_rope_prefill_kernel(
     input_gm_ptr,
     q_gm_ptr,
     k_gm_ptr,
@@ -506,97 +288,60 @@ def split_qkv_rmsnorm_rope_impl(
     k_output = torch.empty(batch_size, kv_hidden_size, device=input.device, dtype=input.dtype)
     v_output = torch.empty(batch_size, kv_hidden_size, device=input.device, dtype=input.dtype)
 
-    # prefill or decode
-    if batch_size <= num_vectorcore:  # decode
-        KV_BLOCK_SIZE = triton.next_power_of_2(head_dim)
-        assert head_dim == KV_BLOCK_SIZE
-        assert q_hidden_size % kv_hidden_size == 0
-        Q_BLOCK_SIZE = q_hidden_size // kv_hidden_size * head_dim
-        n_cols = kv_hidden_size // KV_BLOCK_SIZE
-        n_rows = num_vectorcore // n_cols
+    q_head_num = q_hidden_size // head_dim
+    kv_head_num = kv_hidden_size // head_dim
 
-        grid = (n_rows, n_cols, 1)
+    # set number of line loading from GM data is x
+    # x*(q_head_num + kv_head_num)*HEAD_DIM: values_tmp
+    # 2x*(q_head_num + kv_head_num)*HEAD_DIM: normalized_values(float32)
+    # x*ROPE_DIM*2 : cos/sin
+    # x*q_head_num*HEAD_DIM*2： normalized_values_tmp
+    # x*q_head_num*ROPE_DIM*(0.5) (not IS_PARTIAL_ROPE) x*q_head_num*ROPE_DIM*(0.5): y
+    UB_SIZE = 87040  # 85K = 85 * 1024
+    # the factor is the sum of elements number
+    if IS_PARTIAL_ROPE:
+        factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 4 + q_head_num * rope_dim
+        batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
+    else:
+        factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 2 + q_head_num * rope_dim // 2
+        batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
+    batch_size_per_iter_per_vec = max(1, batch_size_per_iter_per_vec)
+    qk_head_num_sum = int(q_head_num + kv_head_num)
+    qk_head_nums_per_iter_per_vec = batch_size_per_iter_per_vec * qk_head_num_sum
 
-        split_qkv_rmsnorm_rope_kernel[grid](
-            input,
-            q_output,
-            k_output,
-            v_output,
-            q_weight,
-            q_bias,
-            k_weight,
-            k_bias,
-            batch_size,
-            q_hidden_size,
-            kv_hidden_size,
-            total_hidden_size,
-            eps,
-            Q_BLOCK_SIZE,
-            KV_BLOCK_SIZE,
-            BIAS,
-            head_dim,
-            rope_dim,
-            rope_dim // 2,
-            IS_PARTIAL_ROPE,
-            positions,
-            cos_sin_cache,
-        )
+    grid = (num_vectorcore, 1, 1)
+    # v tiling
+    v_batch_size_per_iter_per_vec = UB_SIZE / torch.bfloat16.itemsize // (kv_hidden_size + 1)
 
-    else:  # prefill
-        q_head_num = q_hidden_size // head_dim
-        kv_head_num = kv_hidden_size // head_dim
-
-        # set number of line loading from GM data is x
-        # x*(q_head_num + kv_head_num)*HEAD_DIM: values_tmp
-        # 2x*(q_head_num + kv_head_num)*HEAD_DIM: normalized_values(float32)
-        # x*ROPE_DIM*2 : cos/sin
-        # x*q_head_num*HEAD_DIM*2： normalized_values_tmp
-        # x*q_head_num*ROPE_DIM*(0.5) (not IS_PARTIAL_ROPE) x*q_head_num*ROPE_DIM*(0.5): y
-        UB_SIZE = 87040  # 85K = 85 * 1024
-        # the factor is the sum of elements number
-        if IS_PARTIAL_ROPE:
-            factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 4 + q_head_num * rope_dim
-            batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
-        else:
-            factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 2 + q_head_num * rope_dim // 2
-            batch_size_per_iter_per_vec = int(UB_SIZE / input.element_size()) // factor
-        batch_size_per_iter_per_vec = max(1, batch_size_per_iter_per_vec)
-        qk_head_num_sum = int(q_head_num + kv_head_num)
-        qk_head_nums_per_iter_per_vec = batch_size_per_iter_per_vec * qk_head_num_sum
-
-        grid = (num_vectorcore, 1, 1)
-        # v tiling
-        v_batch_size_per_iter_per_vec = UB_SIZE / torch.bfloat16.itemsize // (kv_hidden_size + 1)
-
-        split_qkv_rmsnorm_rope_prefill_kernel[grid](
-            input,
-            q_output,
-            k_output,
-            v_output,
-            q_weight,
-            q_bias,
-            k_weight,
-            k_bias,
-            batch_size,
-            q_hidden_size,
-            kv_hidden_size,
-            total_hidden_size,
-            eps,
-            BIAS,
-            head_dim,
-            rope_dim,
-            rope_dim // 2,
-            IS_PARTIAL_ROPE,
-            num_vectorcore,
-            int(batch_size_per_iter_per_vec),
-            int(qk_head_nums_per_iter_per_vec),
-            q_head_num,
-            kv_head_num,
-            qk_head_num_sum,
-            int(v_batch_size_per_iter_per_vec),
-            positions,
-            cos_sin_cache,
-        )
+    split_qkv_rmsnorm_rope_kernel[grid](
+        input,
+        q_output,
+        k_output,
+        v_output,
+        q_weight,
+        q_bias,
+        k_weight,
+        k_bias,
+        batch_size,
+        q_hidden_size,
+        kv_hidden_size,
+        total_hidden_size,
+        eps,
+        BIAS,
+        head_dim,
+        rope_dim,
+        rope_dim // 2,
+        IS_PARTIAL_ROPE,
+        num_vectorcore,
+        int(batch_size_per_iter_per_vec),
+        int(qk_head_nums_per_iter_per_vec),
+        q_head_num,
+        kv_head_num,
+        qk_head_num_sum,
+        int(v_batch_size_per_iter_per_vec),
+        positions,
+        cos_sin_cache,
+    )
     return q_output, k_output, v_output
 
 
