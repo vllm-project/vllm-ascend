@@ -59,6 +59,7 @@ def init_ascend_model_parallel(
     global _P_TP
     assert _P_TP is None, "distributed prefill tensor parallel group is already initialized"
     prefill_tensor_model_parallel_size = pd_tp_ratio
+    pcp_size = parallel_config.prefill_context_parallel_size
     # divide alltoall groups
     if pd_head_ratio > 1 and get_current_vllm_config().kv_transfer_config.is_kv_producer:
         num_head_replica = get_ascend_config().num_head_replica
@@ -66,14 +67,15 @@ def init_ascend_model_parallel(
         if num_head_replica <= 1:
             group_ranks = all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(0)
         else:
+
             group_ranks = all_ranks.clone().view(
-                global_dp_size, -1, num_head_replica
+                global_dp_size * pcp_size, -1, num_head_replica
             )  # [DP_size, num_head, num_head_replica]
             group_ranks = group_ranks.permute(0, 2, 1)
             group_ranks = group_ranks.reshape(-1, group_ranks.size(-1))  # [DP_size * num_head_replica, num_head]
             alltoall_group_size = group_ranks.size(-1) // remote_tp_size
             group_ranks = group_ranks.unsqueeze(-1).view(
-                global_dp_size, num_head_replica, -1, alltoall_group_size
+                global_dp_size * pcp_size, num_head_replica, -1, alltoall_group_size
             )  # [DP_size, num_head_replica, num_alltoall_group, alltoall_group_size]
             group_ranks = group_ranks.reshape(-1, alltoall_group_size).unbind(0)
         group_ranks = [x.tolist() for x in group_ranks]

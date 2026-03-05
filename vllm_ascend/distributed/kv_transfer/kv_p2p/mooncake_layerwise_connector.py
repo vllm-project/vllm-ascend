@@ -1227,7 +1227,6 @@ class MooncakeLayerwiseConnectorWorker:
                     send_task.group_block_table[i] = block_ids_tensor.view(1, -1)
                     send_task.group_block_len_tensor[i] = torch.tensor([send_task.group_num_tokens[i]], dtype=torch.int32, device=device)
                     send_task.group_seq_start_tensor[i] = torch.tensor([0], dtype=torch.int32, device=device)
-                    print(f'{send_task.group_rearrange_block_ids[i]=} {flat_block_ids=} {send_task.group_num_tokens[i]=}')
 
     def save_kv_layer(
         self,
