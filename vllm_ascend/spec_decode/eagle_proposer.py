@@ -716,6 +716,7 @@ class AscendEagleProposer(EagleProposer):
             if self.method == "mtp":
                 last_hidden_states = hidden_states
             else:
+                # eagle and eagle3 need allgather last_hidden_states
                 last_hidden_states = last_hidden_states[:num_tokens]
                 last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
                 last_hidden_states = torch.index_select(
