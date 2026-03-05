@@ -30,8 +30,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
-from vllm.v1.spec_decode.eagle import EagleProposer as VllmEagleProposer
+from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID, EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -81,7 +80,7 @@ def split_inputs_tp_to_sp(hidden_states, out):
     return out[:padded_num_tokens_per_rank]
 
 
-class EagleProposer(VllmEagleProposer):
+class AscendEagleProposer(EagleProposer):
     _runnable: ACLGraphWrapper | Callable
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
