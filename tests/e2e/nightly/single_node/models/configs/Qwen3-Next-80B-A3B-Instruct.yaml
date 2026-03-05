@@ -24,6 +24,8 @@ _server_cmd: &server_cmd
   - "0.8"
   - "--max-num-seqs"
   - "64"
+  - "--compilation-config"
+  - '{"cudagraph_capture_sizes": [64]}'
 
 _benchmarks: &benchmarks
   perf:
@@ -42,7 +44,7 @@ _benchmarks: &benchmarks
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
     max_out_len: 32768
-    batch_size: 32
+    batch_size: 64
     top_k: 20
     baseline: 95
     threshold: 5
