@@ -536,7 +536,7 @@ class AscendEagleProposer(EagleProposer):
         slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
         self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping[:slot_mapping_lens])
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
-        common_attn_metadata.slot_mapping = self.slot_mapping_group[0][:slot_mapping_lens]
+        common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
         common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
@@ -982,7 +982,7 @@ class AscendEagleProposer(EagleProposer):
             self.slot_mapping_group[draft_step][: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
             self.slot_mapping_group[draft_step][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step][: slot_mapping.shape[0]]
+            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
 
         # Rebuild attention metadata
         attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
