@@ -20,6 +20,8 @@ import os
 
 import torch
 import torch_npu
+from vllm.config import get_current_vllm_config
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
     MRotaryEmbedding,
@@ -222,6 +224,8 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         dtype: torch.dtype,
     ) -> None:
         super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
+        vllm_config = get_current_vllm_config()
+        self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
         _record_cos_sin_cache(self.cos_sin_cache)
         _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
 
@@ -236,6 +240,10 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
+        is_draft_model = get_forward_context().is_draft_model
+        flash_comm_v1_enabled = get_forward_context().flash_comm_v1_enabled
+        if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
+            positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
         return torch.ops.vllm.npu_rotary_embedding(
             positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )

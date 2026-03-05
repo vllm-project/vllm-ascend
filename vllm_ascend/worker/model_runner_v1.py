@@ -106,6 +106,7 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
+from vllm_ascend.patch.worker.patch_qwen3_quarot import patch_load_weights
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
@@ -113,8 +114,8 @@ from vllm_ascend.spec_decode.medusa_proposer import MedusaProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (
     check_gdn_layer,
-    enable_flash_comm_v1,
     enable_sp,
+    enable_sp_by_pass,
     is_drafter_moe_model,
     is_moe_model,
     lmhead_tp_enable,
@@ -246,36 +247,7 @@ class NPUModelRunner(GPUModelRunner):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        try:
-            self.dcp_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-            self.pcp_size = get_pcp_group().world_size
-            self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        except Exception:
-            self.dcp_size = 1
-            self.dcp_rank = 0
-            self.pcp_size = 1
-            self.pcp_rank = 0
-        if self.pcp_size > 1:
-            self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
-        max_buffer_num_tokens = self.max_num_tokens
-        if self.pcp_size * self.dcp_size > 1:
-            max_buffer_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_size
-            self.pcp_manager = PCPManager(
-                self.pcp_size,
-                self.pcp_rank,
-                self.dcp_size,
-                self.dcp_rank,
-                max_buffer_num_tokens,
-                self.max_num_reqs,
-                self.device,
-                self.vllm_config,
-                self.use_async_scheduling,
-                self.pin_memory,
-            )
-            # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
-            self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
-            self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
+
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
 
@@ -309,6 +281,38 @@ class NPUModelRunner(GPUModelRunner):
             use_sparse=self.use_sparse,
             use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
         )
+
+        try:
+            self.dcp_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+            self.pcp_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        except Exception:
+            self.dcp_size = 1
+            self.dcp_rank = 0
+            self.pcp_size = 1
+            self.pcp_rank = 0
+        if self.pcp_size > 1:
+            self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
+        max_buffer_num_tokens = self.max_num_tokens
+        if self.pcp_size * self.dcp_size > 1:
+            max_buffer_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_size
+            self.pcp_manager = PCPManager(
+                self.pcp_size,
+                self.pcp_rank,
+                self.dcp_size,
+                self.dcp_rank,
+                max_buffer_num_tokens,
+                self.max_num_reqs,
+                self.device,
+                self.vllm_config,
+                self.use_async_scheduling,
+                self.pin_memory,
+                self.use_sparse,
+            )
+            # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
+            self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
+            self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
 
         self._set_up_drafter()
 
@@ -1745,7 +1749,7 @@ class NPUModelRunner(GPUModelRunner):
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if enable_sp(self.vllm_config):
+        if enable_sp(self.vllm_config) or enable_sp_by_pass(self.vllm_config):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -2300,7 +2304,7 @@ class NPUModelRunner(GPUModelRunner):
                 # tp_size; otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading
                 # to incorrect memory estimation and potentially causing OOM.
                 intermediate_tokens = num_tokens_padded
-                if enable_flash_comm_v1():
+                if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
                     intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
                 if self.intermediate_tensors is None:
@@ -2419,6 +2423,8 @@ class NPUModelRunner(GPUModelRunner):
                 model_register(self.model)
             if self.drafter:
                 logger.info("Loading drafter model...")
+                if self.vllm_config.quant_config is not None:
+                    patch_load_weights(self.vllm_config)
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
@@ -2986,7 +2992,8 @@ class NPUModelRunner(GPUModelRunner):
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
-        super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
+        with update_pass_config(self):
+            super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
@@ -3089,3 +3096,14 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
         yield
     finally:
         setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
+
+
+# TODO: remove it when flash_comm1 is removed
+@contextmanager
+def update_pass_config(model_runner):
+    try:
+        original_pass_config_sp = model_runner.compilation_config.pass_config.enable_sp
+        model_runner.compilation_config.pass_config.enable_sp = enable_sp(model_runner.vllm_config)
+        yield
+    finally:
+        model_runner.compilation_config.pass_config.enable_sp = original_pass_config_sp

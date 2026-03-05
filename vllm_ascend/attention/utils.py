@@ -122,6 +122,7 @@ class AscendPrefillContextParallelMetadata:
     # to be renamed 每个rank上处理的pad前的token数
     total_num_scheduled_tokens: int = 0
 
+
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     """
