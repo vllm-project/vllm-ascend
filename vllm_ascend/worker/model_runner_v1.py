@@ -1827,22 +1827,18 @@ class NPUModelRunner(GPUModelRunner):
         has_lora = len(self.input_batch.lora_id_to_lora_request) > 0 if force_has_lora is None else force_has_lora
 
         # ruff: noqa: E731
-        if vllm_version_is("0.16.0"):
+        def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
+            if force_eager:
+                return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
-            def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
-                if force_eager:
-                    return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
+            if vllm_version_is("0.16.0"):
                 return self.cudagraph_dispatcher.dispatch(
                     num_tokens=num_tokens,
                     has_lora=has_lora,
                     uniform_decode=uniform_decode,
                     disable_full=disable_full,
                 )
-        else:
-
-            def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
-                if force_eager:
-                    return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
+            else:
                 return self.cudagraph_dispatcher.dispatch(
                     num_tokens=num_tokens,
                     has_lora=has_lora,
