@@ -17,7 +17,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.llama import LlamaDecoderLayer
-from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM, LlamaModel
 
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -294,7 +294,7 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
         "input_embeds": 0,
     }
 )
-class LlamaModel(nn.Module):
+class VwnLlamaModel(LlamaModel):
     def __init__(
         self,
         *,
@@ -394,7 +394,7 @@ class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
             vllm_config.parallel_config
         )
         # over write model
-        self.model = LlamaModel(
+        self.model = VwnLlamaModel(
             vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
         )
 
