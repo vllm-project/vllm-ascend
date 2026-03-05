@@ -511,7 +511,7 @@ class NPUWorker(WorkerBase):
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
-    def profile(self, is_start: bool = True):
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:
@@ -580,7 +580,7 @@ class NPUWorker(WorkerBase):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU,
                 ],
-                with_stack=False,
+                with_stack=True,
                 profile_memory=profiler_config.torch_profiler_with_memory,
                 # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
                 # The with_stack option in torch_npu.profiler introduces significant time overhead.
