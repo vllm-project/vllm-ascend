@@ -35,23 +35,36 @@ from vllm.model_executor.layers.linear import (  # noqa
     ReplicatedLinear,
     RowParallelLinear,
     UnquantizedLinearMethod,
-    register_weight_loader_v2_supported_method,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import enable_sp, maybe_trans_nz
+from vllm_ascend.utils import enable_sp, maybe_trans_nz, vllm_version_is
+
+if not vllm_version_is("0.16.0"):
+    from vllm.model_executor.layers.linear import register_weight_loader_v2_supported_method
 
 
-@register_weight_loader_v2_supported_method
-class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
-    """Linear method without quantization"""
+if not vllm_version_is("0.16.0"):
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
-        if "conv1d" not in layer.prefix:
-            layer.weight.data = maybe_trans_nz(layer.weight.data)
+    @register_weight_loader_v2_supported_method
+    class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+        """Linear method without quantization"""
+
+        def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+            super().process_weights_after_loading(layer)
+            if "conv1d" not in layer.prefix:
+                layer.weight.data = maybe_trans_nz(layer.weight.data)
+else:
+
+    class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+        """Linear method without quantization"""
+
+        def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+            super().process_weights_after_loading(layer)
+            if "conv1d" not in layer.prefix:
+                layer.weight.data = maybe_trans_nz(layer.weight.data)
 
 
 # TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group
