@@ -38,13 +38,13 @@ class TestNPUCommunicator(unittest.TestCase):
                 torch.tensor([50, 60])
             ])
 
-        dist.all_to_all = patched_all_to_all
+        torch.distributed.all_to_all = patched_all_to_all
 
         scatter_sizes = [2, 2]
         gather_sizes = [2, 2]
         input_ = torch.tensor([10, 20, 30, 40])
 
-        with patch.dict(dist.distributed_c10d._world.pg_map, {dist.group.WORLD: object()}, clear=False):
+        with patch.dict(dist.distributed_c10d._world.pg_map, {dist.group.WORLD: MagicMock()}, clear=False):
             comm = NPUCommunicator(cpu_group=dist.group.WORLD)
 
         output = comm.all_to_all(input_,
@@ -81,11 +81,11 @@ class TestNPUCommunicator(unittest.TestCase):
                 torch.tensor([[50, 60]])
             ])
 
-        dist.all_to_all = patched_all_to_all
+        torch.distributed.all_to_all = patched_all_to_all
 
         input_ = torch.tensor([[10, 20], [30, 40]])
 
-        with patch.dict(dist.distributed_c10d._world.pg_map, {dist.group.WORLD: object()}, clear=False):
+        with patch.dict(dist.distributed_c10d._world.pg_map, {dist.group.WORLD: MagicMock()}, clear=False):
             comm = NPUCommunicator(cpu_group=dist.group.WORLD)
             output = comm.all_to_all(input_, scatter_dim=0, gather_dim=0)
 
