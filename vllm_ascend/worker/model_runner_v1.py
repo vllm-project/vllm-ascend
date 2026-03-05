@@ -1012,6 +1012,8 @@ class NPUModelRunner(GPUModelRunner):
                 long_seq_metadata = None  # type: ignore
                 num_prefill_reqs = 0
                 num_decode_reqs = 0
+
+            num_rejected_tokens_gpu = None
             if spec_decode_metadata is None:
                 # update pcp related params
                 if self.pcp_size > 1:
@@ -1047,8 +1049,10 @@ class NPUModelRunner(GPUModelRunner):
                     )
                 else:
                     assert self.drafter is not None
-                    common_attn_metadata, token_indices, token_indices_to_sample = self.drafter.prepare_inputs_padded(
-                        common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
+                    common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu = (
+                        self.drafter.prepare_inputs_padded(
+                            common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
+                        )
                     )
                 if self.pcp_size > 1:
                     target_token_ids = input_ids_pcp_full[token_indices]
@@ -1069,7 +1073,7 @@ class NPUModelRunner(GPUModelRunner):
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
                 next_token_ids=next_token_ids,
-                last_token_indices=token_indices_to_sample,
+                token_indices_to_sample=token_indices_to_sample,
                 common_attn_metadata=common_attn_metadata,
                 sampling_metadata=sampling_metadata,
                 req_scheduled_tokens=req_scheduled_tokens,
@@ -1078,6 +1082,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_decode_reqs=num_decode_reqs,
                 scheduler_output=scheduler_output,
                 num_scheduled_tokens=num_scheduled_tokens,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
