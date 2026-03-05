@@ -67,6 +67,7 @@ _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
 _ENABLE_SP = None
+_ENABLE_SP_BY_PASS = None
 _HAS_LAYER_IDX = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
@@ -756,8 +757,19 @@ def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
-def enable_sp_by_pass(vllm_config: VllmConfig):
-    return not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.pass_config.enable_sp
+def enable_sp_by_pass(vllm_config: VllmConfig | None = None):
+    global _ENABLE_SP_BY_PASS
+    if _ENABLE_SP_BY_PASS is not None:
+        return _ENABLE_SP_BY_PASS
+
+    if vllm_config is None:
+        raise RuntimeError("enable_sp_by_pass called before initialization with vllm_config")
+
+    _ENABLE_SP_BY_PASS = (
+        not vllm_config.model_config.enforce_eager
+        and vllm_config.compilation_config.pass_config.enable_sp
+    )
+    return _ENABLE_SP_BY_PASS
 
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
