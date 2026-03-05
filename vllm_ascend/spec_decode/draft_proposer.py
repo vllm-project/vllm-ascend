@@ -11,7 +11,7 @@ from vllm_ascend.spec_decode.eagle_proposer import SpecDecodeBaseProposer
 logger = init_logger(__name__)
 
 
-class DraftModelProposer(SpecDecodeBaseProposer):
+class AscendDraftModelProposer(SpecDecodeBaseProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,

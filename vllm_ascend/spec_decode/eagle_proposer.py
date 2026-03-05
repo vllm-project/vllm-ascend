@@ -30,7 +30,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.eagle import EagleProposer as VllmEagleProposer
+from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
@@ -85,7 +85,7 @@ def split_inputs_tp_to_sp(hidden_states, out):
     return out[:padded_num_tokens_per_rank]
 
 
-class SpecDecodeBaseProposer(VllmEagleProposer):
+class SpecDecodeBaseProposer(EagleProposer):
     _runnable: ACLGraphWrapper | Callable
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
@@ -1506,14 +1506,14 @@ class SpecDecodeBaseProposer(VllmEagleProposer):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        forward_context = get_forward_context()
         if self.method == "mtp":
-            if self.enable_shared_expert_dp:
+            if forward_context.flash_comm_v1_enabled:
                 hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
                 positions = positions.unsqueeze(-1)
                 positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
                 positions = positions.squeeze(-1)
         else:
-            forward_context = get_forward_context()
             if forward_context.flash_comm_v1_enabled:
                 hidden_states = split_inputs_tp_to_sp(hidden_states, hidden_states)
         return hidden_states, positions
@@ -1543,7 +1543,7 @@ class SpecDecodeBaseProposer(VllmEagleProposer):
         return last_hidden_states, positions, hidden_states
 
 
-class EagleProposer(SpecDecodeBaseProposer):
+class AscendEagleProposer(SpecDecodeBaseProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
