@@ -124,7 +124,14 @@ class AscendConfig:
         # npu_fused_infer_attention_score performs better on all scenarios.
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
 
-        self.enable_async_exponential = bool(additional_config.get("enable_async_exponential", False))
+        # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
+        # which make batch_invariant mode not working.
+        # so we disable async exponential when batch_invariant mode is enabled.
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
+        self.enable_async_exponential = (
+            bool(additional_config.get("enable_async_exponential", False)) and not vllm_is_batch_invariant()
+        )
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
