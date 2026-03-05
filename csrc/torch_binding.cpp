@@ -569,6 +569,7 @@ void transpose_kv_cache_by_block(
 
 }
 
+// It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
 std::vector<at::Tensor> moe_grouped_matmul(
     at::Tensor x,
     at::Tensor weight,

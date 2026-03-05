@@ -371,6 +371,7 @@ def unquant_apply_mlp(
         gate_up_out *= topk_scales
 
     # In the small batch scenario, use _C_ascend.moe_grouped_matmul
+    # It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
     if group_list.dim() == 2 and get_forward_context().num_tokens <= DeviceOperator.small_batch_gmm_batch_num:
         hidden_states = torch.ops._C_ascend.moe_grouped_matmul(
             x=gate_up_out,
