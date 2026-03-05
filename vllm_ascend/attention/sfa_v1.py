@@ -421,6 +421,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.is_rope_neox_style = False
             self.use_torch_npu_lightning_indexer = True
 
+        self._use_triton_rope = HAS_TRITON and self.vllm_config.model_config.hf_config.model_type not in ["glm_moe_dsa"]
+
         # Effective in SFA when FlashComm is enabled.
         self.enable_dsa_cp = enable_dsa_cp()
 
@@ -850,7 +852,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
-        if HAS_TRITON:
+        if self._use_triton_rope:
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
             k_li = rope_forward_triton_siso(
@@ -887,7 +889,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
-        if HAS_TRITON:
+        if self._use_triton_rope:
             q_li = rope_forward_triton_siso(
                 q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
             )
@@ -897,7 +899,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             )  # [b,s,64,64+64]
 
             q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
+            if self.is_rope_neox_style:
+                q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
+            else:
+                q_li_pe = torch_npu.npu_interleave_rope(q_li_pe, cos, sin)
             q_li_pe = q_li_pe.squeeze(2)
             q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)  # [b*s,64,128]
 
