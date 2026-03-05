@@ -71,6 +71,13 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "lm_head.": "language_model.lm_head.",
         "model.": "language_model.model.",
     },
+    "qwen2_5_omni_thinker": {
+        "thinker.lm_head.": "language_model.lm_head.",
+        "thinker.model.": "language_model.model.",
+        "thinker.": "",
+        "lm_head.": "language_model.lm_head.",
+        "model.": "language_model.model.",
+    },
 }
 
 # key: model_type
@@ -193,7 +200,7 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         ],
         "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
     },
-    "qwen3_omni_moe_text": {
+    "qwen3_omni_moe": {
         "qkv_proj": [
             "q_proj",
             "k_proj",
@@ -204,6 +211,27 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
             "up_proj",
         ],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "qwen2_5_omni": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "attn.qkv": [
+            "attn.q",
+            "attn.k",
+            "attn.v",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "qkv": [
+            "q",
+            "k",
+            "v",
+        ],
     },
 }
 
