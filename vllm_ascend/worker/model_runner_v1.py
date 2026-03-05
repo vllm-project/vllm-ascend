@@ -124,6 +124,7 @@ from vllm_ascend.utils import (
     is_moe_model,
     lmhead_tp_enable,
     set_weight_prefetch_method,
+    use_sparse_c8_indexer,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -276,15 +277,12 @@ class NPUModelRunner(GPUModelRunner):
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
-        # dsv c8
-        if self.use_sparse and \
-            envs_ascend.VLLM_ASCEND_ENABLE_SPARSE_C8 and \
-            get_ascend_device_type() != AscendDeviceType.A5:
-            self.use_sparse_c8_indexer = True
+        # dsa c8
+        self.use_sparse_c8_indexer = use_sparse_c8_indexer()
+        if self.use_sparse_c8_indexer:
             self.c8_k_cache_dtype = torch.int8
             self.c8_k_scale_cache_dtype = torch.float16
-        else:
-            self.use_sparse_c8_indexer = False
+
         self.attn_backend = get_attn_backend(
             0,
             self.dtype,
