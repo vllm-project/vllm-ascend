@@ -95,10 +95,8 @@ class MulsAddFusionPass(VllmInductorPass):
             logger.debug("MulsAdd fusion not enabled: unsupported dtype %s", dtype)
             return
 
-        # Currently we only register a single pattern instance with a fixed
-        # scalar scale value. If needed, multiple instances with different
-        # scales can be added here in the future.
-        MulsAddPattern(vllm_config, scale=1.0).register(self.pattern_match_passes)
+        routed_scaling_factor = getattr(vllm_config.model_config.hf_text_config, "routed_scaling_factor", 1.0)
+        MulsAddPattern(vllm_config, scale=routed_scaling_factor).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph) -> None:  # type: ignore[override]
         self.begin()
