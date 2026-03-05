@@ -431,6 +431,22 @@ void transpose_kv_cache_by_block_meta(
     return;
 }
 
+at::Tensor npu_causal_conv1d_update_meta(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    const c10::optional<at::Tensor>& conv_state_indices,
+    const c10::optional<at::Tensor>& bias,
+    const c10::optional<at::Tensor>& num_accpeted_tokens,
+    const c10::optional<at::Tensor>& query_start_loc,
+    c10::string_view activation_mode,
+    int64_t pad_slot_id
+    )
+{
+    at::Tensor y = at::empty_symint(x.sym_sizes(), x.options());
+    return y;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -471,5 +487,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
+    // causal_conv1d_update
+    ops.impl("npu_causal_conv1d_update", &vllm_ascend::meta::npu_causal_conv1d_update_meta);
 }
 }
