@@ -75,9 +75,7 @@ class TestEagleProposerInitialization(TestBase):
         init_ascend_config(self.vllm_config)
 
         with set_current_vllm_config(self.vllm_config):
-            proposer = AscendEagleProposer(vllm_config=self.vllm_config,
-                                     device=self.device,
-                                     runner=self.runner)
+            proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
             self.assertEqual(proposer.hidden_size, 4096)
             self.assertTrue(proposer.use_cuda_graph)
@@ -98,9 +96,7 @@ class TestEagleProposerInitialization(TestBase):
         init_ascend_config(self.vllm_config)
 
         with set_current_vllm_config(self.vllm_config):
-            proposer = AscendEagleProposer(vllm_config=self.vllm_config,
-                                     device=self.device,
-                                     runner=self.runner)
+            proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
             self.assertEqual(proposer.hidden_size, 2048)
             self.assertFalse(proposer.use_cuda_graph)
@@ -117,9 +113,7 @@ class TestEagleProposerInitialization(TestBase):
         init_ascend_config(self.vllm_config)
 
         with set_current_vllm_config(self.vllm_config):
-            proposer = AscendEagleProposer(vllm_config=self.vllm_config,
-                                     device=self.device,
-                                     runner=self.runner)
+            proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
             self.assertEqual(proposer.hidden_size, 2048)
             self.assertTrue(proposer.use_cuda_graph)
@@ -136,9 +130,7 @@ class TestEagleProposerInitialization(TestBase):
         init_ascend_config(self.vllm_config)
 
         with set_current_vllm_config(self.vllm_config):
-            proposer = AscendEagleProposer(vllm_config=self.vllm_config,
-                                     device=self.device,
-                                     runner=self.runner)
+            proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
             self.assertEqual(proposer.hidden_size, 2048)
             self.assertFalse(proposer.use_cuda_graph)
@@ -187,9 +179,8 @@ class TestEagleProposerLoadModel(TestBase):
 
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
-        self.proposer = AscendEagleProposer(vllm_config=self.vllm_config,
-                                      device=self.device,
-                                      runner=self.runner)
+        self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
+        self.proposer.parallel_drafting = False
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
@@ -335,9 +326,7 @@ class TestEagleProposerDummyRun(TestBase):
 
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
-        self.proposer = AscendEagleProposer(vllm_config=self.vllm_config,
-                                      device=self.device,
-                                      runner=self.runner)
+        self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
         self.proposer.model = MagicMock()
         self.proposer._runnable = MagicMock()
         self.proposer.update_stream = MagicMock()
@@ -466,9 +455,7 @@ class TestEagleProposerHelperMethods(TestBase):
 
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
-        self.proposer = AscendEagleProposer(vllm_config=self.vllm_config,
-                                      device=self.device,
-                                      runner=self.runner)
+        self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
