@@ -64,7 +64,7 @@ export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
-# Note if you are running bridge network with docker, Please expose available ports for multiple nodes communication in advance
+# Note if you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
 docker run --rm \
 --name $NAME \
 --net=host \

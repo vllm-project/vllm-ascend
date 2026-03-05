@@ -86,9 +86,9 @@ class BudgetRefiner:
                 return k
         return None
 
-    def _get_max_budget(self, num_deocde_tokens, num_decode):
+    def _get_max_budget(self, num_decode_tokens, num_decode):
         """Get the maximum budget according to the number of decoding tokens and the decoding requests."""
-        aligned_ctx = self._align_key(num_deocde_tokens, self.context_keys)
+        aligned_ctx = self._align_key(num_decode_tokens, self.context_keys)
         aligned_dnum = self._align_key(num_decode, self.dnum_keys)
         if aligned_ctx is None or aligned_dnum is None:
             return self.default_budget
@@ -99,7 +99,7 @@ class BudgetRefiner:
         # For debug.
         # logger.info(
         #     f"budget {budget}, ctx,dnum {aligned_ctx, aligned_dnum}, "
-        #     f"raw ctx,dnum {num_deocde_tokens, num_decode}"
+        #     f"raw ctx,dnum {num_decode_tokens, num_decode}"
         # )
         return budget
 
@@ -114,8 +114,8 @@ class BudgetRefiner:
         num_decode = len(num_decode_token_lst)
         if num_decode <= 0:
             return budget
-        num_deocde_tokens = sum(num_decode_token_lst) / num_decode
-        return self._get_max_budget(num_deocde_tokens, num_decode)
+        num_decode_tokens = sum(num_decode_token_lst) / num_decode
+        return self._get_max_budget(num_decode_tokens, num_decode)
 
 
 class SchedulerDynamicBatch(Scheduler):
