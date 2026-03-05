@@ -17,7 +17,7 @@ def fc3_all_gather_and_maybe_unpad_impl(
     x = get_fc3_quant_x_group().all_gather(x, 0)
     dp_metadata = forward_context.dp_metadata
     if dp_metadata is None:
-        pad_size = ExtraForwardContext.pad_size
+        pad_size = ExtraForwardContext.pad_size()
         if pad_size > 0:
             x = x[:-pad_size]
     else:
@@ -25,7 +25,7 @@ def fc3_all_gather_and_maybe_unpad_impl(
         num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
         result = torch.empty((num_tokens_across_dp_cpu.sum(), *x.shape[1:]), device=x.device, dtype=x.dtype)
         dp_size = get_dp_group().world_size
-        x = x.view(dp_size, ExtraForwardContext.padded_length, *x.shape[1:])
+        x = x.view(dp_size, ExtraForwardContext.padded_length(), *x.shape[1:])
         offset = 0
         for idx in range(dp_size):
             num_tokens_dp = num_tokens_across_dp_cpu[idx]

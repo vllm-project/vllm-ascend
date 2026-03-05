@@ -665,7 +665,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if ExtraForwardContext.capturing:
+        if ExtraForwardContext.capturing():
             stream = torch_npu.npu.current_stream()
             event = torch.npu.ExternalEvent()
             event.wait(stream)

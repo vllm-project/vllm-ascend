@@ -124,8 +124,8 @@ class WeightPrefetchMethod:
             return
         self.mlp.is_active_this_forward = (
             forward_context.layer_idx is not None
-            and ExtraForwardContext.num_tokens is not None
-            and ExtraForwardContext.num_tokens < 500
+            and ExtraForwardContext.num_tokens() is not None
+            and ExtraForwardContext.num_tokens() < 500
         )
         if not self.mlp.is_active_this_forward:
             return

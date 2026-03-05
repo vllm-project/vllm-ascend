@@ -135,7 +135,7 @@ class MoECommMethod(ABC):
         # Check constraints
         assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16, torch.int8]
 
-        moe_comm_method = ExtraForwardContext.moe_comm_method
+        moe_comm_method = ExtraForwardContext.moe_comm_method()
         assert moe_comm_method is not None, "Missing communication context"
 
         before_dispatch_evt = torch.npu.current_stream().record_event()

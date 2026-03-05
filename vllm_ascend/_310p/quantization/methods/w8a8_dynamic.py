@@ -126,7 +126,7 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
 
         topk_weights = topk_weights.to(self.in_dtype)
 
-        moe_comm_method = ExtraForwardContext.moe_comm_method
+        moe_comm_method = ExtraForwardContext.moe_comm_method()
 
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,

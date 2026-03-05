@@ -759,7 +759,7 @@ class EagleProposer(VllmEagleProposer):
         input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
 
         forward_context = get_forward_context()
-        ExtraForwardContext.num_tokens = input_batch_size
+        ExtraForwardContext.set_num_tokens(input_batch_size)
         forward_context.num_accept_tokens = batch_size
 
         for draft_step in range(self.num_speculative_tokens - 1):
@@ -1338,8 +1338,7 @@ class EagleProposer(VllmEagleProposer):
                 positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
                 positions = positions.squeeze(-1)
         else:
-            forward_context = get_forward_context()
-            if ExtraForwardContext.flash_comm_v1_enabled:
+            if ExtraForwardContext.flash_comm_v1_enabled():
                 hidden_states = split_inputs_tp_to_sp(hidden_states, hidden_states)
         return hidden_states, positions
 
@@ -1358,7 +1357,7 @@ class EagleProposer(VllmEagleProposer):
                 if hidden_states is not None:
                     hidden_states = last_hidden_states
         else:
-            if ExtraForwardContext.flash_comm_v1_enabled:
+            if ExtraForwardContext.flash_comm_v1_enabled():
                 last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                     last_hidden_states.contiguous(), True
                 )

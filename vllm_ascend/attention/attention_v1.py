@@ -621,7 +621,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
-        if ExtraForwardContext.capturing:
+        if ExtraForwardContext.capturing():
             # Get workspace from cache or calculate it if not present.
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
@@ -805,7 +805,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if ExtraForwardContext.capturing:
+        if ExtraForwardContext.capturing():
             return self.full_graph_pa(query, attn_metadata, output)
         torch_npu._npu_paged_attention(
             query=query,

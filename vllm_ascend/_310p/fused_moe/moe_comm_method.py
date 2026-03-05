@@ -51,7 +51,7 @@ class AllGatherCommImpl310(AllGatherCommImpl):
     ) -> FusedExpertsResult:
         # This method is overridden to use the 310p-specific unified_apply_mlp
         # which provides optimized MLP computation for the 310p platform
-        moe_comm_method = ExtraForwardContext.moe_comm_method
+        moe_comm_method = ExtraForwardContext.moe_comm_method()
         assert moe_comm_method is not None, "Missing communication context"
 
         dispatch_results = self.token_dispatcher.token_dispatch(

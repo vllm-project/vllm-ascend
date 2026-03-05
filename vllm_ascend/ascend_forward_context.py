@@ -1,3 +1,4 @@
+from functools import wraps
 import math
 from contextlib import contextmanager
 from enum import Enum
@@ -11,6 +12,7 @@ import vllm.envs as envs_vllm
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -283,100 +285,126 @@ class ExtraForwardContext:
     """
 
     @staticmethod
-    @property
-    def capturing(self):
+    def get_atrr(name: str, default: Any = None):
+        forward_context = get_forward_context()
+        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+            return forward_context.additional_kwargs.get(name, default)
+        return getattr(forward_context, name, default)
+
+    @staticmethod
+    def set_attr(name: str, val: Any):
+        forward_context = get_forward_context()
+        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+            forward_context.additional_kwargs[name] = val
+        else:
+            setattr(forward_context, name, val)
+
+    @staticmethod
+    def capturing() -> bool:
         """A flag to indicate whether to capture graph."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("capturing", False)
-        return forward_context.capturing
+        return ExtraForwardContext.get_atrr("capturing", False)
 
     @staticmethod
-    @property
-    def moe_comm_type(self):
+    def set_capturing(val: bool):
+        """Set the capturing flag."""
+        ExtraForwardContext.set_attr("capturing", val)
+
+    @staticmethod
+    def moe_comm_type() -> MoECommType | None:
         """The MoE communication type."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("moe_comm_type", None)
-        return forward_context.moe_comm_type
+        return ExtraForwardContext.get_atrr("moe_comm_type", None)
 
     @staticmethod
-    @property
-    def moe_comm_method(self):
+    def set_moe_comm_type(val: MoECommType | None):
+        """Set the MoE communication type."""
+        return ExtraForwardContext.set_attr("moe_comm_type", val)
+
+    @staticmethod
+    def moe_comm_method() -> MoECommMethod | None:
         """The MoE communication method."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("moe_comm_method", None)
-        return forward_context.moe_comm_method
+        return ExtraForwardContext.get_atrr("moe_comm_method", None)
 
     @staticmethod
-    @property
-    def mmrs_fusion(self):
+    def set_moe_comm_method(val: MoECommMethod | None):
+        """Set the MoE communication method."""
+        return ExtraForwardContext.set_attr("moe_comm_method", val)
+
+    @staticmethod
+    def mmrs_fusion() -> bool:
         """A flag to indicate whether to use mmrs fusion."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("mmrs_fusion", False)
-        return forward_context.mmrs_fusion
+        return ExtraForwardContext.get_atrr("mmrs_fusion", False)
 
     @staticmethod
-    @property
-    def num_tokens(self):
+    def set_mmrs_fusion(val: bool):
+        """Set the mmrs fusion flag."""
+        return ExtraForwardContext.set_attr("mmrs_fusion", val)
+
+    @staticmethod
+    def num_tokens() -> int:
         """The number of tokens in the current batch."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("num_tokens", 0)
-        return forward_context.num_tokens
+        return ExtraForwardContext.get_atrr("num_tokens", 0)
 
     @staticmethod
-    @property
-    def flash_comm_v1_enabled(self):
+    def set_num_tokens(val: int):
+        """Set the number of tokens in the current batch."""
+        return ExtraForwardContext.set_attr("num_tokens", val)
+
+    @staticmethod
+    def flash_comm_v1_enabled() -> bool:
         """A flag to indicate whether to use flashcomm v1."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("flash_comm_v1_enabled", False)
-        return forward_context.flash_comm_v1_enabled
+        return ExtraForwardContext.get_atrr("flash_comm_v1_enabled", False)
 
     @staticmethod
-    @property
-    def flashcomm_v2_enabled(self):
+    def set_flash_comm_v1_enabled(val: bool):
+        """Set the flashcomm v1 enabled flag."""
+        return ExtraForwardContext.set_attr("flash_comm_v1_enabled", val)
+
+    @staticmethod
+    def flashcomm_v2_enabled() -> bool:
         """A flag to indicate whether to use flashcomm v2."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("flashcomm_v2_enabled", False)
-        return forward_context.flashcomm_v2_enabled
+        return ExtraForwardContext.get_atrr("flashcomm_v2_enabled", False)
 
     @staticmethod
-    @property
-    def pad_size(self):
+    def set_flashcomm_v2_enabled(val: bool):
+        """Set the flashcomm v2 enabled flag."""
+        return ExtraForwardContext.set_attr("flashcomm_v2_enabled", val)
+
+    @staticmethod
+    def pad_size() -> int:
         """The pad size in the current batch."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("pad_size", 0)
-        return forward_context.pad_size
+        return ExtraForwardContext.get_atrr("pad_size", 0)
 
     @staticmethod
-    @property
-    def padded_length(self):
+    def set_pad_size(val: int):
+        """Set the pad size in the current batch."""
+        return ExtraForwardContext.set_attr("pad_size", val)
+
+    @staticmethod
+    def padded_length() -> int:
         """The padded length in the current batch."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("padded_length", 0)
-        return forward_context.padded_length
+        return ExtraForwardContext.get_atrr("padded_length", 0)
 
     @staticmethod
-    @property
-    def max_tokens_across_dp(self):
+    def set_padded_length(val: int):
+        """Set the padded length in the current batch."""
+        return ExtraForwardContext.set_attr("padded_length", val)
+
+    @staticmethod
+    def max_tokens_across_dp() -> int:
         """The max tokens across dp in the current batch."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("max_tokens_across_dp", 0)
-        return forward_context.max_tokens_across_dp
+        return ExtraForwardContext.get_atrr("max_tokens_across_dp", 0)
 
     @staticmethod
-    @property
-    def mc2_mask(self):
+    def set_max_tokens_across_dp(val: int):
+        """Set the max tokens across dp in the current batch."""
+        return ExtraForwardContext.set_attr("max_tokens_across_dp", val)
+
+    @staticmethod
+    def mc2_mask() -> torch.Tensor | None:
         """The mc2 mask in the current batch."""
-        forward_context = get_forward_context()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return forward_context.additional_kwargs.get("mc2_mask", None)
-        return forward_context.mc2_mask
+        return ExtraForwardContext.get_atrr("mc2_mask", None)
+
+    @staticmethod
+    def set_mc2_mask(val: torch.Tensor | None):
+        """Set the mc2 mask in the current batch."""
+        return ExtraForwardContext.set_attr("mc2_mask", val)

@@ -234,7 +234,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
-        moe_comm_method = ExtraForwardContext.moe_comm_method
+        moe_comm_method = ExtraForwardContext.moe_comm_method()
         if self.dynamic_eplb:
             w1 = layer.w13_weight_list
             w1_scale = layer.w13_weight_scale_fp32_list

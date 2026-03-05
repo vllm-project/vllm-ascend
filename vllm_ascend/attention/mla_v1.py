@@ -1249,7 +1249,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if ExtraForwardContext.capturing:
+        if ExtraForwardContext.capturing():
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
@@ -1506,7 +1506,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
-        o_proj_input_shape = (ExtraForwardContext.num_tokens, self.num_heads * self.v_head_dim)
+        o_proj_input_shape = (ExtraForwardContext.num_tokens(), self.num_heads * self.v_head_dim)
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess

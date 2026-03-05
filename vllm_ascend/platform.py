@@ -621,7 +621,7 @@ class NPUPlatform(Platform):
 
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
         flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
-        pad_size = None
+        pad_size = 0
         padded_length = None
         if flash_comm_v1_enabled or flashcomm_v2_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
