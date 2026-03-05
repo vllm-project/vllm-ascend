@@ -99,6 +99,9 @@ class EplbUpdator:
         self.eplb_process.planner_q.put(1)
 
     def forward_before(self):
+        # Batch after eplb process being triggered, get update info provided by eplb process
+        if self.get_update_info_flag():
+            self.update_info_all = self.eplb_process.block_update_q.get()
         if self.update_expert_weight_flag():
             (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
                 0
@@ -116,11 +119,6 @@ class EplbUpdator:
             # set asynchronous stream for d2d expert weight update
             self.reqs = []
             self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
-
-    def take_update_info_from_eplb_process(self):
-        # Batch after eplb process being triggered, get update info provided by eplb process
-        if self.get_update_info_flag():
-            self.update_info_all = self.eplb_process.block_update_q.get()
 
     def forward_end(self):
         if self.wakeup_eplb_worker_flag():
