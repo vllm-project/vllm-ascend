@@ -88,20 +88,30 @@ class AclGraphManager(CudaGraphManager):
     def capture_graph(
         self,
         num_tokens: int,
+        capture_cg_mode: CUDAGraphMode,
         model: nn.Module,
         input_buffers: InputBuffers,
+        mrope_positions: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
+        attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        has_lora: bool = False,
+        uniform_decode: bool = False,
     ) -> None:
         with torch_cuda_wrapper(), prepare_capture_inputs_wrapper():
             super().capture_graph(
                 num_tokens,
+                capture_cg_mode,
                 model,
                 input_buffers,
+                mrope_positions,
+                inputs_embeds,
                 block_tables,
-                attn_metadata_builders,
+                attn_groups,
                 kv_cache_config,
+                has_lora,
+                uniform_decode,
             )
 
 
