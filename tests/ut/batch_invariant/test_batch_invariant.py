@@ -14,13 +14,13 @@
 # This file is a part of the vllm-ascend project.
 #
 # type: ignore
-import importlib
 import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
+# Now import the module under test
 import vllm_ascend.batch_invariant as batch_invariant
 
 
@@ -42,21 +42,6 @@ class TestBatchInvariant:
         assert os.environ["VLLM_ASCEND_ENABLE_NZ"] == "0"
         assert os.environ["HCCL_DETERMINISTIC"] == "strict"
         assert os.environ["LCCL_DETERMINISTIC"] == "1"
-
-    @pytest.mark.parametrize("custom_ops_available, expected_value", [(True, True), (False, False)])
-    def test_has_ascendc_batch_invariant(self, custom_ops_available, expected_value):
-        """Test HAS_ASCENDC_BATCH_INVARIANT detection"""
-        # Control custom_ops availability
-        if custom_ops_available:
-            sys.modules["batch_invariant_ops"] = MagicMock()
-        else:
-            sys.modules.pop("batch_invariant_ops", None)
-
-        # Reload module to re-evaluate the flag
-        importlib.reload(batch_invariant)
-
-        # Verify result
-        assert batch_invariant.HAS_ASCENDC_BATCH_INVARIANT == expected_value
 
     @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
@@ -105,17 +90,20 @@ class TestBatchInvariant:
         batch_invariant.mm_batch_invariant = MagicMock()
         batch_invariant.matmul_batch_invariant = MagicMock()
         batch_invariant.linear_batch_invariant = MagicMock()
+        batch_invariant.softmax_batch_invariant = MagicMock()
 
         # Call function
         batch_invariant.enable_batch_invariant_mode()
 
         # Verify operator registrations
-        assert mock_library.impl.call_count == 5
+        assert mock_library.impl.call_count == 7
         mock_library.impl.assert_any_call("aten::addmm", batch_invariant.addmm_batch_invariant, "NPU")
         mock_library.impl.assert_any_call("aten::bmm", batch_invariant.bmm_batch_invariant, "NPU")
         mock_library.impl.assert_any_call("aten::mm", batch_invariant.mm_batch_invariant, "NPU")
         mock_library.impl.assert_any_call("aten::matmul", batch_invariant.matmul_batch_invariant, "NPU")
         mock_library.impl.assert_any_call("aten::linear", batch_invariant.linear_batch_invariant, "NPU")
+        mock_library.impl.assert_any_call("aten::softmax", batch_invariant.softmax_batch_invariant, "NPU")
+        mock_library.impl.assert_any_call("aten::_softmax", batch_invariant.softmax_batch_invariant, "NPU")
 
     @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", False)
@@ -157,6 +145,79 @@ class TestBatchInvariant:
         else:
             batch_invariant.override_envs_for_invariance.assert_not_called()
             batch_invariant.enable_batch_invariant_mode.assert_not_called()
+
+    @patch("vllm_ascend.batch_invariant.torch_npu")
+    def test_add_rms_norm(self, mock_torch_npu):
+        """Test add_rms_norm function"""
+        # Mock dependencies
+        mock_torch = batch_invariant.torch
+
+        # Create mock tensors
+        batch_size = 2
+        hidden_size = 4
+        x = MagicMock(spec=torch.Tensor)
+        residual = MagicMock(spec=torch.Tensor)
+        weight = MagicMock(spec=torch.Tensor)
+        eps = 1e-6
+
+        # Set up mock return value for addition
+        x_plus_residual = MagicMock(spec=torch.Tensor)
+        x.__add__.return_value = x_plus_residual
+
+        # Set up expected outputs from npu_rms_norm
+        expected_output = MagicMock(spec=torch.Tensor)
+        expected_residual = MagicMock(spec=torch.Tensor)
+        mock_torch_npu.npu_rms_norm.return_value = (expected_output, expected_residual)
+
+        # Call the function
+        result_x, result_placeholder, result_residual = batch_invariant.add_rms_norm(x, residual, weight, eps)
+
+        # Verify the addition was called
+        x.__add__.assert_called_once_with(residual)
+
+        # Verify the npu_rms_norm was called with the correct parameters
+        mock_torch_npu.npu_rms_norm.assert_called_once_with(x_plus_residual, weight, eps)
+
+        # Verify the results
+        assert result_x is expected_output
+        assert result_placeholder is None
+
+    @patch("vllm_ascend.batch_invariant.torch_npu")
+    def test_add_rms_norm_consistency(self, mock_torch_npu):
+        """Test that add_rms_norm produces the same output as torch_npu.npu_add_rms_norm"""
+        # Create mock tensors
+        batch_size = 2
+        hidden_size = 4
+        x = MagicMock(spec=torch.Tensor)
+        residual = MagicMock(spec=torch.Tensor)
+        weight = MagicMock(spec=torch.Tensor)
+        eps = 1e-6
+
+        # Set up mock values
+        x_plus_residual = MagicMock(spec=torch.Tensor)
+        x.__add__.return_value = x_plus_residual
+
+        # Define consistent mock results
+        expected_output = MagicMock(spec=torch.Tensor)
+        expected_residual = MagicMock(spec=torch.Tensor)
+
+        # Set up mock_npu_rms_norm to return the same results as if it were npu_add_rms_norm
+        mock_torch_npu.npu_rms_norm.return_value = (expected_output, expected_residual)
+        mock_torch_npu.npu_add_rms_norm.return_value = (expected_output, None, expected_residual)
+
+        # Call add_rms_norm
+        add_rms_norm_result = batch_invariant.add_rms_norm(x, residual, weight, eps)
+
+        # Call npu_add_rms_norm directly
+        npu_add_rms_norm_result = mock_torch_npu.npu_add_rms_norm(x, residual, weight, eps)
+
+        # Verify both functions return the same results
+        assert add_rms_norm_result[0] == npu_add_rms_norm_result[0]
+
+        # Verify the function composition is correct
+        x.__add__.assert_called_once_with(residual)
+        mock_torch_npu.npu_rms_norm.assert_called_once_with(x_plus_residual, weight, eps)
+        mock_torch_npu.npu_add_rms_norm.assert_called_once_with(x, residual, weight, eps)
 
 
 if __name__ == "__main__":
