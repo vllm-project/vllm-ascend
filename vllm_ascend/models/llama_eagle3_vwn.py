@@ -16,7 +16,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM, LlamaDecoderLayer
+from vllm.model_executor.models.llama import LlamaDecoderLayer
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
