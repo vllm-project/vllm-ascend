@@ -159,7 +159,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.moe_expert_num,
-            "global_bs": self.global_bs,
+            "global_bs": 0,
             "expert_token_nums_type": 0,
         }
 
@@ -226,6 +226,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             tp_recv_counts,
             expand_scales,
         ) = output[0:7]
+        
+        if not self.with_quant:  # TODO 看下为什么有输入
+            dynamic_scale = None
 
         context_metadata = {
             "topk_ids": topk_ids,
@@ -256,6 +259,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         expand_scales = context_metadata["expand_scales"]
 
         assert expert_map is not None
+        moe_expert_num = len(expert_map)
 
         kwargs_mc2 = {
             "expand_x": hidden_states,
@@ -263,8 +267,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_scales": topk_weights.to(torch.float32),
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
-            "moe_expert_num": self.moe_expert_num,
-            "global_bs": self.global_bs,
+            "moe_expert_num": moe_expert_num,
+            "global_bs": 0,
         }
 
         if self.with_quant:

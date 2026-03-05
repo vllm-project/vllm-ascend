@@ -232,20 +232,53 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 use_mxfp_quant=False,
             )
 
-        out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-            x=x,
+        # out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+        #     x=x,
+        #     weight=[weight],
+        #     group_list=group_list,
+        #     weight_scale=[weight_scale],
+        #     x_scale=x_scale,
+        #     dequant_mode=2,
+        #     quant_mode=2,
+        #     dequant_dtype=torch.float32,
+        #     quant_dtype=torch.float8_e4m3fn,
+        #     weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+        #     x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+        # )
+        # return out, out_scale, None
+        
+        if x.dtype == torch.float8_e4m3fn:  # W4A8
+            scale = None
+            antiquant_scale = [weight_scale]
+            weight_dtype = None
+            x_dtype = torch.float8_e4m3fn
+            x_scale = x_scale.reshape(x_scale.shape[0], -1)
+        else:  # W4A4
+            scale = [weight_scale]
+            antiquant_scale = None
+            weight_dtype = torch_npu.float4_e2m1fn_x2
+            x_dtype = torch_npu.float4_e2m1fn_x2
+            
+        
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[x],
             weight=[weight],
+            scale=scale,
+            antiquant_scale=antiquant_scale,
+            scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            per_token_scale=[x_scale],
+            per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            split_item=2,
+            group_type=0,
             group_list=group_list,
-            weight_scale=[weight_scale],
-            x_scale=x_scale,
-            dequant_mode=2,
-            quant_mode=2,
-            dequant_dtype=torch.float32,
-            quant_dtype=torch.float8_e4m3fn,
-            weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-            x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-        )
-        return out, out_scale, None
+            x_dtype=x_dtype,
+            weight_dtype=weight_dtype,
+            output_dtype=torch.bfloat16
+        )[0]
+        hidden_states = torch_npu.npu_swiglu(hidden_states)
+        hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn, round_mode="rint")
+        
+        return hidden_states, swiglu_out_scale, None
 
     @staticmethod
     def get_quant_gmm2_kwargs(
@@ -342,11 +375,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
+        
+        per_token_scale = per_token_scale.reshape(per_token_scale.shape[0], -1)
 
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=gmm2_weight,
-            scale=gmm2_scale,
+            scale=None,
+            antiquant_scale=gmm2_scale,
             bias=bias,
             per_token_scale=[per_token_scale],
             split_item=2,
@@ -354,7 +390,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             group_type=0,
             group_list=group_list,
             output_dtype=output_dtype,
-            **gmm2_kwargs,
+            scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            x_dtype=torch.float8_e4m3fn,
+            weight_dtype=None,  # W4A8不用传
         )[0]
 
 
