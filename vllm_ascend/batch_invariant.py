@@ -24,6 +24,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.triton_utils import HAS_TRITON
 
+# in case recursive call in reduce_sum.
+torch_sum = torch.sum
+
 logger = init_logger(__name__)
 
 if HAS_TRITON:
@@ -34,6 +37,7 @@ if HAS_TRITON:
         matmul_batch_invariant,
         mm_batch_invariant,
     )
+    from vllm_ascend.ops.triton.batch_invariant.softmax import softmax_batch_invariant
 
 
 try:
@@ -44,10 +48,38 @@ except ImportError:
     HAS_ASCENDC_BATCH_INVARIANT = False
 
 
+def add_rms_norm(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+):
+    """AclnnAddRmsNorm can't ensure batch invariant,
+    so we need to split it into add and rms_norm.
+    """
+    x_ = x + residual
+    residual_ = x_
+    x_, _ = torch_npu.npu_rms_norm(x_, weight, eps)
+    return x_, None, residual_
+
+
+def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -> torch.Tensor:
+    """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
+    doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
+    """
+    dim = -1 if dim is None and x.dim() == 1 else dim
+    if x.device.type == "npu" and dim is not None:
+        return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
+    # cpu tensor can't use npu_reduce_sum_batch_invariant, so we use torch.sum instead.
+    return torch_sum(x, dim, keepdim)
+
+
 def override_envs_for_invariance():
     # enabling NZ mode introduces NZ format input to the triton operator,
     # resulting in accuracy anomalies.
     os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
+    # fused operator can't ensure batch invariant, so we disable it.
+    os.environ["VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE"] = "0"
 
     # communication determinism settings
     os.environ["HCCL_DETERMINISTIC"] = "strict"
@@ -65,6 +97,8 @@ def enable_batch_invariant_mode():
     if HAS_TRITON:
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "NPU")
 
     # Register operators implemented in Ascend batch-invariant ops in priority.
     if HAS_ASCENDC_BATCH_INVARIANT:
@@ -76,6 +110,10 @@ def enable_batch_invariant_mode():
         torch_npu.npu_fused_infer_attention_score = (
             torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
+        # patch npu_add_rms_norm to ensure batch invariant.
+        torch_npu.npu_add_rms_norm = add_rms_norm
+        # torch.sum can't be replaced by dispatch logic, so we patch it directly.
+        torch.sum = reduce_sum
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
