@@ -316,14 +316,12 @@ class AllgatherAddRMSNormPattern(_SequenceParallelPatternHelper
         pm.register_replacement(pattern, replacement, self.get_inputs(),
                                 pm.fwd_only, pm_pass, scalar_workaround=self.get_scalar_inputs())     
 
-
-
-
 class AscendSequenceParallelismPass(VllmInductorPass):
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 
-        self.patterns: PatternMatcherPass = PatternMatcherPass(pass_name="npu_sequence_parallelism_pass")
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="npu_sequence_parallelism_pass")
         self.noop_cleanup = AscendNoOpEliminationPass(config)
 
         for epsilon in [1e-5, 1e-6]:

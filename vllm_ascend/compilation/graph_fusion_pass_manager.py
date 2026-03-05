@@ -70,6 +70,8 @@ class GraphFusionPassManager:
             self.passes.append(MulsAddFusionPass(config))
 
         if config.compilation_config.pass_config.enable_sp:
+            from .passes.allgather_chunk_noop_pass import AllGatherChunkNoOpCleanupPass
             from .passes.sequence_parallelism import AscendSequenceParallelismPass
 
             self.passes.append(AscendSequenceParallelismPass(config))
+            self.passes.append(AllGatherChunkNoOpCleanupPass(config))
