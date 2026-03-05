@@ -82,8 +82,11 @@ def split_qkv_rmsnorm_mrope_kernel(
         # q
         in_q_offset = in_qkv_ptr + (block_offset + index) * (q_size + gate_size + 2 * kv_size)
         if gate_size > 0:
-            in_q_gate_tensor = tl.load(in_q_offset + tl.arange(0, q_size + gate_size)).to(tl.float32).reshape(num_q_heads, head_size * 2)
-
+            in_q_gate_tensor = (
+                tl.load(in_q_offset + tl.arange(0, q_size + gate_size))
+                .to(tl.float32)
+                .reshape(num_q_heads, head_size * 2)
+            )
             in_q_tensor = tl.extract_slice(
                 in_q_gate_tensor,
                 offsets=(0, 0),
