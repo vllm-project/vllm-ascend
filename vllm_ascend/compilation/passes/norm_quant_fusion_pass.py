@@ -294,7 +294,7 @@ class AddRMSNormDynamicQuantPattern(BasePattern):
             """
             Pattern for AddRMSNormQuant fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
+            output = ir.ops.fused_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
             quantized_output = torch.ops.npu.npu_dynamic_quant(out0)
@@ -393,7 +393,7 @@ class AddRMSNormDynamicQuantSPPattern(BasePattern):
             """
             Pattern for AddRMSNormQuant fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
+            output = ir.ops.fused_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
             out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
