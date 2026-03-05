@@ -12,6 +12,7 @@ HEAD_SIZES = [128, 256]
 EPS = [1e-6]
 MROPE_SECTION = [[11, 11, 10], [24, 20, 20]]
 IS_INTERLEAVED = [True, False]
+HAS_GATE = [True, False]
 DTYPES = [torch.bfloat16]
 DEVICES = [f"npu:{0}"]
 DEFAULT_ATOL = 1e-2
@@ -249,6 +250,7 @@ def naive_split_qkv_rmsnorm_mrope_interleaved(
 @pytest.mark.parametrize("eps", EPS)
 @pytest.mark.parametrize("mrope_section", MROPE_SECTION)
 @pytest.mark.parametrize("is_interleaved", IS_INTERLEAVED)
+@pytest.mark.parametrize("has_gate", HAS_GATE)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
@@ -262,7 +264,9 @@ def test_split_qkv_rmsnorm_mrope(
     dtype: torch.dtype,
     device: str,
     is_interleaved: bool,
+    has_gate: bool,
 ):
+
     torch.set_default_device(device)
     init_device_properties_triton()
     rope_dim = 2 * sum(mrope_section)
@@ -270,10 +274,16 @@ def test_split_qkv_rmsnorm_mrope(
     kv_size = num_kv_heads * head_size
 
     # input tensor
-    qkv = torch.randn(num_tokens,
-                      q_size + kv_size * 2,
-                      dtype=dtype,
-                      device=device)
+    if has_gate:
+        qkv = torch.randn(num_tokens,
+                          2 * q_size + kv_size * 2,
+                          dtype=dtype,
+                          device=device)
+    else:
+        qkv = torch.randn(num_tokens,
+                          q_size + kv_size * 2,
+                          dtype=dtype,
+                          device=device)
     q_weight = torch.randn(head_size, dtype=dtype, device=device)
     k_weight = torch.randn(head_size, dtype=dtype, device=device)
     q_bias = None
@@ -286,8 +296,19 @@ def test_split_qkv_rmsnorm_mrope(
     cos = cos.contiguous()
     sin = sin.contiguous()
 
+    if has_gate:
+        q_gate_data = qkv[:, :q_size * 2].view(-1, num_q_heads, head_size * 2)
+        q_data, golden_gate = torch.chunk(q_gate_data, 2, dim=-1)
+        golden_gate = golden_gate.reshape(-1, q_size)
+        q_data = q_data.reshape(-1, q_size)
+        k_data = qkv[:, 2 * q_size:2 * q_size + kv_size]
+        v_data = qkv[:, 2 * q_size + kv_size:]
+        qkv_for_ref = torch.cat([q_data, k_data, v_data], dim=-1)
+    else:
+        qkv_for_ref = qkv
+
     if is_interleaved:
-        golden_q, golden_k, golden_v = naive_split_qkv_rmsnorm_mrope_interleaved(qkv.cpu(),
+        golden_q, golden_k, golden_v = naive_split_qkv_rmsnorm_mrope_interleaved(qkv_for_ref.cpu(),
                                                                  q_weight.cpu(),
                                                                  q_bias,
                                                                  k_weight.cpu(),
@@ -301,7 +322,7 @@ def test_split_qkv_rmsnorm_mrope(
                                                                  mrope_section,
                                                                  rope_dim)
     else:
-        golden_q, golden_k, golden_v = naive_split_qkv_rmsnorm_mrope(qkv.cpu(),
+        golden_q, golden_k, golden_v = naive_split_qkv_rmsnorm_mrope(qkv_for_ref.cpu(),
                                                                     q_weight.cpu(),
                                                                     q_bias,
                                                                     k_weight.cpu(),
@@ -315,7 +336,7 @@ def test_split_qkv_rmsnorm_mrope(
                                                                     mrope_section,
                                                                     rope_dim)
 
-    real_q, real_k, real_v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+    real_q, real_k, real_v, real_gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
             qkv=qkv,
             q_weight=q_weight,
             k_weight=k_weight,
@@ -327,24 +348,30 @@ def test_split_qkv_rmsnorm_mrope(
             mrope_section=mrope_section,
             is_interleaved=is_interleaved,
             rope_dim=rope_dim,
+            has_gate=has_gate,
     )
 
-    # Compare the results.
     torch.testing.assert_close(real_q.cpu(),
-                               golden_q,
+                               golden_q.cpu(),
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
 
     torch.testing.assert_close(real_k.cpu(),
-                               golden_k,
+                               golden_k.cpu(),
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
 
     torch.testing.assert_close(real_v.cpu(),
-                               golden_v,
+                               golden_v.cpu(),
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
+    if has_gate:
+        torch.testing.assert_close(real_gate.cpu(),
+                                golden_gate.cpu(),
+                                atol=DEFAULT_ATOL,
+                                rtol=DEFAULT_RTOL)
 
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+    
