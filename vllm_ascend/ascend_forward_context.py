@@ -12,7 +12,6 @@ import vllm.envs as envs_vllm
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -320,12 +319,12 @@ class ExtraForwardContext:
         return ExtraForwardContext.set_attr("moe_comm_type", val)
 
     @staticmethod
-    def moe_comm_method() -> MoECommMethod | None:
+    def moe_comm_method():
         """The MoE communication method."""
         return ExtraForwardContext.get_atrr("moe_comm_method", None)
 
     @staticmethod
-    def set_moe_comm_method(val: MoECommMethod | None):
+    def set_moe_comm_method(val):
         """Set the MoE communication method."""
         return ExtraForwardContext.set_attr("moe_comm_method", val)
 
