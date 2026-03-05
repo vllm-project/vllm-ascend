@@ -64,11 +64,6 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "mm_projector.linear_1": "mm_projector.proj.0",
         "mm_projector.linear_2": "mm_projector.proj.2",
     },
-    "qwen3_omni_moe": {
-        "thinker.lm_head.": "language_model.lm_head.",
-        "thinker.model.": "language_model.model.",
-        "thinker.": "",
-    },
 }
 
 # key: model_type
