@@ -5,10 +5,12 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
+from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -273,42 +275,33 @@ class AscendSFACPImpl(AscendSFAImpl):
     def indexer_select_post_process(
         self,
         x: torch.Tensor,
-        qr: torch.Tensor,
-        q: torch.Tensor | None,
-        k: torch.Tensor,
+        q_c: torch.Tensor,
         kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         attn_metadata: M,
         cos: torch.Tensor,
         sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
-        need_gather_q_kv: bool = False,
     ):
-        if q is None:
-            q, _ = self.wq_b(qr)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
-            q = q.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
-            cos_q, sin_q = cos, sin
+        weights, _ = self.weights_proj(x)
 
-            q_pe, q_nope = torch.split(
-                q, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
+        q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
+        q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
+        if HAS_TRITON:
+            q_li = rope_forward_triton_siso(
+                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+            )
+        else:
+            q_li_pe, q_li_nope = torch.split(
+                q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
             )  # [b,s,64,64+64]
 
-            q_pe = q_pe.unsqueeze(2)
-            q_pe = torch_npu.npu_rotary_mul(q_pe, cos_q, sin_q)
-            q_pe = q_pe.squeeze(2)
-            q = torch.cat([q_pe, q_nope], dim=-1)  # [b*s,64,128]
+            q_li_pe = q_li_pe.unsqueeze(2)
+            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
+            q_li_pe = q_li_pe.squeeze(2)
+            q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)  # [b*s,64,128]
 
-        if kv_cache is not None:
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event = torch.npu.Event()
-            torch_npu.npu_scatter_nd_update_(
-                kv_cache[2].view(-1, k.shape[-1]), attn_metadata.slot_mapping.view(-1, 1), k.view(-1, k.shape[-1])
-            )  # b, s, n, d
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event.record()
-
-        weights, _ = self.weights_proj(x)
-        weights = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(weights, need_gather_q_kv)
+        q = q_li
 
         key = kv_cache[2]
         assert attn_metadata.sfa_cp_metadata is not None
