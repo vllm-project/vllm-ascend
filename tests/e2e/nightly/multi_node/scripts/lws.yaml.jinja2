@@ -24,6 +24,14 @@ spec:
                 value: "/vllm-workspace"
               - name: FAIL_TAG
                 value: {{ fail_tag | default("FAIL_TAG") }}
+              - name: IS_PR_TEST
+                value: "{{ is_pr_test | default("false") }}"
+              - name: VLLM_VERSION
+                value: {{ vllm_version | default("latest") }}
+              - name: VLLM_ASCEND_REF
+                value: {{ vllm_ascend_ref | default("main") }}
+              - name: VLLM_ASCEND_REMOTE_URL
+                value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
             command:
               - sh
               - -c
@@ -76,6 +84,14 @@ spec:
                 value: "/vllm-workspace"
               - name: FAIL_TAG
                 value: {{ fail_tag | default("FAIL_TAG") }}
+              - name: IS_PR_TEST
+                value: "{{ is_pr_test | default("false") }}"
+              - name: VLLM_VERSION
+                value: {{ vllm_version | default("latest") }}
+              - name: VLLM_ASCEND_REF
+                value: {{ vllm_ascend_ref | default("main") }}
+              - name: VLLM_ASCEND_REMOTE_URL
+                value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
             command:
               - sh
               - -c
