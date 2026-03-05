@@ -18,11 +18,6 @@ DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 
 
-def is_false(value: str) -> bool:
-    """Check if the given string value is equivalent to 'false'."""
-    return value.lower() in ("false", "0", "no", "n", "off")
-
-
 class MooncakeBackend(Backend):
     def __init__(self, parallel_config: ParallelConfig):
         try:
@@ -41,7 +36,7 @@ class MooncakeBackend(Backend):
             # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
             # and only can be used for 800 I/T A3 series.
             # Required supporting hardware versions are as follows:
-            if is_false(os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0")):
+            if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
                 transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
                 self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
                 ret = self.store.setup(
@@ -76,7 +71,7 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-        if is_false(os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0")):
+        if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
             global_te.register_buffer(ptrs, lengths)
 
     def exists(self, keys: list[str]) -> list[int]:
