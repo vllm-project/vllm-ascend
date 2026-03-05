@@ -97,6 +97,9 @@ def quant_apply_mlp(
     dynamic_eplb: bool = False,
     **kwargs,
 ) -> torch.Tensor:
+    if hidden_states.shape[0] == 0:
+        return hidden_states
+
     # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced by different
     # quantization modes will be consolidated into a dataclass in a follow-up.
     use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
