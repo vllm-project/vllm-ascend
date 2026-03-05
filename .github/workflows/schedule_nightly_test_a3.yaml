@@ -25,7 +25,7 @@ on:
       # Run test at 24:00 Beijing time (UTC+8)
       - cron: "0 16 * * *"
   workflow_dispatch:
-  pull_request: 
+  pull_request:
     branches:
       - 'main'
     types: [ labeled ]
@@ -108,7 +108,7 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-  
+
   single-node-tests:
     name: single-node
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
