@@ -580,7 +580,7 @@ class NPUWorker(WorkerBase):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU,
                 ],
-                with_stack=True,
+                with_stack=False,
                 profile_memory=profiler_config.torch_profiler_with_memory,
                 # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
                 # The with_stack option in torch_npu.profiler introduces significant time overhead.
