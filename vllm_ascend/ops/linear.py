@@ -49,7 +49,7 @@ if not vllm_version_is("0.16.0"):
 if not vllm_version_is("0.16.0"):
 
     @register_weight_loader_v2_supported_method
-    class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+    class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):  # type: ignore[no-redef]
         """Linear method without quantization"""
 
         def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -58,7 +58,7 @@ if not vllm_version_is("0.16.0"):
                 layer.weight.data = maybe_trans_nz(layer.weight.data)
 else:
 
-    class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+    class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):  # type: ignore[no-redef]
         """Linear method without quantization"""
 
         def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
