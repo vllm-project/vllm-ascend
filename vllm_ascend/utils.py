@@ -1169,7 +1169,7 @@ def check_gdn_layer(vllm_config) -> bool:
         return False
 
     hf_config = model_config.hf_config
-    
+
     # Use `or []` to prevent errors when layer_types is None
     layer_types = getattr(hf_config, "layer_types", None) or []
     if "linear_attention" in layer_types:
