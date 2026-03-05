@@ -881,8 +881,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                     "Some layers in your model are not quantized with W8A8,"
                     "thus mlapo is disabled for these layers."
                 )
-        if self.enable_mlapo  or self.fa_quant:
+        if self.enable_mlapo:
             self._process_weights_for_fused_mlapo(act_dtype)
+        elif self.fa_quant:
+            
         else:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
@@ -891,6 +893,17 @@ class AscendMLAImpl(MLAAttentionImpl):
             if is_hidden_layer(layer):
                 post_process_after_loading_for_shard_weight_series(layer)
 
+    def _process_weights_for_fused_fa_quant(self):
+        self.gamma1 = self.q_a_layernorm.weight.data  # type: ignore[union-attr]
+        self.gamma2 = self.kv_a_layernorm.weight.data  # type: ignore[union-attr]
+
+        self.wu_q = self.q_proj.weight.data
+        self.wd_q = self.fused_qkv_a_proj.weight.data[..., :self.q_lora_rank].contiguous()  # type: ignore[union-attr]
+        self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.view(1, -1).to(torch.float)
+        q_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[:self.q_lora_rank].contiguous()  # type: ignore[union-attr]
+        self.dequant_scale_w_dq = q_a_proj_deq_scl.view(1,-1).to(torch.float)
+        kv_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[self.q_lora_rank:].contiguous()  # type: ignore[union-attr]
+        self.dequant_scale_w_dkv_kr = kv_a_proj_deq_scl.view(1,-1).to(torch.float)
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()  # type: ignore[union-attr]
         q_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()  # type: ignore[union-attr]
@@ -1402,8 +1415,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
             decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = torch_npu.npu_mla_prolog_v2(
                 quantized_x,
-                self.wd_q_fa3,
-                self.wu_q_fa3,
+                self.wd_q,
+                self.wu_q,
                 self.W_UK_T,
                 self.wd_kv,
                 self.gamma1,
@@ -1414,9 +1427,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 decode_k_nope,
                 decode_k_pe,
                 dequant_scale_x = pertoken_scale.view(-1,1),
-                dequant_scale_w_dq = self.q_a_proj_deq_scl_fa3,
+                dequant_scale_w_dq = self.dequant_scale_w_dq,
                 dequant_scale_w_uq_qr = self.dequant_scale_w_uq_qr,
-                dequant_scale_w_dkv_kr = self.kv_a_proj_deq_scl_fa3,
+                dequant_scale_w_dkv_kr = self.dequant_scale_w_dkv_kr,
                 quant_scale_ckv =ctkv_scale,
                 cache_mode="PA_NZ"
             )
