@@ -604,6 +604,12 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
 
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
+    # This function replaces the default run_engine_core (which is wrapped
+    # by patch_multiproc_executor.py). We must call pdeathsig here because
+    # our replacement discards that wrapper.
+    from vllm_ascend.utils import maybe_set_pdeathsig
+
+    maybe_set_pdeathsig()
 
     # Signal handler used for graceful termination.
     # SystemExit exception is only raised once to allow this and worker

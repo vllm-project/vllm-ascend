@@ -20,9 +20,12 @@
 from __future__ import annotations
 
 import atexit
+import ctypes
 import functools
 import math
 import os
+import signal
+import sys
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
@@ -42,6 +45,48 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
+
+
+def maybe_set_pdeathsig(sig: int = signal.SIGKILL) -> None:
+    """Set PR_SET_PDEATHSIG so this process dies when its parent exits.
+
+    This is a Linux-only kernel mechanism. When the parent process exits
+    (for any reason, including SIGKILL), the kernel delivers ``sig`` to
+    this process. Combined with the userspace death_pipe already present
+    in vLLM's MultiprocExecutor, it provides a robust two-layer guard
+    that prevents orphaned worker processes from holding NPU resources.
+
+    Controlled by VLLM_ASCEND_ENABLE_PDEATHSIG_GUARD (default: enabled).
+    """
+    if not envs_ascend.VLLM_ASCEND_ENABLE_PDEATHSIG_GUARD:
+        return
+    if not sys.platform.startswith("linux"):
+        logger.warning_once(
+            "VLLM_ASCEND_ENABLE_PDEATHSIG_GUARD is set, but "
+            "PR_SET_PDEATHSIG is only supported on Linux."
+        )
+        return
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        PR_SET_PDEATHSIG = 1
+        res = libc.prctl(
+            ctypes.c_int(PR_SET_PDEATHSIG),
+            ctypes.c_ulong(int(sig)),
+            ctypes.c_ulong(0),
+            ctypes.c_ulong(0),
+            ctypes.c_ulong(0),
+        )
+        if res != 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err))
+        logger.debug(
+            "PR_SET_PDEATHSIG set to %s for pid %d",
+            sig.name if isinstance(sig, signal.Signals) else sig,
+            os.getpid(),
+        )
+    except Exception as exc:
+        logger.warning("Failed to set PR_SET_PDEATHSIG: %s", exc)
+
 
 COMPILATION_PASS_KEY = "graph_fusion_manager"
 ASCEND_QUANTIZATION_METHOD = "ascend"

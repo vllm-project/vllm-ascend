@@ -117,6 +117,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # If set, child processes will receive SIGKILL when their parent dies,
+    # ensuring NPU resources are released after abnormal exits (e.g. SIGKILL).
+    # Uses Linux PR_SET_PDEATHSIG mechanism. Enabled by default on Linux.
+    "VLLM_ASCEND_ENABLE_PDEATHSIG_GUARD": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_PDEATHSIG_GUARD", "1"))
+    ),
 }
 
 # end-env-vars-definition

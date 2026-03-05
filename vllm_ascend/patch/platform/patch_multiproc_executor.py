@@ -1,3 +1,22 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+import atexit
+import os
 import threading
 import weakref
 from collections import deque
@@ -8,8 +27,10 @@ import vllm.v1.executor.multiproc_executor
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.logger import init_logger
 from vllm.utils.network_utils import get_distributed_init_method, get_loopback_ip, get_open_port
-from vllm.utils.system_utils import get_mp_context
+from vllm.utils.system_utils import get_mp_context, kill_process_tree
+from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.executor.abstract import FailureCallback
 from vllm.v1.executor.multiproc_executor import (
     FutureWrapper,
@@ -19,6 +40,21 @@ from vllm.v1.executor.multiproc_executor import (
     set_multiprocessing_worker_envs,
 )
 
+from vllm_ascend.utils import maybe_set_pdeathsig
+
+logger = init_logger(__name__)
+
+
+def _cleanup_worker_pids(worker_pids: list[int]) -> None:
+    """atexit handler: forcibly clean up any surviving worker process trees."""
+    for pid in worker_pids:
+        try:
+            os.kill(pid, 0)  # check if alive
+        except OSError:
+            continue
+        logger.debug("atexit: cleaning up surviving worker pid %d", pid)
+        kill_process_tree(pid)
+
 
 class AscendMultiprocExecutor(MultiprocExecutor):
     def _init_executor(self) -> None:
@@ -27,6 +63,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
         self.shutdown_event = threading.Event()
+        self._worker_pids: list[int] = []
         self.failure_callback: FailureCallback | None = None
 
         tensor_parallel_size, pp_parallel_size, pcp_parallel_size = self._get_parallel_sizes()
@@ -86,6 +123,12 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
             # Wait for all local workers to be ready.
             self.workers = AscendWorkerProc.wait_for_ready(unready_workers)
+
+            # Record worker PIDs and register atexit cleanup as a last resort
+            # for multi-card scenarios where intermediate processes may orphan
+            # NPU driver subprocesses.
+            self._worker_pids = [uw.proc.pid for uw in unready_workers if uw.proc.pid is not None]
+            atexit.register(_cleanup_worker_pids, self._worker_pids)
 
             # Start background thread to monitor worker health if not in headless mode.
             if self.monitor_workers:
@@ -150,6 +193,20 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
 class AscendWorkerProc(WorkerProc):
     @staticmethod
+    def _worker_main_with_pdeathsig(*args, **kwargs):
+        """Wrapper that arms PR_SET_PDEATHSIG before entering the busy loop.
+
+        Also creates a new process group so that NPU driver subprocesses
+        (e.g. HCCL) spawned by this worker belong to a killable group.
+        """
+        try:
+            os.setpgrp()
+        except OSError:
+            pass
+        maybe_set_pdeathsig()
+        WorkerProc.worker_main(*args, **kwargs)
+
+    @staticmethod
     def make_worker_process(
         vllm_config: VllmConfig,
         local_rank: int,
@@ -177,9 +234,9 @@ class AscendWorkerProc(WorkerProc):
             "shared_worker_lock": shared_worker_lock,
             "is_driver_worker": is_driver_worker,
         }
-        # Run EngineCore busy loop in background process.
+        # Run worker busy loop in background process.
         proc = context.Process(
-            target=WorkerProc.worker_main,
+            target=AscendWorkerProc._worker_main_with_pdeathsig,
             kwargs=process_kwargs,
             name=f"VllmWorker-{rank}",
             daemon=False,
@@ -191,5 +248,23 @@ class AscendWorkerProc(WorkerProc):
         # death_reader in child will get EOFError
         return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
 
+
+# --- Patch EngineCoreProc.run_engine_core to arm pdeathsig ---
+# The EngineCore runs in a spawned process and is the primary holder of
+# NPU resources. We wrap its entry point so that pdeathsig is armed
+# before any NPU initialization happens.
+# NOTE: patch_balance_schedule.py may overwrite this with its own
+# run_engine_core that already contains maybe_set_pdeathsig(), so both
+# the default and balance-scheduling paths are covered.
+
+_original_run_engine_core = EngineCoreProc.run_engine_core
+
+
+def _run_engine_core_with_pdeathsig(*args, **kwargs):
+    maybe_set_pdeathsig()
+    _original_run_engine_core(*args, **kwargs)
+
+
+EngineCoreProc.run_engine_core = staticmethod(_run_engine_core_with_pdeathsig)
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
