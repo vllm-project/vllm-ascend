@@ -272,6 +272,8 @@ class NPUModelRunner(GPUModelRunner):
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
+        # dsv c8
+        self.use_sparse_c8_inderex = True
         self.attn_backend = get_attn_backend(
             0,
             self.dtype,
