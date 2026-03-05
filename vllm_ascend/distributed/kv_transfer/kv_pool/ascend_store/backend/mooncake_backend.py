@@ -39,7 +39,7 @@ class MooncakeBackend(Backend):
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
             # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
-            # and only can be uesd for 800 I/T A3 series.
+            # and only can be used for 800 I/T A3 series.
             # Required supporting hardware versions are as follows:
             if is_false(os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0")):
                 transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)

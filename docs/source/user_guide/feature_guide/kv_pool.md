@@ -84,9 +84,10 @@ export PYTHONHASHSEED=0
         ```shell
         export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
         ```
+
 ### Environment Variables Description
 
-`export ASCEND_ENABLE_USE_FABRIC_MEM=1`: Enable unified memory address direct transmission scheme and only can be uesd for 800 I/T A3 series. Required supporting hardware versions are as follows:
+`export ASCEND_ENABLE_USE_FABRIC_MEM=1`: Enable unified memory address direct transmission scheme and only can be used for 800 I/T A3 series. Required supporting hardware versions are as follows:
 
     HDK >=26.0
     CANN >= 9.0
