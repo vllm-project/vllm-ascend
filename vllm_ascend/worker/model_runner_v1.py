@@ -402,11 +402,7 @@ class NPUModelRunner(GPUModelRunner):
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.drafter: (
-            AscendNgramProposer
-            | AscendEagleProposer
-            | AscendSuffixDecodingProposer
-            | AscendMedusaProposer
-            | None
+            AscendNgramProposer | AscendEagleProposer | AscendSuffixDecodingProposer | AscendMedusaProposer | None
         ) = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
