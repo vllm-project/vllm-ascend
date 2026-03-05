@@ -79,6 +79,7 @@ def test_qwen3_external_launcher(model):
 
 
 @pytest.mark.parametrize("model", MOE_MODELS)
+@wait_until_npu_memory_free()
 def test_qwen3_moe_external_launcher_ep_tp2(model):
     script = Path(
         __file__
@@ -208,6 +209,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
     reason="This test is only for Ascend910B devices.",
 )
 @pytest.mark.parametrize("model", MODELS)
+@wait_until_npu_memory_free()
 @patch.dict(os.environ, {
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
     "HCCL_BUFFSIZE": "500"
