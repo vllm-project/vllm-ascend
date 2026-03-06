@@ -147,6 +147,154 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertIn("tp_send_counts", kwargs)
 
 
+class TestTokenDispatcherWithMC2FullmeshV2(TestBase):
+    """Tests for fullmesh_v2 communication algorithm support in MC2 dispatcher."""
+
+    def setUp(self):
+        self.config_patcher = patch(
+            'vllm_ascend.ops.fused_moe.token_dispatcher.get_current_vllm_config'
+        )
+        self.mock_get_config = self.config_patcher.start()
+
+        mock_config = MagicMock()
+        mock_config.scheduler_config.max_num_seqs = 128
+        mock_config.scheduler_config.decode_max_num_seqs = 128
+        mock_config.compilation_config.custom_ops = ["all"]
+        mock_config.compilation_config.cudagraph_capture_sizes = [1, 4, 8, 16, 32]
+        mock_config.compilation_config.max_cudagraph_capture_size = 32
+        mock_config.speculative_config = None
+        mock_config.parallel_config.tensor_parallel_size = 4
+        self.mock_get_config.return_value = mock_config
+
+        self.mc2_group = MagicMock()
+        self.mc2_group.device_group.return_value._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_123"
+        self.mc2_group.rank_in_group = 0
+        self.mc2_group.world_size = 16
+        self.mc2_group_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_mc2_group",
+            return_value=self.mc2_group)
+        self.mc2_group_patch.start()
+
+        self.rank_group_patch = patch("torch.distributed.get_rank",
+                                      return_value=0)
+        self.rank_group_patch.start()
+
+        self.ascend_soc_version_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_device_type",
+            return_value=AscendDeviceType.A3)
+        self.ascend_soc_version_patch.start()
+
+        self.hier_comm_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.is_hierarchical_communication_enabled",
+            return_value=False)
+        self.hier_comm_patch.start()
+
+        self.envs_patch = patch(
+            "vllm_ascend.envs.VLLM_ASCEND_MC2_COMM_ALG", "fullmesh_v2")
+        self.envs_patch.start()
+
+        kwargs = {"with_quant": False, "top_k": 8, "num_experts": 128}
+        self.dispatcher = TokenDispatcherWithMC2(**kwargs)
+
+    def tearDown(self):
+        self.mc2_group_patch.stop()
+        self.rank_group_patch.stop()
+        self.ascend_soc_version_patch.stop()
+        self.hier_comm_patch.stop()
+        self.envs_patch.stop()
+
+    def test_fullmesh_v2_config(self):
+        self.assertTrue(self.dispatcher.use_fullmesh_v2)
+        self.assertEqual(self.dispatcher.comm_alg, "fullmesh_v2")
+        # per_rank_bs = ceil(max_cudagraph_capture_size / tp_size) = ceil(32/4) = 8
+        self.assertEqual(self.dispatcher.per_rank_bs, 8)
+        # global_bs = per_rank_bs * ep_world_size = 8 * 16 = 128
+        self.assertEqual(self.dispatcher.global_bs, 128)
+
+    def test_fullmesh_v2_dispatch_kwargs_include_comm_alg(self):
+        hidden_states = torch.randn(2, 128)
+        topk_ids = torch.randint(0, 8, (2, 1))
+        topk_weights = torch.randn(2, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        mc2_mask = None
+
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(
+            hidden_states, topk_weights, topk_ids, expert_map, mc2_mask)
+        self.assertEqual(kwargs["comm_alg"], "fullmesh_v2")
+
+    def test_pad_for_fullmesh_v2(self):
+        hidden_states = torch.randn(2, 128)
+        topk_weights = torch.randn(2, 1)
+        topk_ids = torch.randint(0, 8, (2, 1))
+
+        padded_hs, padded_tw, padded_ti, actual_bs = (
+            self.dispatcher._pad_for_fullmesh_v2(
+                hidden_states, topk_weights, topk_ids))
+        self.assertEqual(actual_bs, 2)
+        self.assertEqual(padded_hs.shape[0], self.dispatcher.per_rank_bs)
+        self.assertEqual(padded_tw.shape[0], self.dispatcher.per_rank_bs)
+        self.assertEqual(padded_ti.shape[0], self.dispatcher.per_rank_bs)
+        # Verify original data is preserved
+        self.assertTrue(torch.allclose(padded_hs[:2], hidden_states))
+        # Verify padding is zero
+        self.assertTrue(torch.all(padded_hs[2:] == 0))
+        self.assertTrue(torch.all(padded_tw[2:] == 0))
+
+    def test_pad_not_needed_when_already_full(self):
+        hidden_states = torch.randn(self.dispatcher.per_rank_bs, 128)
+        topk_weights = torch.randn(self.dispatcher.per_rank_bs, 1)
+        topk_ids = torch.randint(0, 8, (self.dispatcher.per_rank_bs, 1))
+
+        padded_hs, padded_tw, padded_ti, actual_bs = (
+            self.dispatcher._pad_for_fullmesh_v2(
+                hidden_states, topk_weights, topk_ids))
+        self.assertEqual(actual_bs, self.dispatcher.per_rank_bs)
+        self.assertTrue(torch.allclose(padded_hs, hidden_states))
+
+    def test_token_dispatch_pads_inputs(self):
+        hidden_states = torch.randn(2, 128)
+        topk_weights = torch.randn(2, 1)
+        topk_ids = torch.randint(0, 8, (2, 1))
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+
+        with patch("torch_npu.npu_moe_distribute_dispatch_v2",
+                   return_value=(torch.randn(10, 128),) * 5 +
+                   (None, None)) as mock_dispatch:
+            self.dispatcher.token_dispatch(
+                hidden_states, topk_weights, topk_ids, expert_map)
+            call_kwargs = mock_dispatch.call_args[1]
+            # x should be padded to per_rank_bs
+            self.assertEqual(call_kwargs["x"].shape[0],
+                             self.dispatcher.per_rank_bs)
+            self.assertEqual(self.dispatcher._actual_bs, 2)
+
+    def test_token_combine_slices_output(self):
+        self.dispatcher._actual_bs = 2
+        self.dispatcher.with_quant = False
+        self.dispatcher.moe_expert_num = 8
+
+        padded_output = torch.randn(self.dispatcher.per_rank_bs, 128)
+        topk_ids = torch.randint(0, 8, (self.dispatcher.per_rank_bs, 1))
+        topk_weights = torch.randn(self.dispatcher.per_rank_bs, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        context_metadata = {
+            "topk_ids": topk_ids,
+            "topk_weights": topk_weights,
+            "expert_map": expert_map,
+            "ep_recv_counts": torch.zeros(8, dtype=torch.int32),
+            "tp_recv_counts": torch.zeros(8, dtype=torch.int32),
+            "assist_info_for_combine": torch.arange(10),
+            "expand_scales": None,
+        }
+
+        with patch("torch_npu.npu_moe_distribute_combine_v2",
+                   return_value=padded_output):
+            result = self.dispatcher.token_combine(
+                torch.randn(10, 128), context_metadata)
+            # Output should be sliced back to actual_bs
+            self.assertEqual(result.routed_out.shape[0], 2)
+
+
 class TestTokenDispatcherWithAllGather(TestBase):
 
     def setUp(self):
