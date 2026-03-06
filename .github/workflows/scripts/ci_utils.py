@@ -63,10 +63,6 @@ def run_tests(
 
         start = time.perf_counter()
         env = os.environ.copy()
-        env.setdefault(
-            "PYTHONWARNINGS",
-            "ignore:The following torchair config or properties may not take effect",
-        )
         proc = subprocess.Popen(
             ["pytest", "-sv", "--durations=0", "--color=yes", "--tb=short", test.name],
             stdout=subprocess.PIPE,
