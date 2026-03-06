@@ -42,23 +42,19 @@ FC1 is a unique optimization in vllm-ascend, currently implemented based on Cust
 
 ### Without Quantization
 
-
 |                      | VL + Dense | VL + MoE | non-VL + Dense | non-VL + MoE |
 | -------------------- | ---------- | -------- | -------------- | ------------ |
 | Sequence Parallelism | graph      | graph    | x              | x            |
 | Flash Comm V1        | x          | x        | eager/graph    | eager/graph  |
 
-
 ### With Quantization
 
 SP currently does not support quantization and is under adaptation.
-
 
 |                      | VL + Dense | VL + MoE | non-VL + Dense | non-VL + MoE |
 | -------------------- | ---------- | -------- | -------------- | ------------ |
 | Sequence Parallelism | x          | x        | x              | x            |
 | Flash Comm V1        | x          | x        | eager/graph    | eager/graph  |
-
 
 ## Pass Design
 
@@ -68,13 +64,11 @@ When SP is enabled, the following passes run in order: `SequenceParallelismPass`
 
 Runs `NoOpEliminationPass` first to eliminate redundant view-like operations, then applies AllReduce-based patterns:
 
-
 | Pattern                                | Match                            | Replacement                                                                           |
 | -------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------- |
 | `MiddleAllReduceRMSNormPattern`        | `all_reduce` + `layernorm`       | `reduce_scatter` + `layernorm` + `all_gather`                                         |
 | `LastAllReduceRMSNormPattern`          | Same (last layer, no residual)   | Same                                                                                  |
 | `Qwen3VLMiddleAllReduceRMSNormPattern` | `all_reduce` + add + `layernorm` | `reduce_scatter` + chunk(`deepstack_input_embeds`) + add + `layernorm` + `all_gather` |
-
 
 **Why Qwen3 VL needs special handling by Qwen3VLMiddleAllReduceRMSNormPattern**
 
@@ -83,7 +77,7 @@ The fix is to chunk `deepstack_input_embeds` by `tp_size` so each rank uses `add
 
 ### SequenceParallelismAllgatherEpPass
 
-After `SequenceParallelismPass` applys, the AllGather EP computation graph looks like:
+After `SequenceParallelismPass` applies, the AllGather EP computation graph looks like:
 
 ![AllGather EP computation graph](../../assets/sp_allgather_ep.png)
 

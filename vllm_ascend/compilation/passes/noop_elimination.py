@@ -41,14 +41,14 @@ class NoOpEliminationPass(VllmInductorPass):
 
     @staticmethod
     def _is_view_like(node: torch.fx.Node) -> bool:
-        if node.op == "call_method" and node.target in {"view", "reshape"}:
-            return True
-        if node.op == "call_function" and node.target in {
-            torch.ops.aten.view.default,
-            torch.ops.aten.reshape.default,
-        }:
-            return True
-        return False
+        return (node.op == "call_method" and node.target in {"view", "reshape"}) or (
+            node.op == "call_function"
+            and node.target
+            in {
+                torch.ops.aten.view.default,
+                torch.ops.aten.reshape.default,
+            }
+        )
 
     @staticmethod
     def _dims_equivalent(dim: int | SymInt, i_dim: int | SymInt) -> bool:
