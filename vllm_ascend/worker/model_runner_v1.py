@@ -1811,6 +1811,7 @@ class NPUModelRunner(GPUModelRunner):
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        force_eager_prefill = self.ascend_config.ascend_compilation_config.prefill_use_eager and not is_all_decode
         uniform_decode = (
             (
                 (is_all_decode if self.speculative_config else True)
@@ -1827,7 +1828,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # ruff: noqa: E731
         def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
-            if force_eager:
+            if force_eager or force_eager_prefill:
                 return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
             if vllm_version_is("0.16.0"):

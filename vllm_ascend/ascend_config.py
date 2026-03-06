@@ -265,6 +265,7 @@ class AscendCompilationConfig:
         fuse_norm_quant: bool = True,
         fuse_qknorm_rope: bool = True,
         fuse_allreduce_rms: bool = False,
+        prefill_use_eager: bool = False,
         **kwargs,
     ):
         """
@@ -289,6 +290,11 @@ class AscendCompilationConfig:
                 Default: True
             fuse_allreduce_rms (bool): Whether to enable allreduce and addrmsnorm fusion optimization.
                 Default: False
+            prefill_use_eager (bool): Whether to bypass ACL graph dispatch for
+                batches that still contain prefill requests. This is useful
+                when `cudagraph_mode=FULL_DECODE_ONLY` is enabled but prefill
+                batches with `query_len == 1` should stay in eager mode.
+                Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
@@ -296,6 +302,7 @@ class AscendCompilationConfig:
         self.fuse_allreduce_rms = fuse_allreduce_rms
         self.enable_npugraph_ex = enable_npugraph_ex
         self.enable_static_kernel = enable_static_kernel
+        self.prefill_use_eager = prefill_use_eager
         self.fuse_muls_add = kwargs.get("fuse_muls_add", True)
         if self.enable_static_kernel:
             assert self.enable_npugraph_ex, "Static kernel generation requires npugraph_ex to be enabled."

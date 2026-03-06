@@ -82,14 +82,15 @@ class TestAscendConfig(TestBase):
         test_vllm_config.additional_config = {
             "ascend_compilation_config": {
                 "enable_npugraph_ex": True,
-                "enable_static_kernel": True
+                "enable_static_kernel": True,
+                "prefill_use_eager": True,
             },
-            "refresh": True
+            "refresh": True,
         }
-        ascend_compilation_config = init_ascend_config(
-            test_vllm_config).ascend_compilation_config
+        ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
         self.assertTrue(ascend_compilation_config.enable_static_kernel)
+        self.assertTrue(ascend_compilation_config.prefill_use_eager)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
