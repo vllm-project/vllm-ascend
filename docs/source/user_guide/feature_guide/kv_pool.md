@@ -42,7 +42,7 @@ export PYTHONHASHSEED=0
         First, we need to obtain the Mooncake project. Refer to the following command:
 
         ```shell
-        git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+        git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
         ```
 
         (Optional) Replace go install url if the network is poor
@@ -84,6 +84,15 @@ export PYTHONHASHSEED=0
         ```shell
         export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
         ```
+
+### Environment Variables Description
+
+`export ASCEND_ENABLE_USE_FABRIC_MEM=1`: Enable unified memory address direct transmission scheme and only can be used for 800 I/T A3 series. Required supporting hardware versions are as follows:
+
+    HDK >=26.0
+    CANN >= 9.0
+
+`export ASCEND_BUFFER_POOL=4:8`: ASCEND_BUFFER_POOL is the environment variable for configuring the number and size of buffer on NPU Device for aggregation and KV transfer，the value 4:8 means we allocate 4 buffers of size 8MB. It only can be used for 800 I/T A2 series.
 
 ### Run Mooncake Master
 
@@ -475,8 +484,8 @@ ock.mmc.tls.key.pass.path = /opt/ock/security/certs/client.passphrase
 ock.mmc.tls.package.path = /opt/ock/security/libs/
 ock.mmc.tls.decrypter.path =
 
-# Total count of local service 
-ock.mmc.local_service.world_size = 32
+# Total count of local service, including services that will be add in the future
+ock.mmc.local_service.world_size = 256
 # config store url, it will automatically modified to PodIP at Pod startup in HA scenario
 # keep consistent with the same name configuration in mmc-meta.conf
 ock.mmc.local_service.config_store_url = tcp://xx.xx.xx.xx:6000
@@ -524,7 +533,7 @@ ock.mmc.client.write_thread_pool.size = 2
 
 * ock.mmc.meta_service_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
 * ock.mmc.local_service.config_store_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
-* ock.mmc.local_service.world_size：Total number of cards for starting services.
+* ock.mmc.local_service.world_size：Total count of local service, including services that will be add in the future.
 * ock.mmc.local_service.protocol：host_rdma (default), device_rdma (supported for A2 and A3 when device ROCE available, recommended for A2), device_sdma (supported for A3 when HCCS available, recommended for A3)
 * ock.mmc.local_service.dram.size：Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card.
 * To disable TLS authentication modification, set the following parameters to false:：ock.mmc.meta.ha.enable、ock.mmc.config_store.tls.enable
