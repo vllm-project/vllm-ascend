@@ -30,7 +30,7 @@ MODELS = {
 DRAFT_PARALLEL_MODELS = {
     "draft_parallel": {
         "main": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
-        "spec": "AMD/PARD-Llama-3.2-1B",
+        "spec": "amd/PARD-Llama-3.2-1B",
     },
 }
 
