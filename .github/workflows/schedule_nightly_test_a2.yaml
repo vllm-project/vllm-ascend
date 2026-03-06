@@ -21,8 +21,8 @@ name: Nightly-A2
 
 on:
   schedule:
-      # Run test at 24:00 Beijing time (UTC+8)
-      - cron: "0 16 * * *"
+      # Run test at 23:45 Beijing time (UTC+8)
+      - cron: "45 15 * * *"
   workflow_dispatch:
   pull_request:
     branches:
