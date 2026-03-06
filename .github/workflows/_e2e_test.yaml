@@ -78,6 +78,10 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+      
+      - name: Patch modelscope
+        run: |
+          python .github/workflows/scripts/patch_modelscope.py
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -167,6 +171,9 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+      - name: Patch modelscope
+        run: |
+          python .github/workflows/scripts/patch_modelscope.py
       - name: Run e2e test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -253,6 +260,11 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+
+      - name: Patch modelscope
+        run: |
+          python .github/workflows/scripts/patch_modelscope.py
+
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -339,6 +351,10 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+
+      - name: Patch modelscope
+        run: |
+          python .github/workflows/scripts/patch_modelscope.py
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -433,6 +449,10 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
+      - name: Patch modelscope
+        run: |
+          python .github/workflows/scripts/patch_modelscope.py
+
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -512,6 +532,10 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
+      - name: Patch modelscope
+        run: |
+          python .github/workflows/scripts/patch_modelscope.py
+
       - name: Run vllm-project/vllm-ascend test
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
@@ -569,6 +593,10 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+
+      - name: Patch modelscope
+        run: |
+          python .github/workflows/scripts/patch_modelscope.py
 
       - name: Run vllm-project/vllm-ascend test
         env:
