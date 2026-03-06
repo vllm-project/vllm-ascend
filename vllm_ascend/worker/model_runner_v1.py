@@ -110,7 +110,6 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
-from vllm_ascend.spec_decode.mtp_proposer import AscendMtpProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.utils import (
@@ -408,7 +407,6 @@ class NPUModelRunner(GPUModelRunner):
             AscendNgramProposer
             | AscendEagleProposer
             | AscendDraftModelProposer
-            | AscendMtpProposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | None
@@ -1060,7 +1058,7 @@ class NPUModelRunner(GPUModelRunner):
                     target_positions = positions
                     target_hidden_states = hidden_states
                     if self.use_aux_hidden_state_outputs:
-                        target_hidden_states = torch.cat([h[token_indices] for h in aux_hidden_states], dim=-1)
+                        target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
                 else:
                     target_token_ids = self.input_ids.gpu[token_indices]
                     target_positions = self._get_positions(token_indices)
@@ -1227,7 +1225,12 @@ class NPUModelRunner(GPUModelRunner):
                     # Currently, Graph Mode and SP will both pad num_tokens,
                     # Another possible condition is num_tokens_padded != num_tokens_unpadded
                     # but this scope is way too big and the consequences are unpredictable
+                    old_num_reqs_padded = num_reqs_padded
                     num_reqs_padded = self._pad_query_start_loc_for_fia(num_tokens_padded, num_reqs_padded, num_reqs)
+                    if enable_sp() and num_tokens_padded == num_tokens_unpadded:
+                        if num_reqs_padded > old_num_reqs_padded:
+                            num_reqs_padded = old_num_reqs_padded
+                            self.query_start_loc.np[num_reqs_padded + 1] = 0
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded

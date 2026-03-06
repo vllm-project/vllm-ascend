@@ -597,6 +597,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.conv import AscendConv2dLayer, AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -645,6 +646,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
+        "Conv2dLayer": AscendConv2dLayer,
+        "Conv3dLayer": AscendConv3dLayer,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
@@ -1182,3 +1185,19 @@ def check_gdn_layer(vllm_config) -> bool:
             return True
 
     return False
+
+
+def get_rope_dim(vllm_config):
+    model_config = vllm_config.model_config
+
+    if model_config.use_mla:
+        rope_dim = model_config.hf_text_config.qk_rope_head_dim
+    else:
+        rope_dim = model_config.get_head_size()
+        # For models using partial rope like Qwen3-Next.
+        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
+            rope_dim = int(rope_dim * model_config.hf_text_config.partial_rotary_factor)
+        elif hasattr(model_config.hf_text_config, "rotary_dim"):
+            rope_dim = int(model_config.hf_text_config.rotary_dim)
+
+    return rope_dim

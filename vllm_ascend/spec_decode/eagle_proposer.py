@@ -134,7 +134,11 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
         if self.method == "mtp":
-            self.use_cuda_graph = self.use_cuda_graph and not self.use_async_scheduling
+            self.use_cuda_graph = (
+                self.use_cuda_graph
+                and not self.use_async_scheduling
+                and not self.speculative_config.disable_padded_drafter_batch
+            )
 
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: AbstractContextManager[Any] = nullcontext()
@@ -387,7 +391,8 @@ class SpecDecodeBaseProposer(EagleProposer):
                 # Set the real slot_mapping.
                 common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
                 attn_metadata_eagle = builder.build_for_graph_capture(
-                    common_attn_metadata, AscendAttentionState.ChunkedPrefill
+                    common_attn_metadata,
+                    AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
                 )
                 per_layer_attn_metadata = dict()
                 for layer_name in self.attn_layer_names:
@@ -584,7 +589,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
         self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping[:slot_mapping_lens])
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
-        common_attn_metadata.slot_mapping = self.slot_mapping_group[0][:slot_mapping_lens]
+        common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
         common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
@@ -768,7 +773,17 @@ class SpecDecodeBaseProposer(EagleProposer):
             hidden_states = torch.index_select(
                 hidden_states, 0, self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
             )
-            last_hidden_states = hidden_states  # TODO: check it
+            if self.method == "mtp":
+                last_hidden_states = hidden_states
+            else:
+                # eagle and eagle3 need allgather last_hidden_states.
+                last_hidden_states = last_hidden_states[:num_tokens]
+                last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
+                last_hidden_states = torch.index_select(
+                    last_hidden_states,
+                    0,
+                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: last_hidden_states.shape[0]],
+                )
 
         if lmhead_tp_enable() and not is_dummy:
             max_num_reqs_across_dp = (
@@ -1076,7 +1091,9 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata.num_actual_tokens = batch_size
             common_attn_metadata.max_query_len = 1
             common_attn_metadata.decode_token_per_req = 1
-            common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+            common_attn_metadata.attn_state = (
+                AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill
+            )
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
 
@@ -1126,7 +1143,7 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         if self.pcp_size * self.dcp_size > 1:
             num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
-                ori_seq_len + draft_step,
+                ori_seq_len + draft_step + 1,
                 self.pcp_size,
                 self.dcp_size,
                 self.runner.parallel_config.cp_kv_cache_interleave_size,
@@ -1158,7 +1175,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             self.slot_mapping_group[draft_step][: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
             self.slot_mapping_group[draft_step][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step][: slot_mapping.shape[0]]
+            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
 
         # Rebuild attention metadata
         attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
