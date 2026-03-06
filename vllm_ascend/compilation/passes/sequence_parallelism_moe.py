@@ -142,11 +142,32 @@ class Qwen3VLMiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelpe
         )
 
 
+class AllGatherChunkNoOpPattern(_SequenceParallelPatternHelper):
+    """Folds all_gather + sequence_parallel_chunk_impl into identity (no-op)."""
+
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
+        super().__init__(eps, vllm_config.model_config.dtype, torch.npu.current_device())
+
+    def get_inputs(self):
+        return [self.empty(8, 16)]
+
+    def register(self, pm_pass: PatternMatcherPass):
+        def pattern(input: torch.Tensor) -> torch.Tensor:
+            gathered = self._all_gather(input)
+            return torch.ops.vllm.sequence_parallel_chunk_impl(gathered)
+
+        def replacement(input: torch.Tensor) -> torch.Tensor:
+            return input
+
+        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+
+
 class SequenceParallelismAllgatherEpPass(VllmInductorPass):
     """Sequence parallelism AllGather epilogue pass.
 
     Applies AllGather-based patterns: MiddleLayerAllgatherAddRMSNormPattern,
-    LastLayerAllgatherRMSNormPattern, Qwen3VLMiddleLayerAllgatherAddRMSNormPattern.
+    LastLayerAllgatherRMSNormPattern, Qwen3VLMiddleLayerAllgatherAddRMSNormPattern,
+    and AllGatherChunkNoOpPattern (all_gather + sequence_parallel_chunk_impl -> identity).
     """
 
     def __init__(self, config: VllmConfig):
@@ -158,6 +179,8 @@ class SequenceParallelismAllgatherEpPass(VllmInductorPass):
             MiddleLayerAllgatherAddRMSNormPattern(config, epsilon).register(self.patterns)
             LastLayerAllgatherRMSNormPattern(config, epsilon).register(self.patterns)
             Qwen3VLMiddleLayerAllgatherAddRMSNormPattern(config, epsilon).register(self.patterns)
+
+        AllGatherChunkNoOpPattern(config).register(self.patterns)
 
         self.min_tokens = get_sp_threshold(config)
 

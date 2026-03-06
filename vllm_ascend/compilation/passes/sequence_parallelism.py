@@ -7,7 +7,7 @@ from vllm.config.utils import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.logger import logger
 
-from vllm_ascend.compilation.passes.noop_elimination import AscendNoOpEliminationPass
+from vllm_ascend.compilation.passes.noop_elimination import NoOpEliminationPass
 from vllm_ascend.utils import is_moe_model
 
 SP_THRESHOLD = 1000
@@ -196,7 +196,7 @@ class SequenceParallelismPass(VllmInductorPass):
         super().__init__(config)
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(pass_name="npu_sequence_parallelism_pass")
-        self.noop_cleanup = AscendNoOpEliminationPass(config)
+        self.noop_cleanup = NoOpEliminationPass(config)
 
         for epsilon in [1e-5, 1e-6]:
             MiddleAllReduceRMSNormPattern(config, epsilon).register(self.patterns)

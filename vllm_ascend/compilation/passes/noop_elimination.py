@@ -8,7 +8,7 @@ from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.logger import logger
 
 
-class AscendNoOpEliminationPass(VllmInductorPass):
+class NoOpEliminationPass(VllmInductorPass):
     """Remove no-op view/reshape nodes after pattern rewrites."""
 
     def __call__(self, graph: torch.fx.Graph) -> None:
@@ -37,7 +37,7 @@ class AscendNoOpEliminationPass(VllmInductorPass):
                 fx_graph.erase_node(node)
                 removed += 1
 
-        logger.debug("AscendNoOpEliminationPass removed %s no-op views", removed)
+        logger.debug("NoOpEliminationPass removed %s no-op views", removed)
 
     @staticmethod
     def _is_view_like(node: torch.fx.Node) -> bool:

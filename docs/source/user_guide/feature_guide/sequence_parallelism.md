@@ -42,16 +42,62 @@ FC1 is a unique optimization in vllm-ascend, currently implemented based on Cust
 
 ### Without Quantization
 
+
 |                      | VL + Dense | VL + MoE | non-VL + Dense | non-VL + MoE |
 | -------------------- | ---------- | -------- | -------------- | ------------ |
-| Sequence Parallelism | graph      | x        | x              | x            |
+| Sequence Parallelism | graph      | graph    | x              | x            |
 | Flash Comm V1        | x          | x        | eager/graph    | eager/graph  |
+
 
 ### With Quantization
 
 SP currently does not support quantization and is under adaptation.
 
+
 |                      | VL + Dense | VL + MoE | non-VL + Dense | non-VL + MoE |
 | -------------------- | ---------- | -------- | -------------- | ------------ |
 | Sequence Parallelism | x          | x        | x              | x            |
 | Flash Comm V1        | x          | x        | eager/graph    | eager/graph  |
+
+
+## Pass Design
+
+When SP is enabled, the following passes run in order: `SequenceParallelismPass` then `SequenceParallelismAllgatherEpPass`.
+
+### SequenceParallelismPass
+
+Runs `NoOpEliminationPass` first to eliminate redundant view-like operations, then applies AllReduce-based patterns:
+
+
+| Pattern                                | Match                            | Replacement                                                                           |
+| -------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------- |
+| `MiddleAllReduceRMSNormPattern`        | `all_reduce` + `layernorm`       | `reduce_scatter` + `layernorm` + `all_gather`                                         |
+| `LastAllReduceRMSNormPattern`          | Same (last layer, no residual)   | Same                                                                                  |
+| `Qwen3VLMiddleAllReduceRMSNormPattern` | `all_reduce` + add + `layernorm` | `reduce_scatter` + chunk(`deepstack_input_embeds`) + add + `layernorm` + `all_gather` |
+
+
+**Why Qwen3 VL needs special handling by Qwen3VLMiddleAllReduceRMSNormPattern**
+
+Qwen3-VL middle layers insert an extra add between `all_reduce` and `layernorm`: `hidden_states=hidden_states + deepstack_input_embeds`. Under SP, `hidden_states` (i.e., `input`) is reduced-scattered to shape `[seq_len/tp, hidden]` per rank, while `deepstack_input_embeds` comes from the vision/deepstack path and stays full-sequence `[seq_len, hidden]` (typically replicated across TP ranks). Simply doing `reduce_scatter(input) + deepstack_input_embeds` would cause a shape mismatch.
+The fix is to chunk `deepstack_input_embeds` by `tp_size` so each rank uses `add(reduce_scatter, chunk(deepstack_input_embeds)[tp_rank])`, keeping shapes consistent before `layernorm` and `all_gather`.
+
+### SequenceParallelismAllgatherEpPass
+
+After `SequenceParallelismPass` applys, the AllGather EP computation graph looks like:
+
+![AllGather EP computation graph](../../assets/sp_allgather_ep.png)
+
+**Overview**
+
+1. **Postponing allgather**: Under SP, `residual` is chunked by tensor parallelism. This causes a shape mismatch between hidden states and residual in the next layer's layernorm: hidden states are gathered (full sequence) while residual remains chunked. The fix is to move `all_gather` to *after* layernorm so that layernorm operates on consistent shapes per rank. `MiddleLayerAllgatherAddRMSNormPattern`, `LastLayerAllgatherRMSNormPattern`, and `Qwen3VLMiddleLayerAllgatherAddRMSNormPattern` are designed for this purpose, each handling different layer and structure variants (see the table below).
+
+2. **AllGatherChunkNoOp cleanup**: When MoE SP is enabled, vllm introduces a `sequence_parallel_chunk` op (corresponding to `sp_chunk` in the diagram). Together with the preceding `all_gather`, the pair forms a redundant no-op (all_gather gathers, then chunk re-splits). `AllGatherChunkNoOpPattern` replaces this pair with identity to eliminate the redundant communication and computation.
+
+**Pattern details:**
+
+| Pattern                            | Match                                    | Replacement                             |
+| ---------------------------------- | ---------------------------------------- | --------------------------------------- |
+| `MiddleLayerAllgatherAddRMSNormPattern`        | `all_gather` + slice + `layernorm`       | `layernorm` + `all_gather`              |
+| `LastLayerAllgatherRMSNormPattern`             | Same (last layer, no residual)           | Same                                    |
+| `Qwen3VLMiddleLayerAllgatherAddRMSNormPattern` | `all_gather` + slice + add + `layernorm` | add(chunk) + `layernorm` + `all_gather` |
+| `AllGatherChunkNoOpPattern`                    | `all_gather` + `sequence_parallel_chunk_impl` | identity (no-op)                    |
