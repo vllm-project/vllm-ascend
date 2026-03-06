@@ -164,6 +164,10 @@ class CAMM2NAFDConnector(AFDConnectorBase):
 
         config = kwargs.get('config')
         batch_size = kwargs.get('batch_size')
+        if self.mix_placement:
+            k = self.hf_config.num_experts_per_tok + self.num_shared_experts
+        else:
+            k = self.hf_config.num_experts_per_tok
         if config:
             metadata.connector_data.moe_expert_num = config.n_routed_experts
             # TODO: quant_mode and aiv_num read from config
@@ -172,7 +176,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             metadata.connector_data.scale = None
             metadata.connector_data.batch_size = batch_size
             metadata.connector_data.h = config.hidden_size
-            metadata.connector_data.k = config.num_experts_per_tok
+            metadata.connector_data.k = k
 
     def select_experts(
             self,

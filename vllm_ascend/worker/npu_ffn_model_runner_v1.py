@@ -412,7 +412,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                       f'ubatch_idx is {ubatch_idx}', flush=True)
 
                 hidden_states = recv_output.hidden_states
-                # print(f"ttg finish recv hidden_states", flush=True)
+                print(f"ttg finish recv hidden_states", flush=True)
                 dynamic_scales = recv_output.dynamic_scales
                 # print(f"ttg finish recv dynamic_scales", flush=True)
                 group_list = recv_output.group_list
@@ -425,6 +425,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 # print(f"ttg ffn_forward group_list.shape: {group_list.shape}, group_list: {group_list}, "
                 #       f"topk_ids.shape: {topk_ids.shape}, topk_ids: {topk_ids}, "
                 #       f"topk_weights.shape: {topk_weights.shape}", flush=True)
+                print(f"ttg ffn_forward topk_ids.shape: {topk_ids.shape}, topk_ids: {topk_ids}, "
+                      f"topk_weights.shape: {topk_weights.shape}", flush=True)
 
                 # Construct AFDMetadata to ensure afd_forward takes the correct branch
                 afd_metadata = AFDMetadata(
