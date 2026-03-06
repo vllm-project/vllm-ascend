@@ -67,6 +67,7 @@ class NPUModelRunner(GPUModelRunner):
             self.uses_mrope,
             self.use_aux_hidden_state_outputs,
             self.device,
+            self,
         )
 
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle
