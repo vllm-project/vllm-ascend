@@ -111,9 +111,7 @@ def npu_memory_profiling(
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
 
-    result.non_kv_cache_memory = (
-        result.non_torch_increase + result.torch_peak_increase + result.weights_memory
-    )
+    result.non_kv_cache_memory = result.non_torch_increase + result.torch_peak_increase + result.weights_memory
 
 
 class NPUWorker(WorkerBase):
