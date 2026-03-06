@@ -2447,6 +2447,7 @@ class NPUModelRunner(GPUModelRunner):
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
+                skip_compiled=is_profile,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
@@ -2502,12 +2503,23 @@ class NPUModelRunner(GPUModelRunner):
         ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
             self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
         origin_max_num_tokens = self.max_num_tokens
+        origin_compilation_mode = self.compilation_config.mode
+        origin_cudagraph_mode = self.compilation_config.cudagraph_mode
         # in the pcp scenario, the split sequence needs to be used for profile run
         # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
         if self.pcp_size > 1:
             self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2)) * 2
-        super().profile_run()
-        self.max_num_tokens = origin_max_num_tokens
+        # NOTE: profiling is only used to estimate memory. On Ascend, entering
+        # the compile / graph path here can create FakeTensorMode mismatches
+        # before the real warmup stage.
+        self.compilation_config.mode = CompilationMode.NONE
+        self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        try:
+            super().profile_run()
+        finally:
+            self.compilation_config.mode = origin_compilation_mode
+            self.compilation_config.cudagraph_mode = origin_cudagraph_mode
+            self.max_num_tokens = origin_max_num_tokens
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
