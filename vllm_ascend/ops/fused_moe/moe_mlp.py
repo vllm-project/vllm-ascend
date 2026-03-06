@@ -368,7 +368,6 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
-
     return hidden_states
 
 

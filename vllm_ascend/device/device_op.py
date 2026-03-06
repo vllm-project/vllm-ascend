@@ -17,7 +17,6 @@
 #
 import torch
 import torch_npu
-from vllm.forward_context import get_forward_context
 
 from vllm_ascend.device.mxfp_compat import (
     FLOAT4_E2M1FN_X2_DTYPE,
@@ -28,8 +27,6 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 class BaseDeviceAdaptor:
-    small_batch_gmm_batch_num = 16
-
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         torch_npu._npu_reshape_and_cache(
