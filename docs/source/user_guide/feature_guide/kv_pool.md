@@ -484,8 +484,8 @@ ock.mmc.tls.key.pass.path = /opt/ock/security/certs/client.passphrase
 ock.mmc.tls.package.path = /opt/ock/security/libs/
 ock.mmc.tls.decrypter.path =
 
-# Total count of local service 
-ock.mmc.local_service.world_size = 32
+# Total count of local service, including services that will be add in the future
+ock.mmc.local_service.world_size = 256
 # config store url, it will automatically modified to PodIP at Pod startup in HA scenario
 # keep consistent with the same name configuration in mmc-meta.conf
 ock.mmc.local_service.config_store_url = tcp://xx.xx.xx.xx:6000
@@ -533,7 +533,7 @@ ock.mmc.client.write_thread_pool.size = 2
 
 * ock.mmc.meta_service_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
 * ock.mmc.local_service.config_store_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
-* ock.mmc.local_service.world_size：Total number of cards for starting services.
+* ock.mmc.local_service.world_size：Total count of local service, including services that will be add in the future.
 * ock.mmc.local_service.protocol：host_rdma (default), device_rdma (supported for A2 and A3 when device ROCE available, recommended for A2), device_sdma (supported for A3 when HCCS available, recommended for A3)
 * ock.mmc.local_service.dram.size：Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card.
 * To disable TLS authentication modification, set the following parameters to false:：ock.mmc.meta.ha.enable、ock.mmc.config_store.tls.enable
