@@ -14,11 +14,9 @@ class AscendMultiConnector(MultiConnector):
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()
-        print(f"[===] enter AscendMultiConnector update_state_after_alloc")
         for i, c in enumerate(self._connectors):
             if i == chosen_connector or isinstance(c, MooncakeLayerwiseConnector):
                 # Forward call to the chosen connector (if any).
-                print(f"[===] enter AscendMultiConnector chosen_connector {type(c)}")
                 c.update_state_after_alloc(request, blocks, num_external_tokens)
             else:
                 # Call with empty blocks for other connectors.
