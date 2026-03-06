@@ -57,31 +57,32 @@ def test_embed_models_correctness(model: str):
     )
 
 
-def test_embedding_duplicate_queries_consistency():
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_embedding_duplicate_queries_consistency(enforce_eager: bool):
     """Regression test for https://github.com/vllm-project/vllm-ascend/issues/5725
 
-    Verifies that repeated identical queries produce consistent embeddings.
-    Previously, prefix caching caused the second computation of the same
+    Verifies that repeated identical queries produce consistent embeddings
+    across both eager and graph execution paths. Previously, enabling prefix
+    caching for pooling models caused the second computation of the same
     query to return incorrect embeddings (cosine similarity ~0.58 instead
     of ~1.0).
     """
     query = 'What is the capital of China?'
-    # Send the same query twice to trigger prefix cache hit on the second one
-    queries = [query, query]
 
     model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B")
     with VllmRunner(
             model_name,
             runner="pooling",
             max_model_len=None,
-            enforce_eager=True,
+            enable_prefix_caching=True,
+            enforce_eager=enforce_eager,
     ) as vllm_runner:
-        vllm_outputs = vllm_runner.embed(queries)
+        first_output = vllm_runner.embed([query])[0]
+        second_output = vllm_runner.embed([query])[0]
 
-    # The two embeddings for the same query must be identical
     check_embeddings_close(
-        embeddings_0_lst=[vllm_outputs[0]],
-        embeddings_1_lst=[vllm_outputs[1]],
+        embeddings_0_lst=[first_output],
+        embeddings_1_lst=[second_output],
         name_0="first_call",
         name_1="second_call",
         tol=1e-3,
