@@ -121,12 +121,12 @@ def prepare_capture_inputs_wrapper():
     """Context manager to override input preparation for NPU graph capture."""
     # TODO(Ronald1995): make prepare_inputs_to_capture as static method
     # in CudaGraphManager.
-    ori = vllm.v1.worker.gpu.cudagraph_utils.CudaGraphManager.prepare_inputs_to_capture_gpu
+    ori = vllm.v1.worker.gpu.cudagraph_utils.prepare_inputs_to_capture
     try:
-        vllm.v1.worker.gpu.cudagraph_utils.CudaGraphManager.prepare_inputs_to_capture_gpu = prepare_inputs_to_capture
+        vllm.v1.worker.gpu.cudagraph_utils.prepare_inputs_to_capture = prepare_inputs_to_capture
         yield
     finally:
-        vllm.v1.worker.gpu.cudagraph_utils.CudaGraphManager.prepare_inputs_to_capture_gpu = ori
+        vllm.v1.worker.gpu.cudagraph_utils.prepare_inputs_to_capture = ori
 
 
 def prepare_inputs_to_capture(
