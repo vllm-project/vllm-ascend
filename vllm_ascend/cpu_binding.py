@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
+import logging
 import os
 import platform
 import re
 import shutil
 import subprocess
-import logging
 from collections import defaultdict
 
 import psutil

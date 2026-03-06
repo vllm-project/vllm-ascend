@@ -682,6 +682,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
+
+
 def check_ascend_device_type():
     if ascend_device_type._ascend_device_type is None:
         ascend_device_type._init_ascend_device_type()
