@@ -247,17 +247,17 @@ def split_qkv_rmsnorm_mrope_kernel(
                 offsets=(0, 0),
                 sizes=(num_q_heads, rope_dim),
                 strides=(1, 1),
-            ).to(tl.bfloat16)
+            )
             k_normalized = tl.insert_slice(
                 k_normalized,
                 roped_k,
                 offsets=(0, 0),
                 sizes=(num_kv_heads, rope_dim),
                 strides=(1, 1),
-            ).to(tl.bfloat16)
+            )
         else:
-            q_normalized = roped_q.to(tl.bfloat16)
-            k_normalized = roped_k.to(tl.bfloat16)
+            q_normalized = roped_q
+            k_normalized = roped_k
 
         ## store ##
         # out_q
