@@ -70,6 +70,7 @@ class TestAscendModelSlimConfig310(TestBase):
         fused_moe_layer = MagicMock(spec=FusedMoE)
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
+        fused_moe_layer.moe_config.moe_backend = "auto"
         fused_moe_layer.moe_config.moe_parallel_config = MagicMock(spec=FusedMoEParallelConfig)
         fused_moe_layer.moe_config.moe_parallel_config.use_ep = True
         fused_moe_layer.moe_config.moe_parallel_config.dp_size = 1
