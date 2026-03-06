@@ -64,6 +64,19 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "mm_projector.linear_1": "mm_projector.proj.0",
         "mm_projector.linear_2": "mm_projector.proj.2",
     },
+    "qwen3_omni_moe": {
+        "language_model.lm_head.": "thinker.lm_head.",
+        "language_model.model.": "thinker.model.",
+        "visual.": "thinker.visual.",
+    },
+    "qwen2_5_omni": {
+        "language_model.lm_head.": "thinker.lm_head.",
+        "language_model.model.": "thinker.model.",
+        "visual.": "thinker.visual.",
+    },
+    "qwen2_5_omni_text": {
+        "language_model.": "thinker.",
+    },
 }
 
 # key: model_type
@@ -192,6 +205,11 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
             "k_proj",
             "v_proj",
         ],
+        "attn_qkv_proj": [
+            "attn_q_proj",
+            "attn_k_proj",
+            "attn_v_proj",
+        ],
         "gate_up_proj": [
             "gate_proj",
             "up_proj",
@@ -204,19 +222,19 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
             "k_proj",
             "v_proj",
         ],
-        "attn.qkv": [
-            "attn.q",
-            "attn.k",
-            "attn.v",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
+        "attn_qkv_proj": [
+            "attn_q_proj",
+            "attn_k_proj",
+            "attn_v_proj",
         ],
         "qkv": [
             "q",
             "k",
             "v",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
         ],
     },
 }
