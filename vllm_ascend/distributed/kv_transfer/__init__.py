@@ -20,6 +20,10 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 def register_connector():
     KVConnectorFactory.register_connector(
+        "AscendMultiConnector", "vllm_ascend.distributed.kv_transfer.ascend_multi_connector", "AscendMultiConnector"
+    )
+
+    KVConnectorFactory.register_connector(
         "MooncakeConnectorV1", "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector", "MooncakeConnector"
     )
 

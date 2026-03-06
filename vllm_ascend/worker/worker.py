@@ -504,6 +504,7 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
@@ -575,7 +576,6 @@ class NPUWorker(WorkerBase):
             self.parallel_config.decode_context_parallel_size,
         )
         init_ascend_model_parallel(self.parallel_config)
-        ensure_kv_transfer_initialized(self.vllm_config)
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def _create_profiler(self, trace_name: str):
