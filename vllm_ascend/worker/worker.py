@@ -430,7 +430,7 @@ class NPUWorker(WorkerBase):
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> float:
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         if not self.model_config.enforce_eager:
@@ -462,6 +462,7 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+        return self.vllm_config.compilation_config.compilation_time
 
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()
