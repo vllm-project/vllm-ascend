@@ -1,7 +1,7 @@
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
-  name: vllm
+  name: {{ lws_name | default("vllm") }}
   namespace: vllm-project
 spec:
   replicas: {{ replicas | default(1) }}
@@ -128,7 +128,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-leader
+  name: {{ lws_name | default("vllm") }}-leader
   namespace: vllm-project
 spec:
   ports:
@@ -137,6 +137,6 @@ spec:
       protocol: TCP
       targetPort: 8080
   selector:
-    leaderworkerset.sigs.k8s.io/name: vllm
+    leaderworkerset.sigs.k8s.io/name: {{ lws_name | default("vllm") }}
     role: leader
   type: ClusterIP
