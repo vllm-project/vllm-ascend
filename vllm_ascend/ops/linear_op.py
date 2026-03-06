@@ -705,7 +705,11 @@ def _get_row_parallel_op(
 
 
 def get_parallel_op(disable_tp, prefix, layer, direct):
-    if disable_tp or ("shared_experts" in prefix and shared_expert_dp_enabled()):
+    if (
+        disable_tp
+        or ("shared_experts" in prefix and shared_expert_dp_enabled())
+        or ("shared_expert" in prefix and shared_expert_dp_enabled())
+    ):
         return None, 0, 1
     custom_op: (
         MLPColumnParallelOp
