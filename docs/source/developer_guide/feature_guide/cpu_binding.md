@@ -16,13 +16,15 @@ On multi‑socket ARM systems, the OS scheduler may place vLLM threads on CPUs f
 - **Running NPU list**: Logical NPU IDs extracted from npu‑smi process listing, optionally filtered by ASCEND_RT_VISIBLE_DEVICES.
 - **CPU pool per NPU**: The CPU list assigned to each logical NPU ID based on the binding mode.
 - **Binding modes & Device behavior**:
+
   | Device type | Default mode | Description |
   | ----------- | ------------ | ------------ |
   | A3 (no affinity) | `global_slice` | Slice the cpuset by global logical NPU IDs to avoid CPU overlap across multi‑process groups. |
   | A2 / 310P / others | `topo_affinity` | Use NPU topology affinity (`npu‑smi info -t topo`) as a base. To prevent bandwidth contention, if more than one NPU is assigned to a single NUMA node, the allocation will extend to the nearest NUMA node. |
-  - **Default**: enabled (enable_cpu_binding = true).
-  - **Fallback**: If NPU topo affinity is unavailable, global_slice is used.
-  - **Failure handling**: Any exception in binding is logged as a warning and **binding is skipped for that rank**.
+
+    - **Default**: enabled (enable_cpu_binding = true).
+    - **Fallback**: If NPU topo affinity is unavailable, global_slice is used.
+    - **Failure handling**: Any exception in binding is logged as a warning and **binding is skipped for that rank**.
 
 ### Execution flow (simplified)
 
@@ -196,7 +198,6 @@ Because both pools are identical, the allocator applies average distribution acr
 
 To resolve, either reduce total_npus or enlarge the cpuset so that each NPU has at least 5 CPUs.
 
-
 ## Usage
 
 ### Minimum working example (online)
@@ -244,8 +245,8 @@ llm = LLM(
 ### Outputs and verification
 
 - Logs show the selected binding mode and the allocation plan, for example:
-  - `[cpu_bind_mode] mode=global_slice rank=0 visible_npus=[...]`
-  - `The CPU allocation plan is as follows: ...`
+    - `[cpu_bind_mode] mode=global_slice rank=0 visible_npus=[...]`
+    - `The CPU allocation plan is as follows: ...`
 - You can verify affinity via taskset or /proc/<pid>/status after startup.
 
 ## Limitations & Notes
@@ -253,11 +254,11 @@ llm = LLM(
 - **ARM‑only**: Binding is skipped on non‑ARM CPUs.
 - **Minimum CPU requirement**: Each logical NPU requires at least 5 CPUs. If the cpuset is smaller, binding fails with an error.
 - **NUMA symmetry assumption**: For best locality, the current strategies assume the cpuset is evenly distributed across NUMA nodes and CPU numbering aligns with NUMA layout; otherwise NUMA locality may be suboptimal.
-  - Example (symmetric layout): 2 NUMA nodes, 64 CPUs total. NUMA0 = CPUs 0–31, NUMA1 = CPUs 32–63, and the cpuset is 0–63. With 4 logical NPUs, global slicing yields 16 CPUs per NPU (0–15, 16–31, 32–47, 48–63), so each NPU’s pool stays within a single NUMA node.
+    - Example (symmetric layout): 2 NUMA nodes, 64 CPUs total. NUMA0 = CPUs 0–31, NUMA1 = CPUs 32–63, and the cpuset is 0–63. With 4 logical NPUs, global slicing yields 16 CPUs per NPU (0–15, 16–31, 32–47, 48–63), so each NPU’s pool stays within a single NUMA node.
 - **Runtime dependencies**:
-  - Requires npu‑smi and lscpu commands.
-  - IRQ binding requires write access to /proc/irq.
-  - Memory binding requires migratepages; otherwise it is skipped.
+    - Requires npu‑smi and lscpu commands.
+    - IRQ binding requires write access to /proc/irq.
+    - Memory binding requires migratepages; otherwise it is skipped.
 - **IRQ side effects**: irqbalance may be stopped to avoid overriding bindings.
 - **Per‑process behavior**: Only the current rank’s NPU is used for IRQ binding to avoid cross‑process overwrite.
 

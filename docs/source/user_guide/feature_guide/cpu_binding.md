@@ -12,6 +12,7 @@ CPU Binding is a performance optimization feature for vLLM, specifically designe
 |---|---|---|
 |A3 (No Affinity)|`global_slice`|Splits the allowed CPU list evenly based on the **total number of global logical NPUs**, ensuring each NPU is assigned a contiguous segment of CPU cores. This prevents CPU core overlap across multiple process groups.|
 |A2 / 310P / Others|`topo_affinity`|Allocates CPUs based on NPU topology affinity (retrieved via npu-smi). If multiple NPUs are assigned to a single NUMA node (which may cause bandwidth contention), the CPU allocation extends to adjacent NUMA nodes.|
+
 #### (2) CPU Pool Role Division
 
 Each CPU pool allocated to an NPU (with a minimum of 5 cores) is divided into fixed roles for dedicated tasks:
@@ -98,6 +99,7 @@ To disable CPU binding, simply set `enable_cpu_binding` to `False` while keeping
 |Insufficient CPUs for binding...|The number of CPU cores allocated to each NPU is less than the minimum requirement of 5.|1. Expand the allowed CPU list; 2. Reduce the number of visible NPUs.|
 |NPU topo affinity not found...|npu-smi is unable to retrieve NPU topology affinity information.|Verify the integrity of the npu-smi installation and ensure the user has sufficient execution permissions.|
 |Bind cpus failed in rankX...|The CPU binding process failed (e.g., taskset is unavailable, or the user lacks write permissions for /proc/irq).|1. Confirm that required tools (taskset, lscpu, npu-smi) are installed and available; 2. Verify the Cpus_allowed_list in `/proc/self/status` is valid.|
+
 ### 4. Key Limitations
 
 - ARM architecture only: Binding is automatically skipped on x86_64 systems.
