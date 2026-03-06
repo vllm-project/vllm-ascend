@@ -9,16 +9,16 @@
  */
  
 /*!
- * \file sparse_flash_attention_def.cpp
+ * \file sparse_flash_attention_custom_def.cpp
  * \brief
  */
 
 #include "register/op_def_registry.h"
 
 namespace ops {
-class SparseFlashAttention : public OpDef {
+class SparseFlashAttentionCustom : public OpDef {
 public:
-    explicit SparseFlashAttention(const char *name) : OpDef(name)
+    explicit SparseFlashAttentionCustom(const char *name) : OpDef(name)
     {
         this->Input("query")
             .ParamType(REQUIRED)
@@ -86,5 +86,5 @@ public:
         this->AICore().AddConfig("ascend910_93", aicore_config);
     }
 };
-OP_ADD(SparseFlashAttention);
+OP_ADD(SparseFlashAttentionCustom);
 } // namespace ops

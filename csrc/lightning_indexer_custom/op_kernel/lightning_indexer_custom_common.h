@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file lightning_indexer_common.h
+ * \file lightning_indexer_custom_common.h
  * \brief
  */
-#ifndef LIGHTNING_INDEXER_COMMON_H
-#define LIGHTNING_INDEXER_COMMON_H
+#ifndef lightning_indexer_custom_COMMON_H
+#define lightning_indexer_custom_COMMON_H
 
 namespace LICommon {
 enum class LI_LAYOUT {
@@ -132,4 +132,4 @@ __aicore__ inline T CeilDiv(T num, T rnd)
 }
 } // namespace LICommon
 
-#endif // LIGHTNING_INDEXER_COMMON_H
+#endif // lightning_indexer_custom_COMMON_H

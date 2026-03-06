@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file lightning_indexer_template_tiling_key.h
+ * \file lightning_indexer_custom_template_tiling_key.h
  * \brief
  */
 
@@ -28,7 +28,7 @@
 
 #define ASCENDC_TPL_4_BW 4
 
-ASCENDC_TPL_ARGS_DECL(LightningIndexer,
+ASCENDC_TPL_ARGS_DECL(LightningIndexerCustom,
                       ASCENDC_TPL_DTYPE_DECL(DT_Q, LI_TPL_FP16, LI_TPL_BF16),
                       ASCENDC_TPL_DTYPE_DECL(DT_K, LI_TPL_FP16, LI_TPL_BF16),
                       ASCENDC_TPL_DTYPE_DECL(DT_OUT, LI_TPL_INT32), ASCENDC_TPL_BOOL_DECL(PAGE_ATTENTION, 0, 1),

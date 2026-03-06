@@ -9,13 +9,13 @@
  */
 
 /*!
- * \file lightning_indexer_vector.h
+ * \file lightning_indexer_custom_vector.h
  * \brief
  */
-#ifndef LIGHTNING_INDEXER_VECTOR_H
-#define LIGHTNING_INDEXER_VECTOR_H
+#ifndef lightning_indexer_custom_VECTOR_H
+#define lightning_indexer_custom_VECTOR_H
 
-#include "lightning_indexer_vector.h"
+#include "lightning_indexer_custom_vector.h"
 #include "kernel_operator.h"
 
 namespace LIServiceVec {
@@ -332,4 +332,4 @@ __aicore__ inline void SetWaitFlag(HardEvent evt)
 }
 
 } // namespace LIServiceVec
-#endif // LIGHTNING_INDEXER_VECTOR_H
+#endif // lightning_indexer_custom_VECTOR_H

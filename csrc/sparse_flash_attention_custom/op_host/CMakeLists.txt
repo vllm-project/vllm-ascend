@@ -8,30 +8,30 @@
 # ======================================================================================================================
 
 add_ops_compile_options(
-        OP_NAME SparseFlashAttention
+        OP_NAME SparseFlashAttentionCustom
         OPTIONS --cce-auto-sync=off
                 -Wno-deprecated-declarations
                 -Werror
                 -fpermissive
 )
 
-set(sparse_flash_attention_depends transformer/attention/sparse_flash_attention PARENT_SCOPE)
+set(sparse_flash_attention_custom_depends transformer/attention/sparse_flash_attention_custom PARENT_SCOPE)
 target_sources(op_host_aclnn PRIVATE
-        sparse_flash_attention_def.cpp
+        sparse_flash_attention_custom_def.cpp
 )
 
 target_sources(optiling PRIVATE
-        sparse_flash_attention_tiling.cpp
+        sparse_flash_attention_custom_tiling.cpp
 )
 
 if (NOT BUILD_OPEN_PROJECT)
     target_sources(opmaster_ct PRIVATE
-        sparse_flash_attention_tiling.cpp
+        sparse_flash_attention_custom_tiling.cpp
     )
 endif ()
 
 target_sources(opsproto PRIVATE
-        sparse_flash_attention_proto.cpp
+        sparse_flash_attention_custom_proto.cpp
 )
 
 target_include_directories(optiling PRIVATE

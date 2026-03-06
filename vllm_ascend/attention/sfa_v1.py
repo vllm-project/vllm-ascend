@@ -875,7 +875,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_key=actual_seq_lengths_key,
             need_gather_q_kv=need_gather_q_kv)
 
-        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
+        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention_custom(
             query=ql_nope,
             key=kv_cache[0],
             value=kv_cache[0],
@@ -1007,7 +1007,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         block_table = attn_metadata.block_tables
 
-        topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+        topk_indices = torch.ops._C_ascend.npu_lightning_indexer_custom(
             query=q,
             key=kv_cache[2],
             weights=weights,
