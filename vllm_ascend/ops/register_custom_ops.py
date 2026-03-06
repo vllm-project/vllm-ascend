@@ -53,7 +53,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool, is_ep_c
                 x = x[:-pad_size]
         else:
             x = get_ep_group().all_gather(x, 0)
-            if enable_sp_by_pass(): # TODO: do unpad
+            if enable_sp_by_pass():  # TODO: do unpad
                 return x
             # unpad
             num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
@@ -75,8 +75,10 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
         forward_context = get_forward_context()
     except AssertionError:
         return tensor_model_parallel_all_reduce(x)
-    
-    flash_comm_v1_enabled = getattr(forward_context, "flash_comm_v1_enabled", False) or (enable_sp_by_pass() and is_ep_comm)
+
+    flash_comm_v1_enabled = getattr(forward_context, "flash_comm_v1_enabled", False) or (
+        enable_sp_by_pass() and is_ep_comm
+    )
 
     if not flash_comm_v1_enabled:
         return tensor_model_parallel_all_reduce(x)
@@ -88,7 +90,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
             x = F.pad(x, (0, 0, 0, pad_size))
         return tensor_model_parallel_reduce_scatter(x, 0)
     else:
-        if enable_sp_by_pass(): # TODO: do pad
+        if enable_sp_by_pass():  # TODO: do pad
             return get_ep_group().reduce_scatter(x.view(-1, *x.shape[1:]), 0)
         # padding
         dp_size = get_dp_group().world_size

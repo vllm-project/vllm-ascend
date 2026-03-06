@@ -766,8 +766,7 @@ def enable_sp_by_pass(vllm_config: VllmConfig | None = None):
         raise RuntimeError("enable_sp_by_pass called before initialization with vllm_config")
 
     _ENABLE_SP_BY_PASS = (
-        not vllm_config.model_config.enforce_eager
-        and vllm_config.compilation_config.pass_config.enable_sp
+        not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.pass_config.enable_sp
     )
     return _ENABLE_SP_BY_PASS
 

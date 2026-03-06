@@ -54,9 +54,7 @@ class AscendNoOpEliminationPass(VllmInductorPass):
     def _dims_equivalent(dim: int | SymInt, i_dim: int | SymInt) -> bool:
         return statically_known_true(dim == i_dim)  # type: ignore[no-any-return]
 
-    def _all_dims_equivalent(
-        self, dims: Iterable[int | SymInt], i_dims: Iterable[int | SymInt]
-    ) -> bool:
+    def _all_dims_equivalent(self, dims: Iterable[int | SymInt], i_dims: Iterable[int | SymInt]) -> bool:
         dims_ = list(dims)
         i_dims_ = list(i_dims)
         if len(dims_) != len(i_dims_):

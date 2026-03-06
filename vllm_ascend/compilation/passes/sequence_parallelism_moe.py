@@ -12,13 +12,12 @@ from vllm_ascend.compilation.passes.sequence_parallelism import (
 )
 
 
-class AllgatherRMSNormPattern(_SequenceParallelPatternHelper):
+class MiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelper):
     """Replaces all_gather + slice + AddRMSNormBias with AddRMSNormBias +
     all_gather to avoid middle-layer shape mismatch."""
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(eps, vllm_config.model_config.dtype,
-                         torch.npu.current_device())
+        super().__init__(eps, vllm_config.model_config.dtype, torch.npu.current_device())
 
     def get_inputs(self):
         input = self.empty(5, 16)
@@ -31,43 +30,34 @@ class AllgatherRMSNormPattern(_SequenceParallelPatternHelper):
         return {"num_tokens": 8}
 
     def register(self, pm_pass: PatternMatcherPass):
-
         def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            residual: torch.Tensor,
-            num_tokens
+            input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, num_tokens
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_gather = self._all_gather(input)
             x_sliced = all_gather[:num_tokens]
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                x_sliced, residual, weight, None, self.eps)
+            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(x_sliced, residual, weight, None, self.eps)
 
             return result, residual
 
         def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            residual: torch.Tensor,
-            num_tokens
+            input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, num_tokens
         ) -> tuple[torch.Tensor, torch.Tensor]:
             residual = torch.ops.vllm.maybe_chunk_residual(input, residual)
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                input, residual, weight, None, self.eps)
+            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(input, residual, weight, None, self.eps)
             all_gather = self._all_gather(result)
             return all_gather, residual
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass, scalar_workaround=self.get_scalar_inputs())
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass, scalar_workaround=self.get_scalar_inputs()
+        )
 
 
 class LastLayerAllgatherRMSNormPattern(_SequenceParallelPatternHelper):
-    """Same as AllgatherRMSNormPattern but for the last layer (no residual)
+    """Same as MiddleLayerAllgatherAddRMSNormPattern but for the last layer (no residual)
     all_gather + RMSNorm fusion."""
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(eps, vllm_config.model_config.dtype,
-                         torch.npu.current_device())
+        super().__init__(eps, vllm_config.model_config.dtype, torch.npu.current_device())
 
     def get_inputs(self):
         input = self.empty(5, 16)
@@ -79,43 +69,34 @@ class LastLayerAllgatherRMSNormPattern(_SequenceParallelPatternHelper):
         return {"num_tokens": 8}
 
     def register(self, pm_pass: PatternMatcherPass):
-
         def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            residual: torch.Tensor,
-            num_tokens
+            input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, num_tokens
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_gather = self._all_gather(input)
             x_sliced = all_gather[:num_tokens]
-            result, _, _ = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                x_sliced, residual, weight, None, self.eps)
+            result, _, _ = torch.ops._C_ascend.npu_add_rms_norm_bias(x_sliced, residual, weight, None, self.eps)
 
             return result
 
         def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            residual: torch.Tensor,
-            num_tokens
+            input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, num_tokens
         ) -> tuple[torch.Tensor, torch.Tensor]:
             residual = torch.ops.vllm.maybe_chunk_residual(input, residual)
-            result, _, _ = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                input, residual, weight, None, self.eps)
+            result, _, _ = torch.ops._C_ascend.npu_add_rms_norm_bias(input, residual, weight, None, self.eps)
             all_gather = self._all_gather(result)
             return all_gather
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass, scalar_workaround=self.get_scalar_inputs())
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass, scalar_workaround=self.get_scalar_inputs()
+        )
 
 
-class AllgatherAddRMSNormPattern(_SequenceParallelPatternHelper):
+class Qwen3VLMiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelper):
     """Replaces all_gather + slice + add + AddRMSNormBias with add(chunk) +
     AddRMSNormBias + all_gather for Qwen3-VL-style all_gather path."""
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(eps, vllm_config.model_config.dtype,
-                         torch.npu.current_device())
+        super().__init__(eps, vllm_config.model_config.dtype, torch.npu.current_device())
 
     def get_inputs(self):
         input = self.empty(5, 16)
@@ -128,19 +109,17 @@ class AllgatherAddRMSNormPattern(_SequenceParallelPatternHelper):
         return {"num_tokens": 8}
 
     def register(self, pm_pass: PatternMatcherPass):
-
         def pattern(
             input: torch.Tensor,
             weight: torch.Tensor,
             residual: torch.Tensor,
             deepstack_input_embeds: torch.Tensor,
-            num_tokens
+            num_tokens,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_gather = self._all_gather(input)
             x_sliced = all_gather[:num_tokens]
             add_ = x_sliced + deepstack_input_embeds
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                add_, residual, weight, None, self.eps)
+            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(add_, residual, weight, None, self.eps)
 
             return result, residual
 
@@ -149,38 +128,36 @@ class AllgatherAddRMSNormPattern(_SequenceParallelPatternHelper):
             weight: torch.Tensor,
             residual: torch.Tensor,
             deepstack_input_embeds: torch.Tensor,
-            num_tokens
+            num_tokens,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             chunk = deepstack_input_embeds.chunk(self.tp_size)[self.tp_rank]
             add_ = input + chunk
             residual = torch.ops.vllm.maybe_chunk_residual(input, residual)
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                add_, residual, weight, None, self.eps)
+            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(add_, residual, weight, None, self.eps)
             all_gather = self._all_gather(result)
             return all_gather, residual
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass, scalar_workaround=self.get_scalar_inputs())
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass, scalar_workaround=self.get_scalar_inputs()
+        )
 
 
 class SequenceParallelismAllgatherEpPass(VllmInductorPass):
     """Sequence parallelism AllGather epilogue pass.
 
-    Applies AllGather-based patterns: AllgatherRMSNormPattern,
-    LastLayerAllgatherRMSNormPattern, AllgatherAddRMSNormPattern.
+    Applies AllGather-based patterns: MiddleLayerAllgatherAddRMSNormPattern,
+    LastLayerAllgatherRMSNormPattern, Qwen3VLMiddleLayerAllgatherAddRMSNormPattern.
     """
 
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="npu_sequence_parallelism_allgather_ep_pass"
-        )
+        self.patterns: PatternMatcherPass = PatternMatcherPass(pass_name="npu_sequence_parallelism_allgather_ep_pass")
 
         for epsilon in [1e-5, 1e-6]:
-            AllgatherRMSNormPattern(config, epsilon).register(self.patterns)
+            MiddleLayerAllgatherAddRMSNormPattern(config, epsilon).register(self.patterns)
             LastLayerAllgatherRMSNormPattern(config, epsilon).register(self.patterns)
-            AllgatherAddRMSNormPattern(config, epsilon).register(self.patterns)
+            Qwen3VLMiddleLayerAllgatherAddRMSNormPattern(config, epsilon).register(self.patterns)
 
         self.min_tokens = get_sp_threshold(config)
 

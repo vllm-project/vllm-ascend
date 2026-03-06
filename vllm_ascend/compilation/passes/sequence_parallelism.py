@@ -195,8 +195,7 @@ class SequenceParallelismPass(VllmInductorPass):
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="npu_sequence_parallelism_pass")
+        self.patterns: PatternMatcherPass = PatternMatcherPass(pass_name="npu_sequence_parallelism_pass")
         self.noop_cleanup = AscendNoOpEliminationPass(config)
 
         for epsilon in [1e-5, 1e-6]:
@@ -215,15 +214,16 @@ class SequenceParallelismPass(VllmInductorPass):
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
         logger.debug(f"after apply replacement {graph.graph}")
-        
+
         from torch._inductor.pattern_matcher import PatternPrettyPrinter
+
         pattern_idx = 0
         for pattern_entry in self.patterns.patterns.values():
             for p in pattern_entry:
                 p_str = PatternPrettyPrinter.run(p.pattern)
                 logger.debug("Pattern %d: %s", pattern_idx, p_str)
                 pattern_idx += 1
-        
+
         self.end_and_log()
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:

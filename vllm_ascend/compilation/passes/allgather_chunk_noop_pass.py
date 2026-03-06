@@ -14,20 +14,14 @@ class AllGatherChunkNoOpCleanupPass(VllmInductorPass):
         super().__init__(config)
         self.tp_group = get_tp_group()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="npu_allgather_chunk_noop_cleanup_pass"
-        )
+        self.patterns: PatternMatcherPass = PatternMatcherPass(pass_name="npu_allgather_chunk_noop_cleanup_pass")
         self._register_patterns()
 
     def _all_gather(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.vllm.all_gather(
-            x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name
-        )
+        return torch.ops.vllm.all_gather(x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name)
 
     def _empty(self, *args, **kwargs):
-        return torch.empty(
-            *args, dtype=self.model_dtype, device=self.device, **kwargs
-        )
+        return torch.empty(*args, dtype=self.model_dtype, device=self.device, **kwargs)
 
     def _register_patterns(self) -> None:
         def pattern(input: torch.Tensor) -> torch.Tensor:
@@ -37,9 +31,7 @@ class AllGatherChunkNoOpCleanupPass(VllmInductorPass):
         def replacement(input: torch.Tensor) -> torch.Tensor:
             return input
 
-        pm.register_replacement(
-            pattern, replacement, [self._empty(8, 16)], pm.fwd_only, self.patterns
-        )
+        pm.register_replacement(pattern, replacement, [self._empty(8, 16)], pm.fwd_only, self.patterns)
 
     def __call__(self, graph: torch.fx.Graph) -> None:
         self.begin()
