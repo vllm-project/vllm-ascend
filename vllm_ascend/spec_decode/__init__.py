@@ -18,6 +18,7 @@
 #
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
+from vllm_ascend.spec_decode.mtp_proposer import AscendMtpProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 
@@ -29,7 +30,9 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendSuffixDecodingProposer(vllm_config, runner)
     elif method == "medusa":
         return AscendMedusaProposer(vllm_config, device)
-    elif method in ("eagle", "eagle3", "mtp"):
+    elif method in ("eagle", "eagle3"):
         return AscendEagleProposer(vllm_config, device, runner)
+    elif method == "mtp":
+        return AscendMtpProposer(vllm_config, device, runner)
     else:
         raise ValueError(f"Unknown speculative decoding method: {method}")
