@@ -22,6 +22,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import numpy as np
+import vllm
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.forward_context import set_forward_context, get_forward_context
@@ -120,13 +121,12 @@ def prepare_capture_inputs_wrapper():
     """Context manager to override input preparation for NPU graph capture."""
     # TODO(Ronald1995): make prepare_inputs_to_capture as static method
     # in CudaGraphManager.
-    global prepare_inputs_to_capture_gpu
+    ori = vllm.v1.worker.gpu.cudagraph_utils.CudaGraphManager.prepare_inputs_to_capture_gpu
     try:
-        ori_func = prepare_inputs_to_capture_gpu
-        prepare_inputs_to_capture_gpu = prepare_inputs_to_capture
+        vllm.v1.worker.gpu.cudagraph_utils.CudaGraphManager.prepare_inputs_to_capture_gpu = prepare_inputs_to_capture
         yield
     finally:
-        prepare_inputs_to_capture_gpu = ori_func
+        vllm.v1.worker.gpu.cudagraph_utils.CudaGraphManager.prepare_inputs_to_capture_gpu = ori
 
 
 def prepare_inputs_to_capture(
