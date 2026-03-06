@@ -37,6 +37,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm_ascend.compilation.acl_graph import update_full_graph_params
 
 
 class AclGraphManager(CudaGraphManager):
@@ -48,7 +49,12 @@ class AclGraphManager(CudaGraphManager):
         use_mrope: bool,
         use_aux_hidden_state_outputs: bool,
         device: torch.device,
+        model_runner: Any,  # NPUModelRunner type, in case circular import, so we pass it as Any
     ):
+        # set model runner attribute, so we can access attributes model runner
+        # when call `run_fullgraph` method in CudaGraphManager,
+        # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
+        self.model_runner = model_runner
         with torch_cuda_wrapper():
             super().__init__(
                 vllm_config,
@@ -114,6 +120,23 @@ class AclGraphManager(CudaGraphManager):
                 has_lora,
                 uniform_decode,
             )
+
+    def run_fullgraph(self, num_tokens: int) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Override run_fullgraph to update full graph params in run_fullgraph."""
+        ret = super().run_fullgraph(num_tokens)
+        forward_context = get_forward_context()
+        assert self.model_runner.positions is not None
+        positions = self.model_runner.positions[:num_tokens]
+        update_full_graph_params(
+            self.model_runner.attn_backend[0],  # TODO(Ronald1995): support hybrid attn backend
+            self.model_runner.update_stream,
+            forward_context,
+            num_tokens,
+            self.vllm_config,
+            self.model_runner.speculative_config,
+            positions.shape[0],
+        )
+        return ret
 
 
 @contextmanager

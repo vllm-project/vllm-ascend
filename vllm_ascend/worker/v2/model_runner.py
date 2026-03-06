@@ -121,6 +121,11 @@ class NPUModelRunner(GPUModelRunner):
         self.ascend_config = get_ascend_config()
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
+        # we need to update full graph params in run_fullgraph,
+        # so we need to create a stream to update full graph params.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream: torch.npu.Stream = torch.npu.Stream()
+
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
