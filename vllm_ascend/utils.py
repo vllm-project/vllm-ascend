@@ -62,6 +62,7 @@ _CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
+_DYNAMIC_EPLB_BUFFER_SIZE = 1  # num_experts * num_layers * 64 byte
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
@@ -133,22 +134,35 @@ def _unregister_print_streams_on_exit():
 atexit.register(_unregister_print_streams_on_exit)
 
 
-def maybe_trans_nz(weight: torch.Tensor):
+def _should_trans_nz(weight: torch.Tensor) -> bool:
+    # FP32 cannot use NZ.
+    if weight.dtype == torch.float32:
+        return False
+
+    # 310P always converts to NZ.
+    if is_310p():
+        return True
+
+    # NZ is disabled on non-310P.
     if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
-        # NZ is not enabled
+        return False
+
+    # BF16/FP16 convert only when enable_nz == 2.
+    if weight.dtype in {torch.bfloat16, torch.float16}:
+        return envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+
+    # Quantized or other supported dtypes convert by default.
+    return True
+
+
+# NZ conversion policy:
+# - 310P: always convert supported weights to FRACTAL_NZ
+# - non-310P: follow VLLM_ASCEND_ENABLE_NZ
+# - FP32: never convert
+def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+    if not _should_trans_nz(weight):
         return weight
-    if weight.dtype == torch.float:
-        # fp32 can not support NZ
-        return weight
-    elif weight.dtype in {torch.bfloat16, torch.float16}:
-        # bf16/fp16 will trans nz when VLLM_ASCEND_ENABLE_NZ is 2
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
-            return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
-        else:
-            return weight
-    else:
-        # quant weight will trans nz by default
-        return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
 def _round_up(x: int, align: int):
@@ -244,10 +258,19 @@ def enable_custom_op():
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
+    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
     global _CUSTOM_OP_ENABLED
 
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
+
+    # There are some customed operators which aren't implemented
+    # with batch invariant in vllm-ascend, we need to disable them.
+    if vllm_is_batch_invariant():
+        _CUSTOM_OP_ENABLED = False
+        return _CUSTOM_OP_ENABLED
+
     try:
         # isort: off
         # register custom ops into torch_library here
@@ -524,6 +547,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
         )
 
+    arch_name = vllm_config.model_config.architecture
+
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
@@ -535,10 +560,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
         sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
-
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
-            vllm_config.model_config.architectures[0],
+            arch_name,
             num_hidden_layers,
             len(original_sizes),
             len(
@@ -550,7 +574,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         compilation_config.cudagraph_capture_sizes = original_sizes
         logger.info(
             "No adjustment needed for ACL graph batch sizes: %s model (layers: %d) with %d sizes",
-            vllm_config.model_config.architectures[0],
+            arch_name,
             num_hidden_layers,
             len(original_sizes),
         )
@@ -628,20 +652,26 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
-        from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
         from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+        from vllm_ascend._310p.ops.vocab_parallel_embedding import (
+            AscendParallelLMHead310,
+            AscendVocabParallelEmbedding310,
+        )
 
         REGISTERED_ASCEND_OPS.update(
             {
                 "SiluAndMul": AscendSiluAndMul310,
-                "MMEncoderAttention": AscendMMEncoderAttention310,
                 "RotaryEmbedding": AscendRotaryEmbedding310,
                 "RMSNorm": AscendRMSNorm310,
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
                 "FusedMoE": AscendFusedMoE310,
                 "SharedFusedMoE": AscendSharedFusedMoE310,
+                "ParallelLMHead": AscendParallelLMHead310,
+                "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
             }
         )
+
+        REGISTERED_ASCEND_OPS.pop("MRotaryEmbedding", None)
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -717,6 +747,10 @@ def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
+def enable_sp_by_pass(vllm_config: VllmConfig):
+    return not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.pass_config.enable_sp
+
+
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
     if _ENABLE_SP is None:
@@ -725,8 +759,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 
             vllm_config = get_current_vllm_config()
         _ENABLE_SP = (
-            vllm_config.compilation_config.pass_config.enable_sp
-            or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
             # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
             # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
             or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
@@ -735,17 +768,6 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
             logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
-
-        if not _ENABLE_SP:
-            return _ENABLE_SP
-
-        assert vllm_config.parallel_config.tensor_parallel_size > 1, (
-            "Flash Comm v1 (Sequence Parallelism) is only supported when tp_size > 1."
-        )
-
-        assert not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel, (
-            "Flash Comm v1 (Sequence Parallelism) requires enable_expert_parallel=True for MoE models."
-        )
 
     return _ENABLE_SP
 
@@ -839,7 +861,7 @@ def weak_ref_tensor(tensor: Any) -> Any:
     but will not keep the original tensor alive.
     """
     if isinstance(tensor, torch.Tensor):
-        return torch.ops._C_ascend.weak_ref_tensor(tensor)
+        return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
 
@@ -907,6 +929,7 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
         return None
     hccl_config_map = {
         "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
+        "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 
@@ -1115,5 +1138,47 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
+    # because the broadcast in layer sharding needs to be overlapped with a heavy compute stream to be
+    # effectively hidden, it is enabled only during the prefill stage.
     is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
     return is_prefill_instance
+
+
+@lru_cache(maxsize=1)
+def enable_dsa_cp_with_o_proj_tp() -> bool:
+    if not enable_dsa_cp():
+        return False
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    # if is PD mix stage, using original TP o_proj weight, and also need to
+    # full gather for o_proj weight for prefill stage.
+    return vllm_config.kv_transfer_config is None
+
+
+def check_gdn_layer(vllm_config) -> bool:
+    """
+    gdn layer is marked with `linear_attention`.
+    So, if `linear_attention` is detected, we think the model has gdn-attention.
+    """
+    if not hasattr(vllm_config, "model_config"):
+        return False
+
+    model_config = vllm_config.model_config
+    if not hasattr(model_config, "hf_config"):
+        return False
+
+    hf_config = model_config.hf_config
+
+    # Use `or []` to prevent errors when layer_types is None
+    layer_types = getattr(hf_config, "layer_types", None) or []
+    if "linear_attention" in layer_types:
+        return True
+
+    text_config = getattr(hf_config, "text_config", None)
+    if text_config:
+        text_layer_types = getattr(text_config, "layer_types", None) or []
+        if "linear_attention" in text_layer_types:
+            return True
+
+    return False

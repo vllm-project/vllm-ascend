@@ -81,6 +81,9 @@ class TestAscendAttentionCPImpl(TestBase):
             [0])
         attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx = torch.tensor(
             [0])
+        attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx = torch.tensor(
+            [0, 1])
+        attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn = False
 
         output, attn_lse = self.impl._forward_prefill_cp(
             query, key, value, attn_metadata)
@@ -118,6 +121,7 @@ class TestAscendAttentionCPImpl(TestBase):
 
         attn_metadata = MagicMock()
         attn_metadata.decode_meta = MagicMock()
+        attn_metadata.num_decodes_flatten = 5
         attn_metadata.decode_meta.batch_seq_mask = torch.tensor(
             [1, 0], dtype=torch.bool)
         output = self.impl._forward_decode_pcp_dcp(query, attn_metadata)
@@ -232,15 +236,17 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(value.shape[1], num_heads)
         self.assertEqual(value.shape[2], head_size)
 
+    @patch('torch_npu.Event', create=True)
     @patch('torch_npu._npu_reshape_and_cache')
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_reshape_and_cache(self, mock_npu_reshape_and_cache):
+    def test_reshape_and_cache(self, mock_event_class, mock_npu_reshape_and_cache):
         num_tokens = 4
         block_num = 100
         block_size = 128
         num_heads = 1
         head_size = 128
         self.impl.head_size = head_size
+        self.impl.is_kv_producer = False
 
         kv_cache = (torch.randn(block_num, block_size, num_heads, head_size),
                     torch.randn(block_num, block_size, num_heads, head_size))
@@ -254,12 +260,23 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata.prefill = MagicMock()
         attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx = torch.tensor(
             [0, 3, 1, 2, 0, 0, 0, 0])
+        attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn = False
+        attn_metadata.prefill.pcp_metadata.pcp_padded_tokens_fla = 0
+        attn_metadata.prefill.pcp_metadata.pcp_enter_fa_restore_idx = torch.arange(
+            num_tokens * 3 * self.impl.pcp_size
+        )
+        attn_metadata.prefill.pcp_metadata.pcp_unpad_mask = torch.tensor(
+            [True, False, True, True, True, True, True, True]
+        )
 
+        query = torch.rand(num_tokens, num_heads, head_size)
         key = torch.randn(num_tokens, num_heads, head_size)
         value = torch.randn(num_tokens, num_heads, head_size)
+        output = torch.rand(num_tokens, num_heads * head_size)
 
-        key, value = self.impl.reshape_and_cache(key, value, kv_cache,
-                                                 attn_metadata)
+        query, key, value, output = self.impl.reshape_and_cache(
+            query, key, value, kv_cache, attn_metadata, output
+        )
         self.assertEqual(key.shape[0], num_tokens * self.impl.pcp_size)
         self.assertEqual(key.shape[1], num_heads)
         self.assertEqual(key.shape[2], head_size)
