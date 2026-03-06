@@ -186,6 +186,39 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         ],
         "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
     },
+    "qwen3_omni_moe": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "qwen2_5_omni": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "attn.qkv": [
+            "attn.q",
+            "attn.k",
+            "attn.v",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "qkv": [
+            "q",
+            "k",
+            "v",
+        ],
+    },
 }
 
 
@@ -457,7 +490,10 @@ class AscendModelSlimConfig(QuantizationConfig):
                         "to have the same precision."
                     )
         else:
-            is_skipped = self.quant_description[prefix + ".weight"] == "FLOAT"
+            is_skipped = any(
+                key.startswith(prefix) and key.endswith(".weight") and value == "FLOAT"
+                for key, value in self.quant_description.items()
+            )
 
         assert is_skipped is not None
         return is_skipped
