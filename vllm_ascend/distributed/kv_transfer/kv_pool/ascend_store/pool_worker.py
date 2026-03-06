@@ -311,9 +311,11 @@ class KVPoolWorker:
                             block_id_list_c,
                             ret,
                         )
-                        self._invalid_block_ids.update(missing_block_ids)
+                        with self._invalid_block_ids_lock:
+                            self._invalid_block_ids.update(missing_block_ids)
                     elif ret is None:
-                        self._invalid_block_ids.update(block_id_list_c)
+                        with self._invalid_block_ids_lock:
+                            self._invalid_block_ids.update(block_id_list_c)
 
     def wait_for_layer_load(self) -> None:
         for layerwise_retriever in self.layerwise_retrievers:
