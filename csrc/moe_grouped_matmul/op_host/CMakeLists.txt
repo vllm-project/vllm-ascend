@@ -7,7 +7,6 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ======================================================================================================================
 
-
 add_ops_compile_options(
         OP_NAME MoeGroupedMatmul
         OPTIONS --cce-auto-sync=on
@@ -15,7 +14,7 @@ add_ops_compile_options(
                 -Werror
 )
 
-target_sources(op_host_aclnnInner PRIVATE
+target_sources(op_host_aclnnExc PRIVATE
         moe_grouped_matmul_def.cpp
 )
 
