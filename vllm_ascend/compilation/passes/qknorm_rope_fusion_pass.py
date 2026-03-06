@@ -24,6 +24,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
+from vllm_ascend.utils import get_rope_dim
 
 
 class QKNormRopeFusionPattern(BasePattern):
@@ -35,6 +36,7 @@ class QKNormRopeFusionPattern(BasePattern):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.device = vllm_config.device_config.device if vllm_config.device_config else None
+        self.rope_dim = get_rope_dim(vllm_config)
 
     def get_inputs(self):
         T = 5
@@ -65,7 +67,7 @@ class QKNormRopeFusionPattern(BasePattern):
             q_flat = q_norm_out.view(q.shape)
             k_flat = k_norm_out.view(k.shape)
             q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
-                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
+                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.rope_dim, True
             )
 
             return q_rope, k_rope, v
@@ -108,6 +110,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.device = vllm_config.device_config.device if vllm_config.device_config else None
+        self.rope_dim = get_rope_dim(vllm_config)
 
     def get_inputs(self):
         T = 5
@@ -145,7 +148,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
             q_flat = q_normed.view(q.shape)
             k_flat = k_normed.view(k.shape)
             q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
-                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
+                positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.rope_dim, True
             )
 
             return q_rope, k_rope, v
