@@ -46,11 +46,41 @@ plugins.md024.allow_different_nesting = true # no-duplicate-headers
 plugins.md029.enabled = false # ol-prefix
 
 [tool.ruff]
-# TODO: according to PEP8, there should be 80 characters per line
+# TODO: according to PEP8, there should be 120 characters per line
 line-length = 120
 # Folder to be modified
 exclude = [
-    "tests/**",
+    # Batch (1)
+    "tests/e2e/__init__.py",
+    "tests/e2e/310p/",
+    "tests/e2e/conftest.py",
+    "tests/e2e/doctests/",
+    "tests/e2e/model_utils.py",
+    "tests/e2e/models/",
+    "tests/e2e/multicard/2-cards/",
+    
+    # Batch (2)
+    "tests/e2e/multicard/4-cards/",
+    "tests/e2e/nightly/multi_node/",
+    
+    # Batch (3)
+    "tests/e2e/nightly/single_node/models/",
+    
+    # Batch (4)
+    "tests/e2e/nightly/single_node/ops/",
+    
+    # Batch (5)
+    # "tests/e2e/singlecard/",
+    
+    # Batch (6)
+    "tests/e2e/nightly/single_node/ops/singlecard_ops/triton/",
+    "tests/e2e/singlecard/pooling/",
+    "tests/e2e/singlecard/spec_decode/",
+    "tests/e2e/utils.py",
+    "tests/e2e/vllm_interface/",
+    "tests/e2e/weekly/",
+
+    "tests/ut/",
 ]
 
 [tool.ruff.lint]

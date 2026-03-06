@@ -1,13 +1,7 @@
 import torch
 import vllm.v1.worker.utils as utils
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("v0.15.0"):
-    from vllm.attention.layer import Attention  # type: ignore
-else:
-    from vllm.model_executor.layers.attention import Attention
 
 
 # Without this patch, it will raise an exception when initialize kv_cache.
