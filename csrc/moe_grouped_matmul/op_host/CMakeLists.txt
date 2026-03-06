@@ -39,8 +39,6 @@ file(GLOB _GMM_Aclnn_header "${CMAKE_CURRENT_SOURCE_DIR}/aclnn_moe_grouped_matmu
 
 file(GLOB _GMM_Aclnn_header_weight_nz "${CMAKE_CURRENT_SOURCE_DIR}/aclnn_moe_grouped_matmul_weight_nz.h")
 
-install(FILES ${_GMM_Aclnn_header}
-        DESTINATION ${ACLNN_INC_INSTALL_DIR} OPTIONAL)
+install(FILES ${_GMM_Aclnn_header} DESTINATION ${ACLNN_INC_INSTALL_DIR} OPTIONAL)
 
-install(FILES ${_GMM_Aclnn_header_weight_nz}
-        DESTINATION ${ACLNN_INC_INSTALL_DIR} OPTIONAL)
+install(FILES ${_GMM_Aclnn_header_weight_nz} DESTINATION ${ACLNN_INC_INSTALL_DIR} OPTIONAL)
