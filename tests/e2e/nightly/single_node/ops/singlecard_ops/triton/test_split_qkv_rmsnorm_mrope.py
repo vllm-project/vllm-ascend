@@ -3,7 +3,6 @@ import gc
 import pytest
 import torch
 
-import vllm_ascend.ops.register_custom_ops  # noqa
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 NUM_TOKENS = [1, 4, 8, 16, 1024, 4096]
@@ -13,7 +12,7 @@ EPS = [1e-6]
 MROPE_SECTION = [[11, 11, 10], [24, 20, 20]]
 IS_INTERLEAVED = [True, False]
 HAS_GATE = [True, False]
-DTYPES = [torch.bfloat16]
+DTYPES = [torch.bfloat16, torch.float16]
 DEVICES = [f"npu:{0}"]
 DEFAULT_ATOL = 1e-2
 DEFAULT_RTOL = 1e-2
@@ -29,38 +28,6 @@ def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.T
     x_t[..., 2 : mrope_section[2] * 3 : 3] = x[2, ..., 2 : mrope_section[2] * 3 : 3]
     return x_t
 
-
-def custom_mrope(q, k, sin, cos, rotary_dim, num_q_heads, num_kv_heads, head_size):
-    cos = cos.unsqueeze(-2).to(torch.float32)
-    sin = sin.unsqueeze(-2).to(torch.float32)
-    
-    q = q.view(-1, num_q_heads, head_size)
-    query_rot = q[..., :rotary_dim]
-    query_pass = q[..., rotary_dim:]
-    x1, x2 = torch.chunk(query_rot, 2, dim=-1)
-    o1 = x1 * cos - x2 * sin
-    o2 = x2 * cos + x1 * sin
-    
-    query_rot = torch.stack((o1, o2), dim=-1).flatten(-2)
-    
-    res1 = torch.cat((query_rot, query_pass), dim=-1)
-    res1 = res1.reshape(-1, num_q_heads * head_size)
-    
-    k = k.view(-1, num_kv_heads, head_size)
-    
-    key_rot = k[..., :rotary_dim]
-    key_pass = k[..., rotary_dim:]
-    
-    x1, x2 = torch.chunk(key_rot, 2, dim=-1)
-    o1 = x1 * cos - x2 * sin
-    o2 = x2 * cos + x1 * sin
-    key_rot = torch.stack((o1, o2), dim=-1).flatten(-2)
-    
-    res2 = torch.cat((key_rot, key_pass), dim=-1)
-    res2 = res2.reshape(-1, num_kv_heads * head_size)
-    
-    return res1.to(torch.bfloat16), res2.to(torch.bfloat16),
-    
 
 def rms_norm(x: torch.Tensor,
             norm_weight: torch.Tensor,
@@ -166,9 +133,9 @@ def naive_split_qkv_rmsnorm_mrope(
     q_result = q_reshaped.view(num_tokens, -1)
     k_result = k_reshaped.view(num_tokens, -1)
 
-    q = q_result.to(torch.bfloat16)
-    k = k_result.to(torch.bfloat16)
-    v = v.to(torch.bfloat16)
+    q = q_result.to(qkv.dtype)
+    k = k_result.to(qkv.dtype)
+    v = v.to(qkv.dtype)
 
     return q, k, v
 
@@ -237,9 +204,9 @@ def naive_split_qkv_rmsnorm_mrope_interleaved(
     q_result = q_reshaped.view(num_tokens, -1)
     k_result = k_reshaped.view(num_tokens, -1)
 
-    q = q_result.to(torch.bfloat16)
-    k = k_result.to(torch.bfloat16)
-    v = v.to(torch.bfloat16)
+    q = q_result.to(qkv.dtype)
+    k = k_result.to(qkv.dtype)
+    v = v.to(qkv.dtype)
 
     return q, k, v
 
@@ -374,4 +341,3 @@ def test_split_qkv_rmsnorm_mrope(
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
-    
