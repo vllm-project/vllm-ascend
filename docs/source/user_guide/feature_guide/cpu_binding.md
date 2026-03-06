@@ -33,23 +33,37 @@ Each CPU pool allocated to an NPU (with a minimum of 5 cores) is divided into fi
 |...|...|...|
 |15|600-639|`IRQ`: 600-601, `Main`: 602-637, `ACL`: 638, `Release`: 639|
 
-#### (4) Core Execution Flow (Mermaid Diagram Below)
+#### (4) Flowchart
 
-```mermaid
-
-flowchart TD
-    A[Worker Initialization] --> B{enable_cpu_binding=True and ARM Architecture?}
-    B -->|No| C[Skip Binding]
-    B -->|Yes| D[Collect Information: Allowed CPU List, NPU Topology, Running NPU IDs]
-    D --> E[Build CPU Pool: Select Mode by Device Type, Ensure ≥5 Cores/NPU]
-    E --> F[Split CPU Pool into IRQ/main/ACL/release]
-    F --> G[Bind Processes/Threads to Corresponding CPUs]
-    G --> H{Optional Operations}
-    H --> I[Bind NPU IRQ to First 2 Cores]
-    H --> J[Migrate ACL Thread Memory to Corresponding NUMA Node]
-    G --> K[Fault Tolerance: Only Log Warning on Failure, Skip Binding for This Rank]
-    
+```text
+Start
+  |
+  v
+[Worker initialization]
+  |
+  v
+[enable_cpu_binding=True and ARM architecture?]
+  |-- No  --> [Skip binding] --> End
+  |
+  `-- Yes --> [Collect info: allowed CPU list / NPU topology / running NPU IDs]
+              |
+              v
+            [Build CPU pools (mode by device type, >=5 cores per NPU)]
+              |
+              v
+            [Split pool roles: IRQ / main / ACL / release]
+              |
+              v
+            [Bind process and thread affinity]
+              |
+              +--> Optional: bind NPU IRQ to first 2 cores
+              +--> Optional: migrate ACL-thread memory to the target NUMA node
+              `--> If binding fails: log warning and skip binding for this rank
+              |
+              v
+             End
 ```
+
 ### 2. Quick Usage Examples
 
 #### (1) Enable CPU Binding (Default: True)
