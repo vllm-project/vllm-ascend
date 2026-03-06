@@ -34,6 +34,7 @@ class AscendPCPMetadata:
     block_table_cp: torch.Tensor = None
     valid_block_ids: torch.Tensor = None
     prefill_q_cum_seqlens: torch.Tensor = None
+    block_arange: torch.Tensor = None
 
 
 @dataclass
