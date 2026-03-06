@@ -826,6 +826,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "int group_list_type)"
 
         "-> Tensor[]"
-        );
+    );
     ops.impl("moe_grouped_matmul", torch::kPrivateUse1,&vllm_ascend::moe_grouped_matmul);
 }
