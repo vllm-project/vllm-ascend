@@ -22,16 +22,18 @@ set -euo pipefail
 trap 'echo "Error on line $LINENO: command \`$BASH_COMMAND\` failed with exit code $?" >&2' ERR
 
 cd /vllm-workspace
+mkdir -p fused_infer_attention_score_a2_$(uname -i)
 # download fused_infer_attention_score related source files
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/cann-8.5.0/fused_infer_attention_score_a2_$(uname -i).tar.gz
-tar -zxvf ./fused_infer_attention_score_a2_$(uname -i).tar.gz
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/cann-8.5.1/fused_infer_attention_score_a2_$(uname -i).tar.gz
+tar -zxvf ./fused_infer_attention_score_a2_$(uname -i).tar.gz -C ./fused_infer_attention_score_a2_$(uname -i)
 
 # replace fused_infer_attention_score operation files
-cd $ASCEND_TOOLKIT_HOME/opp/built-in/op_impl/ai_core/tbe/kernel/ascend910b
+cd $ASCEND_TOOLKIT_HOME/opp/built-in/op_impl/ai_core/tbe/kernel/ascend910b/ops_transformer
 rm -rf fused_infer_attention_score
 cp -r /vllm-workspace/fused_infer_attention_score_a2_$(uname -i)/fused_infer_attention_score .
 
 # replace related so
 cd $ASCEND_TOOLKIT_HOME/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/linux/$(uname -i)
-rm libopmaster_ct.so libopmaster_rt2.0.so liboptiling.so
+rm libopmaster_*.so
+rm liboptiling.so
 cp /vllm-workspace/fused_infer_attention_score_a2_$(uname -i)/*.so .
