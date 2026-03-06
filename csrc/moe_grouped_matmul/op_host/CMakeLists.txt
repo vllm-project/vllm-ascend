@@ -9,7 +9,7 @@
 
 add_ops_compile_options(
         OP_NAME MoeGroupedMatmulCustom
-        OPTIONS --cce-auto-sync=on
+        OPTIONS --cce-auto-sync=off
                 -Wno-deprecated-declarations
                 -Werror
 )
