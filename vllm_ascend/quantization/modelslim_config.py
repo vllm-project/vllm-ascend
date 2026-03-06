@@ -65,18 +65,17 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "mm_projector.linear_2": "mm_projector.proj.2",
     },
     "qwen3_omni_moe": {
-        "language_model.lm_head." : "thinker.lm_head.",
-        "language_model.model." : "thinker.model.",
-        "visual.":"thinker.visual.",
+        "language_model.lm_head.": "thinker.lm_head.",
+        "language_model.model.": "thinker.model.",
+        "visual.": "thinker.visual.",
     },
     "qwen2_5_omni": {
-        "language_model.lm_head." : "thinker.lm_head.",
-        "language_model.model." : "thinker.model.",
-        "visual.":"thinker.visual.",
+        "language_model.lm_head.": "thinker.lm_head.",
+        "language_model.model.": "thinker.model.",
+        "visual.": "thinker.visual.",
     },
     "qwen2_5_omni_text": {
-        "language_model." : "thinker.",
-        #"language_model.lm_head." : "thinker.lm_head.",
+        "language_model.": "thinker.",
     },
 }
 
