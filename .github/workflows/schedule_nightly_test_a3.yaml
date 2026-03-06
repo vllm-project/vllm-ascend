@@ -50,6 +50,10 @@ jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
     runs-on: linux-aarch64-a2b3-0
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'nightly-test')
     outputs:
       should_run: ${{ steps.parse.outputs.should_run }}
       test_filter: ${{ steps.parse.outputs.test_filter }}
