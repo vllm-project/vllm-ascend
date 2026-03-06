@@ -335,75 +335,8 @@ class cmake_build_ext(build_ext):
 
     def build_extensions(self) -> None:
         print(f"envs.COMPILE_CUSTOM_KERNELS is {envs.COMPILE_CUSTOM_KERNELS}")
-        if not envs.COMPILE_CUSTOM_KERNELS:
-            return
-        # Ensure that CMake is present and working
-        try:
-            subprocess.check_output(["cmake", "--version"])
-        except OSError as e:
-            raise RuntimeError(f"Cannot find CMake executable: {e}")
 
-        # Create build directory if it does not exist.
-        if not os.path.exists(self.build_temp):
-            os.makedirs(self.build_temp)
-
-        targets = []
-
-        os.makedirs(os.path.join(self.build_lib, "vllm_ascend"), exist_ok=True)
-
-        def target_name(s: str) -> str:
-            return s.removeprefix("vllm_ascend.")
-
-        # Build all the extensions
-        for ext in self.extensions:
-            self.configure(ext)
-            targets.append(target_name(ext.name))
-
-        num_jobs = self.compute_num_jobs()
-
-        build_args = [
-            "--build",
-            ".",
-            f"-j={num_jobs}",
-            *[f"--target={name}" for name in targets],
-        ]
-        try:
-            subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
-        except OSError as e:
-            raise RuntimeError(f"Build library failed: {e}")
-        # Install the libraries
-        install_args = [
-            "cmake",
-            "--install",
-            ".",
-        ]
-        try:
-            subprocess.check_call(install_args, cwd=self.build_temp)
-        except OSError as e:
-            raise RuntimeError(f"Install library failed: {e}")
-
-        # copy back to build folder for editable build
-        if isinstance(self.distribution.get_command_obj("develop"), develop):
-            import shutil
-
-            for root, _, files in os.walk(self.build_temp):
-                for file in files:
-                    if file.endswith(".so"):
-                        src_path = os.path.join(root, file)
-                        dst_path = os.path.join(self.build_lib, "vllm_ascend", file)
-                        shutil.copy(src_path, dst_path)
-                        print(f"Copy: {src_path} -> {dst_path}")
-
-        # copy back _cann_ops_custom directory
-        src_cann_ops_custom = os.path.join(ROOT_DIR, "vllm_ascend", "_cann_ops_custom")
-        dst_cann_ops_custom = os.path.join(self.build_lib, "vllm_ascend", "_cann_ops_custom")
-        if os.path.exists(src_cann_ops_custom):
-            import shutil
-
-            if os.path.exists(dst_cann_ops_custom):
-                shutil.rmtree(dst_cann_ops_custom)
-            shutil.copytree(src_cann_ops_custom, dst_cann_ops_custom)
-            print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
+        return
 
     def run(self):
         # First, ensure ACLNN custom-ops is built and installed.
