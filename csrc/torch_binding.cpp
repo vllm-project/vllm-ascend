@@ -623,13 +623,8 @@ std::vector<at::Tensor> moe_grouped_matmul(
     y.emplace_back(y_0);
     at::TensorList result = at::TensorList(y);
 
-    if (weight_nz) {
-        EXEC_NPU_CMD(aclnnMoeGroupedMatmulWeightNz,
-                    x_list, weight_list, group_list, transpose_weight, result);
-    } else {
-        EXEC_NPU_CMD(aclnnMoeGroupedMatmul,
-                    x_list, weight_list, group_list, transpose_weight, result);
-    }
+    EXEC_NPU_CMD(aclnnMoeGroupedMatmulWeightNz,
+                x_list, weight_list, group_list, transpose_weight, result);
 
     return y;
 }
