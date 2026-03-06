@@ -49,32 +49,17 @@ class BaseDeviceAdaptor:
         active_expert_range=None,
         quant_mode: int = -1,
     ):
-        # In small batch and non-quantization scenarios, npu_moe_init_routing_v2 is more efficient.
-        # It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
-        if quant_mode == -1 and get_forward_context().num_tokens <= DeviceOperator.small_batch_gmm_batch_num:
-            return torch_npu.npu_moe_init_routing_v2(
-                hidden_states,
-                topk_ids,
-                scale=scale,
-                active_num=active_num,
-                expert_num=expert_num,
-                expert_tokens_num_type=2,
-                expert_tokens_num_flag=expert_tokens_num_flag,
-                active_expert_range=active_expert_range,
-                quant_mode=quant_mode,
-            )
-        else:
-            return torch.ops._C_ascend.npu_moe_init_routing_custom(
-                hidden_states,
-                topk_ids,
-                scale=scale,
-                active_num=active_num,
-                expert_num=expert_num,
-                expert_tokens_num_type=expert_tokens_num_type,
-                expert_tokens_num_flag=expert_tokens_num_flag,
-                active_expert_range=active_expert_range,
-                quant_mode=quant_mode,
-            )
+        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+            hidden_states,
+            topk_ids,
+            scale=scale,
+            active_num=active_num,
+            expert_num=expert_num,
+            expert_tokens_num_type=expert_tokens_num_type,
+            expert_tokens_num_flag=expert_tokens_num_flag,
+            active_expert_range=active_expert_range,
+            quant_mode=quant_mode,
+        )
 
     @staticmethod
     def npu_dynamic_quant(
