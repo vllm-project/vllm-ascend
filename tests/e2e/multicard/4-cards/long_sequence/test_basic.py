@@ -25,6 +25,7 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 os.environ["HCCL_BUFFSIZE"] = "768"
 
 
+@wait_until_npu_memory_free()
 def test_models_pcp_dcp_basic():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -59,12 +60,12 @@ def test_models_pcp_dcp_basic():
     model = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
     with VllmRunner(
             model,
-            enforce_eager=True,
             max_model_len=1024,
             tensor_parallel_size=2,
             prefill_context_parallel_size=2,
             decode_context_parallel_size=2,
             enable_expert_parallel=True,
+            gpu_memory_utilization=0.2,
             block_size=128,
             quantization="ascend",
     ) as runner:
@@ -84,6 +85,7 @@ def test_models_pcp_dcp_basic():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_models_pcp_dcp_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -121,6 +123,7 @@ def test_models_pcp_dcp_full_graph():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_models_pcp_dcp_piece_wise():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -172,6 +175,7 @@ def test_pcp_basic():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_pcp_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -195,6 +199,7 @@ def test_pcp_full_graph():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_pcp_piece_wise():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -214,6 +219,7 @@ def test_pcp_piece_wise():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_dcp_basic():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -233,6 +239,7 @@ def test_dcp_basic():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_dcp_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -256,6 +263,7 @@ def test_dcp_full_graph():
         runner.model.generate(prompts, sampling_params)
 
 
+@wait_until_npu_memory_free()
 def test_dcp_piece_wise():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
