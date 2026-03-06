@@ -81,7 +81,7 @@ jobs:
       
       - name: Patch modelscope
         run: |
-          python .github/workflows/scripts/patch_modelscope.py
+          python .github/workflows/patch/patch_ms.py
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -173,7 +173,7 @@ jobs:
           pip install -v -e .
       - name: Patch modelscope
         run: |
-          python .github/workflows/scripts/patch_modelscope.py
+          python .github/workflows/patch/patch_ms.py
       - name: Run e2e test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -263,7 +263,7 @@ jobs:
 
       - name: Patch modelscope
         run: |
-          python .github/workflows/scripts/patch_modelscope.py
+          python .github/workflows/patch/patch_ms.py
 
       - name: Run vllm-project/vllm-ascend test (light)
         env:
@@ -354,7 +354,7 @@ jobs:
 
       - name: Patch modelscope
         run: |
-          python .github/workflows/scripts/patch_modelscope.py
+          python .github/workflows/patch/patch_ms.py
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -451,7 +451,7 @@ jobs:
 
       - name: Patch modelscope
         run: |
-          python .github/workflows/scripts/patch_modelscope.py
+          python .github/workflows/patch/patch_ms.py
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
@@ -534,7 +534,7 @@ jobs:
 
       - name: Patch modelscope
         run: |
-          python .github/workflows/scripts/patch_modelscope.py
+          python .github/workflows/patch/patch_ms.py
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -596,7 +596,7 @@ jobs:
 
       - name: Patch modelscope
         run: |
-          python .github/workflows/scripts/patch_modelscope.py
+          python .github/workflows/patch/patch_ms.py
 
       - name: Run vllm-project/vllm-ascend test
         env:
