@@ -305,7 +305,7 @@
 #       https://github.com/vllm-project/vllm/pull/34336
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
-# ** 16. File: worker/patch_qwen3_quarot.py**
+# ** 16. File: worker/patch_draft_quarot.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM.load_weights`
 #    Why:
@@ -314,5 +314,7 @@
 #    How：
 #       Dynamically replace the `load_weights` function at runtime,
 #       and fix `target_config` into the new implementation with a closure.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/36225
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
