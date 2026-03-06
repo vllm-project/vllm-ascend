@@ -33,6 +33,8 @@ class MooncakeBackend(Backend):
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
         self.rank = parallel_config.rank
+        self.preferred_segment = self.config.preferred_segment
+        self.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
             transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
@@ -69,8 +71,9 @@ class MooncakeBackend(Backend):
                 res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
             else:
                 config = ReplicateConfig()
-                config.preferred_segment = self.local_seg
-                config.prefer_alloc_in_same_node = True
+                if self.preferred_segment:
+                    config.preferred_segment = self.local_seg
+                config.prefer_alloc_in_same_node = self.prefer_alloc_in_same_node
                 res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
             for value in res:
                 if value < 0:
@@ -100,11 +103,14 @@ class MooncakeStoreConfig:
     protocol: str
     device_name: str
     master_server_address: str
+    preferred_segment: bool
+    prefer_alloc_in_same_node: bool
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
         with open(file_path) as file:
             config = json.load(file)
+        master_server_address = os.getenv("MOONCAKE_MASTER", None)
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server"),
             global_segment_size=_parse_global_segment_size(
@@ -113,7 +119,11 @@ class MooncakeStoreConfig:
             local_buffer_size=_parse_global_segment_size(config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)),
             protocol=config.get("protocol", "ascend"),
             device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address"),
+            master_server_address=master_server_address
+            if master_server_address is not None else
+            config.get("master_server_address"),
+            preferred_segment=config.get("preferred_segment", False),
+            prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node", True),
         )
 
     @staticmethod

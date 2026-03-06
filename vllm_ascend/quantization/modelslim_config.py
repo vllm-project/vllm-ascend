@@ -64,6 +64,11 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "mm_projector.linear_1": "mm_projector.proj.0",
         "mm_projector.linear_2": "mm_projector.proj.2",
     },
+    "qwen3_5_moe": {
+        "visual.": "model.visual.",
+        "language_model.lm_head.": "lm_head.",
+        "language_model.model.": "model.language_model.",
+    }
 }
 
 # key: model_type
@@ -79,6 +84,17 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
             "gate_proj",
             "up_proj",
         ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "qwen3_5_moe": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
     "deepseek_v2": {

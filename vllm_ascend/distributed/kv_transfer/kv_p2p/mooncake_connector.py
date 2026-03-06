@@ -483,7 +483,9 @@ class KVCacheRecvingThread(threading.Thread):
             return
 
         num_remote_blocks = len(remote_block_ids)
-        assert num_local_blocks <= num_remote_blocks
+        assert num_local_blocks <= num_remote_blocks, (
+            f"[AntGroup] Number of local blocks {num_local_blocks} exceeds number of "
+            f"remote blocks {num_remote_blocks} for request {remote_request_id}.")
         if num_local_blocks < num_remote_blocks:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
@@ -972,7 +974,10 @@ class MooncakeConnectorScheduler:
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % self.block_size == 0
             # Note: We use the full token count as transmit data here.
-            count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
+            # [AntGroup] The prefill node appends the first output token to
+            # prompt_token_ids, so subtract 1 to get the original prompt length.
+            num_original_prompt_tokens = len(request.prompt_token_ids) - 1
+            count = max(num_original_prompt_tokens - num_computed_tokens, 0)
             return count, count > 0
 
         # No remote prefill for this request.

@@ -115,7 +115,8 @@ class SeriesMetadata:
 
     def reach_layer(self, layer_idx: int):
         # The index of the layer to be prefetched.
-        next_layer_idx = (layer_idx + self.prefetch_step) % self.num_layers + self.start_layer
+        next_layer_idx = (layer_idx + self.prefetch_step - self.start_layer
+                          ) % self.num_layers + self.start_layer
         next_layer = self.layers[next_layer_idx - self.start_layer]
         # The index of the window to store the weight for the coming layer.
         next_layer.window_idx = self.window_offset
@@ -288,3 +289,10 @@ def register_all_layers_to_shard_weight_series(
                 layer=curr_layer,
                 prefetch_step=1,
             )
+
+
+def wait_all_layers():
+    for item in _series_dict.values():
+        for window in item.shard_windows:
+            if window.work is not None:
+                window.work.wait()

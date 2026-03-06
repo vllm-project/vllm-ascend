@@ -136,6 +136,10 @@ class NPUWorker(WorkerBase):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
+        if self.model_config.architecture in ("Qwen3_5ForConditionalGeneration",
+                                    "Qwen3_5MoeForConditionalGeneration"):
+            WEIGHT_LOADER_V2_SUPPORTED.append("AscendUnquantizedLinearMethod")
+
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
 
         npugraph_ex_config = get_ascend_config().npugraph_ex_config
@@ -361,6 +365,12 @@ class NPUWorker(WorkerBase):
             GiB(self.available_kv_cache_memory_bytes),
             scope="local",
         )
+        if self.model_config.architecture in ("Qwen3_5ForConditionalGeneration",
+                                    "Qwen3_5MoeForConditionalGeneration"):
+            # NOTE(zepeng): Currently for Model with LinearAttention,
+            # two copies of kv_cache_raw_tensors will be created.
+            # It should be removed after import multi_block_pool.
+            self.available_kv_cache_memory_bytes = self.available_kv_cache_memory_bytes // 2
         return int(self.available_kv_cache_memory_bytes)
 
     def execute_model(
