@@ -76,9 +76,7 @@ def _patched_build_chat_params(
     ``chat_template_kwargs`` so that GLM-family models honour the requested
     thinking mode when rendering their chat template.
     """
-    original_result: ChatParams = _original_build_chat_params(
-        self, default_template, default_template_content_format
-    )
+    original_result: ChatParams = _original_build_chat_params(self, default_template, default_template_content_format)
 
     # ``thinking`` is an extra (non-declared) field on the Pydantic model.
     # With ``model_config = ConfigDict(extra="allow")`` Pydantic v2 may store
