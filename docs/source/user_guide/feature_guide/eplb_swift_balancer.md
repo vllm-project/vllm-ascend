@@ -66,7 +66,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{
-    "expert_map_path": "/path/to/eplb.json"
+    "eplb_config": {"expert_map_path": "/path/to/eplb.json"}
   }'
 ```
 

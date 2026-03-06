@@ -320,6 +320,7 @@ class AscendFusedMoE(FusedMoE):
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
 
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
@@ -391,6 +392,10 @@ class AscendFusedMoE(FusedMoE):
         assert self.quant_method is not None
 
         forward_context = get_forward_context()
+        # When static kernels are enabled, the forward pass runs twice (compilation + capture),
+        # causing moe_layer_index to overflow. Wrap the index to prevent out-of-bounds errors.
+        if self.enable_npugraph_ex_static_kernel:
+            forward_context.moe_layer_index = forward_context.moe_layer_index % (len(forward_context.all_moe_layers))
 
         # Load balancing for token distribution among experts in dummy_run
         # TODO: The community only considers load balancing when DP > 1.
