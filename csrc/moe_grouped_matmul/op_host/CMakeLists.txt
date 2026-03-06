@@ -14,8 +14,49 @@ add_ops_compile_options(
                 -Werror
 )
 
-target_sources(op_host_aclnnExc PRIVATE
+target_sources(optiling PRIVATE
+        moe_grouped_matmul_cpu.cpp
+)
+
+target_include_directories(optiling PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${ASCEND_CANN_PACKAGE_PATH}/include
+        ${ASCEND_CANN_PACKAGE_PATH}/include/external
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/platform
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/metadef
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/msprof
+)
+
+target_sources(opsproto PRIVATE
+        moe_grouped_matmul_infershape.cpp
+)
+
+target_include_directories(opsproto PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${ASCEND_CANN_PACKAGE_PATH}/include
+        ${ASCEND_CANN_PACKAGE_PATH}/include/external
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/platform
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/metadef
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/msprof
+)
+
+target_sources(op_host_aclnnInner PRIVATE
         moe_grouped_matmul_def.cpp
+)
+
+target_include_directories(op_host_aclnnInner PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${ASCEND_CANN_PACKAGE_PATH}/include
+        ${ASCEND_CANN_PACKAGE_PATH}/include/external
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/platform
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/metadef
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/msprof
 )
 
 target_sources(opapi PRIVATE
@@ -23,18 +64,8 @@ target_sources(opapi PRIVATE
         aclnn_moe_grouped_matmul.cpp
 )
 
-target_sources(optiling PRIVATE
-        moe_grouped_matmul_cpu.cpp
-)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/aclnn_moe_grouped_matmul.h"
+        DESTINATION ${ACLNN_INC_INSTALL_DIR} OPTIONAL)
 
-target_include_directories(optiling PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_sources(opsproto PRIVATE
-        moe_grouped_matmul_infershape.cpp
-)
-
-file(GLOB _GMM_Aclnn_header_weight_nz "${CMAKE_CURRENT_SOURCE_DIR}/aclnn_moe_grouped_matmul_weight_nz.h")
-
-install(FILES ${_GMM_Aclnn_header_weight_nz} DESTINATION ${ACLNN_INC_INSTALL_DIR} OPTIONAL)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/aclnn_moe_grouped_matmul_weight_nz.h"
+        DESTINATION ${ACLNN_INC_INSTALL_DIR} OPTIONAL)
