@@ -1,0 +1,13 @@
+model_name: "baichuan-inc/Baichuan-M1-14B-Instruct"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "pubmedqa"
+  metrics:
+  - name: "acc,none"
+    value: 0.752
+num_fewshot: 5
+max_model_len: 2048
+trust_remote_code: True
+dtype: "bfloat16"
+apply_chat_template: False
+fewshot_as_multiturn: False

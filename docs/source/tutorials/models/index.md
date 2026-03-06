@@ -7,6 +7,7 @@ This section provides tutorials for different models of vLLM Ascend.
 :maxdepth: 1
 Qwen2.5-Omni.md
 Qwen2.5-7B.md
+Baichuan-M1-14B-Instruct.md
 Qwen3-Dense.md
 Qwen-VL-Dense.md
 Qwen3-30B-A3B.md
