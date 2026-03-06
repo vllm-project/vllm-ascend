@@ -37,7 +37,7 @@ class AscendNoOpEliminationPass(VllmInductorPass):
                 fx_graph.erase_node(node)
                 removed += 1
 
-        logger.info("AscendNoOpEliminationPass removed %s no-op views", removed)
+        logger.debug("AscendNoOpEliminationPass removed %s no-op views", removed)
 
     @staticmethod
     def _is_view_like(node: torch.fx.Node) -> bool:

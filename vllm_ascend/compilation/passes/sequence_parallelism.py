@@ -14,7 +14,6 @@ SP_THRESHOLD = 1000
 
 
 def get_sp_threshold(config: VllmConfig):
-    logger.info(f"is_moe_model {is_moe_model(config)}")
     if is_moe_model(config):
         return 1
 
@@ -339,18 +338,18 @@ class AscendSequenceParallelismPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        self.noop_cleanup(graph)
-        logger.info(f"after noop_cleanup {graph.graph}")
+        self.noop_cleanup(graph)  # Eliminate redundant view-like operations
+        logger.debug(f"after noop_cleanup {graph.graph}")
         self.matched_count = self.patterns.apply(graph)
-        logger.info("Replaced %s patterns", self.matched_count)
-        logger.info(f"after apply replacement {graph.graph}")
+        logger.debug("Replaced %s patterns", self.matched_count)
+        logger.debug(f"after apply replacement {graph.graph}")
         
         from torch._inductor.pattern_matcher import PatternPrettyPrinter
         pattern_idx = 0
         for pattern_entry in self.patterns.patterns.values():
             for p in pattern_entry:
                 p_str = PatternPrettyPrinter.run(p.pattern)
-                logger.info("Pattern %d: %s", pattern_idx, p_str)
+                logger.debug("Pattern %d: %s", pattern_idx, p_str)
                 pattern_idx += 1
         
         self.end_and_log()
@@ -360,5 +359,5 @@ class AscendSequenceParallelismPass(VllmInductorPass):
         Check if the pass is applicable for the current configuration.
         """
         applicable = compile_range.start >= self.min_tokens
-        logger.info(f"SequenceParallelismPass {compile_range=} {applicable=}")
+        logger.debug(f"SequenceParallelismPass {compile_range=} {applicable=}")
         return applicable

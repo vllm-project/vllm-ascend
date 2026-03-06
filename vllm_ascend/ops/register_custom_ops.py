@@ -47,13 +47,11 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool, is_ep_c
     if flash_comm_v1_enabled and label:
         dp_metadata = forward_context.dp_metadata
         if dp_metadata is None or not is_ep_comm:
-            print("allgather_pad: run by tp", "is_ep_comm", is_ep_comm)
             x = tensor_model_parallel_all_gather(x, 0)
             pad_size = _EXTRA_CTX.pad_size
             if pad_size > 0:
                 x = x[:-pad_size]
         else:
-            print("allgather_pad: run by ep", "is_ep_comm", is_ep_comm)
             x = get_ep_group().all_gather(x, 0)
             if enable_sp_by_pass(): # TODO: do unpad
                 return x
@@ -90,7 +88,6 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
             x = F.pad(x, (0, 0, 0, pad_size))
         return tensor_model_parallel_reduce_scatter(x, 0)
     else:
-        print("pad_and_reduce_impl: run by ep", "is_ep_comm", is_ep_comm)
         if enable_sp_by_pass(): # TODO: do pad
             return get_ep_group().reduce_scatter(x.view(-1, *x.shape[1:]), 0)
         # padding
