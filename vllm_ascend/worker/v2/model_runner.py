@@ -49,10 +49,7 @@ def _disable_prefix_caching_for_pooling_models(vllm_config: VllmConfig) -> None:
     if vllm_config.model_config.runner_type != "pooling":
         return
     if vllm_config.cache_config.enable_prefix_caching:
-        logger.warning(
-            "Prefix caching is not supported for pooling models. "
-            "Disabling prefix caching automatically."
-        )
+        logger.warning("Prefix caching is not supported for pooling models. Disabling prefix caching automatically.")
         vllm_config.cache_config.enable_prefix_caching = False
 
 

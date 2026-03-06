@@ -24,27 +24,27 @@ from tests.e2e.utils import check_embeddings_close
 
 MODELS = [
     "Qwen/Qwen3-Embedding-0.6B",  # lasttoken
-    "intfloat/multilingual-e5-small"  # mean_tokens
+    "intfloat/multilingual-e5-small",  # mean_tokens
 ]
 
 
 @pytest.mark.parametrize("model", MODELS)
 def test_embed_models_correctness(model: str):
-    queries = ['What is the capital of China?', 'Explain gravity']
+    queries = ["What is the capital of China?", "Explain gravity"]
 
     model_name = snapshot_download(model)
     with VllmRunner(
-            model_name,
-            runner="pooling",
-            max_model_len=None,
-            cudagraph_capture_sizes=[4],
+        model_name,
+        runner="pooling",
+        max_model_len=None,
+        cudagraph_capture_sizes=[4],
     ) as vllm_runner:
         vllm_outputs = vllm_runner.embed(queries)
 
     with HfRunner(
-            model_name,
-            dtype="float32",
-            is_sentence_transformer=True,
+        model_name,
+        dtype="float32",
+        is_sentence_transformer=True,
     ) as hf_runner:
         hf_outputs = hf_runner.encode(queries)
 
@@ -67,15 +67,15 @@ def test_embedding_duplicate_queries_consistency(enforce_eager: bool):
     query to return incorrect embeddings (cosine similarity ~0.58 instead
     of ~1.0).
     """
-    query = 'What is the capital of China?'
+    query = "What is the capital of China?"
 
     model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B")
     with VllmRunner(
-            model_name,
-            runner="pooling",
-            max_model_len=None,
-            enable_prefix_caching=True,
-            enforce_eager=enforce_eager,
+        model_name,
+        runner="pooling",
+        max_model_len=None,
+        enable_prefix_caching=True,
+        enforce_eager=enforce_eager,
     ) as vllm_runner:
         first_output = vllm_runner.embed([query])[0]
         second_output = vllm_runner.embed([query])[0]
@@ -90,27 +90,27 @@ def test_embedding_duplicate_queries_consistency(enforce_eager: bool):
 
 
 def test_bge_m3_correctness():
-    queries = ['What is the capital of China?', 'Explain gravity']
+    queries = ["What is the capital of China?", "Explain gravity"]
 
     model_name = snapshot_download("BAAI/bge-m3")
     with VllmRunner(
-            model_name,
-            runner="pooling",
-            cudagraph_capture_sizes=[4],
+        model_name,
+        runner="pooling",
+        cudagraph_capture_sizes=[4],
     ) as vllm_aclgraph_runner:
         vllm_aclgraph_outputs = vllm_aclgraph_runner.embed(queries)
 
     with VllmRunner(
-            model_name,
-            runner="pooling",
-            enforce_eager=True,
+        model_name,
+        runner="pooling",
+        enforce_eager=True,
     ) as vllm_runner:
         vllm_eager_outputs = vllm_runner.embed(queries)
 
     with HfRunner(
-            model_name,
-            dtype="float32",
-            is_sentence_transformer=True,
+        model_name,
+        dtype="float32",
+        is_sentence_transformer=True,
     ) as hf_runner:
         hf_outputs = hf_runner.encode(queries)
 

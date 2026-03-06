@@ -222,8 +222,7 @@ class NPUModelRunner(GPUModelRunner):
         if vllm_config.model_config.runner_type == "pooling":
             if vllm_config.cache_config.enable_prefix_caching:
                 logger.warning(
-                    "Prefix caching is not supported for pooling models. "
-                    "Disabling prefix caching automatically."
+                    "Prefix caching is not supported for pooling models. Disabling prefix caching automatically."
                 )
                 vllm_config.cache_config.enable_prefix_caching = False
 
