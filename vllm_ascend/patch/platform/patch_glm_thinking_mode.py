@@ -47,8 +47,7 @@ always respected and takes precedence over the ``thinking`` field.
 from dataclasses import is_dataclass, replace
 from typing import Any
 
-from vllm.entrypoints.openai.chat_completion.protocol import \
-    ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.renderers import ChatParams, merge_kwargs
 
 _original_build_chat_params = ChatCompletionRequest.build_chat_params

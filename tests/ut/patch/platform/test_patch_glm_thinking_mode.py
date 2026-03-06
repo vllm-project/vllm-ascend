@@ -34,7 +34,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Lightweight stubs for vllm types that we cannot import in a plain unit-test
 # context without a full vllm installation.
@@ -50,7 +49,7 @@ class _FakeChatParams:
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     extra_field: str | None = None
 
-    def model_copy(self, update: dict[str, Any] | None = None) -> "_FakeChatParams":
+    def model_copy(self, update: dict[str, Any] | None = None) -> _FakeChatParams:
         """Minimal ``BaseModel.model_copy`` compatible helper for tests."""
         return replace(self, **(update or {}))
 
