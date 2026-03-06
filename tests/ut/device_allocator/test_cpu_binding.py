@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import mock_open, patch
 
 from vllm_ascend.cpu_binding import CpuAlloc, DeviceInfo, bind_cpus, is_arm_cpu
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.device_type import AscendDeviceType
 
 
 class TestDeviceInfo(unittest.TestCase):
@@ -49,7 +49,7 @@ class TestDeviceInfo(unittest.TestCase):
         mock_execute_command.side_effect = [
             ("| NPU Chip | Process id |\n| 0 1 | 1236 | vllm | 56000 |", 0),
             ("", 0),
-            ("| NPU Chip | Process id |\n| 1 0 | 1236 | vllm | 56000 |", 0)
+            ("| NPU 芯片 | 进程号 |\n| 1 0 | 1236 | vllm | 56000 |", 0)
         ]
         with self.assertRaises(RuntimeError):
             self.device_info.get_running_npus()
@@ -240,7 +240,7 @@ class TestCpuAlloc(unittest.TestCase):
         mock_which.return_value = None
         mock_listdir.side_effect = FileNotFoundError
         mock_get_device_type.return_value = AscendDeviceType.A3
-        mock_execute_command.return_value = ("PCIe Bus Info 0000:03:00.0", 0)
+        mock_execute_command.return_value = ("PCIe 总线信息 0000:03:00.0", 0)
         self.cpu_alloc.rank_id = 0
         self.cpu_alloc.device_info.running_npu_list = [3]
         self.cpu_alloc.npu_cpu_pool = {3: [0, 1, 2, 3, 4]}

@@ -24,7 +24,6 @@ import functools
 import math
 import os
 from contextlib import nullcontext
-from enum import Enum
 from functools import lru_cache
 from threading import Lock
 from typing import TYPE_CHECKING, Any
@@ -36,7 +35,9 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend import device_type as ascend_device_type
 from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
+from vllm_ascend.device_type import AscendDeviceType, get_ascend_device_type
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -681,29 +682,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
-
-
-class AscendDeviceType(Enum):
-    A2 = 0
-    A3 = 1
-    _310P = 2
-    A5 = 3
-
-
-_ascend_device_type = None
-
-
-def _init_ascend_device_type():
-    global _ascend_device_type
-    from vllm_ascend import _build_info  # type: ignore
-
-    _ascend_device_type = AscendDeviceType[_build_info.__device_type__]
-
-
 def check_ascend_device_type():
-    global _ascend_device_type
-    if _ascend_device_type is None:
-        _init_ascend_device_type()
+    if ascend_device_type._ascend_device_type is None:
+        ascend_device_type._init_ascend_device_type()
 
     soc_version = torch_npu.npu.get_soc_version()
     if 220 <= soc_version <= 225:
@@ -717,17 +698,10 @@ def check_ascend_device_type():
     else:
         raise RuntimeError(f"Can not support soc_version: {soc_version}.")
 
-    assert _ascend_device_type == cur_device_type, (
+    assert ascend_device_type._ascend_device_type == cur_device_type, (
         f"Current device type: {cur_device_type} does not match the installed version's device type: "
-        f"{_ascend_device_type}, please check your installation package."
+        f"{ascend_device_type._ascend_device_type}, please check your installation package."
     )
-
-
-def get_ascend_device_type():
-    global _ascend_device_type
-    if _ascend_device_type is None:
-        _init_ascend_device_type()
-    return _ascend_device_type
 
 
 def lmhead_tp_enable() -> bool:
