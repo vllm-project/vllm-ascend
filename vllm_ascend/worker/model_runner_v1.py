@@ -109,7 +109,6 @@ from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
-from vllm_ascend.spec_decode.mtp_proposer import AscendMtpProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.utils import (
@@ -404,12 +403,7 @@ class NPUModelRunner(GPUModelRunner):
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.drafter: (
-            AscendNgramProposer
-            | AscendEagleProposer
-            | AscendMtpProposer
-            | AscendSuffixDecodingProposer
-            | AscendMedusaProposer
-            | None
+            AscendNgramProposer | AscendEagleProposer | AscendSuffixDecodingProposer | AscendMedusaProposer | None
         ) = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
