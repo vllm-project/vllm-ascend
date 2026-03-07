@@ -1248,8 +1248,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths,
             "actual_seq_lengths_kv": decode_meta.seq_lens_list,
         }
-        forward_context: ForwardContext = get_forward_context()
-        if forward_context.is_draft_model():
+        if ExtraForwardContext.is_draft_model():
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
@@ -1266,7 +1265,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs
                 )
-                if forward_context.is_draft_model():
+                if ExtraForwardContext.is_draft_model():
                     update_draft_graph_params_workspaces(num_tokens, workspace)
                 else:
                     update_graph_params_workspaces(num_tokens, workspace)

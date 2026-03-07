@@ -38,6 +38,7 @@ from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.compilation.acl_graph import update_full_graph_params
+from vllm_ascend.compilation.acl_graph import set_graph_params
 
 
 class AclGraphManager(CudaGraphManager):
@@ -55,14 +56,16 @@ class AclGraphManager(CudaGraphManager):
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
         self.model_runner = model_runner
-
-        with torch_cuda_wrapper():
-            super().__init__(
-                vllm_config,
-                use_mrope,
-                use_aux_hidden_state_outputs,
-                device,
-            )
+        super().__init__(
+            vllm_config,
+            use_mrope,
+            use_aux_hidden_state_outputs,
+            device,
+        )
+        # vllm-ascend need to update graph params of attention backend.
+        # so we need to set graph params before capture full graph.
+        if super().need_capture():
+            set_graph_params(self.cudagraph_sizes)
 
     def _capture_full_graph(
         self,
@@ -234,7 +237,6 @@ class ModelWithContext(nn.Module):
     def forward(self, *args, **kwargs):
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
-        forward_context = get_forward_context()
-        forward_context.additional_kwargs.setdefault("capturing", True)
+        ExtraForwardContext.set_capturing(True)
 
         return self.original_model(*args, **kwargs)
