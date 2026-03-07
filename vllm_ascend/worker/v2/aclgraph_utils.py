@@ -126,7 +126,7 @@ class AclGraphManager(CudaGraphManager):
         assert self.model_runner.positions is not None
         assert self.model_runner.cudagraph_and_dp_padding is not None
 
-        positions = self.model_runner.positions[:num_tokens]
+        positions = self.model_runner.input_buffers.positions[:num_tokens]
         _num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
             self.model_runner.cudagraph_and_dp_padding
         )
