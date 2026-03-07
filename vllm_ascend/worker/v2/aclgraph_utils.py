@@ -123,7 +123,6 @@ class AclGraphManager(CudaGraphManager):
     def run_fullgraph(self, num_tokens: int) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         ret = super().run_fullgraph(num_tokens)
-        assert self.model_runner.positions is not None
         assert self.model_runner.cudagraph_and_dp_padding is not None
 
         positions = self.model_runner.input_buffers.positions[:num_tokens]
@@ -143,7 +142,7 @@ class AclGraphManager(CudaGraphManager):
         ):
             forward_context = get_forward_context()
             update_full_graph_params(
-                self.model_runner.attn_backend[0],  # TODO(Ronald1995): support hybrid attn backend
+                self.model_runner.attn_backend[0],  # FIXME(Ronald1995): support hybrid attn backend
                 self.model_runner.update_stream,
                 forward_context,
                 num_tokens,
