@@ -17,8 +17,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import functools
 import numpy as np
 import torch
+import vllm
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -31,6 +33,8 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_prefill_inputs,
 )
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.sequence import IntermediateTensors
+from vllm.v1.outputs import ModelRunnerOutput
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_state
@@ -126,6 +130,47 @@ class NPUModelRunner(GPUModelRunner):
         # so we need to create a stream to update full graph params.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
+
+        # we need to use return value of `get_cudagraph_and_dp_padding`
+        # to set forward_context in `run_fullgraph`.
+        # so we can inherit `execute_model` method.
+        self.cudagraph_and_dp_padding = None
+
+        # we need to use input_batch to set forward_context in run_fullgraph.
+        # so we can inherit `execute_model` method.
+        self.input_batch = None
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: IntermediateTensors | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+    ) -> ModelRunnerOutput | IntermediateTensors | None:
+        """Override GPUModelRunner.execute_model for Ascend NPUs by there reasons:
+        1. when run fullgraph, we need to use ret value of `get_cudagraph_and_dp_padding`
+        to set forward_context in `run_fullgraph`.
+        """
+
+        # use closure to store cudagraph_and_dp_padding.
+        def wrapper(func):
+            @functools.wraps(func)
+            def inner(*args, **kwargs):
+                self.cudagraph_and_dp_padding = func(*args, **kwargs)
+                return self.cudagraph_and_dp_padding
+
+            return inner
+
+        if self.cudagraph_and_dp_padding is None:
+            vllm.v1.worker.gpu.dp_utils.get_cudagraph_and_dp_padding = wrapper
+
+        return super().execute_model(
+            scheduler_output,
+            intermediate_tensors,
+            dummy_run,
+            skip_attn_for_dummy_run,
+        )
 
     def prepare_inputs(
         self,
@@ -294,7 +339,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.uses_mrope:
             mrope_positions = self.mrope_states.mrope_positions
             mrope_positions = mrope_positions[:, :num_tokens_after_padding]
-        return AscendInputBatch(
+        self.input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
             idx_mapping=idx_mapping,
@@ -320,6 +365,7 @@ class NPUModelRunner(GPUModelRunner):
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             seq_lens_np=self.input_buffers.seq_lens_np,
         )
+        return self.input_batch
 
     def postprocess(
         self,

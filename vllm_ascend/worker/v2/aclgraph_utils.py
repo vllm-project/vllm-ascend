@@ -24,7 +24,6 @@ import torch.nn as nn
 import numpy as np
 import vllm
 from vllm.config import VllmConfig
-from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.forward_context import set_forward_context, get_forward_context
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -124,18 +123,34 @@ class AclGraphManager(CudaGraphManager):
     def run_fullgraph(self, num_tokens: int) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         ret = super().run_fullgraph(num_tokens)
-        forward_context = get_forward_context()
         assert self.model_runner.positions is not None
+        assert self.model_runner.cudagraph_and_dp_padding is not None
+
         positions = self.model_runner.positions[:num_tokens]
-        update_full_graph_params(
-            self.model_runner.attn_backend[0],  # TODO(Ronald1995): support hybrid attn backend
-            self.model_runner.update_stream,
-            forward_context,
-            num_tokens,
-            self.vllm_config,
-            self.model_runner.speculative_config,
-            positions.shape[0],
+        _num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
+            self.model_runner.cudagraph_and_dp_padding
         )
+        cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
+
+        with set_forward_context(
+            self.model_runner.input_batch.attn_metadata,
+            self.vllm_config,
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            num_tokens_across_dp=num_tokens_across_dp,
+            batch_descriptor=None,  # Full graph model don't need batch_descriptor
+            slot_mapping=self.model_runner.input_batch.slot_mappings,
+        ):
+            forward_context = get_forward_context()
+            update_full_graph_params(
+                self.model_runner.attn_backend[0],  # TODO(Ronald1995): support hybrid attn backend
+                self.model_runner.update_stream,
+                forward_context,
+                num_tokens,
+                self.vllm_config,
+                self.model_runner.speculative_config,
+                positions.shape[0],
+            )
         return ret
 
 
