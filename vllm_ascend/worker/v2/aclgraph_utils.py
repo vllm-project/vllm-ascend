@@ -54,6 +54,9 @@ class AclGraphManager(CudaGraphManager):
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
         self.model_runner = model_runner
+        self.attn_backend = (
+            list(self.model_runner.attn_backends.values())[0],
+        )  # FIXME(Ronald1995): support hybrid attn backend
         with torch_cuda_wrapper():
             super().__init__(
                 vllm_config,
@@ -142,7 +145,7 @@ class AclGraphManager(CudaGraphManager):
         ):
             forward_context = get_forward_context()
             update_full_graph_params(
-                self.model_runner.attn_backends[0],  # FIXME(Ronald1995): support hybrid attn backend
+                self.attn_backend,
                 self.model_runner.update_stream,
                 forward_context,
                 num_tokens,
