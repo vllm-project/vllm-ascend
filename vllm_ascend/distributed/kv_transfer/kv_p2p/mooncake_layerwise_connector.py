@@ -36,7 +36,8 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, MambaSpec, UniformTypeKVCacheSpecs, FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, AttentionSpec, MambaSpec, UniformTypeKVCacheSpecs, FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
+from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
@@ -242,6 +243,8 @@ class KVCacheSendingLayerThread(threading.Thread):
         remote_layer_metadata = req_meta.remote_layer_metadata[layer_name]
         local_layer_metadata = self.layer_metadata[layer_name]
         local_block_ids = req_meta.local_block_ids[layer_group_idx]
+        if torch.distributed.get_rank() == 0:
+            print(f'{layer_name=} {layer_kv_cache_spec=} {remote_block_ids=} {local_block_ids=} {remote_layer_metadata=} {local_layer_metadata=}')
 
         if isinstance(layer_kv_cache_spec, MambaSpec):
             # only support one block transfer for mamba
@@ -913,6 +916,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
         self.encoder = msgspec.msgpack.Encoder()
 
+        self.index_to_name = defaultdict(list)
         self.remote_layer_metadata: dict[str, dict[int, dict[str, LayerMetadata]]] = SizedDict()
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
         self.remote_sockets_lock = threading.Lock()
@@ -961,9 +965,19 @@ class MooncakeLayerwiseConnectorWorker:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
         for i, kv_cache_group_spec in enumerate(kv_cache_groups):
             for layer_name in kv_cache_group_spec.layer_names:
-                if layer_name not in layer2group_ids.keys():
-                    layer2group_ids[layer_name] = []
                 layer2group_ids[layer_name] = i
+
+        use_mamba, use_attn, use_attn_mamba_hybrid = False, False, False
+        for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
+            for layer_name in kv_cache_tensor.shared_by:
+                layer_kv_cache_spec = self.kv_cache_specs[layer2group_ids[layer_name]]
+                if isinstance(layer_kv_cache_spec, MambaSpec):
+                    use_mamba = True
+                if isinstance(layer_kv_cache_spec, AttentionSpec):
+                    use_attn = True
+            if use_mamba and use_attn:
+                use_attn_mamba_hybrid = True
+                break
 
         ptrs = []
         lengths = []
@@ -990,16 +1004,30 @@ class MooncakeLayerwiseConnectorWorker:
                 single_layer_meta.tensor_group_idx.append(layer_kv_group_id)
                 single_layer_meta.kv_caches_base_addr.append(single_kv_cache.data_ptr())
                 single_layer_meta.block_len.append(single_kv_cache.element_size() * math.prod(block_shape))
-                if single_kv_cache.data_ptr() not in ptrs:
+                if single_kv_cache.data_ptr() not in ptrs and not use_attn_mamba_hybrid:
                     ptrs.append(single_kv_cache.data_ptr())
                     lengths.append(num_blocks * single_kv_cache.element_size() * math.prod(block_shape))
                 logger.info(
                     f"layer: {layer_name}, num_blocks: {num_blocks}, block_shape: {block_shape}")
             self.layer_metadata[layer_name] = single_layer_meta
 
+        if use_attn_mamba_hybrid:
+            for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
+                tensor_addrs = []
+                for layer_name in kv_cache_tensor.shared_by:
+                    tensor_addrs.extend(self.layer_metadata[layer_name].kv_caches_base_addr)
+                assert min(set(tensor_addrs)) % (2 * 1024 * 1024) == 0, "Tensor start addr is not align with 2M."
+                ptrs.append(min(set(tensor_addrs)))
+                lengths.append(kv_cache_tensor.size)
+
         global_te.register_buffer(ptrs, lengths)
         if use_resharding_buffer:
             self.create_kv_buffer(resharding_buffer)
+
+        num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
+        for layer_name in kv_caches:
+            self.index_to_name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
+            assert len(self.index_to_name[extract_layer_index(layer_name, num_attn_module)]) == 1, "Mooncake Layerwise Connector does not support multiple `attn_module` in one layer now."
 
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
@@ -1259,6 +1287,8 @@ class MooncakeLayerwiseConnectorWorker:
         """MooncakeLayerwiseConnector does not save explicitly."""
         if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys():
             # get reshape and cache event
+            if layer_name == "":
+                layer_name = self.index_to_name[self.current_layer][0]
             if (type(attn_metadata) == dict and not getattr(attn_metadata[layer_name], "reshape_cache_event", None)) or \
                 (not getattr(attn_metadata, "reshape_cache_event", None)):
                 reshape_cache_event = torch.npu.Event()
