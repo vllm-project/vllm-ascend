@@ -153,7 +153,7 @@ class NPUModelRunner(GPUModelRunner):
         to set forward_context in `run_fullgraph`.
         """
 
-        # use closure to store cudagraph_and_dp_padding.
+        # use closure to store return value of get_cudagraph_and_dp_padding in model runner.
         def wrapper(func):
             @functools.wraps(func)
             def inner(*args, **kwargs):
