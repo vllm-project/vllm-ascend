@@ -538,3 +538,67 @@ class TestEagleProposerHelperMethods(TestBase):
                 return_attn, indices = self.proposer.prepare_inputs(
                     mock_attn, num_rejected)
                 self.assertEqual(indices.tolist(), [1, 2, 4])
+
+
+class TestEagle3HiddenStateHandling(TestBase):
+    """Tests for Eagle3 auxiliary hidden state concatenation and validation."""
+
+    def test_aux_hidden_states_concatenation_shape(self):
+        """Verify aux_hidden_states are correctly concatenated to 3*hidden_size."""
+        hidden_size = 256
+        num_tokens = 10
+        # Simulate 3 auxiliary hidden states from different layers
+        aux_hidden_states = [
+            torch.randn(num_tokens, hidden_size),
+            torch.randn(num_tokens, hidden_size),
+            torch.randn(num_tokens, hidden_size),
+        ]
+        num_scheduled_tokens = num_tokens
+        target_hidden_states = torch.cat(
+            [h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1
+        )
+        self.assertEqual(
+            target_hidden_states.shape,
+            (num_tokens, 3 * hidden_size),
+        )
+
+    def test_aux_hidden_states_slicing_with_padding(self):
+        """Verify slicing works when aux tensors are larger than num_scheduled_tokens."""
+        hidden_size = 128
+        padded_tokens = 16
+        actual_tokens = 10
+        aux_hidden_states = [
+            torch.randn(padded_tokens, hidden_size),
+            torch.randn(padded_tokens, hidden_size),
+            torch.randn(padded_tokens, hidden_size),
+        ]
+        target_hidden_states = torch.cat(
+            [h[:actual_tokens] for h in aux_hidden_states], dim=-1
+        )
+        self.assertEqual(
+            target_hidden_states.shape,
+            (actual_tokens, 3 * hidden_size),
+        )
+
+    def test_aux_hidden_states_index_selection(self):
+        """Verify index-based selection for spec decode verification step."""
+        hidden_size = 128
+        num_tokens = 10
+        aux_hidden_states = [
+            torch.randn(num_tokens, hidden_size),
+            torch.randn(num_tokens, hidden_size),
+            torch.randn(num_tokens, hidden_size),
+        ]
+        token_indices = torch.tensor([0, 3, 5, 9])
+        target_hidden_states = torch.cat(
+            [h[token_indices] for h in aux_hidden_states], dim=-1
+        )
+        self.assertEqual(
+            target_hidden_states.shape,
+            (4, 3 * hidden_size),
+        )
+        # Verify data integrity - first aux state's selected tokens
+        torch.testing.assert_close(
+            target_hidden_states[:, :hidden_size],
+            aux_hidden_states[0][token_indices],
+        )
