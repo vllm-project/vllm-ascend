@@ -56,7 +56,7 @@ class PCPManager:
         use_async_scheduling: bool,
         pin_memory: bool = False,
         use_sparse: bool = False,
-        arange_np: torch.Tensor | None = None,
+        arange_np: np.ndarray | None = None,
     ) -> None:
         self.pcp_size = pcp_size
         self.pcp_rank = pcp_rank
@@ -343,9 +343,7 @@ class PCPManager:
 
                 max_scheduled_prefill_tokens = num_prefill_tokens_allranks[:, 0, 0].sum()
                 num_prefill_tokens = num_scheduled_tokens[self.num_decode_reqs :].sum()
-                self.total_pcp_padding_tokens_fla = (
-                    max_scheduled_prefill_tokens * self.pcp_size - num_prefill_tokens
-                )
+                self.total_pcp_padding_tokens_fla = max_scheduled_prefill_tokens * self.pcp_size - num_prefill_tokens
                 self.pcp_padded_tokens_fla += max_scheduled_prefill_tokens - num_prefill_scheduled_tokens_linear.sum()
 
             max_scheduled_tokens = max_scheduled_prefill_tokens + self.num_decode_tokens
@@ -355,9 +353,7 @@ class PCPManager:
                 # [[3,2]] [[2,2,2,1],[2,2,1,1],[1,1,1,1]]
                 num_prefill_tokens_allranks = num_prefill_tokens_allranks[..., 0]
                 # [0,1,2,0,1] [0,1,0,1,0,1,0,|0,1,0,1,0,0]
-                _, prefill_arange_allranks = self._get_cumsum_and_arange(
-                    num_prefill_tokens_allranks.flatten()
-                )
+                _, prefill_arange_allranks = self._get_cumsum_and_arange(num_prefill_tokens_allranks.flatten())
                 # [0,1] [0,1,2,3,0,1,2,3]
                 _, prefill_rank_offset = self._get_cumsum_and_arange(
                     np.ones(self.num_reqs - self.num_decode_reqs, dtype=np.int64) * self.pcp_size
@@ -387,9 +383,7 @@ class PCPManager:
                 # [0,1,2], [4,4,4] -> [0,0,0,0,1,1,1,1,2,2,2,2]
                 num_decode_pcp_size = np.ones(self.num_decode_reqs, dtype=np.int64) * self.pcp_size
                 decode_reqs_offset = np.repeat(np.arange(self.num_decode_reqs, dtype=np.int64), num_decode_pcp_size)
-                decode_ranks_offset = (
-                    self._get_cumsum_and_arange(num_decode_pcp_size)[1] * max_scheduled_tokens
-                )
+                decode_ranks_offset = self._get_cumsum_and_arange(num_decode_pcp_size)[1] * max_scheduled_tokens
                 enter_fa_decode_restore_idx = np.add(decode_reqs_offset, decode_ranks_offset)
 
             if enter_fa_decode_restore_idx is not None and enter_fa_prefill_restore_idx is not None:
@@ -462,9 +456,7 @@ class PCPManager:
     ):
         if not self.pcp_use_hybrid_attn or tokens_original is None:
             logits_indices = (
-                torch.from_numpy(cu_num_tokens) * self.pcp_size
-                - self.num_pcp_pads_cpu_tensor[: self.num_reqs]
-                - 1
+                torch.from_numpy(cu_num_tokens) * self.pcp_size - self.num_pcp_pads_cpu_tensor[: self.num_reqs] - 1
             )
         else:
             tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
@@ -885,7 +877,6 @@ class PCPManager:
                 head_attn_nomask_seqlens = torch.tensor(
                     [chunk_seqlens, kv_with_q_head_nomask_seqlens], dtype=torch.int32
                 )
-            num_computed_tokens_of_pcp_dcp = torch.cat(num_computed_tokens_of_pcp_dcp_list, dim=0)
         long_seq_metadata = AscendPrefillContextParallelMetadata(
             num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
             num_computed_tokens_of_pcp_dcp=num_computed_tokens_of_pcp_dcp.numpy(),

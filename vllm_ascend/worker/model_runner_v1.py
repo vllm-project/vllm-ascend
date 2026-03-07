@@ -303,6 +303,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config,
                 self.use_async_scheduling,
                 self.pin_memory,
+                self.use_sparse,
                 self.arange_np,
             )
 
