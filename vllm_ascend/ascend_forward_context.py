@@ -4,9 +4,11 @@ from enum import Enum
 from typing import Any
 
 import torch
-from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
-from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
+
+# Use compatibility layer for vLLM internal APIs
+from vllm_ascend.compat import CUDAGraphMode, VllmConfig
+from vllm_ascend.compat import BatchDescriptor, get_forward_context, set_forward_context
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
