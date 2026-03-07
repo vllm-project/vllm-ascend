@@ -10,8 +10,8 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 //
 
-#ifndef __MLA_PREPROCESS_H__
-#define __MLA_PREPROCESS_H__
+#ifndef __GLM5_MLA_PREPROCESS_H__
+#define __GLM5_MLA_PREPROCESS_H__
 
 // sync
 constexpr int32_t QUANT1 = 1;
@@ -59,9 +59,6 @@ constexpr uint32_t SPLIT_RMSNRORM_SIZE_ONE = 512;
 constexpr uint32_t SPLIT_RMSNRORM_SIZE_TWO = 64;
 constexpr uint32_t ROPE_SPLIT_SIZE_ONE = 64;
 constexpr uint32_t ROPE_SPLIT_SIZE_TWO = 128;
-
-constexpr uint32_t MMSIZE1 = 128 * 192;  // 24576
-constexpr uint32_t MMSIZE2 = 64 * 128;   // 8192
 
 constexpr uint64_t L0_PINGPONG_BUFFER_LEN = 32768;   // 32 KB
 constexpr uint64_t L1_PINGPONG_BUFFER_LEN = 262144;  // 256 KB
@@ -114,4 +111,4 @@ enum class QuantMode : int32_t {
     NO_QUANT,
 };
 
-#endif  // __MLA_PREPROCESS_H__
+#endif  // __GLM5_MLA_PREPROCESS_H__

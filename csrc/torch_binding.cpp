@@ -38,6 +38,7 @@
 #include "lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h"
 #include "matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
+#include "glm5_mla_preprocess/glm5_mla_preprocess_torch_adpt.h"
 #include "moe_combine_normal/moe_combine_normal_torch_adpt.h"
 #include "moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
@@ -615,6 +616,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                          Tensor q_out1, Tensor kv_cache_out1, Tensor inner_out)"
     );
     ops.impl("mla_preprocess", torch::kPrivateUse1, &vllm_ascend::mla_preprocess);
+
+    ops.def(
+        "glm5_mla_preprocess(Tensor hiddenState, Tensor wdqkv,"
+        "               Tensor? descale0, Tensor gamma1, Tensor? beta1, Tensor wuq, Tensor? descale1,"
+        "               Tensor gamma2, Tensor cos, Tensor sin, Tensor wuk, Tensor kv_cache,"
+        "               Tensor kv_cache_rope, Tensor slotmapping, Tensor? quant_scale0,"
+        "               Tensor? quant_offset0, Tensor? bias0, Tensor? quant_scale1, Tensor? quant_offset1,"
+        "               Tensor? bias1, Tensor? ctkv_scale, Tensor? q_nope_scale, str? cache_mode,"
+        "               str? quant_mode, bool? enable_inner_out, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
+        "               Tensor! kv_cache_out1, Tensor! inner_out) -> (Tensor q_out0, Tensor kv_cache_out0,"
+        "                                          Tensor q_out1, Tensor kv_cache_out1, Tensor inner_out)"
+    );
+    ops.impl("glm5_mla_preprocess", torch::kPrivateUse1, &vllm_ascend::glm5_mla_preprocess);
 
     //batch_matmul ops refer to sgl-kernel-npu
     ops.def(

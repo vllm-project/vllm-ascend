@@ -99,6 +99,42 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
 }
 
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> glm5_mla_preprocess(
+    const at::Tensor &hiddenState,
+    const at::Tensor &wdqkv,
+    const c10::optional<at::Tensor> &descale0,
+    const at::Tensor &gamma1,
+    const c10::optional<at::Tensor> &beta1,
+    const at::Tensor &wuq,
+    const c10::optional<at::Tensor> &descale1,
+    const at::Tensor &gamma2,
+    const at::Tensor &cos,
+    const at::Tensor &sin,
+    const at::Tensor &wuk,
+    const at::Tensor &kv_cache,
+    const at::Tensor &kv_cache_rope,
+    const at::Tensor &slotmapping,
+    const c10::optional<at::Tensor> &quant_scale0,
+    const c10::optional<at::Tensor> &quant_offset0,
+    const c10::optional<at::Tensor> &bias0,
+    const c10::optional<at::Tensor> &quant_scale1,
+    const c10::optional<at::Tensor> &quant_offset1,
+    const c10::optional<at::Tensor> &bias1,
+    const c10::optional<at::Tensor> &ctkv_scale,
+    const c10::optional<at::Tensor> &q_nope_scale,
+    c10::optional<c10::string_view> cache_mode,
+    c10::optional<c10::string_view> quant_mode,
+    c10::optional<bool> enable_inner_out,
+    at::Tensor &q_out0,
+    at::Tensor &kv_cache_out0,
+    at::Tensor &q_out1,
+    at::Tensor &kv_cache_out1,
+    at::Tensor &inner_out
+    )
+{
+    return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale, const at::Tensor &x_scale,
     const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset)
@@ -447,6 +483,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
+    // GLM5 MLA preprocess
+    ops.impl("glm5_mla_preprocess", &vllm_ascend::meta::glm5_mla_preprocess);
     // grouped_matmul_swiglu_quant meta implementation
     ops.impl("grouped_matmul_swiglu_quant", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
     // Grouped matmul swiglu quant weight nz tensor list

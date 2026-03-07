@@ -13,14 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef MLA_PREPROCESS_TORCH_ADPT_H
-#define MLA_PREPROCESS_TORCH_ADPT_H
+#ifndef GLM5_MLA_PREPROCESS_TORCH_ADPT_H
+#define GLM5_MLA_PREPROCESS_TORCH_ADPT_H
 
 
-#include "op_host/mla_preprocess.h"
+#include "op_host/glm5_mla_preprocess.h"
 
 namespace vllm_ascend {
-std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> glm5_mla_preprocess(
     const at::Tensor &hiddenState, const at::Tensor &wdqkv,
     const c10::optional<at::Tensor> &descale0, const at::Tensor &gamma1, const c10::optional<at::Tensor> &beta1, const at::Tensor &wuq,
     const c10::optional<at::Tensor> &descale1, const at::Tensor &gamma2, const at::Tensor &cos, const at::Tensor &sin,
@@ -80,10 +80,12 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
             ? enable_inner_out.value()
             : false;
     
-    auto [workspace_tensor, tiling, block_dim] = mlapo::mla_preprocess_tiling(
+    auto [workspace_tensor, tiling, block_dim] = glm5_mlapo::glm5_mla_preprocess_tiling(
         hiddenState,
         wdqkv,
         wuk,
+        gamma1,
+        kv_cache_rope,
         cache_mode,
         quant_mode,
         enableInnerOut
@@ -120,14 +122,14 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
 
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
-    cmd.Name("mla_preprocess");
+    cmd.Name("glm5_mla_preprocess");
 
     cmd.SetCustomHandler([stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
                           gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr,
                           kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
                           qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, inner_out_ptr, workspace_ptr,
                           tiling_ptr, block_dim]() -> int {
-        mla_preprocess_impl(stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
+        glm5_mla_preprocess_impl(stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
                             gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr, sin_ptr, cos_ptr,
                             kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
                             qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, inner_out_ptr, workspace_ptr,

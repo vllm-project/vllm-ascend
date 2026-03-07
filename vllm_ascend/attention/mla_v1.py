@@ -713,6 +713,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.speculative_config = self.vllm_config.speculative_config
         self.enable_mlapo = enabling_mlapo(self.vllm_config)
+        model_type = self.vllm_config.model_config.hf_config.model_type
+        self.is_glm5_model = 'glm' in model_type
 
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
@@ -1324,7 +1326,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             device=hidden_states.device,
         )
 
-        torch.ops._C_ascend.mla_preprocess(
+        mla_preprocess_op = (torch.ops._C_ascend.glm5_mla_preprocess
+                              if self.is_glm5_model
+                              else torch.ops._C_ascend.mla_preprocess)
+        mla_preprocess_op(
             hidden_states,
             self.wd_qkv,
             self.deq_scale_qkv,

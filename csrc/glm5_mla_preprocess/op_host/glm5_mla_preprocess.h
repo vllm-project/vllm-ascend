@@ -19,12 +19,12 @@
 // #include "defines.h"
 // #include "torch_helper.h"
 #include "tiling/platform/platform_ascendc.h"
-#include "tiling/mla_preprocess_tiling.h"
+#include "tiling/glm5_mla_preprocess_tiling.h"
 
 // #include "aclrtlaunch_mla_preprocess.h"
 
 // namespace sglang {
-namespace mlapo {
+namespace glm5_mlapo {
 
 constexpr uint32_t DIM_2 = 2;
 
@@ -98,7 +98,7 @@ inline T Min(const T a, const T b)
     return a < b ? a : b;
 }
 
-struct MlaPreprocess {
+struct Glm5MlaPreprocess {
     enum class QuantMode : int32_t {
         PER_TENSOR_ASYMM_QUANT = 0,
         PER_TOKEN_SYMM_QUANT,
@@ -106,7 +106,7 @@ struct MlaPreprocess {
         NO_QUANT
     };
 };
-using QuantMode = MlaPreprocess::QuantMode;
+using QuantMode = Glm5MlaPreprocess::QuantMode;
 
 struct PlatformInfo {
     uint32_t coreNum;
@@ -129,6 +129,11 @@ struct OpParam {
     QuantMode quantMode;
     caffe2::TypeMeta inDtype;
     bool enableInnerOut;
+    // MLA dimensions derived from tensor shapes
+    uint32_t qLoraRank;
+    uint32_t qkNopeHeadDim;
+    uint32_t qkRopeHeadDim;
+    uint32_t kvLoraRank;
 };
 
 class PpMatmulTilingApi
@@ -366,10 +371,10 @@ void PpMatmulTilingApi::Swizzle()
     }
 }
 
-class MlaPreprocessTiling
+class Glm5MlaPreprocessTiling
 {
 public:
-    MlaPreprocessTiling(struct PlatformInfo &platformInfo, struct OpParam &opParam, MlaTilingData *tilingData)
+    Glm5MlaPreprocessTiling(struct PlatformInfo &platformInfo, struct OpParam &opParam, Glm5MlaTilingData *tilingData)
     {
         this->tilingData = tilingData;
         this->platformInfo = platformInfo;
@@ -385,30 +390,30 @@ public:
     void SetMlapoWorkSpace();
 
 private:
-    MlaTilingData *tilingData;
+    Glm5MlaTilingData *tilingData;
     struct PlatformInfo platformInfo;
     struct OpParam opParam;
 };
 
-void MlaPreprocessTiling::RmsNormQuantTiling()
+void Glm5MlaPreprocessTiling::RmsNormQuantTiling()
 {
     tilingData->rmsNumCore1 = platformInfo.coreNumAiv;
     tilingData->rmsNumCol1 = opParam.hiddenStateDim;
     tilingData->rmsNumRow1 = opParam.N;
     tilingData->rmsQuantMin1 = -CONST_128;
     tilingData->rmsNumCore2 = platformInfo.coreNumAiv;
-    tilingData->rmsNumCol2 = HIDDEN_STRATE_MM;
+    tilingData->rmsNumCol2 = opParam.qLoraRank + opParam.kvLoraRank + opParam.qkRopeHeadDim;
     tilingData->rmsNumRow2 = opParam.N;
     tilingData->rmsQuantMin2 = -CONST_128;
 }
 
-void MlaPreprocessTiling::RopeConcatTiling()
+void Glm5MlaPreprocessTiling::RopeConcatTiling()
 {
     uint32_t ntokens = opParam.N;
-    uint32_t hiddenSizeQ = HEADDIM * opParam.headNum;
-    uint32_t headDim = HEADDIM;
+    uint32_t hiddenSizeQ = opParam.qkRopeHeadDim * opParam.headNum;
+    uint32_t headDim = opParam.qkRopeHeadDim;
     uint32_t headNumQ = hiddenSizeQ / headDim;
-    uint32_t concatSize = CONCAT_SIZE;
+    uint32_t concatSize = opParam.kvLoraRank;
     uint32_t maxCore = platformInfo.coreNumAiv;
     uint32_t maxUbSize = platformInfo.ubSize;
 
@@ -450,7 +455,7 @@ void MlaPreprocessTiling::RopeConcatTiling()
     tilingData->lastCoreLoopNLast = lastCoreLoopNLast;
 }
 
-void MlaPreprocessTiling::EinSumQuantTiling()
+void Glm5MlaPreprocessTiling::EinSumQuantTiling()
 {
     uint32_t aivCore = platformInfo.coreNumAiv;
     uint32_t ubSize = UB_SIZE - 1024;
@@ -458,7 +463,7 @@ void MlaPreprocessTiling::EinSumQuantTiling()
     // input shape
     uint32_t esqBatch = opParam.N;          // tokenNum
     uint32_t esqHeadNum = opParam.headNum;  // headNum
-    uint32_t esqColNum = AXES_ALIGN_SIZE;   // 512
+    uint32_t esqColNum = opParam.kvLoraRank;   // kv_lora_rank
 
     // split core
     uint32_t esqFrontCore = esqBatch % aivCore;
@@ -506,16 +511,18 @@ void MlaPreprocessTiling::EinSumQuantTiling()
     tilingData->esqColTail = esqColTail;
 }
 
-void MlaPreprocessTiling::SetMlapoWorkSpace()
+void Glm5MlaPreprocessTiling::SetMlapoWorkSpace()
 {
+    uint32_t hiddenStrideRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
+    uint32_t hiddenStrateMm = opParam.qLoraRank + opParam.kvLoraRank + opParam.qkRopeHeadDim;
     uint64_t s1wsFactor =
         static_cast<uint64_t>(opParam.cacheMode == 2 ? std::max(opParam.hiddenStateDim * sizeof(int8_t),
-                                                                opParam.headNum * AXES_ALIGN_SIZE * sizeof(uint16_t))
+                                                                opParam.headNum * opParam.kvLoraRank * sizeof(uint16_t))
                                                      : opParam.hiddenStateDim * sizeof(int8_t));
     uint64_t workSizeS1 = s1wsFactor;
-    uint64_t workSizeS2 = opParam.headNum * HIDDEN_STRATE_ROPE * sizeof(uint16_t);
-    uint64_t workSizeS3 = HIDDEN_STRATE_MM * sizeof(uint16_t);
-    uint64_t workSizeS4 = std::max(opParam.headNum * HIDDEN_STRATE_ROPE, HIDDEN_STRATE_MM) * sizeof(uint32_t);
+    uint64_t workSizeS2 = opParam.headNum * hiddenStrideRope * sizeof(uint16_t);
+    uint64_t workSizeS3 = hiddenStrateMm * sizeof(uint16_t);
+    uint64_t workSizeS4 = std::max(opParam.headNum * hiddenStrideRope, hiddenStrateMm) * sizeof(uint32_t);
 
     uint64_t maxWorkspaceSize = workSizeS1;
     maxWorkspaceSize = std::max(maxWorkspaceSize, workSizeS2);
@@ -541,7 +548,7 @@ void MlaPreprocessTiling::SetMlapoWorkSpace()
     tilingData->s5Offset = tilingData->s4Offset + maxWorkspaceSize;
 }
 
-void MlaPreprocessTiling::SetTilingKey()
+void Glm5MlaPreprocessTiling::SetTilingKey()
 {
     uint64_t tilingKey = (static_cast<uint64_t>(opParam.enableInnerOut)) << 9;
     tilingKey |= (static_cast<uint64_t>(opParam.inDtype == at::kBFloat16)) << 8;
@@ -552,7 +559,7 @@ void MlaPreprocessTiling::SetTilingKey()
     tilingData->tilingKey = tilingKey;
 }
 
-void MlaPreprocessTiling::Init()
+void Glm5MlaPreprocessTiling::Init()
 {
     tilingData->numCore = platformInfo.coreNumAic;
     tilingData->n = opParam.N;
@@ -564,11 +571,17 @@ void MlaPreprocessTiling::Init()
         deqOnTheFly = true;
     }
 
+    uint32_t mm1N = opParam.qLoraRank + opParam.kvLoraRank + opParam.qkRopeHeadDim;
+    uint32_t mm2K = opParam.qLoraRank;
+    uint32_t mm2N = opParam.headNum * (opParam.qkNopeHeadDim + opParam.qkRopeHeadDim);
+    uint32_t mm3K = opParam.qkNopeHeadDim;
+    uint32_t mm3N = opParam.kvLoraRank;
+
     PpMatmulTilingApi mm1TilingApi(platformInfo,
                                    1,                       // numBatch
                                    opParam.N,               // m
                                    opParam.hiddenStateDim,  // k
-                                   HIDDEN_STRATE_MM,        // n
+                                   mm1N,                    // n
                                    false,                   // transA
                                    true,                    // transB
                                    enDequant,               // enDequant
@@ -576,21 +589,21 @@ void MlaPreprocessTiling::Init()
     mm1TilingApi.GetTilingData(tilingData->mm1);
 
     PpMatmulTilingApi mm2TilingApi(platformInfo,
-                                   1,                                     // numBatch
-                                   opParam.N,                             // m
-                                   HIDDEN_STRATE_RMS,                     // k
-                                   opParam.headNum * HIDDEN_STRATE_ROPE,  // n
-                                   false,                                 // transA
-                                   true,                                  // transB
-                                   enDequant,                             // enDequant
-                                   deqOnTheFly);                          // in bf16.cce?
+                                   1,              // numBatch
+                                   opParam.N,      // m
+                                   mm2K,           // k
+                                   mm2N,           // n
+                                   false,          // transA
+                                   true,           // transB
+                                   enDequant,      // enDequant
+                                   deqOnTheFly);   // in bf16.cce?
     mm2TilingApi.GetTilingData(tilingData->mm2);
 
     PpMatmulTilingApi mm3TilingApi(platformInfo,
                                    opParam.headNum,  // numBatch
                                    opParam.N,        // m
-                                   CONST_128,        // k
-                                   CONCAT_SIZE,      // n
+                                   mm3K,             // k
+                                   mm3N,             // n
                                    false,            // transA
                                    false,            // transB
                                    false,            // enDequant
@@ -603,6 +616,18 @@ void MlaPreprocessTiling::Init()
 
     SetMlapoWorkSpace();
     SetTilingKey();
+
+    // Populate model-specific MLA dimension fields
+    tilingData->mm1OutSize = opParam.qLoraRank + opParam.kvLoraRank + opParam.qkRopeHeadDim;
+    tilingData->splitSizeOne = opParam.kvLoraRank + opParam.qkRopeHeadDim;
+    tilingData->splitSizeTwo = opParam.qLoraRank;
+    tilingData->splitRmsNormSizeOne = opParam.kvLoraRank;
+    tilingData->splitRmsNormSizeTwo = opParam.qkRopeHeadDim;
+    tilingData->ropeSplitSizeOne = opParam.qkRopeHeadDim;
+    tilingData->ropeSplitSizeTwo = opParam.qkNopeHeadDim;
+    tilingData->hiddenStrideRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
+    tilingData->qkNopeHeadDim = opParam.qkNopeHeadDim;
+    tilingData->avgFactor = 1.0f / static_cast<float>(opParam.qLoraRank);
 
     return;
 }
@@ -627,10 +652,12 @@ inline int get_op_mode(const MapType &mode_map, c10::optional<c10::string_view> 
     return it->second;
 }
 
-std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
+std::tuple<at::Tensor, at::Tensor, uint32_t> glm5_mla_preprocess_tiling(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
     const at::Tensor &wuk,
+    const at::Tensor &gamma1,
+    const at::Tensor &kv_cache_rope,
     c10::optional<c10::string_view> cache_mode,
     c10::optional<c10::string_view> quant_mode,
     bool enable_inner_out
@@ -656,6 +683,12 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     int32_t headNum = wuk.sizes()[0];
     uint32_t hiddenStateDim = hiddenState.sizes().back();
 
+    // Derive MLA dimensions from tensor shapes
+    uint32_t qkNopeHeadDim = wuk.sizes()[1];
+    uint32_t kvLoraRank = wuk.sizes()[2];
+    uint32_t qLoraRank = gamma1.sizes()[0];
+    uint32_t qkRopeHeadDim = kv_cache_rope.sizes().back();
+
     OpParam opParam;
     opParam.hiddenStateDim = hiddenStateDim;
     opParam.N = N;
@@ -664,14 +697,18 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     opParam.quantMode = static_cast<QuantMode>(quantMode);
     opParam.inDtype = hiddenState.options().dtype();
     opParam.enableInnerOut = enable_inner_out;
+    opParam.qLoraRank = qLoraRank;
+    opParam.qkNopeHeadDim = qkNopeHeadDim;
+    opParam.qkRopeHeadDim = qkRopeHeadDim;
+    opParam.kvLoraRank = kvLoraRank;
     if (wdqkv.options().dtype() == at::kBFloat16 || wdqkv.options().dtype() == at::kHalf) {
         opParam.isWeightQuantized = 0;
     } else {
         opParam.isWeightQuantized = 1;
     }
 
-    MlaTilingData tilingData;
-    MlaPreprocessTiling mlaTiling(platformInfo, opParam, &tilingData);
+    Glm5MlaTilingData tilingData;
+    Glm5MlaPreprocessTiling mlaTiling(platformInfo, opParam, &tilingData);
 
     mlaTiling.Init();
     uint32_t blockDim = platformInfo.coreNumAic;
@@ -684,7 +721,7 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
 
     // tiling
     int32_t bIndex = N - 1;
-    uint32_t tilingSize = sizeof(MlaTilingData);
+    uint32_t tilingSize = sizeof(Glm5MlaTilingData);
     static auto global_tiling_data =
         at::empty({tilingSize * MAX_SUPPORT_TOKEN_NUMS},
                   at::TensorOptions().dtype(at::kByte).device(hiddenState.options().device()));
@@ -703,4 +740,4 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     return std::make_tuple(workspace_tensor, tiling, blockDim);
 }
 
-}  // namespace npu_kernel
+}  // namespace glm5_mlapo

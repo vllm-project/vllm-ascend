@@ -401,6 +401,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         self.local_num_heads = self.num_heads
         self.vllm_config = get_current_vllm_config()
+        model_type = self.vllm_config.model_config.hf_config.model_type
+        self.is_glm5_model = 'glm' in model_type
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
@@ -697,7 +699,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        torch.ops._C_ascend.mla_preprocess(
+        mla_preprocess_op = (torch.ops._C_ascend.glm5_mla_preprocess
+                              if self.is_glm5_model
+                              else torch.ops._C_ascend.mla_preprocess)
+        mla_preprocess_op(
             hidden_states,
             self.wd_qkv,
             self.deq_scale_qkv,
