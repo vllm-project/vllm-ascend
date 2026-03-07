@@ -407,3 +407,13 @@ class ExtraForwardContext:
     def set_mc2_mask(val: torch.Tensor | None):
         """Set the mc2 mask in the current batch."""
         return ExtraForwardContext.set_attr("mc2_mask", val)
+
+    @staticmethod
+    def is_draft_model() -> bool:
+        """A flag to indicate whether to use draft model."""
+        return ExtraForwardContext.get_atrr("is_draft_model", False)
+
+    @staticmethod
+    def set_is_draft_model(val: bool):
+        """Set the is_draft_model flag."""
+        return ExtraForwardContext.set_attr("is_draft_model", val)

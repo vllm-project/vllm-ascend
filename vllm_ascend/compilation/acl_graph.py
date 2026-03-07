@@ -18,6 +18,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 
 from ..utils import weak_ref_tensors
 
@@ -195,7 +196,7 @@ class ACLGraphWrapper:
             if self.vllm_config.speculative_config
             else False
         )
-        if self.runtime_mode != CUDAGraphMode.FULL or not forward_context.is_draft_model or not use_eagle:
+        if self.runtime_mode != CUDAGraphMode.FULL or not ExtraForwardContext.is_draft_model() or not use_eagle:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output

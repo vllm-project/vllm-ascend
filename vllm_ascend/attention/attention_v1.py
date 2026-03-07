@@ -387,7 +387,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
-            if forward_context.is_draft_model:
+            if ExtraForwardContext.is_draft_model():
                 graph_params = get_draft_graph_params()
             else:
                 graph_params = get_graph_params()
@@ -439,7 +439,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     event.record(update_stream)
         else:
             # FIA update logic
-            if forward_context.is_draft_model:
+            if ExtraForwardContext.is_draft_model():
                 graph_params = get_draft_graph_params()
                 attn_metadata = draft_attn_metadatas
                 attn_keys = list(attn_metadata[0].keys())
@@ -457,7 +457,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_layers = len(attn_keys)
             if num_layers == 0:
                 return
-            if forward_context.is_draft_model:
+            if ExtraForwardContext.is_draft_model():
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
             attn_count = 0
             with torch.npu.stream(update_stream):
@@ -483,7 +483,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         softmax_lse,
                     ) = param
 
-                    if forward_context.is_draft_model:
+                    if ExtraForwardContext.is_draft_model():
                         draft_step = attn_count // num_layers
                         seq_lens = attn_metadata[draft_step][key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
@@ -530,8 +530,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-        forward_context = get_forward_context()
-        if forward_context.is_draft_model:
+        if ExtraForwardContext.is_draft_model():
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
@@ -558,7 +557,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode=3,
                 scale=self.scale,
             )
-            if forward_context.is_draft_model:
+            if ExtraForwardContext.is_draft_model():
                 update_draft_graph_params_workspaces(num_tokens, workspace)
             else:
                 update_graph_params_workspaces(num_tokens, workspace)

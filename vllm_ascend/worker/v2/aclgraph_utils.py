@@ -34,6 +34,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.compilation.acl_graph import update_full_graph_params

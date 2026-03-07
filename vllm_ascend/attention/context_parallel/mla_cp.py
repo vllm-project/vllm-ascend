@@ -295,7 +295,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        if forward_context.is_draft_model:
+        if forward_context.is_draft_model():
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
@@ -661,7 +661,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         }
 
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.is_draft_model:
+        if forward_context.is_draft_model():
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
