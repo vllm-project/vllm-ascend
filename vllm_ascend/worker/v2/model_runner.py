@@ -163,7 +163,9 @@ class NPUModelRunner(GPUModelRunner):
             return inner
 
         if self.cudagraph_and_dp_padding is None:
-            vllm.v1.worker.gpu.dp_utils.get_cudagraph_and_dp_padding = wrapper
+            vllm.v1.worker.gpu.dp_utils.get_cudagraph_and_dp_padding = wrapper(
+                vllm.v1.worker.gpu.dp_utils.get_cudagraph_and_dp_padding
+            )
 
         return super().execute_model(
             scheduler_output,
