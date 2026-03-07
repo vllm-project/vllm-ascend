@@ -18,6 +18,8 @@
 #
 
 import functools
+import sys
+
 import numpy as np
 import torch
 import vllm
@@ -152,6 +154,12 @@ class NPUModelRunner(GPUModelRunner):
         1. when run fullgraph, we need to use ret value of `get_cudagraph_and_dp_padding`
         to set forward_context in `run_fullgraph`.
         """
+        # use sys.module to get parent module of NPUModelRunner.
+        # we need to override get_cudagraph_and_dp_padding in parent module.
+        # we can't use vllm.v1.worker.gpu.dp_utils.get_cudagraph_and_dp_padding
+        # to make patch, cause get_cudagraph_and_dp_padding is already binded in
+        # vllm.v1.worker.gpu.model_runner.GPUModelRunner.
+        parent_module = sys.modules[super().__class__.__module__]
 
         # use closure to store return value of get_cudagraph_and_dp_padding in model runner.
         def wrapper(func):
@@ -163,9 +171,7 @@ class NPUModelRunner(GPUModelRunner):
             return inner
 
         if self.cudagraph_and_dp_padding is None:
-            vllm.v1.worker.gpu.dp_utils.get_cudagraph_and_dp_padding = wrapper(
-                vllm.v1.worker.gpu.dp_utils.get_cudagraph_and_dp_padding
-            )
+            parent_module.get_cudagraph_and_dp_padding = wrapper(parent_module.get_cudagraph_and_dp_padding)
 
         return super().execute_model(
             scheduler_output,
