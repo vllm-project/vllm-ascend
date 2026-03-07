@@ -64,7 +64,7 @@ class AclGraphManager(CudaGraphManager):
         )
         # vllm-ascend need to update graph params of attention backend.
         # so we need to set graph params before capture full graph.
-        if super().need_capture():
+        if super().needs_capture():
             set_graph_params(self.cudagraph_sizes)
 
     def _capture_full_graph(
