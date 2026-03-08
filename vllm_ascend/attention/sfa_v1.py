@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
-import scipy
+import scipy  # type: ignore
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
@@ -527,7 +527,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
         if self.use_sparse_c8_indexer and AscendSFAImpl.qk_hadamard is None:
-            AscendSFAImpl.qk_hadamard = torch.tensor(scipy.linalg.hadamard(128),dtype=torch.bfloat16, device='npu') / (
+            AscendSFAImpl.qk_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
                 128**0.5
             )
 
@@ -893,8 +893,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.use_sparse_c8_indexer:
             k_li = k_li @ AscendSFAImpl.qk_hadamard
             k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype) # [b*s,]
-            k_li_scale = k_li_scale.unsqueeze(-1) # [b*s,1]
+            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
+            k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
         else:
             k_li_scale = None
 
@@ -939,13 +939,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         # So two branches are maintained temporarily.
         # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
         if self.use_sparse_c8_indexer:
+            assert len(kv_cache) == 4
             weights = weights.to(torch.float16)
             topk_indices = torch.ops._C_ascend.npu_lightning_indexer_quant(
                 query=q_li.view(q_li_shape_ori),
                 key=kv_cache[2],
                 weights=weights,
                 query_dequant_scale=q_li_scale.view(q_li_shape_ori[:-1]),
-                key_dequant_scale=kv_cache[3].squeeze(2), # B S N D -> B S D
+                key_dequant_scale=kv_cache[3].squeeze(2),  # B S N D -> B S D
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
                 block_table=attn_metadata.block_table,
@@ -1140,7 +1141,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_pe = self.rope_single(q_pe, cos, sin)
 
             if self.enable_dsa_cp:
-                for handle in filter(None, handles):
+                valid_handles: list[Work] = [h for h in handles if h is not None]
+                for handle in valid_handles:
                     handle.wait()
 
                 if self.enable_dsa_cp_with_layer_shard:
@@ -1179,6 +1181,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
             )  # b, s, n, d
             if self.use_sparse_c8_indexer:
+                assert len(kv_cache) == 4
                 torch_npu.npu_scatter_nd_update_(
                     kv_cache[3].view(-1, k_li_scale.shape[-1]),
                     slot_mapping.view(-1, 1),

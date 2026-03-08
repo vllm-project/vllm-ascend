@@ -2678,8 +2678,8 @@ class NPUModelRunner(GPUModelRunner):
 
                     if not self.model_config.use_mla:
                         # for non-mla model, use FullAttentionSpec
-                        k_tensor_split_factor = 2
-                        v_tensor_split_factor = 2
+                        k_tensor_split_factor = 2.0
+                        v_tensor_split_factor = 2.0
                     elif self.use_sparse:
                         # for deepseek v3.2, we split the kv cache according to the corresponding ratio
                         sparse_kv_cache_ratio = self._get_sparse_kv_cache_ratio()
@@ -2710,7 +2710,9 @@ class NPUModelRunner(GPUModelRunner):
                         if dsa_k_tensor_size is not None:
                             dsa_k_tensor = torch.zeros(dsa_k_tensor_size, dtype=torch.int8, device=self.device)
                         if dsa_k_scale_tensor_size is not None:
-                            dsa_k_scale_tensor = torch.zeros(dsa_k_scale_tensor_size, dtype=torch.int8, device=self.device)
+                            dsa_k_scale_tensor = torch.zeros(
+                                dsa_k_scale_tensor_size, dtype=torch.int8, device=self.device
+                            )
                     else:
                         k_tensor = torch.zeros(k_tensor_size + alignment, dtype=torch.int8, device=self.device)
                         v_tensor = torch.zeros(v_tensor_size + alignment, dtype=torch.int8, device=self.device)
@@ -2726,14 +2728,18 @@ class NPUModelRunner(GPUModelRunner):
                             dsa_k_scale_tensor = torch.zeros(
                                 dsa_k_scale_tensor_size + alignment, dtype=torch.int8, device=self.device
                             )
-                            dsa_k_scale_tensor = self._align_memory(dsa_k_scale_tensor, alignment)[:dsa_k_scale_tensor_size]
+                            dsa_k_scale_tensor = self._align_memory(
+                                dsa_k_scale_tensor, alignment
+                            )[:dsa_k_scale_tensor_size]
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the attn kvcache for all shared layers
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             if self.use_sparse:
                                 if self.use_sparse_c8_indexer:
-                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor)
+                                    kv_cache_raw_tensors[layer_name_inner] = (
+                                        k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor
+                                    )
                                 else:
                                     kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, dsa_k_tensor)
                             else:
@@ -2785,7 +2791,12 @@ class NPUModelRunner(GPUModelRunner):
                                 layer_name]
                             assert raw_dsa_k_tensor is not None
                             assert raw_dsa_k_scale_tensor is not None
-                            sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel() + raw_dsa_k_tensor.numel() + raw_dsa_k_scale_tensor.numel()
+                            sum_page_size_bytes = (
+                                raw_k_tensor.numel()
+                                + raw_v_tensor.numel()
+                                + raw_dsa_k_tensor.numel()
+                                + raw_dsa_k_scale_tensor.numel()
+                            )
                         else:
                             raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor = kv_cache_raw_tensors[  # type: ignore
                                 layer_name]
@@ -2884,7 +2895,11 @@ class NPUModelRunner(GPUModelRunner):
                                 index_k_scale_head_dim,
                             )
                             assert raw_dsa_k_scale_tensor is not None
-                            dsa_k_scale_cache = raw_dsa_k_scale_tensor.view(self.c8_k_scale_cache_dtype).view(dsa_k_scale_cache_shape)
+                            dsa_k_scale_cache = (
+                                raw_dsa_k_scale_tensor
+                                .view(self.c8_k_scale_cache_dtype)
+                                .view(dsa_k_scale_cache_shape)
+                            )
                             kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache, dsa_k_scale_cache)
                         else:
                             # dsa_k

@@ -1175,10 +1175,8 @@ def use_sparse_c8_indexer() -> bool:
 
     vllm_config = get_current_vllm_config()
     use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
-    # dsa c8
-    if use_sparse and envs_ascend.VLLM_ASCEND_ENABLE_SPARSE_C8 and get_ascend_device_type() != AscendDeviceType.A5:
-        return True
-    return False
+
+    return use_sparse and envs_ascend.VLLM_ASCEND_ENABLE_SPARSE_C8 and get_ascend_device_type() != AscendDeviceType.A5
 
 
 def check_gdn_layer(vllm_config) -> bool:
