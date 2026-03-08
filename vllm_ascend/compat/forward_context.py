@@ -16,14 +16,25 @@
 #
 """Compatibility wrappers for vllm.forward_context module.
 
-The forward_context module is internal to vLLM and can change.
-This module provides stable imports with fallback implementations.
+The forward_context module is internal to vLLM and can change between
+versions. This module re-exports whatever vLLM provides when available,
+and supplies minimal mock implementations otherwise so that the rest of
+vllm-ascend can import these names without caring whether the underlying
+vLLM version ships them or not.
+
+Important: vLLM's set_forward_context is a @contextmanager generator,
+and callers (e.g. ascend_forward_context.py) use it with 'with'.
+Any wrapper or fallback here must preserve that context-manager protocol.
 """
 
 import warnings
+from contextlib import contextmanager
 from typing import Any, Optional
 
-# Try to import from vLLM first, fall back to mock if not available
+# Try to import directly from vLLM. When vLLM is installed and its
+# forward_context module exists, we just re-export everything as-is.
+# No wrapping needed -- that would break the context-manager protocol
+# of set_forward_context and risk signature mismatches.
 try:
     from vllm.forward_context import (
         BatchDescriptor,
@@ -31,75 +42,83 @@ try:
         get_forward_context,
         set_forward_context,
     )
-    _USE_MOCK = False
 except ImportError:
     warnings.warn(
         "forward_context not found in vllm. "
-        "Using mock implementation. Some features may not work correctly.",
-        RuntimeWarning
+        "Using mock implementation -- some features may not work correctly.",
+        RuntimeWarning,
     )
-    _USE_MOCK = True
 
     class BatchDescriptor:
-        """Mock BatchDescriptor when vLLM doesn't provide it."""
+        """Stand-in for vLLM's BatchDescriptor dataclass."""
 
-        def __init__(
-            self,
-            num_tokens: int,
-            batch_size: int,
-            max_seq_len: int = 0,
-            **kwargs
-        ):
+        def __init__(self, num_tokens: int = 0, num_reqs: Optional[int] = None, **kwargs):
             self.num_tokens = num_tokens
-            self.batch_size = batch_size
-            self.max_seq_len = max_seq_len
+            self.num_reqs = num_reqs
             for key, value in kwargs.items():
                 setattr(self, key, value)
 
     class ForwardContext:
-        """Mock ForwardContext when vLLM doesn't provide it."""
+        """Stand-in for vLLM's ForwardContext dataclass.
 
-        def __init__(self, batch_descriptor: Optional[BatchDescriptor] = None):
-            self.batch_descriptor = batch_descriptor
+        Unlike the real dataclass this is a plain object that accepts
+        any attribute assignment, since downstream code (ascend_forward_context)
+        freely sets attributes like moe_comm_type, flash_comm_v1_enabled, etc.
+        """
 
-    # Global context storage for mock implementation
-    _current_context: Optional[ForwardContext] = None
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
-    def get_forward_context() -> Optional[ForwardContext]:
-        """Get the current forward context."""
-        return _current_context
+    # Module-level storage, mirrors vLLM's _forward_context global.
+    _forward_context: Optional[ForwardContext] = None
 
-    def set_forward_context(context: Optional[ForwardContext] = None, **kwargs) -> None:
-        """Set the current forward context."""
-        global _current_context
-        if context is not None:
-            _current_context = context
+    def get_forward_context() -> ForwardContext:
+        """Return the current forward context (mock)."""
+        assert _forward_context is not None, (
+            "Forward context is not set. "
+            "Please use set_forward_context to set the forward context."
+        )
+        return _forward_context
 
+    @contextmanager
+    def set_forward_context(
+        attn_metadata: Any = None,
+        vllm_config: Any = None,
+        virtual_engine: int = 0,
+        num_tokens: Optional[int] = None,
+        num_tokens_across_dp: Any = None,
+        cudagraph_runtime_mode: Any = None,
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        skip_compiled: bool = False,
+        **kwargs,
+    ):
+        """Mock context manager matching vLLM's set_forward_context signature.
 
-# Wrap real implementations with error handling if not using mock
-if not _USE_MOCK:
-    from vllm.forward_context import set_forward_context as _original_set_forward_context
-    from vllm.forward_context import get_forward_context as _original_get_forward_context
+        Creates a temporary ForwardContext, makes it the active context for
+        the duration of the ``with`` block, then restores the previous one.
+        """
+        global _forward_context
+        prev = _forward_context
 
-    def set_forward_context(context: Any = None, **kwargs) -> None:
-        """Set forward context with error handling."""
+        ctx = ForwardContext(
+            attn_metadata=attn_metadata,
+            virtual_engine=virtual_engine,
+            dp_metadata=None,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            batch_descriptor=batch_descriptor,
+            skip_compiled=skip_compiled,
+        )
+        _forward_context = ctx
         try:
-            _original_set_forward_context(context, **kwargs)
-        except Exception as e:
-            warnings.warn(f"Error setting forward context: {e}", RuntimeWarning)
-
-    def get_forward_context() -> Any:
-        """Get forward context with error handling."""
-        try:
-            return _original_get_forward_context()
-        except Exception as e:
-            warnings.warn(f"Error getting forward context: {e}", RuntimeWarning)
-            return None
+            yield
+        finally:
+            _forward_context = prev
 
 
 __all__ = [
-    'BatchDescriptor',
-    'ForwardContext',
-    'get_forward_context',
-    'set_forward_context',
+    "BatchDescriptor",
+    "ForwardContext",
+    "get_forward_context",
+    "set_forward_context",
 ]
