@@ -2860,7 +2860,9 @@ class NPUModelRunner(GPUModelRunner):
                     v_cache = raw_v_tensor.view(kv_cache_spec.dtype).view(v_shape)
 
                     if self.use_sparse:
-                        index_k_head_dim, index_k_scale_head_dim = self._get_sparse_head_size()[:-2]
+                        sparse_head_size = self._get_sparse_head_size()
+                        index_k_head_dim = sparse_head_size[2]
+                        index_k_scale_head_dim = sparse_head_size[3] if len(sparse_head_size) > 3 else None
                         if self.use_sparse_c8_indexer:
                             # dsa_k
                             assert raw_dsa_k_tensor is not None
@@ -2881,8 +2883,8 @@ class NPUModelRunner(GPUModelRunner):
                                 kv_cache_spec.num_kv_heads,
                                 index_k_scale_head_dim,
                             )
-                            assert raw_dsa_k_tensor is not None
-                            dsa_k_scale_cache = raw_dsa_k_tensor.view(self.c8_k_scale_cache_dtype).view(dsa_k_scale_cache_shape)
+                            assert raw_dsa_k_scale_tensor is not None
+                            dsa_k_scale_cache = raw_dsa_k_scale_tensor.view(self.c8_k_scale_cache_dtype).view(dsa_k_scale_cache_shape)
                             kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache, dsa_k_scale_cache)
                         else:
                             # dsa_k

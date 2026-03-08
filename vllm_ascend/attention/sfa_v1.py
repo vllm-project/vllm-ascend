@@ -893,7 +893,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.use_sparse_c8_indexer:
             k_li = k_li @ AscendSFAImpl.qk_hadamard
             k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)
+            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype) # [b*s,]
+            k_li_scale = k_li_scale.unsqueeze(-1) # [b*s,1]
         else:
             k_li_scale = None
 
@@ -944,7 +945,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 key=kv_cache[2],
                 weights=weights,
                 query_dequant_scale=q_li_scale.view(q_li_shape_ori[:-1]),
-                key_dequant_scale=kv_cache[3],
+                key_dequant_scale=kv_cache[3].squeeze(2), # B S N D -> B S D
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
                 block_table=attn_metadata.block_table,
