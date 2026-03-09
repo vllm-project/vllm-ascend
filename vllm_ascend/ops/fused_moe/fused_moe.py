@@ -286,9 +286,7 @@ class AscendFusedMoE(FusedMoE):
         )
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
-        self.local_num_experts = (
-            torch.sum(self._expert_map != -1).item() if self._expert_map is not None else self.global_num_experts
-        )
+        self.local_num_experts = self.global_num_experts // self.ep_size
         if self._expert_map is not None:
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"

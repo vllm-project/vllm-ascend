@@ -169,8 +169,6 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata.prefill.chunked_context = MagicMock()
         local_context_lens_allranks = torch.tensor([[[256, 256], [256, 256]]])
         attn_metadata.prefill.chunked_context.local_context_lens_allranks = local_context_lens_allranks
-        attn_metadata.prefill.chunked_context.batch_chunk_seq_mask = torch.randint(
-            0, 2, (1024, ), dtype=torch.bool)
         attn_metadata.prefill.chunked_context.local_total_toks = local_context_lens_allranks[:,
                                                                                              0,
                                                                                              0].sum(
