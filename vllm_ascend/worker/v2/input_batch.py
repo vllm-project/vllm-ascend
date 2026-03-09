@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.utils import CpuGpuBuffer
 
 
 class AscendInputBuffers(InputBuffers):
@@ -37,6 +38,18 @@ class AscendInputBuffers(InputBuffers):
             max_num_tokens,
             device,
         )
+        del self.query_start_loc
+
+        # vllm only need gpu's query_start_loc for attention backend.
+        # but vllm-ascend also need cpu's query_start_loc for fia backend.
+        # so reinitialize query_start_loc here.
+        # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
+        # See _pad_query_start_loc_for_fia.
+        self.query_start_loc = CpuGpuBuffer(
+            self.max_num_reqs + 2,  # type: ignore[has-type]
+            dtype=torch.int32,
+        )
+
         # Create seq_lens_cpu and seq_lens_np.
         # npu's attention backend still needs seq_lens on CPU side.
         self.seq_lens_cpu: torch.Tensor = torch.zeros(

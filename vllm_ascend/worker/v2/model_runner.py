@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import vllm
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -259,11 +260,18 @@ class NPUModelRunner(GPUModelRunner):
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
-        async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
+        query_start_loc_np = self._pad_query_start_loc_for_fia(
+            num_tokens_padded=num_tokens_after_padding,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            query_start_loc_np=query_start_loc_np,
+            max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
+        )
+        async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc.gpu)
 
         query_start_loc_np = query_start_loc_np[: num_reqs + 1]
         query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        query_start_loc = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
         max_query_len = num_scheduled_tokens.max().item()
 
         # Get prefill tokens.
@@ -426,3 +434,43 @@ class NPUModelRunner(GPUModelRunner):
         # TODO(Ronald1995): just define the method in case calling error in
         # worker, implement it in the future.
         pass
+
+    def _pad_query_start_loc_for_fia(
+        self,
+        num_tokens_padded: int,
+        num_tokens: int,
+        num_reqs: int,
+        query_start_loc_np: np.ndarray,
+        max_query_len: int,
+    ) -> int:
+        """
+        This function is only designed to satisfied the constraint that when the layout is TND,
+        the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
+        """
+        _num_tokens_after_padding, _num_tokens_across_dp, synced_cudagraph_mode = self.cudagraph_and_dp_padding
+        cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
+        if cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            return query_start_loc_np
+        uniform_decode_query_len = self.cudagraph_manager.uniform_decode_query_len
+        is_uniform_decode = self.cudagraph_manager.is_uniform_decode(
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            max_query_len=max_query_len,
+        )
+        if is_uniform_decode:
+            # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
+            num_reqs_padded = num_tokens_padded / uniform_decode_query_len
+
+            last_loc = self.query_start_loc.np[num_reqs]
+            query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
+                self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * uniform_decode_query_len + last_loc
+            )
+        else:
+            # Mixed-batch case: num_reqs must equal num_reqs_padded
+            num_reqs_padded = min(num_tokens_padded, self.max_num_reqs)
+
+            # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
+            query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
+            num_reqs_padded = num_reqs_padded + 1
+
+        return query_start_loc_np

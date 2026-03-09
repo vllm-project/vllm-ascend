@@ -158,6 +158,40 @@ class AclGraphManager(CudaGraphManager):
             )
         return ret
 
+    def is_uniform_decode(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        max_query_len: int,
+    ):
+        return (max_query_len == self.uniform_decode_query_len) and (num_tokens == max_query_len * num_reqs)
+
+    def _pad_query_start_loc_for_fia(self, num_tokens_padded: int, num_reqs_padded: int, num_reqs: int) -> int:
+        """
+        This function is only designed to satisfied the constraint that when the layout is TND,
+        the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
+        """
+
+        if num_tokens_padded == num_reqs_padded * self.uniform_decode_query_len:
+            # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
+            assert num_reqs <= num_reqs_padded
+
+            last_loc = self.query_start_loc.np[num_reqs]
+            self.model_runner.input_buffers.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
+                np.arange(1, num_reqs_padded + 1 - num_reqs, dtype=np.int32) * self.uniform_decode_query_len + last_loc
+            )
+        else:
+            # Mixed-batch case: num_reqs must equal num_reqs_padded
+            assert num_reqs == num_reqs_padded
+
+            # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
+            self.query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
+            num_reqs_padded = num_reqs_padded + 1
+
+        self.query_start_loc.copy_to_gpu()
+
+        return num_reqs_padded
+
 
 @contextmanager
 def prepare_capture_inputs_wrapper():
