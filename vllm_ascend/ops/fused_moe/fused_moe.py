@@ -493,18 +493,18 @@ class AscendFusedMoE(FusedMoE):
             assert expert_tokens is not None and group_list_type is not None, (
                 "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
             )
+            local_load = (
+                expert_tokens
+                if group_list_type == 1
+                else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+            )
             if self.multi_stage:
                 cur_iter = torch.remainder(self.load_counter, self.num_iter)
                 self.moe_load.index_add_(
-                    dim=0, index=cur_iter, source=expert_tokens.to(torch.int32, non_blocking=True).view(1, -1)
+                    dim=0, index=cur_iter, source=local_load.to(torch.int32, non_blocking=True).view(1, -1)
                 )
                 self.load_counter.add_(1)
             else:
-                local_load = (
-                    expert_tokens
-                    if group_list_type == 1
-                    else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-                )
                 self.moe_load.add_(local_load)
         routed_out = forward_context.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,

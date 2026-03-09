@@ -19,7 +19,7 @@ numba_logger.setLevel(logging.WARNING)
 
 
 @njit(fastmath=True, cache=True)
-def min_max_replica_org(
+def min_max_replica(
     mu: np.ndarray, var: np.ndarray, num_available_replicas: int, current_replicas: np.ndarray, z_score: float
 ) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -151,6 +151,22 @@ def percentage_replica(
         replicas_history[r] = current_replicas + add_slots
 
     return replicas_history[-1], replicas_history
+
+
+def make_replica(
+    mu: np.ndarray,
+    var: np.ndarray,
+    num_available_replicas: int,
+    current_replicas: np.ndarray,
+    z_score: float,
+    method: str = "percentage",
+) -> tuple[np.ndarray, np.ndarray]:
+    if method == "percentage":
+        return percentage_replica(mu, var, num_available_replicas, current_replicas, z_score)
+    elif method == "max_delta":
+        return max_delta_replica(mu, var, num_available_replicas, current_replicas, z_score)
+    else:
+        return min_max_replica(mu, var, num_available_replicas, current_replicas, z_score)
 
 
 @njit(fastmath=True, cache=True)
@@ -304,100 +320,185 @@ def compute_score(val_data: np.ndarray, simulated_replicas: np.ndarray, simulate
     return np.mean(scores)
 
 
-def get_score(
-    f: Any,
-    val_data: np.ndarray,
-    deployed_replicas: np.ndarray,
-    current_idx: np.ndarray,
-    current_replicas: np.ndarray,
-    remaind_idx: np.ndarray,
-    remaind_replicas: np.ndarray,
-) -> tuple[float, np.ndarray]:
-    """
-    Wrapper to compute load balance score for replica allocation simulation
+class FlashTree:
+    def __init__(self, X, num_replicas, num_devices, z_score=0.674, depth=4, width=8):
+        super().__init__()
+        self.num_replicas = num_replicas
+        self.num_devices = num_devices
+        self.z_score = z_score
+        self.depth = depth
+        self.width = width
 
-    Args:
-        f: Deployment function (e.g., _lpt_deployment)
-        val_data: Validation load data (T, N)
-        deployed_replicas: Already deployed replica count per expert (N,)
-        current_idx: Indices of current expert group
-        current_replicas: Replica count for current expert group
-        remaind_idx: Indices of remaining expert group
-        remaind_replicas: Replica count for remaining expert group
+        self.X = X
+        self.mu, self.var, self.cov = FlashTree.compute_statistics(X)
 
-    Returns:
-        score: Load balance score
-        simulated_deployment: Simulated expert deployment matrix
-    """
-    # Simulate replica allocation and deployment
-    simulated_replicas = deployed_replicas.copy()
-    simulated_replicas[current_idx] = current_replicas
-    simulated_replicas[remaind_idx] = remaind_replicas
-    simulated_deployment = f(simulated_replicas)
+    @staticmethod
+    def compute_statistics(X):
+        T, N = X.shape
+        mean_ = np.mean(X, axis=0)
+        if T > 1:
+            X_centered = X - mean_
+            variance_ = np.sum(X_centered**2, axis=0) / (T - 1)
+            cov_matrix = (X_centered.T @ X_centered) / (T - 1)
+        else:
+            variance_ = np.zeros((N,))
+            cov_matrix = np.zeros((N, N))
+        return mean_, variance_, cov_matrix
 
-    # Calculate load balance score
-    score = compute_score(val_data, simulated_replicas, simulated_deployment)
-    return score, simulated_deployment
+    def neighbor_search(
+        self, low: int, high: int, initial: int, max_range: int, get_score: Any, *args: Any
+    ) -> tuple[int, float, np.ndarray]:
+        """
+        Local neighbor search for optimal replica number
+        Search [initial-max_range, initial+max_range] within [low, high]
 
+        Args:
+            low: Lower bound of search range
+            high: Upper bound of search range
+            initial: Initial replica number to start search
+            max_range: Maximum search range from initial value
+            get_score: Function to compute score for a given replica number
+            *args: Additional arguments for get_score function
 
-def neighbor_search(
-    low: int, high: int, initial: int, max_range: int, get_score: Any, *args: Any
-) -> tuple[int, float, np.ndarray]:
-    """
-    Local neighbor search for optimal replica number
-    Search [initial-max_range, initial+max_range] within [low, high]
+        Returns:
+            best_x: Optimal replica number
+            best_score: Best load balance score
+            best_sim: Corresponding deployment simulation result
+        """
+        max_range = min(max(initial - low, high - initial), max_range)
+        best_x = initial
+        best_score, best_sim = get_score(initial, *args)
 
-    Args:
-        low: Lower bound of search range
-        high: Upper bound of search range
-        initial: Initial replica number to start search
-        max_range: Maximum search range from initial value
-        get_score: Function to compute score for a given replica number
-        *args: Additional arguments for get_score function
+        # Search left and right neighbors
+        for r in range(1, max_range + 1):
+            left = initial - r
+            if left >= low:
+                score, sim = get_score(left, *args)
+                if score < best_score:
+                    best_x, best_score, best_sim = left, score, sim
 
-    Returns:
-        best_x: Optimal replica number
-        best_score: Best load balance score
-        best_sim: Corresponding deployment simulation result
-    """
-    max_range = min(max(initial - low, high - initial), max_range)
-    best_x = initial
-    best_score, best_sim = get_score(initial, *args)
+            right = initial + r
+            if right <= high:
+                score, sim = get_score(right, *args)
+                if score < best_score:
+                    best_x, best_score, best_sim = right, score, sim
 
-    # Search left and right neighbors
-    for r in range(1, max_range + 1):
-        left = initial - r
-        if left >= low:
-            score, sim = get_score(left, *args)
-            if score < best_score:
-                best_x, best_score, best_sim = left, score, sim
+        return best_x, best_score, best_sim
 
-        right = initial + r
-        if right <= high:
-            score, sim = get_score(right, *args)
-            if score < best_score:
-                best_x, best_score, best_sim = right, score, sim
+    def optimize_balanceness(self):
+        X_row = self.X
+        mu, var, cov = self.mu, self.var, self.cov
+        num_total_replicas = self.num_replicas
+        num_devices = self.num_devices
+        z_score = self.z_score
+        depth, width = self.depth, self.width
 
-    return best_x, best_score, best_sim
+        num_experts = mu.shape[0]
+        num_available_replicas = num_total_replicas - num_experts
 
+        if depth <= 1:
+            default_replicas = np.ones(num_experts, dtype=np.int32)
+            default_replicas = make_replica(mu, var, num_available_replicas, default_replicas, z_score)[0]
+            default_deployment = -np.ones((num_devices, num_total_replicas // num_devices), dtype=np.int32)
+            default_deployment = lpt_deployment(
+                mu, var, cov, default_deployment, np.zeros(num_experts, dtype=np.int32), default_replicas, z_score
+            )
+            default_par = compute_score(X_row, default_replicas, default_deployment)
+            return default_deployment, default_replicas, default_par
 
-def compute_expert_hotness(num_of_expert: int, deployment: np.ndarray, rank_load: np.ndarray) -> np.ndarray:
-    """
-    Calculate expert hotness by summing rank load on each expert
+        interval_size = math.ceil(num_experts / depth)
+        weight = mu + z_score * np.sqrt(var)
+        idx = np.argsort(-weight)
 
-    Args:
-        num_of_expert: Total number of experts
-        deployment: Expert deployment matrix (num_devices, num_slots)
-        rank_load: Load matrix for each rank/slot (num_devices, num_slots)
+        deployed_replicas = np.zeros(num_experts, dtype=np.int32)
+        deployment = -np.ones((num_devices, num_total_replicas // num_devices), dtype=np.int32)
 
-    Returns:
-        hotness: Hotness score for each expert (num_of_expert,)
-    """
-    hotness = np.zeros(num_of_expert, dtype=rank_load.dtype)
-    deployment_flat = deployment.ravel()
-    rank_load_flat = rank_load.ravel()
-    np.add.at(hotness, deployment_flat, rank_load_flat)
-    return hotness
+        def _lpt_deployment(replicas):
+            nonlocal mu, var, cov, deployment, deployed_replicas, z_score
+            return lpt_deployment(mu, var, cov, deployment, np.zeros_like(replicas), replicas, z_score)
+
+        def get_score(
+            f: Any,
+            val_data: np.ndarray,
+            deployed_replicas: np.ndarray,
+            current_idx: np.ndarray,
+            current_replicas: np.ndarray,
+            remaind_idx: np.ndarray,
+            remaind_replicas: np.ndarray,
+        ) -> tuple[float, np.ndarray]:
+            """
+            Wrapper to compute load balance score for replica allocation simulation
+
+            Args:
+                f: Deployment function (e.g., _lpt_deployment)
+                val_data: Validation load data (T, N)
+                deployed_replicas: Already deployed replica count per expert (N,)
+                current_idx: Indices of current expert group
+                current_replicas: Replica count for current expert group
+                remaind_idx: Indices of remaining expert group
+                remaind_replicas: Replica count for remaining expert group
+
+            Returns:
+                score: Load balance score
+                simulated_deployment: Simulated expert deployment matrix
+            """
+            # Simulate replica allocation and deployment
+            simulated_replicas = deployed_replicas.copy()
+            simulated_replicas[current_idx] = current_replicas
+            simulated_replicas[remaind_idx] = remaind_replicas
+            simulated_deployment = f(simulated_replicas)
+
+            # Calculate load balance score
+            score = compute_score(val_data, simulated_replicas, simulated_deployment)
+            return score, simulated_deployment
+
+        for node in range(depth - 1):
+            low, high = 0, num_available_replicas
+            simulation_idx = idx[node * interval_size :]
+            current_idx = idx[node * interval_size : (node + 1) * interval_size]
+            remaind_idx = idx[(node + 1) * interval_size :]
+
+            simulation_replicas = make_replica(
+                mu[simulation_idx], var[simulation_idx], high, np.ones(simulation_idx.shape[0], dtype=np.int32), z_score
+            )[0]
+            current_replicas_f = make_replica(
+                mu[current_idx], var[current_idx], high, np.ones(current_idx.shape[0], dtype=np.int32), z_score
+            )[1]
+            remaind_replicas_f = make_replica(
+                mu[remaind_idx], var[remaind_idx], high, np.ones(remaind_idx.shape[0], dtype=np.int32), z_score
+            )[1]
+
+            initial_replicas = (simulation_replicas[:interval_size] - 1).sum()
+
+            best_replica, _, _ = self.neighbor_search(
+                low,
+                high,
+                initial_replicas,
+                width,
+                lambda mid,
+                ci=current_idx,
+                crf=current_replicas_f,
+                ri=remaind_idx,
+                rrf=remaind_replicas_f,
+                nar=num_available_replicas: get_score(
+                    _lpt_deployment, X_row, deployed_replicas, ci, crf[mid], ri, rrf[nar - mid]
+                ),
+            )
+
+            deployed_replicas[current_idx] = current_replicas_f[best_replica]
+            num_available_replicas -= best_replica
+
+            if not num_available_replicas or node == depth - 2:
+                deployed_replicas[remaind_idx] = remaind_replicas_f[num_available_replicas]
+                break
+
+        final_deployment = -np.ones((num_devices, num_total_replicas // num_devices), dtype=np.int32)
+        final_deployment = lpt_deployment(
+            mu, var, cov, final_deployment, np.zeros_like(deployed_replicas), deployed_replicas, z_score
+        )
+        final_par = compute_score(X_row, deployed_replicas, final_deployment)
+
+        return final_deployment, deployed_replicas, final_par
 
 
 class FlashLB(EplbPolicy):
@@ -414,12 +515,19 @@ class FlashLB(EplbPolicy):
             config: Dynamic configuration object containing policy parameters
         """
         super().__init__(config)
+        if config.ep_worldsize >= 32:
+            threshold_ratio = 0.9
+            threshold_value = 0.85
+        else:
+            threshold_ratio = 0.95
+            threshold_value = 0.9
+
         # Max window size for expert hotness observation
-        self.max_observation_window = config.max_stage_window if hasattr(config, "max_stage_window") else 1000
+        self.max_observation_window = config.max_stage_window if hasattr(config, "max_stage_window") else 2000
         # Threshold ratio for load balance update trigger
-        self.update_threshold_ratio = config.threshold_ratio if hasattr(config, "threshold_ratio") else 0.95
+        self.update_threshold_ratio = config.threshold_ratio if hasattr(config, "threshold_ratio") else threshold_ratio
         # Threshold value for load balance update trigger
-        self.update_threshold_value = config.threshold_value if hasattr(config, "threshold_value") else 0.9
+        self.update_threshold_value = config.threshold_value if hasattr(config, "threshold_value") else threshold_value
         # Upper bound of layers to update per iteration
         self.update_layers_upper_bound = config.layers_upper_bound if hasattr(config, "layers_upper_bound") else -1
         # Z-score for risk calculation (default: 75% confidence)
@@ -428,6 +536,9 @@ class FlashLB(EplbPolicy):
         self.depth = config.depth if hasattr(config, "depth") else 4
         # Tree search width for neighbor search
         self.width = config.width if hasattr(config, "width") else 8
+        self.sample_size = (
+            config.sample_size if hasattr(config, "sample_size") else min(self.max_observation_window, 64)
+        )
 
         # Runtime state storage with type annotations
         self.average_to_peak_history: dict[int, float] = {}  # Layer-wise load balance history
@@ -452,7 +563,7 @@ class FlashLB(EplbPolicy):
             current_replicas: Updated replica count per expert (N,)
             replicas_history: Replica allocation history (num_available_replicas+1, N)
         """
-        return min_max_replica_org(mu, var, num_available_replicas, current_replicas, z_score)
+        return min_max_replica(mu, var, num_available_replicas, current_replicas, z_score)
 
     @staticmethod
     def compute_statistics(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -581,75 +692,73 @@ class FlashLB(EplbPolicy):
             num_experts: Total number of experts
         """
         num_stage = rank_load.shape[0]
-        # Initialize hotness matrix (stage, layer, expert)
         hotness = np.zeros((num_stage, num_layers, num_experts), dtype=rank_load.dtype)
         for stage in range(num_stage):
             for layer in range(num_layers):
-                hotness[stage, layer] = compute_expert_hotness(num_experts, deployment[layer], rank_load[stage, layer])
+                deployment_flat = deployment[layer].ravel()
+                rank_load_flat = rank_load[stage, layer].ravel()
+                np.add.at(hotness[stage, layer], deployment_flat, rank_load_flat)
 
-        # Avoid zero hotness (prevent division by zero)
-        mask_1 = hotness == 0
-        hotness[mask_1] += 1
-
+        hotness += 1
         window_length = self.max_observation_window
 
-        # Update hotness stats for each layer
         for layer in range(num_layers):
-            # Take latest data within window size
             new_X = hotness[-window_length:, layer, :]
             t = new_X.shape[0]
 
-            # Initialize window if layer not registered or window full
-            if layer not in self.hotness_window or t == window_length:
-                mu, var, cov = self.compute_statistics(new_X)
-                buffer = np.zeros((window_length, num_experts), dtype=new_X.dtype)
-                buffer[:t] = new_X
+            if layer not in self.hotness_window:
                 self.hotness_window[layer] = {
-                    "buffer": buffer,
+                    "buffer": np.zeros((window_length, num_experts), dtype=new_X.dtype),
                     "start": 0,
-                    "length": t,
-                    "mean": mu.astype(np.float32, copy=False),
-                    "var": var.astype(np.float32, copy=False),
-                    "cov": cov.astype(np.float32, copy=False),
+                    "length": 0,
                 }
-                continue
 
-            # Update existing window
             info = self.hotness_window[layer]
             buf = info["buffer"]
             start = info["start"]
             length = info["length"]
-            mu = info["mean"]
-            var = info["var"]
-            cov = info["cov"]
 
-            if length + t <= window_length:
-                # Incremental update (window not full)
-                mu, var, cov, length = self.incremental_update_stats(
-                    mu.astype(np.float64, copy=False), cov.astype(np.float64, copy=False), new_X, length
-                )
-                end = (start + length - t) % window_length
-                buf[end : end + t] = new_X
+            if start + t <= window_length:
+                buf[start : start + t] = new_X
             else:
-                # Sliding update (window full, replace old data)
-                old_idx = np.arange(start, start + t) % window_length
-                x_old = buf[old_idx]
-                mu, var, cov = self.sliding_update_stats(
-                    mu.astype(np.float64, copy=False), cov.astype(np.float64, copy=False), x_old, new_X, window_length
-                )
-                buf[old_idx] = new_X
-                start = (start + t) % window_length
-                length = window_length
+                first_part = window_length - start
+                buf[start:] = new_X[:first_part]
+                buf[: t - first_part] = new_X[first_part:]
 
-            # Save updated stats
-            self.hotness_window[layer] = {
-                "buffer": buf,
-                "start": start,
-                "length": length,
-                "mean": mu.astype(np.float32, copy=False),
-                "var": var.astype(np.float32, copy=False),
-                "cov": cov.astype(np.float32, copy=False),
-            }
+            start = (start + t) % window_length
+            length = min(window_length, length + t)
+
+            self.hotness_window[layer]["buffer"] = buf
+            self.hotness_window[layer]["start"] = start
+            self.hotness_window[layer]["length"] = length
+
+    def need_update(self, layer_id: int = 0) -> bool:
+        """
+        Check if layer needs load balance update
+        Trigger update if load balance ratio drops below threshold
+
+        Args:
+            layer_id: Layer index to check
+
+        Returns:
+            bool: True if update is needed, False otherwise
+        """
+        past_average_to_peak_ratio = self.average_to_peak_history.get(layer_id, 0.0)
+        if past_average_to_peak_ratio == 0.0:
+            # Force update for first iteration
+            return True
+
+        # Calculate current load balance ratio (average/peak load)
+        hotness = self.hotness_window[layer_id]["buffer"]
+        average_to_peak_ratio = 1 / compute_score(
+            hotness, self.current_deployed_replicas[layer_id], self.current_deployment[layer_id]
+        )
+
+        # Check update conditions
+        return (
+            average_to_peak_ratio < past_average_to_peak_ratio * self.update_threshold_ratio
+            or average_to_peak_ratio < self.update_threshold_value
+        )
 
     @staticmethod
     @njit
@@ -739,155 +848,6 @@ class FlashLB(EplbPolicy):
             dst_reordered[src_idx] = reordered
         return dst_reordered
 
-    def need_update(self, layer_id: int = 0) -> bool:
-        """
-        Check if layer needs load balance update
-        Trigger update if load balance ratio drops below threshold
-
-        Args:
-            layer_id: Layer index to check
-
-        Returns:
-            bool: True if update is needed, False otherwise
-        """
-        past_average_to_peak_ratio = self.average_to_peak_history.get(layer_id, 0.0)
-        if past_average_to_peak_ratio == 0.0:
-            # Force update for first iteration
-            return True
-
-        # Calculate current load balance ratio (average/peak load)
-        hotness = self.hotness_window[layer_id]["buffer"]
-        average_to_peak_ratio = 1 / compute_score(
-            hotness, self.current_deployed_replicas[layer_id], self.current_deployment[layer_id]
-        )
-
-        # Check update conditions
-        return (
-            average_to_peak_ratio < past_average_to_peak_ratio * self.update_threshold_ratio
-            or average_to_peak_ratio < self.update_threshold_value
-        )
-
-    def flash_tree(
-        self,
-        X_row: np.ndarray,
-        mu: np.ndarray,
-        var: np.ndarray,
-        cov: np.ndarray,
-        num_total_replicas: int,
-        num_devices: int,
-        z_score: float = 0.674,
-        deep: int = 4,
-        width: int = 8,
-    ) -> tuple[np.ndarray, np.ndarray, float]:
-        """
-        Flash tree search algorithm for optimal replica allocation and deployment
-        Layered search to balance exploration and exploitation
-
-        Args:
-            X_row: Validation load data (T, N)
-            mu: Mean load of each expert (N,)
-            var: Variance of each expert's load (N,)
-            cov: Covariance matrix between experts (N,N)
-            num_total_replicas: Total number of replicas to allocate
-            num_devices: Number of devices for deployment
-            z_score: Z-score for risk calculation (default: 0.674)
-            deep: Tree search depth (default: 4)
-            width: Neighbor search width (default: 8)
-
-        Returns:
-            optimal_deployment: Optimal expert deployment matrix
-            replica_counts: Optimal replica count per expert
-            load_balance_score: Load balance score (lower is better)
-        """
-        num_experts = mu.shape[0]
-        num_available_replicas = num_total_replicas - num_experts
-
-        # Fallback to basic LPT if tree depth is 1
-        if deep <= 1:
-            default_replicas = np.ones(num_experts, dtype=np.int32)
-            default_replicas = self.min_max_replica(mu, var, num_available_replicas, default_replicas, z_score)[0]
-            default_deployment = -np.ones((num_devices, num_total_replicas // num_devices), dtype=np.int32)
-            default_deployment = lpt_deployment(
-                mu, var, cov, default_deployment, np.zeros(num_experts, dtype=np.int32), default_replicas, z_score
-            )
-            default_par = compute_score(X_row, default_replicas, default_deployment)
-            return default_deployment, default_replicas, default_par
-
-        # Tree search initialization
-        interval_size = math.ceil(num_experts / deep)
-        weight = mu + z_score * np.sqrt(var)
-        idx = np.argsort(-weight)  # Sort experts by load weight
-
-        deployed_replicas = np.zeros(num_experts, dtype=np.int32)
-        deployment = -np.ones((num_devices, num_total_replicas // num_devices), dtype=np.int32)
-
-        # LPT deployment wrapper for simulation
-        def _lpt_deployment(replicas: np.ndarray) -> np.ndarray:
-            nonlocal mu, var, cov, deployment, deployed_replicas, z_score
-            return lpt_deployment(mu, var, cov, deployment, np.zeros_like(replicas), replicas, z_score)
-
-        # Layered tree search
-        for node in range(deep - 1):
-            low, high = 0, num_available_replicas
-            simulation_idx = idx[node * interval_size :]
-            current_idx = idx[node * interval_size : (node + 1) * interval_size]
-            remaind_idx = idx[(node + 1) * interval_size :]
-
-            # Simulate replica allocation for all remaining experts
-            simulation_replicas = self.min_max_replica(
-                mu[simulation_idx], var[simulation_idx], high, np.ones(simulation_idx.shape[0], dtype=np.int32), z_score
-            )[0]
-            # Get replica allocation history for current and remaining experts
-            current_replicas_f = self.min_max_replica(
-                mu[current_idx], var[current_idx], high, np.ones(current_idx.shape[0], dtype=np.int32), z_score
-            )[1]
-            remaind_replicas_f = self.min_max_replica(
-                mu[remaind_idx], var[remaind_idx], high, np.ones(remaind_idx.shape[0], dtype=np.int32), z_score
-            )[1]
-
-            # Initial replica number for current expert group
-            initial_replicas = int((simulation_replicas[:interval_size] - 1).sum())  # Explicit int conversion
-
-            # Neighbor search for optimal replica allocation
-            best_replica, best_score, best_deployment = neighbor_search(
-                low,
-                high,
-                initial_replicas,
-                width,
-                lambda mid,
-                c_idx=current_idx,
-                c_rep_f=current_replicas_f,
-                r_idx=remaind_idx,
-                r_rep_f=remaind_replicas_f,
-                n_ar=num_available_replicas: get_score(
-                    _lpt_deployment,
-                    X_row,
-                    deployed_replicas,
-                    c_idx,
-                    c_rep_f[mid],
-                    r_idx,
-                    r_rep_f[n_ar - mid],
-                ),
-            )
-
-            # Update deployed replicas and remaining quota
-            deployed_replicas[current_idx] = current_replicas_f[best_replica]
-            num_available_replicas -= best_replica
-
-            # Terminate if no replicas left or last node
-            if not num_available_replicas or node == deep - 2:
-                deployed_replicas[remaind_idx] = remaind_replicas_f[num_available_replicas]
-                break
-
-        # Final LPT deployment with optimal replica allocation
-        final_deployment = -np.ones((num_devices, num_total_replicas // num_devices), dtype=np.int32)
-        final_deployment = lpt_deployment(
-            mu, var, cov, final_deployment, np.zeros_like(deployed_replicas), deployed_replicas, z_score
-        )
-        final_par = compute_score(X_row, deployed_replicas, final_deployment)
-
-        return final_deployment, deployed_replicas, final_par
-
     def rebalance_experts(
         self, current_expert_table: torch.Tensor, expert_workload: torch.Tensor
     ) -> tuple[bool, np.ndarray, np.ndarray]:
@@ -931,6 +891,7 @@ class FlashLB(EplbPolicy):
         new_deployed_replicas = np.zeros((num_layers, num_expert), dtype=np.int32)
         new_average_to_peak_ratio = np.zeros((num_layers,), dtype=np.float32)
         delta_average_to_peak_ratio = np.zeros((num_layers,), dtype=np.float32)
+        pars = np.zeros((num_layers,), dtype=np.float32)
 
         # Optimize each layer
         for layer in range(num_layers):
@@ -948,42 +909,34 @@ class FlashLB(EplbPolicy):
             buf = layer_info["buffer"]
             start = layer_info["start"]
             length = layer_info["length"]
-            mu = layer_info["mean"]
-            var = layer_info["var"]
-            cov = layer_info["cov"]
 
             # Get valid hotness data from sliding window
             idx = np.arange(start, start + length) % self.max_observation_window
-            val_data = buf[idx]
+            data = buf[idx]
 
+            shape = data.shape
+            window = max(length // self.sample_size, 1)
+            data = data[-window * self.sample_size :].reshape((-1, window, *shape[1:])).sum(1)
             # Flash tree search for optimal deployment
-            deployment, deployed_replicas, new_score = self.flash_tree(
-                val_data,
-                mu,
-                var,
-                cov,
-                num_replicas,
-                num_devices,
-                z_score=self.z_score,
-                deep=self.depth,
-                width=self.width,
-            )
+            flash_tree = FlashTree(data, num_replicas, num_devices, self.z_score, self.depth, self.width)
+            best_deployment, best_replicas, best_score = flash_tree.optimize_balanceness()
 
             # Update layer state
-            new_deployed_replicas[layer] = deployed_replicas
-            new_average_to_peak_ratio[layer] = 1 / new_score
-            new_par[layer] = new_score
-            current_deployment_layer = self.current_deployment[layer]
+            new_deployed_replicas[layer] = best_replicas
+            new_average_to_peak_ratio[layer] = 1 / best_score
 
+            current_deployment = self.current_deployment.get(layer, None)
+
+            new_deployment[layer] = best_deployment
             # Minimize redeployment by permuting new deployment
             new_deployment[layer] = FlashLB.minimize_redeploy_with_inner_permutation(
-                current_deployment_layer, deployment
+                current_deployment, best_deployment
             )
-            # Calculate load balance improvement
             current_average_to_peak_ratio = 1 / compute_score(
-                val_data, self.current_deployed_replicas.get(layer), current_deployment_layer
+                buf, self.current_deployed_replicas.get(layer), current_deployment
             )
             delta_average_to_peak_ratio[layer] = new_average_to_peak_ratio[layer] - current_average_to_peak_ratio
+            pars[layer] = best_score
 
         # Select layers to update (sorted by improvement, positive delta only)
         priority_idx = np.argsort(-delta_average_to_peak_ratio)

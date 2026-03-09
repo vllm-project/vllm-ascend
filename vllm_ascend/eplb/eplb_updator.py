@@ -140,9 +140,7 @@ class EplbUpdator:
         )
 
         if self.multi_stage:
-            moe_load_cum = moe_load.permute(2, 0, 1, 3)
-            moe_load_dff = moe_load_cum[..., 1:] - moe_load_cum.roll(shifts=1, dims=3)[..., 1:]
-            moe_load = torch.cat([moe_load_cum[..., :1], moe_load_dff], dim=3)
+            moe_load = moe_load.permute(2, 0, 1, 3)
 
         self.shared_dict["moe_load"] = moe_load
         logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
