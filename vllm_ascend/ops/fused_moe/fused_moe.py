@@ -718,7 +718,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         w2 = layer.w2_weight.to(torch.int8)
         gmm1_weight = torch_npu.npu_format_cast(w1, torch_npu.Format.FRACTAL_NZ)
         gmm2_weight = torch_npu.npu_format_cast(w2, torch_npu.Format.FRACTAL_NZ)
-        print(f"##DEBUG before fused_experts -----")
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=hidden_states,
             w1=[gmm1_weight],
@@ -858,7 +857,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             shared_out = self._shared_experts(hidden_states)
 
         if connector_name == "camp2pconnector":
-            print(f"##DEBUG before afd_ffn_compute -----")
             # final_hidden_states = self.afd_ffn_compute(layer = layer, hidden_states = hidden_states, \
             #     router_logits = router_logits, group_list = group_list, topk_weights = topk_weights, \
             #     topk_ids = topk_ids, row_idx = row_idx, x_active_mask = x_active_mask)
