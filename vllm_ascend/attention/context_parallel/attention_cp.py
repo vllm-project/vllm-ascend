@@ -172,7 +172,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                     kv_inverse_idx_for_chunk = None
                     cp_kv_recover_idx_for_chunk = None
 
-                batch_chunk_seq_mask = local_context_lens_allranks[:, self.pcp_rank, self.dcp_rank] == 0
                 chunk_seq_mask_filtered_indices = filter_chunked_req_indices(query_lens, chunked_req_mask).to(
                     self.device
                 )
