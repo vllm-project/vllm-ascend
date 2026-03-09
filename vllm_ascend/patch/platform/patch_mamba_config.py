@@ -56,9 +56,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # NOTE(zxr): because of the limit of Ascend Hardware, we need to keep
     # all cache tensors contiguous, so we align the page size of ssm_block
     # and single attn_block
-    attn_block_size = kernel_block_size * cdiv(
-        ssm_block_page_size, kernel_block_size * attn_single_token_k_page_size
-    )
+    attn_block_size = kernel_block_size * cdiv(ssm_block_page_size, kernel_block_size * attn_single_token_k_page_size)
     assert attn_single_token_k_page_size * attn_block_size == ssm_block_page_size, (
         "Cannot align ssm_page_size and attn_page_size."
     )
