@@ -467,7 +467,7 @@ class NPUModelRunner(GPUModelRunner):
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * uniform_decode_query_len + last_loc
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * uniform_decode_query_len + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
