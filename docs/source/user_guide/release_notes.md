@@ -8,49 +8,26 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 
 - DeepSeek V3.2 now supports graph mode (piecewise and full_decode_only) with PCP and DCP context parallel. Additionally, PCP now supports MTP and chunked prefill for DeepSeek V3.2. [#6940](https://github.com/vllm-project/vllm-ascend/pull/6940) [#6917](https://github.com/vllm-project/vllm-ascend/pull/6917)
 - Qwen3-Next now supports PCP and DCP context parallel. [#6091](https://github.com/vllm-project/vllm-ascend/pull/6091)
-- 310P now supports W8A8S quantization and saving W8A8SC state. [#6878](https://github.com/vllm-project/vllm-ascend/pull/6878)
 - MXFP8 MoE quantization is now supported for Qwen MoE models. [#6670](https://github.com/vllm-project/vllm-ascend/pull/6670)
 - Qwen3-Omni quantization adaptation and optimization is now available. [#6828](https://github.com/vllm-project/vllm-ascend/pull/6828)
 
 ### Features
 
-- Support FabricMem Mode for ADXL/HIXL interconnect. [#6806](https://github.com/vllm-project/vllm-ascend/pull/6806)
-- 300I (Ascend 310P) now supports decode-only aclgraph mode. [#6849](https://github.com/vllm-project/vllm-ascend/pull/6849)
+- [Experimental support] Support FabricMem Mode for ADXL/HIXL interconnect. [#6806](https://github.com/vllm-project/vllm-ascend/pull/6806)
 - Qwen3-Next now supports FlashComm1. [#6830](https://github.com/vllm-project/vllm-ascend/pull/6830)
-- fused_qkvzba_split_reshape now supports token number greater than 65536, removing the previous limitation. [#6740](https://github.com/vllm-project/vllm-ascend/pull/6740)
 - NPUWorker Profiler now supports profile_prefix for better profiling experience. [#6968](https://github.com/vllm-project/vllm-ascend/pull/6968)
 - EPLB profiling now displays expert hotness comparison and time required for eplb adjustment. [#6877](https://github.com/vllm-project/vllm-ascend/pull/6877) [#7001](https://github.com/vllm-project/vllm-ascend/pull/7001)
-- Adapt to RecomputeScheduler in vLLM 0.16.0. [#6898](https://github.com/vllm-project/vllm-ascend/pull/6898)
-- Support platform.get_device_uuid function. [#6777](https://github.com/vllm-project/vllm-ascend/pull/6777)
-
-### Hardware and Operator Support
-
-- Add Gemma RMSNorm support in ACLGraph mode. [#6473](https://github.com/vllm-project/vllm-ascend/pull/6473)
-- Add split_qkv_rmsnorm_mrope operator for mRoPE models. [#6730](https://github.com/vllm-project/vllm-ascend/pull/6730)
-- Add muls_add Triton kernel. [#5518](https://github.com/vllm-project/vllm-ascend/pull/5518)
-- Add compile-time Ascend950/910_95 compatibility for custom ops between CANN 8.5 and 9.0. [#6936](https://github.com/vllm-project/vllm-ascend/pull/6936)
 
 ### Performance
 
-- 2.7x faster convolution computation for VL models using aclnn BatchMatMulV2 optimization. This improves TTFT by 0.95% and throughput by 0.59% for Qwen3-VL models. [#7017](https://github.com/vllm-project/vllm-ascend/pull/7017)
+- Faster convolution computation improves TTFT by 0.95% and throughput by 0.59% for Qwen3-VL models. [#7017](https://github.com/vllm-project/vllm-ascend/pull/7017)
 - Optimize split_qkv_rmsnorm_rope operator. [#6827](https://github.com/vllm-project/vllm-ascend/pull/6827)
-- Refactor and optimize SFA for DeepSeek V3.2 and GLM5. [#6874](https://github.com/vllm-project/vllm-ascend/pull/6874)
 - Implement global CPU slicing and improve IRQ binding for Ascend NPUs, ensuring non-overlapping CPU partitions and better resource management. [#6945](https://github.com/vllm-project/vllm-ascend/pull/6945)
 
-### Dependencies
+### User-Facing Changes
 
 - CANN is upgraded to 8.5.1. [#6897](https://github.com/vllm-project/vllm-ascend/pull/6897)
-
-### Deprecation & Breaking Changes
-
 - `enable_flash_comm_v1` config option has been renamed back to `enable_sp`. [#6883](https://github.com/vllm-project/vllm-ascend/pull/6883)
-- Cleaned up v0.15.0 support code. [#6852](https://github.com/vllm-project/vllm-ascend/pull/6852)
-
-### Documentation
-
-- Add batch invariance documentation and operator patches. [#6910](https://github.com/vllm-project/vllm-ascend/pull/6910)
-- Document how to enable both FlashComm1 and CUDAGraph together. [#6807](https://github.com/vllm-project/vllm-ascend/pull/6807)
-- Add 310P3 guidance for PaddleOCR-VL. [#6837](https://github.com/vllm-project/vllm-ascend/pull/6837)
 
 ### Others
 
