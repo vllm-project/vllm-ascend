@@ -115,6 +115,7 @@ from vllm_ascend.utils import (
     check_gdn_layer,
     enable_sp,
     enable_sp_by_pass,
+    global_stream,
     is_drafter_moe_model,
     is_moe_model,
     lmhead_tp_enable,
@@ -389,7 +390,6 @@ class NPUModelRunner(GPUModelRunner):
         self.long_seq_metadata = None
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
-        self.state_update_stream: torch.npu.Stream | None = None
         self.sampling_done_event: torch.npu.Event | None = None
 
     @property
@@ -1434,8 +1434,7 @@ class NPUModelRunner(GPUModelRunner):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         if self.need_accepted_tokens:
-            if self.state_update_stream is None:
-                self.state_update_stream = torch.npu.Stream()
+            if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
 
             assert self.sampling_done_event is not None
@@ -1520,13 +1519,12 @@ class NPUModelRunner(GPUModelRunner):
             self.debugger.step()
 
         if self.need_accepted_tokens:
-            assert self.state_update_stream is not None
             assert self.sampling_done_event is not None
             with (
                 record_function_or_nullcontext("async_state_update"),
-                torch.npu.stream(self.state_update_stream),
+                torch.npu.stream(global_stream()),
             ):
-                self.state_update_stream.wait_event(self.sampling_done_event)
+                global_stream().wait_event(self.sampling_done_event)
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
