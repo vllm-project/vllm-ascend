@@ -21,6 +21,8 @@ from typing import Any
 import torch
 import torch_npu
 
+from vllm.distributed import get_tensor_model_parallel_rank
+from vllm_ascend.ops.linear import AscendRowParallelLinear
 from vllm_ascend.quantization.methods.base import AscendLinearScheme
 
 from .registry import register_scheme
@@ -42,21 +44,21 @@ class AscendW8A8SCLinearMethod310(AscendLinearScheme):
     ) -> dict[str, Any]:
         """
         Get the weight tensors for the W8A8SC quantization scheme.
-
+        
         Args:
             input_size: Size of the input dimension (k)
             output_size: Size of the output dimension (n)
             params_dtype: Data type for parameters, default is torch.float16
-
+            
         Returns:
             A dictionary containing:
-            - "weight": The compressed weight tensor with shape [c], where c is greater than 0
+            - "weight": The compressed weight tensor with shape [c], where c is greater than 0 
               and not larger than k * n
-            - "index": Compression index generated simultaneously with compressed weights,
-              with shape [x], where x = k_index * n_index * 8, k_index = ceil(k1 / tilingK),
+            - "index": Compression index generated simultaneously with compressed weights, 
+              with shape [x], where x = k_index * n_index * 8, k_index = ceil(k1 / tilingK), 
               n_index = ceil(n1 / tilingN), k1 = k / 32, n1 = n / 16
-            - "info": Compression information with length 5, containing compression block
-              information tilingN, tilingK, original shape of the pre-compression x2 matrix,
+            - "info": Compression information with length 5, containing compression block 
+              information tilingN, tilingK, original shape of the pre-compression x2 matrix, 
               and identifier for the compression block traversal direction
         """
         self.input_size = input_size
@@ -94,17 +96,21 @@ class AscendW8A8SCLinearMethod310(AscendLinearScheme):
                 layer.aclnn_input_offset,
             )
 
-        quant_bias = layer.quant_bias if tp_rank == 0 else None
-
-        return torch_npu.npu_quant_matmul(
+        return torch_npu.npu_matmul_compress_dequant(
             x,
             layer.weight,
+            layer.index,
+            layer.quant_bias,
             layer.deq_scale,
-            bias=quant_bias,
-            output_dtype=layer.params_dtype,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.aclnn_input_scale = layer.input_scale.data.repeat(self.input_size)
         layer.aclnn_input_scale_reciprocal = 1.0 / layer.aclnn_input_scale.data
         layer.aclnn_input_offset = layer.input_offset.data.repeat(self.input_size).to(layer.aclnn_input_scale.dtype)
+        layer.deq_scale.data = layer.deq_scale.data.unsqueeze(0).to(torch.uint64)
+        layer.quant_bias.data = layer.quant_bias.data.unsqueeze(0)
+        # Only apply bias on row_parallel_linear when tp_rank is 0.
+        # torch_npu.npu_matmul_compress_dequant's quant_bias cannot be None.
+        if isinstance(layer, AscendRowParallelLinear) and get_tensor_model_parallel_rank() != 0:
+            layer.quant_bias.data = torch.zeros_like(layer.quant_bias)
