@@ -378,9 +378,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         # Pre-create all queues upfront to avoid synchronization overhead
         # Each worker thread handles one queue
-        self.task_queues: dict[int, queue.Queue[Any]] = {
-            i: queue.Queue() for i in range(self.max_workers)
-        }
+        self.task_queues: dict[int, queue.Queue[Any]] = {i: queue.Queue() for i in range(self.max_workers)}
         # (remote_host, remote_handshake_port) -> queue_id
         self.remote_rank_to_queue: dict[tuple[str, int], int] = {}
         # Track number of remote_ranks mapped to each queue for load balancing
