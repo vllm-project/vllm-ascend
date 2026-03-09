@@ -775,8 +775,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         torch_npu.npu.config.allow_internal_format = True
         w1 = layer.w13_weight.to(torch.int8)
         w2 = layer.w2_weight.to(torch.int8)
-        gmm1_weight = torch_npu.npu_format_cast(w1, torch_npu.Format.FRACTAL_NZ)
-        gmm2_weight = torch_npu.npu_format_cast(w2, torch_npu.Format.FRACTAL_NZ)
         # 1. Dispatch阶段
         dispatch_output = dispatch_experts(
             hidden_states=hidden_states,
