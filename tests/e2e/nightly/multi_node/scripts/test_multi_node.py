@@ -37,7 +37,7 @@ async def test_multi_node() -> None:
                 run_aisbench_cases(
                     model=config.model,
                     port=port,
-                    aisbench_cases=[config.acc_cmd, config.perf_cmd],
+                    aisbench_cases=config.benchmark_cases,
                     host_ip=host,
                 )
             else:
