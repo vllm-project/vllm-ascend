@@ -161,13 +161,13 @@ def update_quant_description(ori_json_file: str, target_json_file: str) -> None:
         with config_path.open("r", encoding="utf-8") as file:
             json_data = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        raise RuntimeError(f"Failed to read configuration file {json_file}: {e}")
+        raise RuntimeError(f"Failed to read configuration file {ori_json_file}: {e}")
 
     original_quant_type = json_data.get("model_quant_type")
     if not original_quant_type or original_quant_type not in QUANTIZATION_UPDATE_MAP:
         raise RuntimeError(
             f"Cannot update quantization type. "
-            f"Original type '{original_quant_type}' not found or not supported for update in {json_file}."
+            f"Original type '{original_quant_type}' not found or not supported for update in {ori_json_file}."
         )
     updated_quant_type = QUANTIZATION_UPDATE_MAP[original_quant_type]
 
@@ -185,7 +185,7 @@ def update_quant_description(ori_json_file: str, target_json_file: str) -> None:
             json.dump(updated_config, file, indent=2, ensure_ascii=False)
         os.remove(ori_json_file)
     except OSError as e:
-        raise RuntimeError(f"Failed to write updated configuration to {json_file}: {e}")
+        raise RuntimeError(f"Failed to write updated configuration to {target_json_file}: {e}")
 
 
 def weight_compress_worker(file_path: str, quant_desc: dict, process_num: int) -> bool:
@@ -250,8 +250,8 @@ def main(args):
     # 4. Compression Logic
     parameters_map_fpath = output_dir / "parameters_type_map.json"
     if args.enable_compress:
-        quant_desc_file = p.parent / QUANT_DESCRIPTION_FNAME
-        backup_quant_desc_file = p.parent / "ori_quant_model_description.json"
+        quant_desc_file = output_dir / "quant_model_description.json"
+        backup_quant_desc_file = output_dir / "ori_quant_model_description.json"
         if quant_desc_file.exists():
             os.rename(str(quant_desc_file), str(backup_quant_desc_file))
         quant_desc = get_quant_description(str(parameters_map_fpath))
