@@ -142,13 +142,6 @@ class EplbUpdator:
         self.shared_dict["moe_load"] = moe_load
         logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
 
-        if dist.get_rank() == 0:
-            if self.multi_stage:
-                self.compute_moe_imbalance(moe_load.sum(0))
-            else:
-                self.compute_moe_imbalance(moe_load)
-            self.summarize_moe_imbalance()
-
         return moe_load
 
     def warm_up_eplb(self):
