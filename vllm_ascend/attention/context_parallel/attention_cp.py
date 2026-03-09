@@ -142,7 +142,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         assert num_computed_tokens_of_pcp_dcp is not None
         chunked_context_metadata = None
         if num_prefills > 0:
-            query_lens = query_lens[num_decode_tokens:]
+            query_lens = query_lens[num_decodes:]
             context_lens_cpu = num_computed_tokens_cpu[num_decodes:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
             pcp_size = get_pcp_group().world_size
@@ -173,9 +173,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                     cp_kv_recover_idx_for_chunk = None
 
                 batch_chunk_seq_mask = local_context_lens_allranks[:, self.pcp_rank, self.dcp_rank] == 0
-                batch_chunk_seq_mask = torch.repeat_interleave(
-                    batch_chunk_seq_mask, repeats=(query_lens * self.pcp_size).to(self.device)
-                )
                 chunk_seq_mask_filtered_indices = filter_chunked_req_indices(query_lens, chunked_req_mask).to(
                     self.device
                 )
@@ -187,7 +184,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                     local_context_lens_allranks=local_context_lens_allranks,
                     cp_kv_recover_idx_for_chunk=cp_kv_recover_idx_for_chunk,
                     kv_inverse_idx_for_chunk=kv_inverse_idx_for_chunk,
-                    batch_chunk_seq_mask=batch_chunk_seq_mask,
                     chunk_seq_mask_filtered_indices=chunk_seq_mask_filtered_indices,
                     local_total_toks=local_total_toks.item(),
                 )
