@@ -103,13 +103,12 @@ from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
-from vllm_ascend.patch.worker.patch_qwen3_quarot import patch_load_weights
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
-from vllm_ascend.spec_decode.mtp_proposer import AscendMtpProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.utils import (
@@ -120,6 +119,7 @@ from vllm_ascend.utils import (
     is_moe_model,
     lmhead_tp_enable,
     set_weight_prefetch_method,
+    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -403,12 +403,7 @@ class NPUModelRunner(GPUModelRunner):
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.drafter: (
-            AscendNgramProposer
-            | AscendEagleProposer
-            | AscendMtpProposer
-            | AscendSuffixDecodingProposer
-            | AscendMedusaProposer
-            | None
+            AscendNgramProposer | AscendEagleProposer | AscendSuffixDecodingProposer | AscendMedusaProposer | None
         ) = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
@@ -1053,7 +1048,7 @@ class NPUModelRunner(GPUModelRunner):
                     target_positions = positions
                     target_hidden_states = hidden_states
                     if self.use_aux_hidden_state_outputs:
-                        target_hidden_states = torch.cat([h[token_indices] for h in aux_hidden_states], dim=-1)
+                        target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
                 else:
                     target_token_ids = self.input_ids.gpu[token_indices]
                     target_positions = self._get_positions(token_indices)
@@ -1219,7 +1214,12 @@ class NPUModelRunner(GPUModelRunner):
                     # Currently, Graph Mode and SP will both pad num_tokens,
                     # Another possible condition is num_tokens_padded != num_tokens_unpadded
                     # but this scope is way too big and the consequences are unpredictable
+                    old_num_reqs_padded = num_reqs_padded
                     num_reqs_padded = self._pad_query_start_loc_for_fia(num_tokens_padded, num_reqs_padded, num_reqs)
+                    if enable_sp() and num_tokens_padded == num_tokens_unpadded:
+                        if num_reqs_padded > old_num_reqs_padded:
+                            num_reqs_padded = old_num_reqs_padded
+                            self.query_start_loc.np[num_reqs_padded + 1] = 0
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
@@ -1810,9 +1810,11 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         uniform_decode = (
             (
-                (max_num_scheduled_tokens == self.uniform_decode_query_len)
+                (is_all_decode if self.speculative_config else True)
+                and (max_num_scheduled_tokens == self.uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
             )
             if force_uniform_decode is None
@@ -1824,16 +1826,26 @@ class NPUModelRunner(GPUModelRunner):
         has_lora = len(self.input_batch.lora_id_to_lora_request) > 0 if force_has_lora is None else force_has_lora
 
         # ruff: noqa: E731
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
-                num_tokens=num_tokens,
-                has_lora=has_lora,
-                uniform_decode=uniform_decode,
-                disable_full=disable_full,
-            )
-            if not force_eager
-            else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
-        )
+        def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
+            if force_eager:
+                return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
+
+            if vllm_version_is("0.16.0"):
+                return self.cudagraph_dispatcher.dispatch(
+                    num_tokens=num_tokens,
+                    has_lora=has_lora,
+                    uniform_decode=uniform_decode,
+                    disable_full=disable_full,
+                )
+            else:
+                return self.cudagraph_dispatcher.dispatch(
+                    num_tokens=num_tokens,
+                    has_lora=has_lora,
+                    uniform_decode=uniform_decode,
+                    valid_modes=valid_modes,
+                    invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
+                )
+
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
         num_tokens_padded = batch_descriptor.num_tokens
         if enable_sp(self.vllm_config):
@@ -1854,10 +1866,16 @@ class NPUModelRunner(GPUModelRunner):
                 dp_rank = self.parallel_config.data_parallel_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
                 # Re-dispatch with DP padding
-                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-                    num_tokens_padded,
-                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
-                )
+                if vllm_version_is("0.16.0"):
+                    cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                        num_tokens_padded,
+                        disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                    )
+                else:
+                    cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                        num_tokens_padded,
+                        valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
+                    )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded

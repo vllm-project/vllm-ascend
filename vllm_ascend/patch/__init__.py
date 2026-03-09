@@ -94,6 +94,20 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 6. File: platform/patch_fusion_matcher_compat_ops.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `torch.ops._C.rms_norm`, `torch.ops._C.fused_add_rms_norm`,
+#    Why:
+#       upstream vLLM initializes fusion matcher global operators at import time.
+#       On Ascend environment these symbols may be absent and cause import failure.
+#    How：
+#       inject placeholders only when the symbols are missing so import can continue.
+#    Related PR (if no, explain why):
+#       temporary compatibility patch before upstream adjustment is merged.
+#    Future Plan:
+#       remove this patch once upstream no longer requires these global symbols or
+#       provides a backend-safe initialization path.
+#
 # * Worker Patch:
 # ===============
 #
@@ -305,7 +319,7 @@
 #       https://github.com/vllm-project/vllm/pull/34336
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
-# ** 16. File: worker/patch_qwen3_quarot.py**
+# ** 16. File: worker/patch_draft_quarot.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM.load_weights`
 #    Why:
@@ -314,5 +328,7 @@
 #    How：
 #       Dynamically replace the `load_weights` function at runtime,
 #       and fix `target_config` into the new implementation with a closure.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/36225
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.

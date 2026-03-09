@@ -938,8 +938,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 prefill_query = query[self.pcp_size * num_decode_tokens :]
             else:
                 prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
-            key = key[self.pcp_size * num_decode_tokens :].contiguous()
-            value = value[self.pcp_size * num_decode_tokens :].contiguous()
+            key = key[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded].contiguous()
+            value = value[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded].contiguous()
 
             if has_chunked_context:
                 # all_gather q for chunked prefill // overlap the computation inner current chunk
