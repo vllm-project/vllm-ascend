@@ -36,4 +36,5 @@ from .modelslim_config import AscendModelSlimConfig
 __all__ = [
     "AscendModelSlimConfig",
     "AscendCompressedTensorsConfig",
+    "AscendFAQuantAttentionMethod",
 ]

@@ -17,6 +17,7 @@
 #
 
 from collections.abc import Callable
+from typing import Optional, Tuple, TypeVar
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
@@ -26,6 +27,8 @@ from vllm.model_executor.layers.linear import LinearMethodBase, RowParallelLinea
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.ops.mla import AscendMLAModules
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_flashcomm2_otp_group, get_mlp_tp_group, get_otp_group
@@ -33,6 +36,7 @@ from vllm_ascend.utils import flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
 
+M = TypeVar("M", bound=AscendMLAMetadata)
 
 class AscendLinearMethod(LinearMethodBase):
     """Linear method for Ascend quantization.
@@ -173,19 +177,11 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.quant_method.process_weights_after_loading(layer)
 
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache,
-        attn_metadata,
-        attn_type,
-        scale,
-        output,
-    ) -> torch.Tensor:
-        return self.quant_method.apply(layer, query, key, value, kv_cache, attn_metadata, attn_type, scale, output)
+    def apply(self, layer: torch.nn.Module, hidden_states: torch.Tensor,
+              kv_cache: Tuple[torch.Tensor], attn_metadata: M, mla_module: AscendMLAModules ,need_gather_q_kv: bool = False,
+        output: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.quant_method.apply(layer, hidden_states, kv_cache, attn_metadata, mla_module, need_gather_q_kv,
+                                      output)
 
 
 class AscendFusedMoEMethod(FusedMoEMethodBase):
