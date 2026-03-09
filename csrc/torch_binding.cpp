@@ -634,6 +634,38 @@ at::Tensor causal_conv1d_fn(
 
     return output;
 }
+  
+// It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
+std::vector<at::Tensor> moe_grouped_matmul(
+    at::Tensor x,
+    at::Tensor weight,
+    const at::Tensor& group_list,
+    int64_t split_item,
+    int64_t group_type,
+    int64_t group_list_type
+)
+{
+    bool transpose_weight = false;
+    bool weight_nz = true;
+
+    at::TensorList x_list = at::TensorList(x);
+    at::TensorList weight_list = at::TensorList(weight);
+    std::vector<at::Tensor> y;
+    c10::TensorOptions options = x_list[0].options().dtype(x[0].scalar_type());
+    auto m = x_list[0].sizes()[0];
+    auto n = weight_list[0].sizes()[1];
+    if (!transpose_weight) {
+        n = weight_list[0].sizes()[2];
+    }
+    at::Tensor y_0 = at::empty(at::IntArrayRef{m, n}, options);
+    y.emplace_back(y_0);
+    at::TensorList result = at::TensorList(y);
+
+    EXEC_NPU_CMD(aclnnMoeGroupedMatmulWeightNz,
+                x_list, weight_list, group_list, transpose_weight, result);
+
+    return y;
+}
 
 } // namespace vllm_ascend
 
@@ -829,4 +861,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         Tensor non_spec_query_start_loc, "
         "                         int pad_slot_id) -> (Tensor output)");
     ops.impl("causal_conv1d_fn", torch::kPrivateUse1, &vllm_ascend::causal_conv1d_fn);
+    ops.def(
+        "moe_grouped_matmul("
+            "Tensor x,"
+            "Tensor weight,"
+            "Tensor group_list,"
+            "int split_item,"
+            "int group_type,"
+            "int group_list_type)"
+
+        "-> Tensor[]"
+    );
+    ops.impl("moe_grouped_matmul", torch::kPrivateUse1,&vllm_ascend::moe_grouped_matmul);
 }

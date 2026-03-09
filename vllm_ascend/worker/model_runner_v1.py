@@ -103,8 +103,8 @@ from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
-from vllm_ascend.patch.worker.patch_qwen3_quarot import patch_load_weights
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
@@ -1287,25 +1287,49 @@ class NPUModelRunner(GPUModelRunner):
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
 
         # Run forward pass
-        with (
-            record_function_or_nullcontext("forward"),
-            set_ascend_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens_padded,
-                num_tokens_across_dp=num_tokens_across_dp,
-                aclgraph_runtime_mode=cudagraph_mode,
-                batch_descriptor=batch_desc,
-                num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
-                model_instance=self.model,
-                max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
-                skip_compiled=has_encoder_input,
-            ),
-            self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
-        ):
-            hidden_states = self._model_forward(
-                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-            )
+        clear_kv_metadata = self.speculative_config is None
+        if vllm_version_is("0.16.0"):
+            with (
+                record_function_or_nullcontext("forward"),
+                set_ascend_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens_padded,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    aclgraph_runtime_mode=cudagraph_mode,
+                    batch_descriptor=batch_desc,
+                    num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
+                    model_instance=self.model,
+                    max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
+                    skip_compiled=has_encoder_input,
+                ),
+                self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
+            ):
+                hidden_states = self._model_forward(
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                )
+        else:
+            with (
+                record_function_or_nullcontext("forward"),
+                set_ascend_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens_padded,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    aclgraph_runtime_mode=cudagraph_mode,
+                    batch_descriptor=batch_desc,
+                    num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
+                    model_instance=self.model,
+                    max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
+                    skip_compiled=has_encoder_input,
+                ),
+                self.maybe_get_kv_connector_output(
+                    scheduler_output, clear_metadata=clear_kv_metadata
+                ) as kv_connector_output,
+            ):
+                hidden_states = self._model_forward(
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
