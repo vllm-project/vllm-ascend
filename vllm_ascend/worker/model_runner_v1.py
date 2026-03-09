@@ -2522,7 +2522,7 @@ class NPUModelRunner(GPUModelRunner):
         # If some tensors are shared by linear layers and attention layers,
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
-        use_attn_linear_hybrid = False
+        self.hybrid_with_attn_and_mamba = False
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             use_mamba, use_attn = False, False
             for layer_name in kv_cache_tensor.shared_by:
@@ -2530,10 +2530,10 @@ class NPUModelRunner(GPUModelRunner):
                     use_mamba = True
                 if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
                     use_attn = True
-            use_attn_linear_hybrid = use_attn_linear_hybrid or (use_mamba and use_attn)
+            self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                if ("linear_attn" in layer_name or use_attn_linear_hybrid) and layer_name not in kv_cache_raw_tensors:
+                if ("linear_attn" in layer_name or self.hybrid_with_attn_and_mamba) and layer_name not in kv_cache_raw_tensors:
                     # for mamba linear attention or attn-linear hybrid
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
@@ -2637,16 +2637,6 @@ class NPUModelRunner(GPUModelRunner):
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
                 layer_kv_cache_spec[layer_name] = group.kv_cache_spec
-        attn_linear_hybrid_layers = []
-        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            has_mamba, has_attn = False, False
-            for layer_name in kv_cache_tensor.shared_by:
-                if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
-                    has_mamba = True
-                elif isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
-                    has_attn = True
-            if has_mamba and has_attn:
-                attn_linear_hybrid_layers.extend(kv_cache_tensor.shared_by)
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -2664,14 +2654,7 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                         assert raw_dsa_k_tensor is not None
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel() + raw_dsa_k_tensor.numel()
-                    elif self.use_hybrid_blocks and layer_name in attn_linear_hybrid_layers:
-                        raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
-                        sum_page_size_bytes = raw_k_tensor.numel()
-                    elif (
-                        self.use_hybrid_blocks
-                        and layer_name not in attn_linear_hybrid_layers
-                        and len(attn_linear_hybrid_layers) > 0
-                    ):
+                    elif self.use_hybrid_blocks and self.hybrid_with_attn_and_mamba:
                         # Currently, we ensure that the same kvcache format is used even if there
                         # is no shared layer, such as the full attention mtp layer of qwen3.5, etc.
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
@@ -2705,7 +2688,7 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size,
                         )
-                        if len(attn_linear_hybrid_layers) > 0:
+                        if self.hybrid_with_attn_and_mamba:
                             attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                 kv_cache_spec.dtype
                             )

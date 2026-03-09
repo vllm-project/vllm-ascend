@@ -34,7 +34,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     else:
         kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
-    block_alignment_bytes = 128
+    kernel_block_size = 128
     # get attention block size
     attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
     attn_head_size = model_config.get_head_size()
@@ -56,8 +56,8 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # NOTE(zxr): because of the limit of Ascend Hardware, we need to keep
     # all cache tensors contiguous, so we align the page size of ssm_block
     # and single attn_block
-    attn_block_size = block_alignment_bytes * cdiv(
-        ssm_block_page_size, block_alignment_bytes * attn_single_token_k_page_size
+    attn_block_size = kernel_block_size * cdiv(
+        ssm_block_page_size, kernel_block_size * attn_single_token_k_page_size
     )
     assert attn_single_token_k_page_size * attn_block_size == ssm_block_page_size, (
         "Cannot align ssm_page_size and attn_page_size."
