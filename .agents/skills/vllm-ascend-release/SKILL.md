@@ -43,21 +43,26 @@ Use this skill when:
 │  ├── Identify must-merge PRs                                                │
 │  └── Update checklist with PR list                                          │
 │                                                                             │
-│  Phase 4: Functional Testing                                                │
-│  ├── Select representative models                                           │
-│  ├── Run automated tests                                                    │
-│  └── Update checklist with test results                                     │
+│  Phase 4: Test Coverage Analysis                                            │
+│  ├── Scan PRs for features/models without tests                             │
+│  ├── Check previous feedback issue status                                   │
+│  └── Update checklist with items needing manual testing                     │
 │                                                                             │
-│  Phase 5: Release Notes (invoke existing skill)                             │
+│  Phase 5: Nightly Status                                                    │
+│  ├── Get latest Nightly-A3 and Nightly-A2 runs                              │
+│  ├── Analyze failures with extract_and_analyze.py                           │
+│  └── Update checklist with nightly status table                             │
+│                                                                             │
+│  Phase 6: Release Notes (invoke existing skill)                             │
 │  ├── Generate release notes via vllm-ascend-release-note-writer             │
 │  └── Create release notes PR                                                │
 │                                                                             │
-│  Phase 6: Documentation & Artifacts                                         │
+│  Phase 7: Documentation & Artifacts                                         │
 │  ├── Update version references                                              │
 │  ├── Prepare Docker image                                                   │
 │  └── Prepare wheel package                                                  │
 │                                                                             │
-│  Phase 7: Release Execution                                                 │
+│  Phase 8: Release Execution                                                 │
 │  ├── Merge release notes PR                                                 │
 │  ├── Create GitHub release                                                  │
 │  ├── Verify PyPI & Docker availability                                      │
@@ -120,34 +125,43 @@ gh issue create --repo vllm-project/vllm-ascend \
 
 ## Phase 2: Bug Triage
 
-### 2.1 Scan Open Bugs
+### 2.1 Scan Issues Since Last Release
 
-Run the bug scanning script to identify potential release-blocking bugs:
+Run the issue scanning script to browse all issues since the last release:
 
 ```bash
 python scripts/scan_release_bugs.py \
   --repo vllm-project/vllm-ascend \
-  --output bug-analysis.md
+  --since-tag ${LAST_VERSION} \
+  --output issue-scan.md
 ```
 
-The script analyzes bugs based on:
-- **Severity indicators**: keywords like "crash", "data loss", "security", "regression"
-- **User impact**: number of reactions, comments, linked issues
-- **Recency**: bugs reported in the current release cycle
-- **Labels**: `priority:high`, `regression`, `blocker`
+The script:
+1. Gets the release date of the previous version (including rc versions)
+2. Fetches all issues created since that date
+3. Generates a report with:
+   - **Flagged issues**: Automatically flagged based on engagement or keywords
+   - **All open issues**: Quick browse table with titles
+   - **Recently closed issues**: May be relevant for release notes
 
-### 2.2 Bug Prioritization Criteria
+### 2.2 Human Review Process
 
-| Priority | Criteria | Action |
-|----------|----------|--------|
-| P0 - Blocker | Crashes, data corruption, security issues | Must fix before release |
-| P1 - Critical | Major feature broken, significant regression | Should fix, may delay release |
-| P2 - Important | Notable bugs affecting common workflows | Fix if possible |
-| P3 - Normal | Minor issues, edge cases | Document as known issues |
+The output is designed for quick human review:
 
-### 2.3 Update Checklist
+1. **Check flagged issues first** - these have high engagement or concerning keywords
+2. **Browse the open issues table** - scan titles, click to investigate if needed
+3. **Review closed issues** - identify fixes that should be highlighted in release notes
 
-After review, update the release checklist issue with the identified bugs:
+### 2.3 Issue Flagging Criteria
+
+Issues are automatically flagged when they have:
+- High reactions (≥5) or many comments (≥5)
+- Labels: `bug`, `regression`, `blocker`, `priority:high`, `critical`
+- Keywords in title: crash, hang, freeze, oom, error, fail, etc.
+
+### 2.4 Update Checklist
+
+After manual review, add important bugs to the release checklist:
 
 ```bash
 python scripts/update_checklist_section.py \
@@ -187,54 +201,53 @@ python scripts/update_checklist_section.py \
   --content-file pr-list.md
 ```
 
-## Phase 4: Functional Testing
+## Phase 4: Test Coverage Analysis
 
-### 4.1 Select Representative Models
+### 4.1 Identify Features/Models Needing Testing
 
-The skill automatically selects models that cover core functionalities:
+CI already covers most test cases. Manual testing is only needed for:
+- **New features** merged without test cases
+- **New models** added due to environment constraints (e.g., CI doesn't have the model)
+- **Issues** reported in the previous release's feedback
 
-| Model Category | Representative Model | Features Covered |
-|----------------|---------------------|------------------|
-| Dense LLM | Qwen3-8B | Basic inference, attention |
-| MoE LLM | Qwen3-MoE-7B | Expert parallelism, MoE routing |
-| VL Model | Qwen3-VL-7B | Multimodal, image processing |
-| Long Context | Qwen3-32B-128k | Long context, memory management |
-| Speculative | DeepSeek-V3 + MTP | Speculative decoding |
-
-Model selection criteria:
-1. **Coverage**: Each model tests different code paths
-2. **Availability**: Models accessible in test environment
-3. **Stability**: Models with known-good baselines
-4. **Popularity**: Commonly used by the community
-
-### 4.2 Run Automated Tests
+Run the test coverage scanner:
 
 ```bash
-python scripts/run_functional_tests.py \
-  --config references/test-models.yaml \
-  --output test-results.md \
-  --hardware 910B \
-  --timeout 3600
+python scripts/scan_test_coverage.py \
+  --repo vllm-project/vllm-ascend \
+  --since-tag ${LAST_VERSION} \
+  --feedback-issue ${PREVIOUS_FEEDBACK_ISSUE} \
+  --output test-coverage-analysis.md
 ```
 
-Test categories:
-- **Startup Test**: Model loads successfully
-- **Inference Test**: Basic generation works
-- **Accuracy Test**: Output quality meets baseline
-- **Performance Test**: Throughput within expected range
-- **Feature Test**: Specific features (EP, graph mode, etc.)
+This script:
+1. Scans PRs merged since the last release
+2. Identifies features/models without corresponding test files
+3. Checks the previous feedback issue for unresolved problems
 
-### 4.3 Test Result Format
+### 4.2 Review the Analysis
+
+The output categorizes items:
+
+**Features/Models Needing Manual Testing:**
+- New model support (e.g., Kimi K2.5, GLM-5)
+- Features that couldn't be tested in CI
+
+**Previous Feedback Status:**
+- Unresolved issues from the feedback thread
+- Items that need manual verification
+
+### 4.3 Manual Testing Checklist
+
+For items identified above, perform manual testing:
 
 ```markdown
-### Functional Test Results
+#### Manual Testing Required
 
-| Model | Startup | Inference | Accuracy | Performance | Features | Status |
-|-------|---------|-----------|----------|-------------|----------|--------|
-| Qwen3-8B | ✅ | ✅ | 98.5% | 1200 tok/s | Graph ✅ | PASS |
-| Qwen3-MoE | ✅ | ✅ | 97.2% | 800 tok/s | EP ✅ | PASS |
-| Qwen3-VL | ✅ | ✅ | 96.8% | 600 tok/s | MM ✅ | PASS |
-| DeepSeek-V3 | ✅ | ✅ | 99.1% | 1500 tok/s | MTP ✅ | PASS |
+- [ ] Model: Kimi K2.5 - Basic inference works
+- [ ] Model: GLM-5 - Multimodal features work
+- [ ] Feature: Expert parallel with 8 GPUs
+- [ ] Feedback: User reported slow startup (verify fixed)
 ```
 
 ### 4.4 Update Checklist with Results
@@ -246,9 +259,51 @@ python scripts/update_checklist_section.py \
   --content-file test-results.md
 ```
 
-## Phase 5: Release Notes
+## Phase 5: Nightly Status
 
-### 5.1 Invoke Release Note Skill
+### 5.1 Analyze Nightly CI Runs
+
+Get the latest Nightly-A3 and Nightly-A2 CI runs and analyze failures:
+
+```bash
+python scripts/scan_nightly_status.py \
+  --repo vllm-project/vllm-ascend \
+  --output nightly-status.md
+```
+
+This script:
+1. Fetches the latest Nightly-A3 and Nightly-A2 workflow runs
+2. Calls `extract_and_analyze.py` (from main2main-error-analysis skill) for failed runs
+3. Extracts and categorizes errors:
+   - **Code Bugs**: Real issues that need fixing
+   - **Environment Flakes**: Transient issues (network, disk, etc.)
+
+### 5.2 Review Output
+
+The output includes:
+
+| Workflow | Status | Failed Jobs | Code Bugs | Env Flakes | Run |
+|----------|--------|-------------|-----------|------------|-----|
+| Nightly-A3 | ✅ success | 0/15 | 0 | 0 | [#123](url) |
+| Nightly-A2 | ❌ failure | 3/12 | 2 | 1 | [#124](url) |
+
+For failed runs, it also shows:
+- Code bugs that need fixing before release
+- Failed test cases
+- Environment flakes (informational)
+
+### 5.3 Update Checklist
+
+```bash
+python scripts/update_checklist_section.py \
+  --issue-number ${CHECKLIST_ISSUE} \
+  --section "Nightly Status" \
+  --content-file nightly-status.md
+```
+
+## Phase 6: Release Notes
+
+### 6.1 Invoke Release Note Skill
 
 This phase invokes the existing `vllm-ascend-release-note-writer` skill:
 
@@ -270,7 +325,7 @@ uv run python scripts/fetch_commits-optimize.py \
 # Follow the release-note-writer SKILL.md workflow
 ```
 
-### 5.2 Create Release Notes PR
+### 6.2 Create Release Notes PR
 
 After release notes are finalized:
 
@@ -288,9 +343,9 @@ gh pr create --repo vllm-project/vllm-ascend \
   --label "release"
 ```
 
-## Phase 6: Documentation & Artifacts
+## Phase 7: Documentation & Artifacts
 
-### 6.1 Files to Update
+### 7.1 Files to Update
 
 | File | Update Required |
 |------|-----------------|
@@ -302,7 +357,7 @@ gh pr create --repo vllm-project/vllm-ascend \
 | `docs/source/community/contributors.md` | New contributors |
 | `docs/conf.py` | Package version |
 
-### 6.2 Version Update Script
+### 7.2 Version Update Script
 
 ```bash
 python scripts/update_version_references.py \
@@ -311,7 +366,7 @@ python scripts/update_version_references.py \
   --feedback-issue ${FEEDBACK_ISSUE_URL}
 ```
 
-### 6.3 Docker Image Preparation
+### 7.3 Docker Image Preparation
 
 Verify Docker build and push:
 
@@ -323,7 +378,7 @@ gh workflow view docker-build --repo vllm-project/vllm-ascend
 # Image will be at: quay.io/ascend/vllm-ascend:${VERSION}
 ```
 
-### 6.4 Wheel Package Preparation
+### 7.4 Wheel Package Preparation
 
 Verify wheel build:
 
@@ -335,9 +390,9 @@ gh workflow view wheel-build --repo vllm-project/vllm-ascend
 # Package will be at: https://pypi.org/project/vllm-ascend/${VERSION}
 ```
 
-## Phase 7: Release Execution
+## Phase 8: Release Execution
 
-### 7.1 Pre-Release Checklist
+### 8.1 Pre-Release Checklist
 
 Before executing the release, verify:
 
@@ -348,7 +403,7 @@ Before executing the release, verify:
 - [ ] Documentation updated
 - [ ] CI passing on release branch
 
-### 7.2 Execute Release
+### 8.2 Execute Release
 
 ```bash
 # 1. Merge release notes PR
@@ -376,7 +431,7 @@ gh release upload ${VERSION} \
   vllm_ascend-${VERSION}-310p-*.whl
 ```
 
-### 7.3 Post-Release
+### 8.3 Post-Release
 
 ```bash
 # 1. Broadcast release (prepare announcement)
@@ -407,27 +462,49 @@ Generates the release checklist issue body from template.
 
 ### scripts/scan_release_bugs.py
 
-Scans GitHub issues to identify release-blocking bugs.
+Scans GitHub issues since the last release for human review.
 
 **Arguments:**
 - `--repo`: Repository (default: vllm-project/vllm-ascend)
-- `--days`: Look back period in days (default: 30)
+- `--since-tag`: Previous release tag (including rc versions)
+- `--state`: Issue state filter (open, closed, all; default: all)
 - `--output`: Output file path
 
-**Output:** Markdown file with prioritized bug list
+**Output:** Markdown report with:
+- Flagged issues (auto-detected as important)
+- All open issues table for quick browsing
+- Recently closed issues summary
 
-### scripts/run_functional_tests.py
+### scripts/scan_test_coverage.py
 
-Runs functional tests on representative models.
+Identifies features/models that need manual testing.
 
 **Arguments:**
-- `--config`: Test configuration YAML file
-- `--output`: Output file for results
-- `--hardware`: Hardware type (910B, 310P, etc.)
-- `--timeout`: Test timeout in seconds
-- `--models`: Specific models to test (optional)
+- `--repo`: Repository (default: vllm-project/vllm-ascend)
+- `--since-tag`: Previous release tag
+- `--feedback-issue`: Previous release feedback issue number (optional)
+- `--output`: Output file path
 
-**Output:** Markdown table with test results
+**Output:** Markdown report with:
+- Features/models merged without test coverage
+- Previous feedback issue status (resolved/unresolved)
+
+### scripts/scan_nightly_status.py
+
+Scans Nightly CI status for release readiness.
+
+**Arguments:**
+- `--repo`: Repository (default: vllm-project/vllm-ascend)
+- `--output`: Output file path
+
+**Output:** Markdown report with:
+- Summary table of Nightly-A3 and Nightly-A2 status
+- Code bugs that need fixing (from extract_and_analyze.py)
+- Environment flakes (informational)
+- Failed test cases
+
+**Dependencies:**
+- Calls `main2main-error-analysis/scripts/extract_and_analyze.py` for detailed analysis
 
 ### scripts/update_checklist_section.py
 
@@ -468,14 +545,6 @@ The release checklist issue template (see file for full template).
 The feedback collection issue template.
 
 ## References
-
-### references/test-models.yaml
-
-Configuration for functional test models, including:
-- Model paths
-- Expected performance baselines
-- Feature requirements
-- Test commands
 
 ### references/version-files.yaml
 

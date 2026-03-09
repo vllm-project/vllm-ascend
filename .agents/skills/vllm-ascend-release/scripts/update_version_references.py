@@ -107,17 +107,16 @@ def update_file_content(
             # Common patterns for variable definitions
             patterns = [
                 # YAML: VLLM_VERSION: "0.15.0"
-                (rf'({var_name}:\s*["\']?)[\d.]+(?:rc\d+)?(["\']?)',
-                 rf'\g<1>{variables.get("vllm_version_num", "")}\g<2>'),
+                (
+                    rf'({var_name}:\s*["\']?)[\d.]+(?:rc\d+)?(["\']?)',
+                    rf"\g<1>{variables.get('vllm_version_num', '')}\g<2>",
+                ),
                 # Shell: VLLM_VERSION=0.15.0
-                (rf'({var_name}=)[\d.]+(?:rc\d+)?',
-                 rf'\g<1>{variables.get("vllm_version_num", "")}'),
+                (rf"({var_name}=)[\d.]+(?:rc\d+)?", rf"\g<1>{variables.get('vllm_version_num', '')}"),
                 # Docker ARG: ARG VLLM_VERSION=0.15.0
-                (rf'(ARG\s+{var_name}=)[\d.]+(?:rc\d+)?',
-                 rf'\g<1>{variables.get("vllm_version_num", "")}'),
+                (rf"(ARG\s+{var_name}=)[\d.]+(?:rc\d+)?", rf"\g<1>{variables.get('vllm_version_num', '')}"),
                 # ENV: ENV VLLM_VERSION=0.15.0
-                (rf'(ENV\s+{var_name}=)[\d.]+(?:rc\d+)?',
-                 rf'\g<1>{variables.get("vllm_version_num", "")}'),
+                (rf"(ENV\s+{var_name}=)[\d.]+(?:rc\d+)?", rf"\g<1>{variables.get('vllm_version_num', '')}"),
             ]
 
             for pattern, replacement in patterns:
@@ -165,7 +164,6 @@ def process_file_config(
 
     path_pattern = file_config["path"]
     updates = file_config.get("updates", [])
-    description = file_config.get("description", "")
 
     # Expand glob patterns
     file_paths = expand_glob_pattern(repo_root, path_pattern)
@@ -276,9 +274,7 @@ def main():
 
     # Process each file configuration
     for file_config in files_config:
-        updated, manual, messages = process_file_config(
-            repo_root, file_config, variables, args.dry_run
-        )
+        updated, manual, messages = process_file_config(repo_root, file_config, variables, args.dry_run)
         all_updated_files.extend(updated)
         all_manual_files.extend(manual)
         for msg in messages:

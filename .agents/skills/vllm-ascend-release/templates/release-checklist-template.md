@@ -39,9 +39,28 @@ ${PR_LIST}
 
 ### Functional Test
 
-<!-- AI-GENERATED: Test results will be written here by the release skill -->
-<!-- Models tested: Qwen3-dense, Qwen3-MoE, Qwen3-VL, DeepSeek-V3, etc. -->
-${FUNCTIONAL_TEST_RESULTS}
+<!-- AI-GENERATED: This section will be populated by the release skill -->
+<!-- Lists features/models that need manual testing (not covered by CI) -->
+<!-- Also tracks unresolved items from previous release feedback -->
+
+#### Manual Testing Required
+${MANUAL_TEST_ITEMS}
+
+#### Previous Feedback Status
+${FEEDBACK_STATUS}
+
+### Nightly Status
+
+<!-- AI-GENERATED: This section will be populated by the release skill -->
+<!-- Analyzes latest Nightly-A3 and Nightly-A2 CI runs -->
+<!-- Uses extract_and_analyze.py to extract and categorize failures -->
+
+| Workflow | Status | Failed Jobs | Code Bugs | Env Flakes | Run |
+|----------|--------|-------------|-----------|------------|-----|
+${NIGHTLY_TABLE}
+
+#### Code Bugs Need Fix
+${NIGHTLY_CODE_BUGS}
 
 ### Doc Test
 
