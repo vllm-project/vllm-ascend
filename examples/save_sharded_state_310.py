@@ -24,12 +24,15 @@ Sparse-Compress-Quantization state dict could also be saved via this script.
 
 Example usage:
 
-python save_sharded_state.py \
+python save_sharded_state_310.py \
     --model /path/to/load \
     --tensor-parallel-size 8 \
     --output /path/to/save \
     --enable-compress \
-    --compress-process-num 8
+    --compress-process-num 8 \
+    --enforce-eager \
+    --dtype float16 \
+    --quantization ascend
 
 Then, the model can be loaded with
 
@@ -56,6 +59,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 SUPPORTED_COMPRESS_QUANT_TYPE = ["W8A8S", "W16A16S"]
 DEFAULT_PATTERN = "model-rank-{rank}-part-{part}.safetensors"
 QUANTIZATION_UPDATE_MAP = {"W8A8S": "W8A8SC", "W16A16S": "W16A16SC"}
+QUANT_DESCRIPTION_FNAME = "quant_model_description.json"
 
 
 class FileHandler:
@@ -140,18 +144,19 @@ def get_quant_description(json_file: str) -> dict:
     return quant_desc
 
 
-def update_quant_description(json_file: str) -> None:
+def update_quant_description(ori_json_file: str, target_json_file: str) -> None:
     """
     Update quantization types in JSON configuration file based on update mapping.
 
     Args:
-        json_file: Path to the JSON configuration file
+        ori_json_file: Path to the JSON configuration file
+        target_json_file: Path to the JSON configuration file to be saved
 
     Raises:
         FileNotFoundError: If the JSON file does not exist
         RuntimeError: If JSON parsing fails or required keys are missing
     """
-    config_path = Path(json_file)
+    config_path = Path(ori_json_file)
     try:
         with config_path.open("r", encoding="utf-8") as file:
             json_data = json.load(file)
@@ -175,10 +180,10 @@ def update_quant_description(json_file: str) -> None:
             updated_config[key] = value
 
     try:
-        new_file_path = config_path.parent / "quant_model_description.json"
+        new_file_path = Path(target_json_file)
         with new_file_path.open("w", encoding="utf-8") as file:
             json.dump(updated_config, file, indent=2, ensure_ascii=False)
-        os.remove(json_file)
+        os.remove(ori_json_file)
     except OSError as e:
         raise RuntimeError(f"Failed to write updated configuration to {json_file}: {e}")
 
@@ -214,9 +219,6 @@ def weight_compress_worker(file_path: str, quant_desc: dict, process_num: int) -
         compressor.run()
         if p.exists():
             os.remove(p)
-        ori_quant_desc_file = p.parent / "quant_model_description.json"
-        if ori_quant_desc_file.exists():
-            os.rename(str(ori_quant_desc_file), str(ori_quant_desc_file.parent / "ori_quant_model_description.json"))
         compressor.export_safetensors(str(p.parent), safetensors_name=p.name)
         return True
     except Exception as e:
@@ -248,6 +250,10 @@ def main(args):
     # 4. Compression Logic
     parameters_map_fpath = output_dir / "parameters_type_map.json"
     if args.enable_compress:
+        quant_desc_file = p.parent / QUANT_DESCRIPTION_FNAME
+        backup_quant_desc_file = p.parent / "ori_quant_model_description.json"
+        if quant_desc_file.exists():
+            os.rename(str(quant_desc_file), str(backup_quant_desc_file))
         quant_desc = get_quant_description(str(parameters_map_fpath))
         quant_type = quant_desc["model_quant_type"]
         if quant_type in SUPPORTED_COMPRESS_QUANT_TYPE:
@@ -269,7 +275,7 @@ def main(args):
             for p in tasks:
                 p.join()
 
-            update_quant_description(os.path.join(args.output, "ori_quant_model_description.json"))
+            update_quant_description(str(backup_quant_desc_file), str(quant_desc_file))
             print("Compression completed successfully.")
         else:
             print(f"Skipping compression: Unsupported type {quant_type}")
