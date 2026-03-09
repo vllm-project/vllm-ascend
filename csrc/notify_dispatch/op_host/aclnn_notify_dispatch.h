@@ -24,21 +24,12 @@ extern "C" {
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
  */
-__attribute__((visibility("default")))
-aclnnStatus aclnnNotifyDispatchGetWorkspaceSize(
-    const aclTensor *sendData,
-    const aclTensor *tokenPerExpertData,
-    int64_t sendCount,
-    int64_t numTokens,
-    char *commGroup,
-    int64_t rankSize,
-    int64_t rankId,
-    int64_t localRankSize,
-    int64_t localRankId,
-    const aclTensor *sendDataOffset,
-    const aclTensor *recvData,
-    uint64_t *workspaceSize,
-    aclOpExecutor **executor);
+__attribute__((visibility("default"))) aclnnStatus aclnnNotifyDispatchGetWorkspaceSize(
+    const aclTensor *sendData, const aclTensor *tokenPerExpertData, int64_t sendCount, int64_t numTokens,
+    char *commGroup, int64_t rankSize, int64_t rankId, int64_t localRankSize, int64_t localRankId,
+    const aclTensor *sendDataOffset, const aclTensor *recvData, const aclTensor *totalRecvTokens,
+    const aclTensor *recvCount, const aclTensor *recvOffset, const aclTensor *maxBs,
+    const aclTensor *recvTokensPerExpert, uint64_t *workspaceSize, aclOpExecutor **executor);
 
 /* function: aclnnNotifyDispatch
  * parameters :
@@ -47,12 +38,8 @@ aclnnStatus aclnnNotifyDispatchGetWorkspaceSize(
  * executor : executor context(input).
  * stream : acl stream.
  */
-__attribute__((visibility("default")))
-aclnnStatus aclnnNotifyDispatch(
-    void *workspace,
-    uint64_t workspaceSize,
-    aclOpExecutor *executor,
-    aclrtStream stream);
+__attribute__((visibility("default"))) aclnnStatus aclnnNotifyDispatch(void *workspace, uint64_t workspaceSize,
+                                                                       aclOpExecutor *executor, aclrtStream stream);
 
 #ifdef __cplusplus
 }

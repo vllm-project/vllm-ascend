@@ -25,34 +25,41 @@ at::Tensor combine_prefill(const at::Tensor& x, const at::Tensor& topk_idx, cons
     char* group_ep_ptr = &group_ep_chrs[0];
 
     TORCH_BIND_ASSERT(x.dim() == 2 and x.is_contiguous());
-    at::Tensor recv_x = x;
 
-    at::Tensor topk_idx_p = topk_idx;
-
-    auto topk_idx_int32 = topk_idx_p.to(at::kInt);
-    at::Tensor expand_ids = topk_idx_int32;
+    // Convert topk_idx to int32 if necessary
+    at::Tensor topk_idx_int32 = topk_idx.scalar_type() == at::kInt 
+        ? topk_idx 
+        : topk_idx.to(at::kInt);
     at::Tensor token_src_info = src_idx;
     at::Tensor ep_send_counts = send_head;
     auto device = x.device();
 
-    const int num_tokens = topk_idx_p.size(0);
-    const int num_topk = topk_idx_p.size(1);
+    const int num_tokens = topk_idx_int32.size(0);
+    const int num_topk = topk_idx_int32.size(1);
 
-    int64_t hidden = static_cast<int>(recv_x.size(1));
+    // Convert topk_weights to float if necessary
+    at::Tensor expert_scales = topk_weights.scalar_type() == at::kFloat
+        ? topk_weights
+        : topk_weights.to(at::kFloat);
+
+    int64_t hidden = static_cast<int>(x.size(1));
     at::Tensor tp_send_counts = at::empty({1}, at::dtype(at::kInt).device(device));
     int64_t tp_world_size = 1;
     int64_t tp_rankId = 0;
     int64_t moe_expert_number = send_head.size(0);
-    int64_t global_bs = topk_idx_p.size(0) * num_ranks;
+    int64_t global_bs = topk_idx_int32.size(0) * num_ranks;
+
+    // Create combine_send_cost_stats_out tensor (optional output for performance monitoring)
+    at::Tensor combine_send_cost_stats_out;
 
     // Combine data
-    auto combined_x = torch::empty({topk_weights.size(0), hidden}, x.options());
+    auto combined_x = torch::empty({expert_scales.size(0), hidden}, x.options());
 
     EXEC_NPU_CMD(aclnnMoeCombineNormal,
-        recv_x,
+        x,
         token_src_info,
         ep_send_counts,
-        topk_weights,
+        expert_scales,
         tp_send_counts,
         group_ep_ptr,
         num_ranks,
@@ -62,7 +69,8 @@ at::Tensor combine_prefill(const at::Tensor& x, const at::Tensor& topk_idx, cons
         tp_rankId,
         moe_expert_number,
         global_bs,
-        combined_x);
+        combined_x,
+        combine_send_cost_stats_out);
 
     return combined_x;
 }

@@ -4,7 +4,6 @@
 #include <cstdint>
 #include "kernel_tiling/kernel_tiling.h"
 
-// a3
 struct MoeCombineNormalInfo {
     uint32_t epWorldSize;
     uint32_t tpWorldSize;
@@ -22,6 +21,7 @@ struct MoeCombineNormalInfo {
     uint64_t totalWinSize;
     float armAvgFactor;
     float epsilon;
+    bool isEnableDiagnose;
 };
 struct MoeCombineNormalTilingData {
     Mc2InitTiling mc2InitTiling;
@@ -30,4 +30,4 @@ struct MoeCombineNormalTilingData {
     MoeCombineNormalInfo moeCombineNormalInfo;
 };
 
-#endif //MOE_COMBINE_NORMAL_TILING_H
+#endif  // MOE_COMBINE_NORMAL_TILING_H

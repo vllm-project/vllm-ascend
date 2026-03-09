@@ -1,7 +1,8 @@
 #include "register/op_def_registry.h"
 
 namespace ops {
-class MoeDispatchNormal : public OpDef {
+class MoeDispatchNormal : public OpDef
+{
 public:
     explicit MoeDispatchNormal(const char *name) : OpDef(name)
     {
@@ -57,6 +58,12 @@ public:
 
         this->Output("assist_info_for_combine")
             .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+
+        this->Output("dispatch_wait_recv_cost_stats")
+            .ParamType(OPTIONAL)
             .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
