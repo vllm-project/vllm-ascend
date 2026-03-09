@@ -51,7 +51,6 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
         self.n_shared_experts: int = config.n_shared_experts
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
-        print(f"ttg AscendDeepseekV2MoE init", flush=True)
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "

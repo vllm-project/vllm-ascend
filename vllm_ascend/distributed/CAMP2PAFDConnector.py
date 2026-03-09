@@ -213,9 +213,6 @@ class CAMP2PAFDConnector(AFDConnectorBase):
             global_num_experts: int = -1,
             **kwargs
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        print(f"ttg select_experts mix_placement: {mix_placement}, "
-              f"num_logical_experts: {num_logical_experts}, num_shared_experts: {num_shared_experts}, "
-              f"global_num_experts: {global_num_experts}", flush=True)
         return select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -271,8 +268,6 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         else:
             k = self.hf_config.num_experts_per_tok
             moe_expert_num = self.hf_config.n_routed_experts
-
-        print(f"ttg send_attn_output k: {k}, moe_expert_num: {moe_expert_num}")
 
         multistream_enable = False  # dense层的后一层不分流
         return torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
@@ -331,8 +326,6 @@ class CAMP2PAFDConnector(AFDConnectorBase):
         h = metadata.h
         k = metadata.k
         aiv_num = metadata.aiv_num
-
-        print(f"ttg recv_attn_output k: {k}", flush=True)
 
         groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
         outputs = torch.ops.umdk_cam_op_lib.a2e(x=torch.tensor([], dtype=torch.bfloat16, device='npu'),

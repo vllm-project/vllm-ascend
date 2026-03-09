@@ -291,7 +291,6 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
 
-    print(f"ttg start npu_grouped_matmul 1")
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],
@@ -304,13 +303,11 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
         gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
             torch.float16)
     else:
-        print(f"ttg npu_swiglu")
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
 
-    print(f"ttg start npu_grouped_matmul 2")
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[gate_up_out],
         weight=[w2],
@@ -319,7 +316,6 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
         group_type=0,
         group_list=group_list,
     )[0]
-    print(f"ttg finish npu_grouped_matmul 2")
     return hidden_states
 
 
@@ -366,7 +362,6 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                                fusion=fusion,
                                dynamic_eplb=dynamic_eplb)
     else:
-        print(f"ttg exec unquant_apply_mlp")
         return unquant_apply_mlp(hidden_states=hidden_states,
                                  w1=w1,
                                  w2=w2,

@@ -703,7 +703,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         #     topk_weights = split_topk_weights[tp_rank]
         #     topk_ids = split_topk_ids[tp_rank]
 
-        # print(f'topk_ids shape after split is {topk_ids.shape}')
         hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -750,8 +749,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             hidden_states=final_hidden_states.routed_out,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata)
-
-        print(f"##DEBUG after fused_experts -----")
 
         return final_hidden_states
 
@@ -816,25 +813,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                                        need_trans=False)
 
         # 3. Combine阶段
-        # print(f"mlp_output: shape={mlp_output.shape}, dtype={mlp_output.dtype}")
-        print(f"topk_ids: shape={topk_ids.shape}, dtype={topk_ids.dtype}, topk_ids: {topk_ids}")
-        print(f"topk_weights: shape={topk_weights.shape}, dtype={topk_weights.dtype}")
-        # print(
-        #     f"x_active_mask: shape={x_active_mask.shape if x_active_mask is not None else None}, dtype={x_active_mask.dtype if x_active_mask is not None else None}")
-        # print(f"assist_info_for_combine: shape={assist_info_for_combine.shape}, dtype={assist_info_for_combine.dtype}")
-        # print(f"ep_recv_counts: shape={ep_recv_counts.shape}, dtype={ep_recv_counts.dtype}, ep_recv_counts: ={ep_recv_counts}")
-        # print(f"tp_recv_counts: shape={tp_recv_counts.shape}, dtype={tp_recv_counts.dtype}, tp_recv_counts: ={tp_recv_counts}")
-        # print(f"expand_scales: shape={expand_scales.shape}, dtype={expand_scales.dtype}")
-        #
-        # print(f"expand_x:={expand_x}, dtype={expand_x.dtype}")
-        # print(f"topk_ids dtype={topk_ids.dtype}")
-        # print(f"topk_weights dtype={topk_weights.dtype}")
-        # print(
-        #     f"x_active_mask: ={x_active_mask if x_active_mask is not None else None}, dtype={x_active_mask.dtype if x_active_mask is not None else None}")
-        # print(f"assist_info_for_combine: ={assist_info_for_combine}, dtype={assist_info_for_combine.dtype}")
-        # print(f"ep_recv_counts: ={ep_recv_counts}, dtype={ep_recv_counts.dtype}")
-        # print(f"tp_recv_counts: ={tp_recv_counts}, dtype={tp_recv_counts.dtype}")
-        # # print(f"expand_scales: ={expand_scales}, dtype={expand_scales.dtype}")
         combined_output = combine_experts(
             gmm2_output=mlp_output,
             topk_ids=topk_ids,
@@ -897,12 +875,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                 moe_expert_num=self.global_num_experts,
                 layer=layer,
             )
-            print(f"##DEBUG after afd_ffn_compute -----")
             return shared_out, mlp_output
         from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
-
-        print(f"ttg afd_m2n_ffn_compute w1.shape: {layer.w13_weight.shape}, "
-              f"w2.shape: {layer.w2_weight.shape}")
 
         permuted_hidden_states, expert_tokens = hidden_states, group_list
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
