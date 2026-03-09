@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, fields
 
 import numpy as np
@@ -39,7 +39,7 @@ from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
@@ -96,14 +96,30 @@ class RecomputeScheduler(Scheduler):
         )
 
     def add_request(self, request: Request) -> None:
-        # Fill in placeholder tokens to enable full graph compatibility. Without
-        # placeholders, graph matching may fail, forcing eager mode execution.
-        if self.is_mtp_kv_consumer:
-            request.spec_token_ids = [PLACEHOLDER_TOKEN_ID] * self.num_spec_tokens
-        self.waiting.add_request(request)
-        self.requests[request.request_id] = request
-        if self.log_stats:
-            request.record_event(EngineCoreEventType.QUEUED)
+        existing = self.requests.get(request.request_id)
+        if existing is not None:
+            update = StreamingUpdate.from_request(request)
+            if existing.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
+                assert existing.streaming_queue is not None, "duplicate request id"
+                # Queue next input chunk (or finished sentinel).
+                existing.streaming_queue.append(update)
+            elif update is not None:
+                # Commence next input chunk.
+                self._update_request_as_session(existing, update)
+            else:
+                # Streaming-input session finished.
+                self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+        else:
+            if request.resumable:
+                request.streaming_queue = deque()
+            # Fill in placeholder tokens to enable full graph compatibility. Without
+            # placeholders, graph matching may fail, forcing eager mode execution.
+            if self.is_mtp_kv_consumer:
+                request.spec_token_ids = [PLACEHOLDER_TOKEN_ID] * self.num_spec_tokens
+            self.waiting.add_request(request)
+            self.requests[request.request_id] = request
+            if self.log_stats:
+                request.record_event(EngineCoreEventType.QUEUED)
 
     def schedule(self) -> RecomputeSchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -513,9 +529,11 @@ class RecomputeScheduler(Scheduler):
                         - request.num_output_placeholders
                     )
                     if num_scheduled_spec_tokens > 0:
-                        # Trim spec_token_ids list to num_scheduled_spec_tokens.
-                        del request.spec_token_ids[num_scheduled_spec_tokens:]
-                        scheduled_spec_decode_tokens[request.request_id] = request.spec_token_ids
+                        spec_token_ids = request.spec_token_ids
+                        if len(spec_token_ids) > num_scheduled_spec_tokens:
+                            spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
+                        scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
+
                     # New spec tokens will be set in `update_draft_token_ids` before the
                     # next step when applicable.
                     request.spec_token_ids = []
