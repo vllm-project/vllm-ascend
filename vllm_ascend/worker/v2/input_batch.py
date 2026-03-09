@@ -40,14 +40,12 @@ class AscendInputBuffers(InputBuffers):
         )
         del self.query_start_loc
 
-        # vllm only need gpu's query_start_loc for attention backend.
-        # but vllm-ascend also need cpu's query_start_loc for fia backend.
-        # so reinitialize query_start_loc here.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
-        self.query_start_loc = CpuGpuBuffer(
-            self.max_num_reqs + 2,  # type: ignore[has-type]
+        self.query_start_loc = torch.zeros(
+            max_num_reqs + 2,
             dtype=torch.int32,
+            device=device,
         )
 
         # Create seq_lens_cpu and seq_lens_np.

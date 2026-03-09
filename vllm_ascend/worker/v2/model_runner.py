@@ -254,12 +254,16 @@ class NPUModelRunner(GPUModelRunner):
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
 
         # Get query_start_loc.
-        query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
+        # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
+        # See _pad_query_start_loc_for_fia.
+        query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
+
+        # This is only required for vllm-ascend.
         query_start_loc_np = self._pad_query_start_loc_for_fia(
             num_tokens_padded=num_tokens_after_padding,
             num_tokens=num_tokens,
@@ -267,11 +271,11 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_np=query_start_loc_np,
             max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
         )
-        async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc.gpu)
+        async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
 
         query_start_loc_np = query_start_loc_np[: num_reqs + 1]
         query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
-        query_start_loc = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         max_query_len = num_scheduled_tokens.max().item()
 
         # Get prefill tokens.
