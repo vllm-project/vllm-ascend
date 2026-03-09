@@ -49,15 +49,7 @@ logger = init_logger(__name__)
 
 # key: model_type
 # value: orig_to_new_prefix
-QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
-    "qwen3_omni_moe_thinker": {
-        "thinker.lm_head.": "language_model.lm_head.",
-        "thinker.model.": "language_model.model.",
-        "thinker.": "",
-        "lm_head.": "language_model.lm_head.",
-        "model.": "language_model.model.",
-    },
-}
+QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {}
 
 # key: model_type
 # value: dict of fused module name -> list of original module names
@@ -165,6 +157,30 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+    },
+    "glm4v_moe": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "glm4v_moe_text": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
     "longcat_flash": {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -426,7 +442,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         # Try different ways to get the mapping based on WeightsMapper implementation
         # Method 1: Check for public or private attribute with possible names
-        mapping_attrs = ["orig_to_new_prefix", "_orig_to_new_prefix"]
+        mapping_attrs = ["orig_to_new_prefix"]
         orig_to_new_prefix = {}
 
         for attr_name in mapping_attrs:
@@ -451,7 +467,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         # Debug info
         if not new_to_orig_prefix:
-            logger.warning("No reverse mapping found for WeightsMapper. Using manual mappings if available.")
+            logger.info("No reverse mapping found for WeightsMapper. Using manual mappings if available.")
         else:
             logger.debug(f"Created reverse mapping: {combined_mapping}")
 
