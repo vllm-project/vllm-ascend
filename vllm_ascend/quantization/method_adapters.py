@@ -220,6 +220,15 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             set_weight_attrs(param, extra_weight_attrs)
 
         extra_weight_attrs.update({"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
+
+        quant_method_name = self.quant_method.__class__.__name__
+        always_group_param = []
+        # w2_scale_bias must use GROUP only for w4a8 with new_quant_version
+        # so that _load_w2 narrows the checkpoint tensor [H, 16] to [H, 16 // tp_size] per TP rank.
+        if quant_method_name == "AscendW4A8DynamicFusedMoEMethod":
+            is_new_quant_version = getattr(self.quant_method, "new_quant_version", False)
+            if is_new_quant_version:
+                always_group_param = ["w2_scale_bias"]
         per_group_param = (
             ["weight_scale_second", "weight_offset_second", "scale_bias"] + ["weight_scale", "weight_offset"]
             if hasattr(self.quant_method, "group_size") and self.quant_method.group_size > 0
@@ -232,7 +241,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             param = torch.nn.Parameter(param_value, requires_grad=False)
             layer.register_parameter(param_key, param)
             set_weight_attrs(param, extra_weight_attrs)
-            if any(fields in param_key for fields in per_group_param):
+            if any(fields in param_key for fields in (always_group_param + per_group_param)):
                 param.quant_method = FusedMoeWeightScaleSupported.GROUP.value
 
     def apply(
