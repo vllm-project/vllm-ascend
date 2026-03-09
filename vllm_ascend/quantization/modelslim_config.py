@@ -361,7 +361,10 @@ class AscendModelSlimConfig(QuantizationConfig):
                 new_k = k.replace("weight_packed", "weight")
                 extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
-        self.model_type = None
+        # Initialize attributes for type checking
+        self.model_type: str | None = None
+        self.hf_to_vllm_mapper: WeightsMapper | None = None
+        self.vllm_to_hf_mapper: WeightsMapper | None = None
 
     def __repr__(self) -> str:
         return "AscendModelSlimConfig:\n" + super().__repr__()
@@ -401,65 +404,65 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         """Apply the vLLM model-specific mapper to this quantization config.
-        
+
         This method is called by vLLM to apply the model-specific weight mapper
         to the quantization configuration. It creates a reverse mapper to convert
         vLLM prefixes back to HF format for looking up keys in quant_config.json.
-        
+
         Args:
             hf_to_vllm_mapper: The WeightsMapper instance provided by vLLM
                 that contains model-specific prefix mappings (HF to vLLM).
         """
         # Check if we already have a valid vllm_to_hf_mapper for this hf_to_vllm_mapper
-        if hasattr(self, 'hf_to_vllm_mapper') and self.hf_to_vllm_mapper is hf_to_vllm_mapper:
+        if hasattr(self, "hf_to_vllm_mapper") and self.hf_to_vllm_mapper is hf_to_vllm_mapper:
             # Same mapper instance, no need to recreate
             return
-        
+
         # Store the original mapper
         self.hf_to_vllm_mapper = hf_to_vllm_mapper
-        
+
         # Create a reverse mapper (vLLM to HF)
         new_to_orig_prefix = {}
-        
+
         # Try different ways to get the mapping based on WeightsMapper implementation
         # Method 1: Check for public or private attribute with possible names
-        mapping_attrs = ['orig_to_new_prefix', '_orig_to_new_prefix']  # Check both public and private variants
+        mapping_attrs = ["orig_to_new_prefix", "_orig_to_new_prefix"]
         orig_to_new_prefix = {}
-        
+
         for attr_name in mapping_attrs:
             if hasattr(hf_to_vllm_mapper, attr_name):
                 orig_to_new_prefix = getattr(hf_to_vllm_mapper, attr_name)
                 break
-        
+
         # Create reverse mapping
         for orig_prefix, new_prefix in orig_to_new_prefix.items():
             # Reverse the mapping direction
             new_to_orig_prefix[new_prefix] = orig_prefix
-        
+
         # Combine with manual mappings if available
         combined_mapping = new_to_orig_prefix.copy()
-        if hasattr(self, 'model_type') and self.model_type in QUANT_MODEL_PREFIX_MAPPINGS:
+        if hasattr(self, "model_type") and self.model_type in QUANT_MODEL_PREFIX_MAPPINGS:
             manual_mapping = QUANT_MODEL_PREFIX_MAPPINGS[self.model_type]
             # Manual mapping is already in vLLM to HF direction, no need to reverse
             combined_mapping.update(manual_mapping)
-        
+
         # Create and store the reverse WeightsMapper instance
         self.vllm_to_hf_mapper = WeightsMapper(orig_to_new_prefix=combined_mapping)
-        
+
         # Debug info
         if not new_to_orig_prefix:
             logger.warning("No reverse mapping found for WeightsMapper. Using manual mappings if available.")
         else:
             logger.debug(f"Created reverse mapping: {combined_mapping}")
-        
+
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         # Store model_type for backward compatibility mappings
         self.model_type = model_type
-        
+
         # Use the reverse mapper (vLLM to HF) if available
-        if hasattr(self, 'vllm_to_hf_mapper') and self.vllm_to_hf_mapper:
+        if hasattr(self, "vllm_to_hf_mapper") and self.vllm_to_hf_mapper:
             return self.vllm_to_hf_mapper._map_name(prefix)
-        
+
         # Fall back to manual mapping for backward compatibility (simplified)
         # This is only used if apply_vllm_mapper wasn't called or failed
         prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
@@ -467,7 +470,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             # Create a simple mapper on the fly (no caching since this should be rare)
             mapper = WeightsMapper(orig_to_new_prefix=prefix_mapping)
             return mapper._map_name(prefix)
-        
+
         return prefix
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
