@@ -167,8 +167,10 @@ def _triton_rope_siso(
     IS_NEOX_STYLE: tl.constexpr,
     USE_COS_SIN: tl.constexpr,
 ):
-    row_idx = tl.program_id(0)
-    if row_idx < num_tokens:
+    pid = tl.program_id(0).to(tl.int64)
+    row_block_size = tl.num_programs(0)
+
+    for row_idx in tl.range(pid, num_tokens, row_block_size):
         qk_start_ptr = qk_ptr + row_idx * qk_row_stride
 
         # ####################################################################
