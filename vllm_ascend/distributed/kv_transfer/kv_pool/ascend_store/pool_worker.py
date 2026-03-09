@@ -140,11 +140,6 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        # be removed later
-        if self.backend == "mooncake":
-            self.head_or_tp_rank = self.tp_rank
-            self.put_step = 1
-
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config
         )

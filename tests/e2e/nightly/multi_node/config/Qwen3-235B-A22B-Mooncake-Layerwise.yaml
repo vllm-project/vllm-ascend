@@ -1,0 +1,115 @@
+test_name: "test Qwen3-235B-A22B PD separation with mooncake layerwise connector"
+model: "Qwen/Qwen3-235B-A22B"
+num_nodes: 2
+npu_per_node: 16
+env_common:
+  VLLM_USE_MODELSCOPE: true
+  OMP_PROC_BIND: false
+  OMP_NUM_THREADS: 100
+  HCCL_BUFFSIZE: 1024
+  SERVER_PORT: 8080
+  NUMEXPR_MAX_THREADS: 128
+  MC_LOG_LEVEL: "ERROR"
+  DISAGGREGATED_PREFILL_PROXY_SCRIPT: "examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py"
+
+disaggregated_prefill:
+  enabled: true
+  prefiller_host_index: [0]
+  decoder_host_index: [1]
+
+deployment:
+  -
+    server_cmd: >
+        vllm serve "Qwen/Qwen3-235B-A22B"
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --data-parallel-size 2
+        --data-parallel-size-local 2
+        --data-parallel-address $LOCAL_IP
+        --data-parallel-rpc-port 13389
+        --tensor-parallel-size 8
+        --seed 1024
+        --enforce-eager
+        --enable-expert-parallel
+        --max-num-seqs 32
+        --max-model-len 8192
+        --max-num-batched-tokens 8192
+        --trust-remote-code
+        --no-enable-prefix-caching
+        --gpu-memory-utilization 0.9
+        --additional-config '{"recompute_scheduler_enable": true,"enable_shared_expert_dp": true}'
+        --kv-transfer-config
+        '{"kv_connector": "MooncakeLayerwiseConnector",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "engine_id": "0",
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  }
+            }
+        }'
+  -
+    server_cmd: >
+        vllm serve "Qwen/Qwen3-235B-A22B"
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --data-parallel-size 2
+        --data-parallel-size-local 2
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389
+        --tensor-parallel-size 8
+        --seed 1024
+        --max-num-seqs 16
+        --max-model-len 8192
+        --max-num-batched-tokens 8192
+        --enable-expert-parallel
+        --trust-remote-code
+        --no-enable-prefix-caching
+        --gpu-memory-utilization 0.9
+        --additional-config '{"torchair_graph_config":{"enabled":true}}'
+        --kv-transfer-config
+        '{"kv_connector": "MooncakeLayerwiseConnector",
+        "kv_role": "kv_consumer",
+        "kv_port": "30200",
+        "engine_id": "1",
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  }
+            }
+        }'
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 2800
+    max_out_len: 1500
+    batch_size: 700
+    request_rate: 11.2
+    baseline: 183
+    threshold: 0.97
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 7680
+    batch_size: 512
+    baseline: 97
+    threshold: 3

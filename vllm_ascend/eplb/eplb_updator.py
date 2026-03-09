@@ -21,6 +21,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
 
+from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -34,7 +35,7 @@ class EplbUpdator:
         self.eplb_loader = loader
         self.eplb_process = eplb_process
         self.shared_dict = self.eplb_process.shared_dict
-        self.moe_imbalance_dict: dict[int, float] = {}
+        self.comm_group = get_dynamic_eplb_group()
 
     def set_adaptor(self, adaptor: VllmEplbAdaptor):
         self.adaptor = adaptor
@@ -42,8 +43,6 @@ class EplbUpdator:
         local_load = self.adaptor.get_rank_expert_workload()
         self.world_size = dist.get_world_size()
         self.device = local_load.device
-        shape = (self.world_size, *local_load.shape)
-        self._gather_buffer = torch.empty(shape, dtype=local_load.dtype, device=self.device)
         self.eplb_loader.num_layers = self.adaptor.num_dense_layers + self.adaptor.num_moe_layers
 
     def init_eplb(self, expert_map_path, process):
@@ -100,6 +99,9 @@ class EplbUpdator:
         self.eplb_process.planner_q.put(1)
 
     def forward_before(self):
+        # Batch after eplb process being triggered, get update info provided by eplb process
+        if self.get_update_info_flag():
+            self.update_info_all = self.eplb_process.block_update_q.get()
         if self.update_expert_weight_flag():
             (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
                 0
@@ -117,11 +119,6 @@ class EplbUpdator:
             # set asynchronous stream for d2d expert weight update
             self.reqs = []
             self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
-
-    def take_update_info_from_eplb_process(self):
-        # Batch after eplb process being triggered, get update info provided by eplb process
-        if self.get_update_info_flag():
-            self.update_info_all = self.eplb_process.block_update_q.get()
 
     def forward_end(self):
         if self.wakeup_eplb_worker_flag():
@@ -154,54 +151,21 @@ class EplbUpdator:
 
         return moe_load
 
-    def compute_moe_imbalance(self, moe_load: torch.Tensor):
-        self.moe_imbalance_dict.clear()
-
-        layer_card_load = moe_load.sum(dim=-1).cpu().float()
-
-        for layer_idx in range(layer_card_load.size(0)):
-            layer_load = layer_card_load[layer_idx]
-
-            mean_load = layer_load.mean().item()
-            max_load = layer_load.max().item()
-
-            moe_load_imbalance = max_load / (mean_load + 1e-6)
-
-            logger.debug(f"[ModelRunner][MOE_load_stats][Layer {layer_idx}] PAR={moe_load_imbalance:.4f}")
-
-            self.moe_imbalance_dict[layer_idx] = moe_load_imbalance
-
-    def summarize_moe_imbalance(self):
-        values = list(self.moe_imbalance_dict.values())
-        if not values:
-            logger.info("[MOE_load_stats] No data available.")
-            return
-
-        avg_imbalance = sum(values) / len(values)
-        max_imbalance = max(values)
-        min_imbalance = min(values)
-
-        logger.info(
-            f"[ModelRunner][MOE_load_stats] Peak-to-Average-Ratio: "
-            f"Mean={avg_imbalance:.4f}, Max={max_imbalance:.4f}, Min={min_imbalance:.4f}"
-        )
-
     def warm_up_eplb(self):
         self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)
-        self_rank = dist.get_rank()
 
         comm_op_list = []
 
         for dst_rank in range(self.world_size):
-            if dst_rank == self_rank:
+            if dst_rank == self.rank_id:
                 continue
             comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank))
 
         for src_rank in range(self.world_size):
-            if src_rank == self_rank:
+            if src_rank == self.rank_id:
                 continue
             comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank))
         if comm_op_list:

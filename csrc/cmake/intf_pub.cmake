@@ -64,6 +64,8 @@ target_compile_definitions(intf_pub
         INTERFACE
             $<$<COMPILE_LANGUAGE:CXX>:_GLIBCXX_USE_CXX11_ABI=0>
             $<$<CONFIG:Release>:_FORTIFY_SOURCE=2>
+            $<$<COMPILE_LANGUAGE:CXX>:VLLM_ASCEND_950_SOC_ENUM=${VLLM_ASCEND_950_SOC_ENUM}>
+            $<$<COMPILE_LANGUAGE:CXX>:VLLM_ASCEND_950_SOC_CONFIG=\"${VLLM_ASCEND_950_SOC_CONFIG}\">
 )
 target_link_options(intf_pub
         INTERFACE

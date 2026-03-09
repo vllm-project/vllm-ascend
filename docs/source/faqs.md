@@ -2,14 +2,14 @@
 
 ## Version Specific FAQs
 
-- [[v0.14.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6148)
+- [[v0.15.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6838)
 - [[v0.13.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6583)
 
 ## General FAQs
 
 ### 1. What devices are currently supported?
 
-Currently, **ONLY** Atlas A2 series (Ascend-cann-kernels-910b)，Atlas A3 series (Atlas-A3-cann-kernels) and Atlas 300I (Ascend-cann-kernels-310p) series are supported:
+Currently, **ONLY** Atlas A2 series (Ascend-cann-kernels-910b), Atlas A3 series (Atlas-A3-cann-kernels) and Atlas 300I (Ascend-cann-kernels-310p) series are supported:
 
 - Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
 - Atlas 800I A2 Inference series (Atlas 800I A2)
@@ -23,7 +23,7 @@ Below series are NOT supported yet:
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet
 - Ascend 910, Ascend 910 Pro B (Ascend-cann-kernels-910) unplanned yet
 
-From a technical view, vllm-ascend support would be possible if torch-npu is supported. Otherwise, we have to implement it by using custom ops. We also welcome you to join us to improve together.
+From a technical view, vllm-ascend supports devices if torch-npu is supported. Otherwise, we have to implement it by using custom ops. We also welcome you to join us to improve together.
 
 ### 2. How to get our docker containers?
 
@@ -108,7 +108,7 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 ### 8. Does vllm-ascend support Prefill Disaggregation feature?
 
-Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. Take [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html) for example.
+Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html) for example.
 
 ### 9. Does vllm-ascend support quantization method?
 
