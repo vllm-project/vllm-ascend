@@ -161,13 +161,19 @@ class AscendEagleProposer(EagleProposer):
             )
 
         indexer_layers = get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys()
-        draft_attn_layer = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
+        draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        draft_attn_layers = draft_attn_layers_dict.keys()
 
-        draft_attn_layer_names = draft_attn_layer - target_attn_layer_names
+        draft_attn_layer_names = draft_attn_layers - target_attn_layer_names
         draft_indexer_layer_names = indexer_layers - target_indexer_layer_names
         draft_attn_layer_names = draft_attn_layer_names - draft_indexer_layer_names
         assert len(draft_attn_layer_names) == 1
         self.attn_layer_names = list(sorted(draft_attn_layer_names))
+
+        self.kernel_block_size = (
+            draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
+        )
+
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
             self.piece_all_attn_layer_name.append([name for name in self.attn_layer_names])
@@ -978,7 +984,10 @@ class AscendEagleProposer(EagleProposer):
             slot_mapping = mtp_slot_mapping[slot_indices]
             common_attn_metadata.slot_mapping[: batch_size * self.pcp_size] = slot_mapping
         else:
-            block_size = attn_metadata_builder.kv_cache_spec.block_size
+            # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
+            # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
+            # which is not correct for computing `slot_mapping` below.
+            block_size = self.kernel_block_size
 
             # Compute the slot mapping.
             if self.uses_mrope:
