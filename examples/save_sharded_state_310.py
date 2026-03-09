@@ -59,7 +59,6 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 SUPPORTED_COMPRESS_QUANT_TYPE = ["W8A8S", "W16A16S"]
 DEFAULT_PATTERN = "model-rank-{rank}-part-{part}.safetensors"
 QUANTIZATION_UPDATE_MAP = {"W8A8S": "W8A8SC", "W16A16S": "W16A16SC"}
-QUANT_DESCRIPTION_FNAME = "quant_model_description.json"
 
 
 class FileHandler:
