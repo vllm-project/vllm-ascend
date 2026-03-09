@@ -134,22 +134,35 @@ def _unregister_print_streams_on_exit():
 atexit.register(_unregister_print_streams_on_exit)
 
 
-def maybe_trans_nz(weight: torch.Tensor):
+def _should_trans_nz(weight: torch.Tensor) -> bool:
+    # FP32 cannot use NZ.
+    if weight.dtype == torch.float32:
+        return False
+
+    # 310P always converts to NZ.
+    if is_310p():
+        return True
+
+    # NZ is disabled on non-310P.
     if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
-        # NZ is not enabled
+        return False
+
+    # BF16/FP16 convert only when enable_nz == 2.
+    if weight.dtype in {torch.bfloat16, torch.float16}:
+        return envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+
+    # Quantized or other supported dtypes convert by default.
+    return True
+
+
+# NZ conversion policy:
+# - 310P: always convert supported weights to FRACTAL_NZ
+# - non-310P: follow VLLM_ASCEND_ENABLE_NZ
+# - FP32: never convert
+def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+    if not _should_trans_nz(weight):
         return weight
-    if weight.dtype == torch.float:
-        # fp32 can not support NZ
-        return weight
-    elif weight.dtype in {torch.bfloat16, torch.float16}:
-        # bf16/fp16 will trans nz when VLLM_ASCEND_ENABLE_NZ is 2
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
-            return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
-        else:
-            return weight
-    else:
-        # quant weight will trans nz by default
-        return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
 def _round_up(x: int, align: int):
@@ -245,10 +258,19 @@ def enable_custom_op():
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
+    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
     global _CUSTOM_OP_ENABLED
 
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
+
+    # There are some customed operators which aren't implemented
+    # with batch invariant in vllm-ascend, we need to disable them.
+    if vllm_is_batch_invariant():
+        _CUSTOM_OP_ENABLED = False
+        return _CUSTOM_OP_ENABLED
+
     try:
         # isort: off
         # register custom ops into torch_library here
@@ -575,6 +597,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.conv import AscendConv2dLayer, AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -623,6 +646,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
+        "Conv2dLayer": AscendConv2dLayer,
+        "Conv3dLayer": AscendConv3dLayer,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
@@ -631,6 +656,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
         from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+        from vllm_ascend._310p.ops.vocab_parallel_embedding import (
+            AscendParallelLMHead310,
+            AscendVocabParallelEmbedding310,
+        )
 
         REGISTERED_ASCEND_OPS.update(
             {
@@ -640,6 +669,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
                 "FusedMoE": AscendFusedMoE310,
                 "SharedFusedMoE": AscendSharedFusedMoE310,
+                "ParallelLMHead": AscendParallelLMHead310,
+                "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
             }
         )
 
@@ -1110,8 +1141,22 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
+    # because the broadcast in layer sharding needs to be overlapped with a heavy compute stream to be
+    # effectively hidden, it is enabled only during the prefill stage.
     is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
     return is_prefill_instance
+
+
+@lru_cache(maxsize=1)
+def enable_dsa_cp_with_o_proj_tp() -> bool:
+    if not enable_dsa_cp():
+        return False
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    # if is PD mix stage, using original TP o_proj weight, and also need to
+    # full gather for o_proj weight for prefill stage.
+    return vllm_config.kv_transfer_config is None
 
 
 def check_gdn_layer(vllm_config) -> bool:
@@ -1127,7 +1172,16 @@ def check_gdn_layer(vllm_config) -> bool:
         return False
 
     hf_config = model_config.hf_config
-    if not hasattr(hf_config, "layer_types"):
-        return False
 
-    return "linear_attention" in hf_config.layer_types
+    # Use `or []` to prevent errors when layer_types is None
+    layer_types = getattr(hf_config, "layer_types", None) or []
+    if "linear_attention" in layer_types:
+        return True
+
+    text_config = getattr(hf_config, "text_config", None)
+    if text_config:
+        text_layer_types = getattr(text_config, "layer_types", None) or []
+        if "linear_attention" in text_layer_types:
+            return True
+
+    return False
