@@ -100,6 +100,7 @@ def test_qwen3_next_mtp_correctness_tp4(model_name: str,
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
+        "Who are you?",
     ]
 
     max_tokens = 20

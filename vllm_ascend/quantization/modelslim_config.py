@@ -64,12 +64,28 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "mm_projector.linear_1": "mm_projector.proj.0",
         "mm_projector.linear_2": "mm_projector.proj.2",
     },
-    "qwen3_omni_moe_thinker": {
-        "thinker.lm_head.": "language_model.lm_head.",
-        "thinker.model.": "language_model.model.",
-        "thinker.": "",
-        "lm_head.": "language_model.lm_head.",
-        "model.": "language_model.model.",
+    "qwen3_omni_moe": {
+        "language_model.lm_head.": "thinker.lm_head.",
+        "language_model.model.": "thinker.model.",
+        "visual.": "thinker.visual.",
+    },
+    "qwen2_5_omni": {
+        "language_model.lm_head.": "thinker.lm_head.",
+        "language_model.model.": "thinker.model.",
+        "visual.": "thinker.visual.",
+    },
+    "qwen2_5_omni_text": {
+        "language_model.": "thinker.",
+    },
+    "glm4v_moe": {
+        "visual.": "model.visual.",
+        "language_model.lm_head.": "lm_head.",
+        "language_model.model.": "model.language_model.",
+    },
+    "glm4v_moe_text": {
+        "visual.": "model.visual.",
+        "language_model.lm_head.": "lm_head.",
+        "language_model.model.": "model.language_model.",
     },
 }
 
@@ -180,6 +196,30 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     },
+    "glm4v_moe": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "glm4v_moe_text": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
     "longcat_flash": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
@@ -193,17 +233,43 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         ],
         "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
     },
-    "qwen3_omni_moe_text": {
+    "qwen3_omni_moe": {
         "qkv_proj": [
             "q_proj",
             "k_proj",
             "v_proj",
+        ],
+        "attn_qkv_proj": [
+            "attn_q_proj",
+            "attn_k_proj",
+            "attn_v_proj",
         ],
         "gate_up_proj": [
             "gate_proj",
             "up_proj",
         ],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "qwen2_5_omni": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "attn_qkv_proj": [
+            "attn_q_proj",
+            "attn_k_proj",
+            "attn_v_proj",
+        ],
+        "qkv": [
+            "q",
+            "k",
+            "v",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
     },
 }
 

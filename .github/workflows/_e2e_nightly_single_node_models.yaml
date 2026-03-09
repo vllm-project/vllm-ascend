@@ -40,6 +40,9 @@ on:
         required: false
         type: boolean
         default: false
+      is_run:
+        required: true
+        type: boolean
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -58,6 +61,7 @@ jobs:
   e2e-nightly:
     name: ${{inputs.model_list}} accuracy test
     runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.is_run }}
     container:
       image: "${{ inputs.image }}"
       env:
@@ -186,6 +190,7 @@ jobs:
           TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
         run: |
           mkdir -p ./benchmarks/accuracy
+          echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Received model_list: ${{ inputs.model_list }}"
           models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
           any_failure=0
