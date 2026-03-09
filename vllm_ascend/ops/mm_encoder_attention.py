@@ -96,6 +96,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None = None,
     ):
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)

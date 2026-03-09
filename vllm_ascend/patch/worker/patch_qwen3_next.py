@@ -18,7 +18,6 @@
 import torch
 from einops import rearrange
 from torch import nn
-from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -31,6 +30,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+from vllm_ascend.utils import enable_sp
 
 
 class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
@@ -45,30 +45,22 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         2. Core attention (custom op)
         3. Output projection
         """
-        num_tokens = hidden_states.size(0)
 
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
         projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
         projected_states_ba, _ = self.in_proj_ba(hidden_states)
-        forward_context = get_forward_context()
-        is_cuda_graph = forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
-        # triton grid should be less than 66536
-        divide_grid = projected_states_qkvz.shape[0] * triton.cdiv(self.num_k_heads, self.tp_size)
-        if self.num_v_heads // self.num_k_heads in [1, 2, 4] and is_cuda_graph and divide_grid < 65536:
-            mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
-                projected_states_qkvz,
-                projected_states_ba,
-                triton.cdiv(self.num_k_heads, self.tp_size),
-                triton.cdiv(self.num_v_heads, self.tp_size),
-                self.head_k_dim,
-                self.head_v_dim,
-            )
-        else:
-            query, key, value, z, b, a = self.fix_query_key_value_ordering(projected_states_qkvz, projected_states_ba)
-            query, key, value = map(lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value))
-            mixed_qkv = torch.cat((query, key, value), dim=-1)
+        num_tokens = projected_states_qkvz.size(0)
+
+        mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
+            projected_states_qkvz,
+            projected_states_ba,
+            triton.cdiv(self.num_k_heads, self.tp_size),
+            triton.cdiv(self.num_v_heads, self.tp_size),
+            self.head_k_dim,
+            self.head_v_dim,
+        )
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -135,9 +127,10 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
-        mixed_qkv = mixed_qkv[:num_actual_tokens]
-        b = b[:num_actual_tokens]
-        a = a[:num_actual_tokens]
+        if not enable_sp():
+            mixed_qkv = mixed_qkv[:num_actual_tokens]
+            b = b[:num_actual_tokens]
+            a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
@@ -301,11 +294,20 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
             )
             merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+            if not enable_sp():
+                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+            else:
+                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)[:num_actual_tokens]
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            if not enable_sp():
+                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            else:
+                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)[:num_actual_tokens]
         else:
-            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+            if not enable_sp():
+                core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+            else:
+                core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
 
 
 Qwen3NextGatedDeltaNet.forward = AscendQwen3Next_GatedDeltaNet.forward
