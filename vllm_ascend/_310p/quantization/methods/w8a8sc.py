@@ -20,8 +20,8 @@ from typing import Any
 
 import torch
 import torch_npu
-
 from vllm.distributed import get_tensor_model_parallel_rank
+
 from vllm_ascend.ops.linear import AscendRowParallelLinear
 from vllm_ascend.quantization.methods.base import AscendLinearScheme
 
@@ -44,21 +44,21 @@ class AscendW8A8SCLinearMethod310(AscendLinearScheme):
     ) -> dict[str, Any]:
         """
         Get the weight tensors for the W8A8SC quantization scheme.
-        
+
         Args:
             input_size: Size of the input dimension (k)
             output_size: Size of the output dimension (n)
             params_dtype: Data type for parameters, default is torch.float16
-            
+
         Returns:
             A dictionary containing:
-            - "weight": The compressed weight tensor with shape [c], where c is greater than 0 
+            - "weight": The compressed weight tensor with shape [c], where c is greater than 0
               and not larger than k * n
-            - "index": Compression index generated simultaneously with compressed weights, 
-              with shape [x], where x = k_index * n_index * 8, k_index = ceil(k1 / tilingK), 
+            - "index": Compression index generated simultaneously with compressed weights,
+              with shape [x], where x = k_index * n_index * 8, k_index = ceil(k1 / tilingK),
               n_index = ceil(n1 / tilingN), k1 = k / 32, n1 = n / 16
-            - "info": Compression information with length 5, containing compression block 
-              information tilingN, tilingK, original shape of the pre-compression x2 matrix, 
+            - "info": Compression information with length 5, containing compression block
+              information tilingN, tilingK, original shape of the pre-compression x2 matrix,
               and identifier for the compression block traversal direction
         """
         self.input_size = input_size
