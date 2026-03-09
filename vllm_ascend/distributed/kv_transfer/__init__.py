@@ -19,6 +19,13 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 
 def register_connector():
+    # override multi_connector as ascend_multi_connector
+    if "MultiConnector" in KVConnectorFactory._registry:
+        KVConnectorFactory._registry.pop("MultiConnector")
+    KVConnectorFactory.register_connector(
+        "MultiConnector", "vllm_ascend.distributed.kv_transfer.ascend_multi_connector", "AscendMultiConnector"
+    )
+
     KVConnectorFactory.register_connector(
         "MooncakeConnectorV1", "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector", "MooncakeConnector"
     )
