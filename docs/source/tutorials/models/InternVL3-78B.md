@@ -1,271 +1,334 @@
 # InternVL3-78B
 
-## 模型概述
+## Model Overview
 
-InternVL3-78B是OpenGVLab推出的大规模多模态语言模型，支持图像和文本输入。相比8B版本，78B模型具有更强的理解和推理能力。
+InternVL3-78B is a large-scale vision-language model from the InternVL series, designed for advanced multimodal understanding tasks. With 78 billion parameters, it offers superior performance in complex visual reasoning, detailed image analysis, and sophisticated multimodal dialogue compared to smaller variants.
 
-- **模型页面：** https://huggingface.co/OpenGVLab/InternVL3-78B
-- **架构：** InternVLChatModel
-- **支持硬件：** Atlas A2/A3系列（需要多卡）
-- **参数量：** 78B
+Key features:
+- 78B parameter vision-language model
+- Enhanced reasoning and understanding capabilities
+- Supports high-resolution image understanding
+- Requires multi-NPU deployment with tensor parallelism
+- Compatible with OpenAI API format
 
-## 快速开始
+This tutorial demonstrates how to deploy and use InternVL3-78B with vLLM-Ascend.
 
-### 基础用法
+## Supported Features
+
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+
+## Quick Start
+
+### Basic Usage
+
+Here's a simple example to get started with InternVL3-78B for offline inference:
 
 ```python
 from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
 
-# 初始化模型（需要多卡）
+# Initialize the model with tensor parallelism
 llm = LLM(
     model="OpenGVLab/InternVL3-78B",
     trust_remote_code=True,
-    max_model_len=40960,
-    tensor_parallel_size=4,  # 使用4张NPU
-    dtype="bfloat16",
+    max_model_len=8192,
+    tensor_parallel_size=4,  # Use 4 NPUs
+    limit_mm_per_prompt={"image": 1}
 )
 
-# 创建采样参数
+# Prepare sampling parameters
 sampling_params = SamplingParams(
     temperature=0.7,
-    top_p=0.9,
-    max_tokens=512,
+    max_tokens=512
 )
 
-# 运行多模态推理
-prompts = [
-    {
-        "prompt": "<image>\n这张图片里有什么？",
-        "multi_modal_data": {
-            "image": "path/to/image.jpg"
-        },
-    }
-]
+# Create a prompt with an image
+image = ImageAsset("cherry_blossom").pil_image
+prompt = "USER: <image>\nDescribe this image in detail.\nASSISTANT:"
 
-outputs = llm.generate(prompts, sampling_params=sampling_params)
-for output in outputs:
-    print(output.outputs[0].text)
+# Generate response
+outputs = llm.generate(
+    {
+        "prompt": prompt,
+        "multi_modal_data": {"image": image}
+    },
+    sampling_params=sampling_params
+)
+
+print(outputs[0].outputs[0].text)
 ```
 
-### OpenAI兼容服务器
+### OpenAI-Compatible Server
+
+Deploy InternVL3-78B as an OpenAI-compatible API server:
 
 ```bash
-# 使用enforce-eager模式（推荐）
-vllm serve OpenGVLab/InternVL3-78B \
-    --served-model-name InternVL3-78B \
+#!/bin/bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export MODEL_PATH="OpenGVLab/InternVL3-78B"
+
+vllm serve ${MODEL_PATH} \
     --host 0.0.0.0 \
     --port 8000 \
-    --tensor-parallel-size 4 \
-    --dtype bfloat16 \
-    --enforce-eager \
+    --served-model-name internvl3-78b \
     --trust-remote-code \
+    --tensor-parallel-size 4 \
     --max-model-len 8192 \
-    --max-num-seqs 2 \
-    --gpu-memory-utilization 0.85
+    --limit-mm-per-prompt '{"image": 1}' \
+    --enforce-eager
 ```
 
-### 测试脚本
+Then query the server using curl:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "internvl3-78b",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+                ]
+            }
+        ],
+        "max_tokens": 512
+    }'
+```
+
+Or use the OpenAI Python client:
 
 ```python
-#!/usr/bin/env python3
-import requests
-import json
+from openai import OpenAI
 
-API_URL = "http://localhost:8000/v1/chat/completions"
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="dummy"
+)
 
-def test_text():
-    """测试纯文本对话"""
-    payload = {
-        "model": "InternVL3-78B",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "请用一句话介绍InternVL3-78B模型的特点。"
-                    }
-                ]
-            }
-        ],
-        "temperature": 0.7,
-        "max_tokens": 256
-    }
+response = client.chat.completions.create(
+    model="internvl3-78b",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+            ]
+        }
+    ],
+    max_tokens=512
+)
 
-    response = requests.post(API_URL, json=payload)
-    result = response.json()
-
-    if "choices" in result:
-        print("✅ 文本对话成功！")
-        print(f"回复: {result['choices'][0]['message']['content']}")
-    else:
-        print("❌ 失败！")
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-def test_multimodal():
-    """测试多模态对话"""
-    payload = {
-        "model": "InternVL3-78B",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "请详细描述这张图片。"
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://raw.githubusercontent.com/open-mmlab/mmdeploy/main/tests/data/tiger.jpeg"
-                        }
-                    }
-                ]
-            }
-        ],
-        "temperature": 0.7,
-        "max_tokens": 512
-    }
-
-    response = requests.post(API_URL, json=payload)
-    result = response.json()
-
-    if "choices" in result:
-        print("✅ 多模态对话成功！")
-        print(f"回复: {result['choices'][0]['message']['content']}")
-    else:
-        print("❌ 失败！")
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-if __name__ == "__main__":
-    print("🚀 测试InternVL3-78B模型\n")
-    test_text()
-    print()
-    test_multimodal()
+print(response.choices[0].message.content)
 ```
 
-## 配置说明
+## Configuration
 
-### 关键参数
+### Key Parameters
 
-- `tensor_parallel_size`: 张量并行度，78B模型建议使用4-8张NPU
-- `max_model_len`: 最大序列长度（默认：40960，可根据内存调整）
-- `trust_remote_code`: 必须设置为True
-- `enforce_eager`: 推荐使用，避免CANN编译问题
-- `dtype`: 推荐使用bfloat16
+- `tensor_parallel_size`: Number of NPUs for tensor parallelism. For InternVL3-78B, recommended values are 4 or 8.
+- `max_model_len`: Maximum sequence length (default: 8192). Adjust based on your use case and available memory.
+- `limit_mm_per_prompt`: Limits the number of images per prompt. For InternVL3-78B, typically set to `{"image": 1}` for single-image tasks.
+- `trust_remote_code`: Required for InternVL models to load custom model code.
+- `enforce_eager`: Recommended to avoid CANN compilation issues with kernel_meta directory.
 
-### 硬件要求
+### Hardware Requirements
 
-- **最低配置：** 4x Atlas A2 NPU（每张32GB显存）
-- **推荐配置：** 8x Atlas A2 NPU（更好的性能和更长的序列支持）
-- **内存需求：** 模型权重约150GB，推理时需要额外内存
+**Multi-NPU Deployment (Required):**
+- Minimum: 4x Atlas 910B (32GB each) or 4x Atlas 800I A2 (64GB each)
+- Recommended: 8x Atlas 800I A2 (64GB each) for better performance and longer sequences
+- Total memory requirement: ~150GB for model weights plus inference overhead
 
-### 与InternVL3-8B的区别
+**Note:** InternVL3-78B cannot run on a single NPU due to its size. Multi-NPU deployment with tensor parallelism is mandatory.
 
-| 特性 | InternVL3-8B | InternVL3-78B |
-|------|--------------|---------------|
-| 参数量 | 8B | 78B |
-| NPU数量 | 1张 | 4-8张 |
-| 推理速度 | 快 | 较慢 |
-| 理解能力 | 良好 | 优秀 |
-| 推理能力 | 良好 | 优秀 |
-| 适用场景 | 通用任务 | 复杂任务 |
+### Environment Setup
 
-## 性能优化
-
-### 1. 批处理
+Before running InternVL3-78B, set up the environment:
 
 ```bash
-# 增加批处理大小以提高吞吐量
---max-num-seqs 4
+# Use ModelScope for faster model downloads (optional)
+export VLLM_USE_MODELSCOPE=True
+
+# Configure memory allocation to reduce fragmentation
+export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+
+# Specify visible NPU devices (for 4-NPU setup)
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+
+# Set kernel_meta directory to avoid permission issues
+export KERNEL_META_TEMP_DIR=~/kernel_meta
+mkdir -p ~/kernel_meta
 ```
 
-### 2. 序列长度
+## Performance Tips
+
+1. **Optimize Tensor Parallelism**: Use 4 or 8 NPUs depending on availability. More NPUs can improve throughput:
 
 ```bash
-# 根据实际需求调整，较短的序列可以节省内存
---max-model-len 4096  # 或 8192
+vllm serve OpenGVLab/InternVL3-78B \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --max-model-len 8192 \
+    --enforce-eager
 ```
 
-### 3. 内存利用率
+2. **Adjust Max Model Length**: Use the minimum `max_model_len` needed for your use case to save memory:
 
 ```bash
-# 根据NPU内存情况调整
---gpu-memory-utilization 0.85  # 或 0.9
+# For shorter contexts
+vllm serve OpenGVLab/InternVL3-78B \
+    --tensor-parallel-size 4 \
+    --max-model-len 4096 \
+    --trust-remote-code \
+    --enforce-eager
 ```
 
-### 4. 张量并行
+3. **Batch Size Tuning**: Start with smaller batch sizes (e.g., `--max-num-seqs 2`) and gradually increase:
 
 ```bash
-# 使用更多NPU可以提高性能
---tensor-parallel-size 8  # 如果有8张NPU
+vllm serve OpenGVLab/InternVL3-78B \
+    --tensor-parallel-size 4 \
+    --max-num-seqs 2 \
+    --trust-remote-code \
+    --enforce-eager
 ```
 
-## 已知限制
-
-1. **需要多卡：** 78B模型无法在单张NPU上运行
-2. **编译问题：** 建议使用`--enforce-eager`模式避免kernel_meta权限错误
-3. **内存需求：** 需要充足的NPU内存，建议使用32GB或更大显存的NPU
-4. **推理速度：** 相比8B版本，推理速度较慢
-
-## 故障排除
-
-### 内存不足（OOM）
-
-如果遇到OOM错误：
-- 减少`--max-model-len`（例如：8192 → 4096）
-- 减少`--max-num-seqs`（例如：4 → 2）
-- 增加`--tensor-parallel-size`（使用更多NPU）
-- 降低`--gpu-memory-utilization`（例如：0.85 → 0.75）
-
-### kernel_meta权限错误
+4. **Memory Utilization**: Adjust GPU memory utilization based on available memory:
 
 ```bash
-# 使用enforce-eager模式
+vllm serve OpenGVLab/InternVL3-78B \
+    --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.85 \
+    --trust-remote-code \
+    --enforce-eager
+```
+
+5. **Image Preprocessing**: Ensure images are appropriately sized. Very large images may impact performance.
+
+## Known Limitations
+
+- **Multi-NPU Required**: Cannot run on a single NPU due to model size.
+- **Compilation Issues**: May encounter kernel_meta permission errors. Use `--enforce-eager` to bypass.
+- **Image Count**: Currently optimized for single-image inputs. Multi-image support may require additional configuration.
+- **Context Length**: Very long contexts (>16K tokens) may require careful memory management across NPUs.
+- **Inference Speed**: Slower than smaller models (InternVL3-8B) due to increased parameter count.
+
+## Troubleshooting
+
+### Out of Memory Errors
+
+If you encounter OOM errors:
+
+1. Reduce `max_model_len`:
+```bash
+vllm serve OpenGVLab/InternVL3-78B \
+    --tensor-parallel-size 4 \
+    --max-model-len 4096 \
+    --trust-remote-code \
+    --enforce-eager
+```
+
+2. Reduce batch size:
+```bash
+vllm serve OpenGVLab/InternVL3-78B \
+    --tensor-parallel-size 4 \
+    --max-num-seqs 2 \
+    --trust-remote-code \
+    --enforce-eager
+```
+
+3. Increase tensor parallelism (use more NPUs):
+```bash
+vllm serve OpenGVLab/InternVL3-78B \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --enforce-eager
+```
+
+4. Set memory allocation configuration:
+```bash
+export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:128
+```
+
+### kernel_meta Permission Errors
+
+If you encounter permission errors related to kernel_meta directory:
+
+1. Set the kernel_meta directory and use enforce-eager mode:
+```bash
 export KERNEL_META_TEMP_DIR=~/kernel_meta
 mkdir -p ~/kernel_meta
 
 vllm serve OpenGVLab/InternVL3-78B \
-    --enforce-eager \
-    --trust-remote-code \
     --tensor-parallel-size 4 \
-    --dtype bfloat16 \
+    --trust-remote-code \
+    --enforce-eager \
     --max-model-len 4096 \
     --gpu-memory-utilization 0.75
 ```
 
-### 模型加载失败
+### Slow Image Processing
 
-确保：
-- 已安装最新版本的vLLM-Ascend
-- 设置了`trust_remote_code=True`参数
-- 有足够的磁盘空间存储模型权重（约150GB）
-- NPU驱动和CANN版本兼容
+If image processing is slow:
 
-### 多卡通信问题
+1. Ensure images are reasonably sized (e.g., max 1024x1024)
+2. Use batch processing when possible
+3. Check NPU utilization with `npu-smi info`
+4. Verify all NPUs are being utilized in tensor parallel mode
 
+### Model Loading Issues
+
+If the model fails to load:
+
+1. Verify `trust_remote_code=True` is set
+2. Check model weights are correctly downloaded
+3. Ensure sufficient disk space in cache directory (`~/.cache/huggingface/`) - approximately 150GB needed
+4. Verify all NPUs are visible: `npu-smi info`
+
+### Multi-NPU Communication Issues
+
+If you encounter issues with multi-NPU communication:
+
+1. Verify all NPUs are available:
 ```bash
-# 检查NPU状态
 npu-smi info
+```
 
-# 确保所有NPU可用
+2. Check HCCL (Huawei Collective Communication Library) configuration:
+```bash
+export HCCL_OP_EXPANSION_MODE=AIV
+```
+
+3. Ensure NPU devices are properly specified:
+```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 ```
 
-## 性能基准
+### Connection Errors
 
-基于Atlas A2 NPU的性能参考（4卡配置）：
+If you cannot connect to the server:
 
-- **首token延迟：** ~2-3秒
-- **生成速度：** ~10-15 tokens/秒
-- **最大批处理：** 2-4个并发请求
-- **最大序列长度：** 8192 tokens（取决于内存）
+1. Verify the server is running: `curl http://localhost:8000/health`
+2. Check firewall settings
+3. Ensure the correct host and port are specified
+4. Check server logs for startup errors
 
-*注：实际性能取决于硬件配置、序列长度和批处理大小*
+## Performance Comparison
 
-## 参考资料
+| Model | Parameters | NPUs Required | Inference Speed | Use Case |
+|-------|-----------|---------------|-----------------|----------|
+| InternVL3-8B | 8B | 1 | Fast | General tasks |
+| InternVL3-78B | 78B | 4-8 | Slower | Complex reasoning |
 
-- [InternVL3-78B模型卡](https://huggingface.co/OpenGVLab/InternVL3-78B)
-- [InternVL GitHub](https://github.com/OpenGVLab/InternVL)
-- [InternVL3-8B教程](./InternVL3-8B.md)
-- [Issue #1362](https://github.com/vllm-project/vllm-ascend/issues/1362)
+## References
+
+- [InternVL GitHub Repository](https://github.com/OpenGVLab/InternVL)
+- [InternVL3-78B Model Card](https://huggingface.co/OpenGVLab/InternVL3-78B)
+- [InternVL3-8B Tutorial](./InternVL3-8B.md)
+- [vLLM Documentation](https://docs.vllm.ai/)
+- [vLLM-Ascend User Guide](../../user_guide/index.md)
