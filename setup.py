@@ -133,6 +133,41 @@ else:
         logging.warning(f"env SOC_VERSION: {envs.SOC_VERSION} is not equal to soc_version from npu-smi: {soc_version}")
 
 
+SOC_TO_DEVICE = {
+    "910b": "A2",
+    "910c": "A3",
+    "310p": "_310P",
+    "ascend910b1": "A2",
+    "ascend910b2": "A2",
+    "ascend910b2c": "A2",
+    "ascend910b3": "A2",
+    "ascend910b4": "A2",
+    "ascend910b4-1": "A2",
+    "ascend910_9391": "A3",
+    "ascend910_9381": "A3",
+    "ascend910_9372": "A3",
+    "ascend910_9392": "A3",
+    "ascend910_9382": "A3",
+    "ascend910_9362": "A3",
+    "ascend310p1": "_310P",
+    "ascend310p3": "_310P",
+    "ascend310p5": "_310P",
+    "ascend310p7": "_310P",
+    "ascend310p3vir01": "_310P",
+    "ascend310p3vir02": "_310P",
+    "ascend310p3vir04": "_310P",
+    "ascend310p3vir08": "_310P",
+    "ascend910_9579": "A5",
+}
+
+DEVICE_TO_PACKAGE_NAME = {
+    "A2": "vllm_ascend",
+    "A3": "vllm_ascend_a3",
+    "_310P": "vllm_ascend_310p",
+    "A5": "vllm_ascend_a5",
+}
+
+
 def gen_build_info():
     soc_version = envs.SOC_VERSION
 
@@ -487,8 +522,11 @@ cmdclass = {
     "install": custom_install,
 }
 
+_device_type = SOC_TO_DEVICE.get(envs.SOC_VERSION, "A2")
+PACKAGE_NAME = DEVICE_TO_PACKAGE_NAME.get(_device_type, "vllm_ascend")
+
 setup(
-    name="vllm_ascend",
+    name=PACKAGE_NAME,
     # Follow:
     # https://packaging.python.org/en/latest/specifications/version-specifiers
     version=VERSION,
