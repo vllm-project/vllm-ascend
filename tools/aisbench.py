@@ -103,7 +103,7 @@ class AisbenchRunner:
     def _init_dataset_conf(self):
         if self.task_type == "accuracy":
             dataset_name = os.path.basename(self.dataset_path)
-            dataset_rename = self.DATASET_RENAME.get(dataset_name, "")
+            dataset_rename = self.DATASET_RENAME.get(dataset_name, dataset_name)
             dst_dir = os.path.join(DATASET_DIR, dataset_rename)
             command = ["cp", "-r", self.dataset_path, dst_dir]
             subprocess.call(command)
@@ -226,15 +226,25 @@ class AisbenchRunner:
 def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="localhost"):
     aisbench_results = []
     aisbench_errors = []
+    total = sum(1 for c in aisbench_cases if c)
+    idx = 0
     for aisbench_case in aisbench_cases:
         if not aisbench_case:
             continue
+        idx += 1
+        case_name = aisbench_case.get("case_name", "unknown")
+        case_type = aisbench_case.get("case_type", "unknown")
+        logging.info("=" * 60)
+        logging.info("[%d/%d] Starting benchmark: %s (type=%s)", idx, total, case_name, case_type)
+        logging.info("=" * 60)
         try:
             with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
                 aisbench_results.append(aisbench.result)
+            logging.info("[%d/%d] Finished benchmark: %s", idx, total, case_name)
         except Exception as e:
             aisbench_results.append("")
             aisbench_errors.append([aisbench_case, e])
+            logging.error("[%d/%d] Benchmark failed: %s, reason: %s", idx, total, case_name, e)
             print(e)
     for failed_case, error_info in aisbench_errors:
         error_msg = f"The following aisbench case failed: {failed_case}, reason is {error_info}"
