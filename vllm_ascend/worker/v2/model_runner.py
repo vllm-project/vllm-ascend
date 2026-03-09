@@ -264,7 +264,7 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np[num_reqs + 1 :] = num_tokens
 
         # This is only required for vllm-ascend.
-        query_start_loc_np = self._pad_query_start_loc_for_fia(
+        query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
             num_tokens_padded=num_tokens_after_padding,
             num_tokens=num_tokens,
             num_reqs=num_reqs,
@@ -334,7 +334,7 @@ class NPUModelRunner(GPUModelRunner):
         # method like this.
         attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
-            num_reqs=num_reqs,
+            num_reqs=num_reqs_padded,
             num_tokens=num_tokens,
             query_start_loc_gpu=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -446,7 +446,7 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs: int,
         query_start_loc_np: np.ndarray,
         max_query_len: int,
-    ) -> int:
+    ) -> tuple[np.ndarray, int]:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
@@ -454,7 +454,7 @@ class NPUModelRunner(GPUModelRunner):
         _num_tokens_after_padding, _num_tokens_across_dp, synced_cudagraph_mode = self.cudagraph_and_dp_padding
         cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
         if cudagraph_runtime_mode != CUDAGraphMode.FULL:
-            return query_start_loc_np
+            return query_start_loc_np, num_reqs
         uniform_decode_query_len = self.cudagraph_manager.uniform_decode_query_len
         is_uniform_decode = self.cudagraph_manager.is_uniform_decode(
             num_reqs=num_reqs,
@@ -463,7 +463,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         if is_uniform_decode:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
-            num_reqs_padded = num_tokens_padded / uniform_decode_query_len
+            num_reqs_padded = num_tokens_padded // uniform_decode_query_len
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
@@ -477,4 +477,4 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
-        return query_start_loc_np
+        return query_start_loc_np, num_reqs_padded
