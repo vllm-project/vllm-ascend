@@ -23,6 +23,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 
 import vllm_ascend.envs as envs_ascend
 
@@ -63,6 +64,11 @@ def init_eplb_config(ascend_config, layer_id, moe_config):
     global_placement = None
     eplb_enable = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
     n_redundant = ascend_config.init_redundancy_expert if eplb_enable else 0
+
+    if ep_size == 1:
+        assert not eplb_enable, "EPLB must used in expert parallelism."
+        return None, None, None, n_redundant
+
     if expert_map_path:
         if not (os.path.exists(expert_map_path)
                 and os.access(expert_map_path, os.R_OK)):
@@ -77,13 +83,15 @@ def init_eplb_config(ascend_config, layer_id, moe_config):
                     "Eplb supports only w8a8_dynamic quantization.")
         else:
             eplb_enable = False
+    elif not eplb_enable:
+        _, expert_map, _ = determine_expert_map(ep_size, moe_config.ep_rank,
+                                                n_experts)
+        return None, expert_map, None, 0
 
     if global_placement is None:
         global_placement = generate_global_placement(n_experts, ep_size,
                                                      n_redundant)
 
-    if ep_size == 1:
-        return None, None, None, n_redundant
     global_expert_map = []
     for rankid in range(ep_size):
         expert_map = torch.full((n_experts, ), -1, dtype=torch.int32)
