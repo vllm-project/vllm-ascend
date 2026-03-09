@@ -2533,7 +2533,9 @@ class NPUModelRunner(GPUModelRunner):
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                if ("linear_attn" in layer_name or self.hybrid_with_attn_and_mamba) and layer_name not in kv_cache_raw_tensors:
+                if (
+                    "linear_attn" in layer_name or self.hybrid_with_attn_and_mamba
+                ) and layer_name not in kv_cache_raw_tensors:
                     # for mamba linear attention or attn-linear hybrid
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
@@ -2695,7 +2697,7 @@ class NPUModelRunner(GPUModelRunner):
                             conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
                             raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
                             raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
-                            raw_v_tensor = raw_kv_tensor[attn_tensor_page_size : attn_tensor_page_size * 2]
+                            raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
                     else:
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                             num_blocks, kv_cache_spec.block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
