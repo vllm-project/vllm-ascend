@@ -2,13 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-import vllm
-import vllm.config
-from vllm.lora.request import LoRARequest
-from unittest.mock import patch
-
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.singlecard.test_llama32_lora import PROMPT_TEMPLATE, EXPECTED_LORA_OUTPUT, EXPECTED_BASE_MODEL_OUTPUT, do_sample, generate_and_test
+from tests.e2e.singlecard.test_llama32_lora import (
+    generate_and_test
+)
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
