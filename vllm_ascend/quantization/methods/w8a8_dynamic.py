@@ -239,7 +239,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             w1 = [layer.w13_weight]
             w1_scale = [layer.w13_weight_scale_fp32]
             w2 = [layer.w2_weight]
-            w2_scale = [layer.w2_weight_scale]
+            w2_scale = [layer.w2_weight_scale_fp32]
 
         fused_scale_flag = (
             get_forward_context().moe_comm_type == MoECommType.FUSED_MC2
@@ -275,6 +275,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
+        layer.w2_weight_scale_fp32 = layer.w2_weight_scale.data.to(torch.float32)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
         layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
@@ -286,12 +287,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w13_weight_scale_fp32_list = [
                 weight.clone() for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
             ]
-            layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
+            layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale_fp32.data.unbind(dim=0)]
             del layer.w13_weight
             del layer.w2_weight
             del layer.w13_weight_scale
             del layer.w13_weight_scale_fp32
             del layer.w2_weight_scale
+            del layer.w2_weight_scale_fp32
             torch.npu.empty_cache()
 
 

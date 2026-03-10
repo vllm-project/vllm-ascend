@@ -98,15 +98,11 @@ def quant_apply_mlp(
         quantized_hidden_states = hidden_states
 
     bias1, bias2 = None, None
-    # _output_dtype must be captured before any scale normalization so that the
-    # original model dtype (e.g. float16) is preserved as the output dtype.
-    _output_dtype = w2_scale[0].dtype
-    # NPU per-token quant requires all weight scales to be float32 when output
-    # dtype is float16. QuaRot models store scales as float16, so normalize
-    # here once to cover all gmm call sites in this function.
-    if _output_dtype == torch.float16:
-        w1_scale = [s.to(torch.float32) for s in w1_scale]
-        w2_scale = [s.to(torch.float32) for s in w2_scale]
+    # w1_scale and w2_scale are pre-converted to float32 in
+    # process_weights_after_loading (w13_weight_scale_fp32 / w2_weight_scale_fp32),
+    # so they are always float32 here. Capture output dtype from w2_scale to
+    # determine the model's activation dtype for npu_grouped_matmul output_dtype.
+    _output_dtype = hidden_states.dtype
 
     weight_prefetch_method = get_weight_prefetch_method()
     weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
