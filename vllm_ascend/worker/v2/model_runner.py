@@ -301,7 +301,7 @@ class NPUModelRunner(GPUModelRunner):
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
 
         # Pad for full CUDA graph mode.
-        self.seq_lens_np[num_reqs_padded:] = 0
+        self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
 
         # Prepare M-RoPE positions.
         if self.uses_mrope:

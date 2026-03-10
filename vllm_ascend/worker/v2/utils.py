@@ -31,7 +31,7 @@ def block_table_wrapper():
     try:
         # vllm-ascend need to initialize slot mapping as torch.int32 dtype,
         # but vllm default is torch.int64 dtype.
-        vllm.v1.worker.gpu.block_table.BlockTables = AscendBlockTables
+        vllm.v1.worker.gpu.model_runner.BlockTables = AscendBlockTables
         yield
     finally:
         pass
