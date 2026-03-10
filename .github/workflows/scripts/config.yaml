@@ -54,7 +54,7 @@ e2e-singlecard:
   - name: tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
     estimated_time: 1500
   - name: tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
-    estimated_time: 1800
+    estimated_time: 600
   - name: tests/e2e/singlecard/model_runner_v2/test_basic.py
     estimated_time: 80
     is_skipped: true
@@ -101,6 +101,8 @@ e2e-multicard-2-cards:
     estimated_time: 60
   - name: tests/e2e/multicard/2-cards/test_llama32_lora_tp2.py
     estimated_time: 223
+  - name: tests/e2e/multicard/2-cards/spec_decode/test_quarot_eagle.py
+    estimated_time: 600
   # Run the test in a separate step to avoid oom
   - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
     estimated_time: 100
