@@ -27,6 +27,7 @@ MODELS = [
 SHARED_STORAGE_PATH = "/dev/shm/epd/storage"
 TENSOR_PARALLELS = [1]
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
@@ -36,36 +37,61 @@ async def test_models(model: str, tp_size: int) -> None:
     vllm_server_args = [
         [
             "--port",
-            str(encode_port), "--model", model, "--gpu-memory-utilization",
-            "0.01", "--tensor-parallel-size",
-            str(tp_size), "--enforce-eager", "--no-enable-prefix-caching",
-            "--max-model-len", "10000", "--max-num-batched-tokens", "10000",
-            "--max-num-seqs", "1", "--ec-transfer-config",
-            '{"ec_connector_extra_config":{"shared_storage_path":"' +
-            SHARED_STORAGE_PATH +
-            '"},"ec_connector":"ECExampleConnector","ec_role": "ec_producer"}'
+            str(encode_port),
+            "--model",
+            model,
+            "--gpu-memory-utilization",
+            "0.01",
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--enforce-eager",
+            "--no-enable-prefix-caching",
+            "--max-model-len",
+            "10000",
+            "--max-num-batched-tokens",
+            "10000",
+            "--max-num-seqs",
+            "1",
+            "--ec-transfer-config",
+            '{"ec_connector_extra_config":{"shared_storage_path":"'
+            + SHARED_STORAGE_PATH
+            + '"},"ec_connector":"ECExampleConnector","ec_role": "ec_producer"}',
         ],
         [
             "--port",
-            str(pd_port), "--model", model, "--gpu-memory-utilization", "0.95",
+            str(pd_port),
+            "--model",
+            model,
+            "--gpu-memory-utilization",
+            "0.95",
             "--tensor-parallel-size",
-            str(tp_size), "--enforce-eager", "--max-model-len", "10000",
-            "--max-num-batched-tokens", "10000", "--max-num-seqs", "128",
+            str(tp_size),
+            "--enforce-eager",
+            "--max-model-len",
+            "10000",
+            "--max-num-batched-tokens",
+            "10000",
+            "--max-num-seqs",
+            "128",
             "--ec-transfer-config",
-            '{"ec_connector_extra_config":{"shared_storage_path":"' +
-            SHARED_STORAGE_PATH +
-            '"},"ec_connector":"ECExampleConnector","ec_role": "ec_consumer"}'
-        ]
+            '{"ec_connector_extra_config":{"shared_storage_path":"'
+            + SHARED_STORAGE_PATH
+            + '"},"ec_connector":"ECExampleConnector","ec_role": "ec_consumer"}',
+        ],
     ]
     proxy_port = get_open_port()
     proxy_args = [
-        "--host", "127.0.0.1", "--port",
-        str(proxy_port), "--encode-servers-urls",
-        f"http://localhost:{encode_port}", "--decode-servers-urls",
-        f"http://localhost:{pd_port}", "--prefill-servers-urls", "disable"
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(proxy_port),
+        "--encode-servers-urls",
+        f"http://localhost:{encode_port}",
+        "--decode-servers-urls",
+        f"http://localhost:{pd_port}",
+        "--prefill-servers-urls",
+        "disable",
     ]
 
-    with RemoteEPDServer(vllm_serve_args=vllm_server_args) as _:
-        with DisaggEpdProxy(proxy_args=proxy_args) as proxy:
-            send_image_request(model, proxy)
-
+    with RemoteEPDServer(vllm_serve_args=vllm_server_args) as _, DisaggEpdProxy(proxy_args=proxy_args) as proxy:
+        send_image_request(model, proxy)
