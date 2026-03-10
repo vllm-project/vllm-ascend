@@ -19,6 +19,7 @@ import os
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_fusion_matcher_compat_ops  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
+import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
