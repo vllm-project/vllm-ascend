@@ -11,7 +11,7 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 
 ### Features
 
-- [Experimental support] Support FabricMem Mode for ADXL/HIXL interconnect. [#6806](https://github.com/vllm-project/vllm-ascend/pull/6806)
+- [Experimental] Support FabricMem Mode for ADXL/HIXL interconnect. [#6806](https://github.com/vllm-project/vllm-ascend/pull/6806)
 - Qwen3-Next now supports FlashComm1. [#6830](https://github.com/vllm-project/vllm-ascend/pull/6830)
 - NPUWorker Profiler now supports profile_prefix for better profiling experience. [#6968](https://github.com/vllm-project/vllm-ascend/pull/6968)
 - EPLB profiling now displays expert hotness comparison and time required for eplb adjustment. [#6877](https://github.com/vllm-project/vllm-ascend/pull/6877) [#7001](https://github.com/vllm-project/vllm-ascend/pull/7001)]
@@ -33,11 +33,11 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 - Implement global CPU slicing and improve IRQ binding for Ascend NPUs, ensuring non-overlapping CPU partitions and better resource management. [#6945](https://github.com/vllm-project/vllm-ascend/pull/6945)
 - Optimize MTP execution by reordering state update operation. [#6844](https://github.com/vllm-project/vllm-ascend/pull/6844)
 - Avoid CPU sync in mrope_positions copy by using full tensor copy. [#7014](https://github.com/vllm-project/vllm-ascend/pull/7014)
-- Cancel H2D synchronization for expert_map in MoE models. [#7000](https://github.com/vllm-project/vllm-ascend/pull/7000)
+- Remove H2D synchronization for expert_map in MoE models. [#7000](https://github.com/vllm-project/vllm-ascend/pull/7000)
 
 ### Dependencies
 
-- CANN is upgraded to 8.5.1. [#6897](https://github.com/vllm-project/vllm-ascend/pull/6897)
+- CANN is upgraded to 8.5.1, please remember to upgrade by hand if you're not using the official image. [#6897](https://github.com/vllm-project/vllm-ascend/pull/6897)
 
 ### Deprecation & Breaking Changes
 
@@ -87,9 +87,9 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 
 ### Known Issue
 
-- Currently, DeepSeek v3.2’s PCP & DCP do not yet support the FlashComm1 feature, which may cause serve errors or other unknown errors.
-- In 4-node A3 PD disaggregation deployment with DeepSeek V3.2, the P-Node may hang when benchmarking at high concurrency (e.g., 2K/2K tokens with 512 concurrent requests).
-- MTP with large EP configurations may cause graph capture buffer overflow. Workaround: explicitly set `--compilation-config '{"max_cudagraph_capture_size": N}'` where `N = max_concurrency × (1 + num_speculative_tokens)`.
+- Currently, for DeepSeek v3.2, PCP & DCP do not yet work with FlashComm1 feature, which may cause serve errors or other unknown errors.
+- In 4-node A3 PD disaggregation deployment with DeepSeek V3.2, the P-Node may hang when benchmarking in high concurrency scenario, e.g., 2K/2K tokens with 512 concurrent requests.
+- MTP with large EP configurations may cause graph capture buffer overflow. This is a bug need to fix in vLLM, now there is a workaround to avoid it: explicitly set `--compilation-config '{"max_cudagraph_capture_size": N}'` where `N = max_concurrency × (1 + num_speculative_tokens)`.
 
 ## v0.15.0rc1 - 2026.02.27
 
