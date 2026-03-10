@@ -42,7 +42,7 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 ### Deprecation & Breaking Changes
 
 - `enable_flash_comm_v1` config option has been renamed back to `enable_sp`. [#6883](https://github.com/vllm-project/vllm-ascend/pull/6883)
-- Reverted auto-detect quantization format from model files feature. [#6873](https://github.com/vllm-project/vllm-ascend/pull/6873)
+- The auto-detect quantization format from model files is reverted, in v0.16.0rc1, we still need to add `---quantization ascend` to serve a model quantinized by modelslim. It will be added back in the next version after the bug with the remote model id is fixed. [#6873](https://github.com/vllm-project/vllm-ascend/pull/6873)
 
 ### Documentation
 
