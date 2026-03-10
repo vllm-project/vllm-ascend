@@ -21,12 +21,11 @@ from typing import Any
 
 import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm.v1.worker.gpu.model_states.default import DefaultModelState
-
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 
 class AscendModelState(DefaultModelState):

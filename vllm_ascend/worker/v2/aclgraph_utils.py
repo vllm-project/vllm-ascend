@@ -173,7 +173,6 @@ class AclGraphManager(CudaGraphManager):
         if num_tokens_padded == num_reqs_padded * self.uniform_decode_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
-
             last_loc = self.query_start_loc.np[num_reqs]
             self.model_runner.input_buffers.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
                 np.arange(1, num_reqs_padded + 1 - num_reqs, dtype=np.int32) * self.uniform_decode_query_len + last_loc
@@ -181,13 +180,10 @@ class AclGraphManager(CudaGraphManager):
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
             assert num_reqs == num_reqs_padded
-
             # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
             self.query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
-
         self.query_start_loc.copy_to_gpu()
-
         return num_reqs_padded
 
 

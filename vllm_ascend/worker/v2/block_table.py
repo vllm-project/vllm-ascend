@@ -44,11 +44,9 @@ class AscendBlockTables(BlockTables):
             cp_rank,
             cp_interleave,
         )
-
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.slot_mappings
-
         # vllm-ascend' reshape_and_cache function requires slot_mappings to be int32.
         # so we need to redefine slot_mappings to be int32.
         self.slot_mappings = torch.zeros(

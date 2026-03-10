@@ -26,7 +26,9 @@ import vllm
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
+from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -35,9 +37,9 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_prefill_inputs,
 )
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.sequence import IntermediateTensors
-from vllm.v1.outputs import ModelRunnerOutput
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -45,13 +47,7 @@ from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import set_weight_prefetch_method
-from vllm_ascend.worker.v2.utils import (
-    block_table_wrapper,
-    model_states_wrapper,
-    torch_cuda_wrapper,
-)
+from vllm_ascend.worker.v2.utils import block_table_wrapper, model_states_wrapper, torch_cuda_wrapper
 
 
 class NPUModelRunner(GPUModelRunner):

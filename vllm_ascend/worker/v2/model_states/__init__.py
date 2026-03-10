@@ -19,7 +19,6 @@
 
 import torch
 import torch.nn as nn
-
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
