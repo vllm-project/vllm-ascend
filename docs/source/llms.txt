@@ -1,0 +1,53 @@
+# vLLM Ascend Plugin
+> vLLM Ascend is a community-maintained hardware plugin for running vLLM on Huawei Ascend NPUs.
+
+Each section links to canonical HTML pages. If a public Markdown twin is available and reachable, it may be used. (e.g., latest/installation.html --> latest/_sources/installation.md).
+
+Official repository: https://github.com/vllm-project/vllm-ascend
+Documentation: https://docs.vllm.ai/projects/ascend/en/latest/index.html
+
+## Getting Started
+- [Installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html): environment preparation and installation methods.
+- [Quick Start](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html): first successful serve and inference flow.
+- [Model Tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/index.html): model-specific guides.
+- [Feature Tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/index.html): feature-focused walkthroughs.
+- [Hardware Tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/hardwares/index.html): hardware-specific setup and usage.
+- [FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html): common issues and troubleshooting.
+
+## Requirements
+- Hardware: Atlas 800I A2 Inference, Atlas A2 Training, Atlas 800I A3 Inference, Atlas A3 Training, Atlas 300I Duo (Experimental).
+- For software and version requirements, follow the official Installation and Release Notes pages.
+
+## Features and Models
+- [Supported Models Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html): source of truth for support status (`✅`/`🔵`/`❌`), hardware scope, and feature coverage.
+- [Supported Features Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html): feature availability per hardware and model type.
+
+## Features and Configuration
+- [Additional Configuration](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/configuration/additional_config.html): Ascend-specific knobs and runtime options.
+- [Quantization Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html): supported quantization flows and usage.
+- [Graph Mode Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html): graph execution modes and constraints.
+- [Feature Guide Index](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/index.html): all feature guides.
+- [Deployment Guide Index](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/deployment_guide/index.html): deployment patterns and operations.
+- [Performance Benchmark Guide](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/performance_and_debug/performance_benchmark.html): benchmarking methodology and commands.
+
+## Release and Versioning
+- [Release Notes](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/release_notes.html): user-facing changes by version.
+- [Versioning Policy](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html): branch and release policy.
+
+## Developer Guide
+- [Contribution Guide](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html): setup and contribution workflow.
+- [Developer Feature Guide](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/feature_guide/index.html): developer-side feature docs.
+- [Evaluation Guide](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/index.html): evaluation workflow.
+- [Performance and Debug Index](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/performance_and_debug/index.html): profiling and debugging docs.
+
+## Community and Support
+- [GitHub Issues](https://github.com/vllm-project/vllm-ascend/issues): bug reports and feature requests.
+- [vLLM Discuss Forum (Ascend)](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support): usage Q&A.
+- [Slack `#SIG-Ascend`](https://slack.vllm.ai): community channel.
+- [Weekly Meeting](https://tinyurl.com/vllm-ascend-meeting): Wednesday 15:00-16:00 (UTC+8).
+- [Governance](https://docs.vllm.ai/projects/ascend/en/latest/community/governance.html): project governance.
+- [Contributors](https://docs.vllm.ai/projects/ascend/en/latest/community/contributors.html): contributor roster and acknowledgements.
+- [User Stories](https://docs.vllm.ai/projects/ascend/en/latest/community/user_stories/index.html): community usage cases.
+
+## License
+- [Apache License 2.0](https://github.com/vllm-project/vllm-ascend/blob/main/LICENSE)

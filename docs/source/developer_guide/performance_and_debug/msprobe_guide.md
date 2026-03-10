@@ -55,21 +55,20 @@ To restrict the operators that are captured, configure the `list` block:
 
   ```json
   "scope": ["Module.conv1.Conv2d.forward.0", "Module.fc2.Linear.forward.0"]
-  "scope": ["Cell.conv1.Conv2d.forward.0", "Cell.fc2.Dense.backward.0"]
+  "scope": ["Cell.conv1.Conv2d.forward.0", "Cell.fc2.Dense.forward.0"]
   "scope": ["Tensor.add.0.forward", "Functional.square.2.forward"]
   ```
 
   The `level` setting determines what can be provided—modules when `level=L0`, APIs when `level=L1`, and either modules or APIs when `level=mix`.
 
 - `list` (list[str]): Custom operator list. Options include:
-    - Supply the full names of specific APIs in PyTorch pynative scenarios to only dump those APIs. Example: `"list": ["Tensor.permute.1.forward", "Tensor.transpose.2.forward", "Torch.relu.3.backward"]`.
+    - Supply the full names of specific APIs in PyTorch pynative scenarios to only dump those APIs. Example: `"list": ["Tensor.permute.1.forward", "Tensor.transpose.2.forward", "Torch.relu.3.forward"]`.
     - When `level=mix`, you can provide module names so that the dump expands to everything produced while the module is running. Example: `"list": ["Module.module.language_model.encoder.layers.0.mlp.ParallelMlp.forward.0"]`.
     - Provide a substring such as `"list": ["relu"]` to dump every API whose name contains the substring. When `level=mix`, modules whose names contain the substring are also expanded.
 
 Example configuration:
 
-```bash
-cat <<'JSON' > /data/msprobe_config.json
+```json
 {
   "task": "statistics",
   "dump_path": "/home/data_dump",
@@ -86,10 +85,9 @@ cat <<'JSON' > /data/msprobe_config.json
     "summary_mode": "statistics"
   }
 }
-JSON
 ```
 
-## 2. Enable `msprobe` in vllm-ascend
+## 3. Enable `msprobe` in vllm-ascend
 
 1. Start vLLM in eager mode by adding `--enforce-eager` (static-graph scenarios are not supported yet) and pass the config path through `--additional-config`:
 
@@ -102,7 +100,7 @@ JSON
      --additional-config '{"dump_config_path": "/data/msprobe_config.json"}' &
    ```
 
-## 3. Send requests and collect dumps
+## 4. Send requests and collect dumps
 
 1. Send inference requests as usual, for example:
 
@@ -117,7 +115,7 @@ JSON
          }' | python -m json.tool
    ```
 
-2. Each request drives the sequence `msprobe: start -> forward/backward -> stop -> step`. The runner invokes `step()` on every code path, so you always get a complete dataset even if inference returns early.
+2. Each request drives the sequence `msprobe: start -> forward -> stop -> step`. The runner invokes `step()` on every code path, so you always get a complete dataset even if inference returns early.
 
 3. Dump files are written into `dump_path`. They usually contain:
    - Tensor files grouped by operator/module.
@@ -131,12 +129,10 @@ JSON
    │   ├── step0
    │   │   ├── rank0
    │   │   │   ├── dump_tensor_data
-   │   │   │   │    ├── Tensor.permute.1.forward.pt
-   │   │   │   │    ├── Functional.linear.5.backward.output.pt    # Format: {api_type}.{api_name}.{call_count}.{forward/backward}.{input/output}.{arg_index}.
+   │   │   │   │    ├── Tensor.permute.1.forward.pt                       # Format: {api_type}.{api_name}.{call_count}.forward.{input/output}.{arg_index}.
    │   │   │   │    │                                              # arg_index is the nth input or output of the API. If an input is a list, keep numbering with decimals (e.g., 1.1 is the first element of the first argument).
-   │   │   │   │    ├── Module.conv1.Conv2d.forward.0.input.0.pt          # Format: {Module}.{module_name}.{class_name}.{forward/backward}.{call_count}.{input/output}.{arg_index}.
-   │   │   │   │    ├── Module.conv1.Conv2d.forward.0.parameters.bias.pt  # Module parameter data: {Module}.{module_name}.{class_name}.forward.{call_count}.parameters.{parameter_name}.
-   │   │   │   │    └── Module.conv1.Conv2d.parameters_grad.weight.pt     # Module parameter gradients: {Module}.{module_name}.{class_name}.parameters_grad.{parameter_name}. Gradients do not include call_count because the same gradient updates all invocations.
+   │   │   │   │    ├── Module.conv1.Conv2d.forward.0.input.0.pt          # Format: {Module}.{module_name}.{class_name}.forward.{call_count}.{input/output}.{arg_index}.
+   │   │   │   │    └── Module.conv1.Conv2d.forward.0.parameters.bias.pt  # Module parameter data: {Module}.{module_name}.{class_name}.forward.{call_count}.parameters.{parameter_name}.
    │   │   │   │                                                          # When the `model` argument passed to dump is a List[torch.nn.Module] or Tuple[torch.nn.Module], module-level data names also include the index inside the list ({Module}.{index}.*), e.g., Module.0.conv1.Conv2d.forward.0.input.0.pt.
    │   │   │   ├── dump.json
    │   │   │   ├── stack.json
@@ -159,20 +155,20 @@ JSON
 
    - `rank`: Device ID. Each card writes its data to the corresponding `rank{ID}` directory. In non-distributed scenarios the directory is simply named `rank`.
    - `dump_tensor_data`: Tensor payloads that were collected.
-   - `dump.json`: Statistics for the forward/backward data of each API or module, including names, dtype, shape, max, min, mean, L2 norm (square root of the L2 variance), and CRC-32 when `summary_mode="md5"`. See [dump.json file description](#dumpjson-file-description) for details.
+   - `dump.json`: Statistics for the forward data of each API or module, including names, dtype, shape, max, min, mean, L2 norm (square root of the L2 variance), and CRC-32 when `summary_mode="md5"`. See [dump.json file description](#dumpjson-file-description) for details.
    - `dump_error_info.log`: Present only when the dump tool encountered an error and records the failure log.
    - `stack.json`: Call stacks for APIs/modules.
    - `construct.json`: Hierarchical structure description. Empty when `level=L1`.
 
-## 4. Analyze the results
+## 5. Analyze the results
 
-### 4.1 Prerequisites
+### 5.1 Prerequisites
 
 You typically need two dump datasets: one from the "problem side" (the run that exposes the accuracy or numerical error) and another from the "benchmark side" (a good baseline). These datasets do not have to be identical—they can come from different branches, framework versions, or even alternative implementations (operator substitutions, different graph-optimization switches, etc.). As long as they use the same or similar inputs, hardware topology, and sampling points (step/token), `msprobe` can compare them and locate the divergent nodes. If you cannot find a perfectly clean benchmark, start by capturing the problem-side data, craft the smallest reproducible case by hand, and perform a self-comparison. Below we assume the problem dump is `problem_dump` and the benchmark dump is `bench_dump`.
 
-### 4.2 Visualization
+### 5.2 Visualization
 
-Use `msprobe graph_visualize` to generate results that can be opened inside `tb_graph_ascend`.
+Use `msprobe -f pytorch graph` to generate results that can be opened inside `tb_graph_ascend`.
 
 1. Ensure the dump contains `construct.json` (i.e., `level = L0` or `level = mix`).
 2. Prepare a comparison file such as `compare.json`. Its format and generation flow are described in section 3.1.3 of `msprobe_visualization.md`. Example (minimal runnable snippet):
@@ -185,7 +181,7 @@ Use `msprobe graph_visualize` to generate results that can be opened inside `tb_
    }
    ```
 
-   Replace the paths with your dump directories before invoking `msprobe graph_visualize`. **If you only need to build a single graph**, omit `bench_path` to visualize one dump.  
+   Replace the paths with your dump directories before invoking `msprobe -f pytorch graph`. **If you only need to build a single graph**, omit `bench_path` to visualize one dump.  
    Multi-rank scenarios (single rank, multi-rank, or multi-step multi-rank) are also supported. `npu_path` or `bench_path` must contain folders named `rank+number`, and every rank folder must contain a non-empty `construct.json` together with `dump.json` and `stack.json`. If any `construct.json` is empty, verify that the dump level includes `L0` or `mix`. When comparing graphs, both `npu_path` and `bench_path` must contain the same set of rank folders so they can be paired one-to-one.
 
    ```shell
@@ -195,7 +191,7 @@ Use `msprobe graph_visualize` to generate results that can be opened inside `tb_
    |   |   |    ├── Tensor.permute.1.forward.pt
    |   |   |    ├── MyModule.0.forward.input.pt
    |   |   |    ...
-   |   |   |    └── Function.linear.5.backward.output.pt
+   |   |   |    └── Functional.linear.5.forward.output.pt
    |   |   ├── dump.json         # Tensor metadata
    |   |   ├── stack.json        # Operator call stack information
    |   |   └── construct.json    # Hierarchical structure; empty when `level=L1`
@@ -213,7 +209,7 @@ Use `msprobe graph_visualize` to generate results that can be opened inside `tb_
 3. Run:
 
    ```bash
-   msprobe graph_visualize \
+   msprobe -f pytorch graph \
        --input_path ./compare.json \
        --output_path ./graph_output
    ```
@@ -236,7 +232,7 @@ Use `msprobe graph_visualize` to generate results that can be opened inside `tb_
      - Search/filter: Use the search box to filter nodes by operator name, etc.
      - Manual mapping: Automatic mapping cannot cover every case, so the tool lets you manually map nodes between the problem and benchmark graphs before generating comparison results.
 
-## 5. Troubleshooting
+## 6. Troubleshooting
 
 - `RuntimeError: Please enforce eager mode`: Restart vLLM and add the `--enforce-eager` flag.
 - No dump files: Confirm that the JSON path is correct and every node has write permission. In distributed scenarios set `keep_all_ranks` so that every rank writes its own dump.
@@ -250,15 +246,13 @@ Use `msprobe graph_visualize` to generate results that can be opened inside `tb_
 
 #### L0 level
 
-An L0 `dump.json` contains forward/backward I/O for modules together with parameters and parameter gradients. Using PyTorch's `Conv2d` as an example, the network code looks like:
+An L0 `dump.json` contains forward I/O for modules together with parameters. Using PyTorch's `Conv2d` as an example, the network code looks like:
 
 `output = self.conv2(input)  # self.conv2 = torch.nn.Conv2d(64, 128, 5, padding=2, bias=True)`
 
 `dump.json` contains the following entries:
 
 - `Module.conv2.Conv2d.forward.0`: Forward data of the module. `input_args` represents positional inputs, `input_kwargs` represents keyword inputs, `output` stores forward outputs, and `parameters` stores weights/biases.
-- `Module.conv2.Conv2d.parameters_grad`: Parameter gradients (weight and bias).
-- `Module.conv2.Conv2d.backward.0`: Backward data of the module. `input` represents gradients that flow into the module (gradients of the forward outputs) and `output` represents gradients that flow out (gradients of the module inputs).
 
 **Note**: When the `model` parameter passed to the dump API is `List[torch.nn.Module]` or `Tuple[torch.nn.Module]`, module-level names include the index inside the list (`{Module}.{index}.*`). Example: `Module.0.conv1.Conv2d.forward.0`.
 
@@ -339,78 +333,6 @@ An L0 `dump.json` contains forward/backward I/O for modules together with parame
     }
    }
   },
-  "Module.conv2.Conv2d.parameters_grad": {
-   "weight": [
-    {
-     "type": "torch.Tensor",
-     "dtype": "torch.float32",
-     "shape": [
-      32,
-      16,
-      5,
-      5
-     ],
-     "Max": 0.018550323322415352,
-     "Min": -0.008627401664853096,
-     "Mean": 0.0006675920449197292,
-     "Norm": 0.26084786653518677,
-     "requires_grad": false,
-     "data_name": "Module.conv2.Conv2d.parameters_grad.weight.pt"
-    }
-   ],
-   "bias": [
-    {
-     "type": "torch.Tensor",
-     "dtype": "torch.float32",
-     "shape": [
-      32
-     ],
-     "Max": 0.014914230443537235,
-     "Min": -0.006656786892563105,
-     "Mean": 0.002657240955159068,
-     "Norm": 0.029451673850417137,
-     "requires_grad": false,
-     "data_name": "Module.conv2.Conv2d.parameters_grad.bias.pt"
-    }
-   ]
-  },
-  "Module.conv2.Conv2d.backward.0": {
-   "input": [
-    {
-     "type": "torch.Tensor",
-     "dtype": "torch.float32",
-     "shape": [
-      8,
-      32,
-      10,
-      10
-     ],
-     "Max": 0.0015069986693561077,
-     "Min": -0.001139344065450132,
-     "Mean": 3.3215508210560074e-06,
-     "Norm": 0.020567523315548897,
-     "requires_grad": false,
-     "data_name": "Module.conv2.Conv2d.backward.0.input.0.pt"
-    }
-   ],
-   "output": [
-    {
-     "type": "torch.Tensor",
-     "dtype": "torch.float32",
-     "shape": [
-      8,
-      16,
-      14,
-      14
-     ],
-     "Max": 0.0007466732058674097,
-     "Min": -0.00044813455315306783,
-     "Mean": 6.814070275140693e-06,
-     "Norm": 0.01474067009985447,
-     "requires_grad": false,
-     "data_name": "Module.conv2.Conv2d.backward.0.output.0.pt"
-    }
-   ]
   }
  }
 }
@@ -418,10 +340,9 @@ An L0 `dump.json` contains forward/backward I/O for modules together with parame
 
 #### L1 level
 
-An L1 `dump.json` records forward/backward I/O for APIs. Using PyTorch's `relu` function as an example (`output = torch.nn.functional.relu(input)`), the file contains:
+An L1 `dump.json` records forward I/O for APIs. Using PyTorch's `relu` function as an example (`output = torch.nn.functional.relu(input)`), the file contains:
 
 - `Functional.relu.0.forward`: Forward data of the API. `input_args` are positional inputs, `input_kwargs` are keyword inputs, and `output` stores the forward outputs.
-- `Functional.relu.0.backward`: Backward data of the API. `input` represents the gradients of the forward outputs, and `output` represents the gradients that flow back to the forward inputs.
 
 ```json
 {
@@ -469,43 +390,6 @@ An L1 `dump.json` records forward/backward I/O for APIs. Using PyTorch's `relu` 
     }
    ]
   },
-  "Functional.relu.0.backward": {
-   "input": [
-    {
-     "type": "torch.Tensor",
-     "dtype": "torch.float32",
-     "shape": [
-      32,
-      16,
-      28,
-      28
-     ],
-     "Max": 0.0001815402356442064,
-     "Min": -0.00013352684618439525,
-     "Mean": 0.00011915402356442064,
-     "Norm": 0.007598237134516239,
-     "requires_grad": false,
-     "data_name": "Functional.relu.0.backward.input.0.pt"
-    }
-   ],
-   "output": [
-    {
-     "type": "torch.Tensor",
-     "dtype": "torch.float32",
-     "shape": [
-      32,
-      16,
-      28,
-      28
-     ],
-     "Max": 0.0001815402356442064,
-     "Min": -0.00012117840378778055,
-     "Mean": 2.0098118724831693e-08,
-     "Norm": 0.006532244384288788,
-     "requires_grad": false,
-     "data_name": "Functional.relu.0.backward.output.0.pt"
-    }
-   ]
   }
  }
 }  

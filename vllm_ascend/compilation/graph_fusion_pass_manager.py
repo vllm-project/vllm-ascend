@@ -64,6 +64,11 @@ class GraphFusionPassManager:
 
             self.passes.append(MatmulAllReduceAddRMSNormPass(config))
 
+        if self.ascend_compilation_config.get("fuse_muls_add", True):
+            from .passes.muls_add_pass import MulsAddFusionPass
+
+            self.passes.append(MulsAddFusionPass(config))
+
         if config.compilation_config.pass_config.enable_sp:
             from .passes.sequence_parallelism import AscendSequenceParallelismPass
 

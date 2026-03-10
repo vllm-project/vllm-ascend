@@ -15,6 +15,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
+from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
@@ -201,6 +202,14 @@ def _rope_forward_oot_impl_fake(
     return query, key
 
 
+def _muls_add_impl_fake(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
 direct_register_custom_op(
     op_name="maybe_chunk_residual",
     op_func=_maybe_chunk_residual_impl,
@@ -269,6 +278,14 @@ direct_register_custom_op(
     op_name="npu_rotary_embedding",
     op_func=rope_forward_oot,
     fake_impl=_rope_forward_oot_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="muls_add",
+    op_func=muls_add_triton,
+    fake_impl=_muls_add_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
