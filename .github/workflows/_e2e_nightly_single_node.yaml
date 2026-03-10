@@ -71,11 +71,17 @@ jobs:
     env:
       HF_HUB_OFFLINE: 1
       VLLM_USE_MODELSCOPE: True
+      UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+      UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
     steps:
       - name: Check npu and CANN info
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          pip install uv
       
       - name: uninstall vlm vllm-ascend and remove code (if pr test)
         if: ${{ inputs.is_pr_test }}
@@ -110,7 +116,7 @@ jobs:
         if: ${{ inputs.is_pr_test }}
         working-directory: /vllm-workspace/vllm
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
       
       - name: Install vllm-project/vllm-ascend
         if: ${{ inputs.is_pr_test }}
@@ -118,8 +124,9 @@ jobs:
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
 
       - name: Install aisbench
         if: ${{ inputs.is_pr_test }}
