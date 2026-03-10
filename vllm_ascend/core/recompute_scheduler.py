@@ -116,7 +116,7 @@ class RecomputeScheduler(Scheduler):
                 request.streaming_queue = deque()
             # Fill in placeholder tokens to enable full graph compatibility. Without
             # placeholders, graph matching may fail, forcing eager mode execution.
-            if self.is_kv_producer and request.num_tokens > 1:
+            if self.is_kv_producer and self.is_hybrid_model and request.num_tokens > 1:
                 request.prompt_token_ids.pop()
                 request._all_token_ids.pop()
                 request.num_prompt_tokens -= 1
