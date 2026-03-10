@@ -1016,7 +1016,7 @@ class NPUModelRunner(GPUModelRunner):
                     target_positions = self._get_positions(num_scheduled_tokens)
                     target_hidden_states = hidden_states
                     if self.use_aux_hidden_state_outputs:
-                        target_hidden_states = torch.cat([h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1)
+                        target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
                 else:
                     token_indices_to_sample = None
                     # input_ids can be None for multimodal models.
@@ -1848,6 +1848,7 @@ class NPUModelRunner(GPUModelRunner):
         # be improved in model runner v2)
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
+        force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
@@ -1864,7 +1865,12 @@ class NPUModelRunner(GPUModelRunner):
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
-        has_lora = len(self.input_batch.lora_id_to_lora_request) > 0 if force_has_lora is None else force_has_lora
+        num_active_loras = (
+            force_num_active_loras
+            if force_num_active_loras is not None
+            else len(self.input_batch.lora_id_to_lora_request)
+        )
+        has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         # ruff: noqa: E731
         def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
@@ -1877,6 +1883,7 @@ class NPUModelRunner(GPUModelRunner):
                     has_lora=has_lora,
                     uniform_decode=uniform_decode,
                     disable_full=disable_full,
+                    num_active_loras=num_active_loras,
                 )
             else:
                 return self.cudagraph_dispatcher.dispatch(
@@ -1885,6 +1892,7 @@ class NPUModelRunner(GPUModelRunner):
                     uniform_decode=uniform_decode,
                     valid_modes=valid_modes,
                     invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
+                    num_active_loras=num_active_loras,
                 )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
@@ -2169,6 +2177,20 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
         return attn_metadata, spec_decode_common_attn_metadata
 
+    def _should_build_dummy_attn_metadata(
+        self,
+        force_attention: bool = False,
+        is_profile: bool = False,
+        cudagraph_runtime_mode: CUDAGraphMode | None = None,
+    ) -> bool:
+        """
+        Determine whether attention metadata should be built during dummy_run.
+        SubClass can override this to add custom conditions.
+        """
+        # If force_attention is True, we always capture attention, Otherwise,
+        # it only happens for cudagraph_runtime_mode=FULL.
+        return force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -2182,7 +2204,6 @@ class NPUModelRunner(GPUModelRunner):
         allow_microbatching: bool = True,
         skip_eplb: bool = False,
         remove_lora: bool = True,
-        activate_lora: bool = False,
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2246,7 +2267,8 @@ class NPUModelRunner(GPUModelRunner):
             # `force_has_lora` is used for cudagraph capture; because LoRA is
             # activated later in the context manager, but we need to know the
             # LoRA state when determining the batch descriptor for capture
-            force_has_lora=activate_lora,
+            force_has_lora=num_active_loras > 0,
+            force_num_active_loras=num_active_loras,
         )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
@@ -2272,9 +2294,8 @@ class NPUModelRunner(GPUModelRunner):
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
-        # If force_attention is True, we always capture attention. Otherwise,
-        # it only happens for cudagraph_runtime_mode=FULL.
-        if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        # Build attention metadata for dummy_run
+        if self._should_build_dummy_attn_metadata(force_attention, is_profile, cudagraph_runtime_mode):
             if create_mixed_batch:
                 raise NotImplementedError(
                     "create_mixed_batch is used for warmup deepgemm, vllm-ascend does not need it"
@@ -2321,6 +2342,11 @@ class NPUModelRunner(GPUModelRunner):
             self.lora_config,
             num_scheduled_tokens,
             num_sampled_tokens,
+            remove_lora,
+            # TODO: The next line is a temporary workaround
+            # to fix the accuracy issue of test_llama32_lora.py,
+            # which is introduced by vllm-project/vllm#32005
+            num_active_loras=(self.lora_config.max_loras if self.lora_config is not None else num_active_loras),
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
