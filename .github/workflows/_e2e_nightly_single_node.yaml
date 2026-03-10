@@ -204,6 +204,7 @@ jobs:
           VLLM_CI_RUNNER: ${{ inputs.runner }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
+          export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "Running pytest with tests path: ${{ inputs.tests }}"
           pytest -sv "${{ inputs.tests }}" \
           --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
@@ -217,6 +218,7 @@ jobs:
           CONFIG_YAML_PATH: ${{ inputs.config_file_path }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
+          export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
           pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
