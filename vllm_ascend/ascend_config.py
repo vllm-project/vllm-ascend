@@ -260,7 +260,7 @@ class AscendCompilationConfig:
 
     def __init__(
         self,
-        enable_npugraph_ex: bool = True,
+        enable_npugraph_ex: bool = False,
         enable_static_kernel: bool = False,
         fuse_norm_quant: bool = True,
         fuse_qknorm_rope: bool = True,
