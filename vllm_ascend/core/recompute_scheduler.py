@@ -93,8 +93,8 @@ class RecomputeScheduler(Scheduler):
         )
         self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
         self.is_hybrid_model = (
-            "qwen3_next" in self.vllm_config.model_config.model_type
-            or "qwen3_5" in self.vllm_config.model_config.model_type
+            "qwen3_next" in self.vllm_config.model_config.hf_text_config.model_type
+            or "qwen3_5" in self.vllm_config.model_config.hf_text_config.model_type
         )
 
     def add_request(self, request: Request) -> None:
