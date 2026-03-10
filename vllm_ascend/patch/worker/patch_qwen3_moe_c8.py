@@ -56,13 +56,20 @@ def _patched_qwen3_moe_model_load_weights(
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for name, loaded_weight in raw_weights:
             scale_name = quant_config.get_cache_scale(name)
-            if scale_name is not None and scale_name in params_dict:
-                param = params_dict[scale_name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
-                weight_loader(param, loaded_weight.squeeze())
-                c8_loaded_params.add(scale_name)
+            if scale_name is not None:
+                # Always consume C8 scale/offset weights here.
+                # With pipeline parallelism, this PP stage may not own all
+                # layers. If the target param is absent from params_dict, the
+                # weight belongs to another PP stage - skip it silently.
+                # Never yield to the original load_weights, which does a bare
+                # params_dict[scale_name] lookup and would raise KeyError.
+                if scale_name in params_dict:
+                    param = params_dict[scale_name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight.squeeze())
+                    c8_loaded_params.add(scale_name)
             else:
                 yield name, loaded_weight
 
