@@ -6,6 +6,7 @@ This section provides a detailed usage guide of vLLM Ascend features.
 :caption: Feature Guide
 :maxdepth: 1
 graph_mode
+cpu_binding
 quantization
 sleep_mode
 structured_output
