@@ -328,6 +328,7 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
+            dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
             input_ids=input_ids,
             positions=positions,
             logits_indices=logits_indices,
