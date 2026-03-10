@@ -101,6 +101,39 @@ def npugraph_ex_compile(
 
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
 
+    # Fix for FakeTensorMode mismatch issue in vllm v3.5+
+    # The piecewise backend now compiles ranges upfront in __init__, which may use
+    # fake tensors from graph placeholder nodes that have a different FakeTensorMode
+    # than the current tracing context. We need to ensure consistent fake mode.
+    import logging
+
+    from torch._guards import detect_fake_mode
+
+    logger = logging.getLogger(__name__)
+
+    current_fake_mode = detect_fake_mode()
+    if current_fake_mode is not None:
+        # Convert example_inputs to use the current fake mode if they are fake tensors
+        # from a different fake mode
+        converted_inputs = []
+        for inp in example_inputs:
+            if isinstance(inp, torch.Tensor):
+                # Check if this is a fake tensor that needs conversion
+                if hasattr(inp, "fake_mode") and inp.fake_mode is not current_fake_mode:
+                    # Convert to current fake mode
+                    old_fake_mode = inp.fake_mode
+                    converted_inputs.append(current_fake_mode.from_tensor(inp))
+                    logger.debug("Converting fake tensor from fake_mode %s to %s", old_fake_mode, current_fake_mode)
+                else:
+                    converted_inputs.append(inp)
+            else:
+                converted_inputs.append(inp)
+        example_inputs = converted_inputs
+    else:
+        logger.warning(
+            "detect_fake_mode() returned None in npugraph_ex_compile. FakeTensorMode mismatch fix may not be applied."
+        )
+
     # torch.compile requires the output of the fx graph to be a tuple
     if not graph_returns_tuple(graph):
         return make_graph_return_tuple(graph, example_inputs, npugraph_ex), None
