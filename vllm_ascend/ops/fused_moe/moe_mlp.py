@@ -81,6 +81,7 @@ def quant_apply_mlp(
     w2_offset: torch.Tensor | None = None,
     fusion: bool = False,
     dynamic_eplb: bool = False,
+    output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     if w1_offset is not None:
         unquantized_hidden_states = hidden_states
@@ -98,14 +99,11 @@ def quant_apply_mlp(
         quantized_hidden_states = hidden_states
 
     bias1, bias2 = None, None
-    # w1_scale and w2_scale are pre-converted to float32 in
-    # process_weights_after_loading (w13_weight_scale_fp32 / w2_weight_scale_fp32).
-    # Determine the model's activation dtype (float16/bfloat16) for use as
-    # npu_grouped_matmul output_dtype. hidden_states may be INT8 (quantized),
-    # so we derive dtype from dynamic_scale (always float16/bf16 per-token
-    # scale) when present, or from hidden_states directly when it is the
-    # unquantized float activation (dynamic_scale is None).
-    _output_dtype = dynamic_scale.dtype if dynamic_scale is not None else hidden_states.dtype
+    # Use the explicitly provided output_dtype (model's float16/bfloat16
+    # activation dtype).  This avoids inferring from dynamic_scale which may
+    # be float32 on some CANN paths, or from hidden_states which may be INT8
+    # after quantization.
+    _output_dtype = output_dtype
 
     weight_prefetch_method = get_weight_prefetch_method()
     weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
@@ -349,6 +347,7 @@ def unified_apply_mlp(
     fusion: bool = False,
     need_trans: bool = True,
     dynamic_eplb: bool = False,
+    output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     if with_quant:
         assert w1_scale is not None and w2_scale is not None
@@ -367,6 +366,7 @@ def unified_apply_mlp(
             w2_offset=w2_offset,
             fusion=fusion,
             dynamic_eplb=dynamic_eplb,
+            output_dtype=output_dtype,
         )
     else:
         return unquant_apply_mlp(

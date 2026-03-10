@@ -129,6 +129,7 @@ class MoECommMethod(ABC):
         dynamic_eplb: bool = False,
         mc2_mask: torch.Tensor = None,
         pertoken_scale: torch.Tensor | None = None,
+        output_dtype: torch.dtype = torch.float16,
     ):
         # Check constraints
         assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16, torch.int8]
@@ -175,6 +176,7 @@ class MoECommMethod(ABC):
             fusion=use_int8_w8a8 and self.use_fusion_ops,
             need_trans=need_trans,
             dynamic_eplb=dynamic_eplb,
+            output_dtype=output_dtype,
         )
 
         before_combine_evt = torch.npu.current_stream().record_event()
@@ -317,6 +319,7 @@ class FusedMC2CommImpl(MoECommMethod):
         dynamic_eplb: bool = False,
         mc2_mask: torch.Tensor = None,
         pertoken_scale: torch.Tensor | None = None,
+        output_dtype: torch.dtype = torch.float16,
     ):
         assert not (w1_scale is None or w2_scale is None), "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
 

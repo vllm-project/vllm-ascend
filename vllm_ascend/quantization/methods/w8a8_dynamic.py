@@ -259,6 +259,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             log2phy=log2phy,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask"),
+            output_dtype=layer.w2_output_dtype,
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
@@ -275,6 +276,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
+        # Store original dtype (float16/bfloat16) as the MoE output dtype before
+        # converting to float32, since npu_grouped_matmul down_proj output must
+        # match the model's activation dtype, not the scale dtype.
+        layer.w2_output_dtype = layer.w2_weight_scale.dtype
         layer.w2_weight_scale_fp32 = layer.w2_weight_scale.data.to(torch.float32)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
