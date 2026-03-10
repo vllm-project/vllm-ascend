@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.utils import CpuGpuBuffer
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 
 class AscendInputBuffers(InputBuffers):
@@ -67,6 +67,8 @@ class AscendInputBatch(InputBatch):
     # Create seq_lens_np.
     # npu's attention backend still needs seq_lens on CPU side.
     seq_lens_np: np.ndarray
+    # attn_state is used to build attention metadata.
+    attn_state: AscendAttentionState | None = None
 
     @classmethod
     def make_dummy(
@@ -90,4 +92,11 @@ class AscendInputBatch(InputBatch):
         input_buffers.seq_lens_np[num_reqs:] = 0
         seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
         input_batch.seq_lens_np = seq_lens_np
+        # A dummy run for dp or memory profiling.
+        # When dummy run for dp, num_tokens is set to 1,
+        # so attn_state is set to DecodeOnly.
+        # when dummy run for memory profiling,
+        # attention metadata isn't needed,
+        # we can also set attn_state to AscendAttentionState.DecodeOnly.
+        input_batch.attn_state = AscendAttentionState.DecodeOnly
         return cls(**asdict(input_batch), seq_lens_np=seq_lens_np)

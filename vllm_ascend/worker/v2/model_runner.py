@@ -27,7 +27,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -38,28 +37,28 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.gpu.model_runner import get_cudagraph_and_dp_padding
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_state
+from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
-from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import set_weight_prefetch_method
-from vllm_ascend.worker.v2.utils import block_table_wrapper
-
-logger = init_logger(__name__)
+from vllm_ascend.worker.v2.utils import (
+    block_table_wrapper,
+    model_states_wrapper,
+    torch_cuda_wrapper,
+)
 
 
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        with torch_cuda_wrapper(), block_table_wrapper():
+        with torch_cuda_wrapper(), block_table_wrapper(), model_states_wrapper():
             super().__init__(vllm_config, device)
 
         # because we will override these attribute, delete these attribute to
@@ -250,9 +249,6 @@ class NPUModelRunner(GPUModelRunner):
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
 
-        # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
-        block_tables = self.block_tables.gather_block_tables(idx_mapping)
-
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -274,20 +270,19 @@ class NPUModelRunner(GPUModelRunner):
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
-        query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        max_query_len = num_scheduled_tokens.max().item()
 
-        # Get prefill tokens.
-        prepare_prefill_inputs(
-            self.input_buffers.input_ids,
-            self.req_states.next_prefill_tokens,
-            idx_mapping,
-            query_start_loc,
-            self.req_states.all_token_ids.gpu,
-            self.req_states.prefill_len.gpu,
-            self.req_states.num_computed_tokens.gpu,
-        )
+        # Get prefill tokens if any.
+        if self.req_states.any_prefills(idx_mapping_np):
+            prepare_prefill_inputs(
+                self.input_buffers.input_ids,
+                self.req_states.next_prefill_tokens,
+                idx_mapping,
+                query_start_loc,
+                self.req_states.all_token_ids.gpu,
+                self.req_states.prefill_len.gpu,
+                self.req_states.num_computed_tokens.gpu,
+            )
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
@@ -301,15 +296,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Pad for full CUDA graph mode.
         self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
-
-        # Prepare M-RoPE positions.
-        if self.uses_mrope:
-            self.mrope_states.prepare_mrope_positions(
-                idx_mapping,
-                query_start_loc,
-                self.req_states.prefill_len.gpu,
-                self.req_states.num_computed_tokens.gpu,
-            )
 
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
@@ -325,43 +311,12 @@ class NPUModelRunner(GPUModelRunner):
             total_num_logits,
         )
 
-        # Compute slot mappings: [num_kv_cache_groups, num_tokens]
-        slot_mappings = self.block_tables.compute_slot_mappings(
-            idx_mapping, query_start_loc, self.input_buffers.positions[:num_tokens]
-        )
-        # Layer name -> slot mapping.
-        slot_mappings_by_layer = build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config)
-        # Layer name -> attention metadata.
-        # TODO(Ronald1995): try to add a new method `build_attn_metadata` in
-        # vllm gpu_model_runner_v2, maybe we don't overwrite `prepare_inputs`
-        # method like this.
-        attn_metadata = build_attn_metadata(
-            attn_groups=self.attn_groups,
-            num_reqs=num_reqs_padded,
-            num_tokens=num_tokens,
-            query_start_loc_gpu=query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=max_query_len,
-            seq_lens=self.input_buffers.seq_lens,
-            max_seq_len=self.max_model_len,
-            block_tables=block_tables,
-            slot_mappings=slot_mappings,
-            kv_cache_config=self.kv_cache_config,
-            # extra attributes for ascend npus.
-            seq_lens_np=self.input_buffers.seq_lens_np,
-            num_computed_tokens_cpu=self.req_states.num_computed_tokens_cpu[idx_mapping_cpu],
-            attn_state=attn_state,
-        )
-
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
         positions = self.input_buffers.positions[:num_tokens_after_padding]
-        mrope_positions = None
-        if self.uses_mrope:
-            mrope_positions = self.mrope_states.mrope_positions
-            mrope_positions = mrope_positions[:, :num_tokens_after_padding]
+
         self.input_batch = AscendInputBatch(
             req_ids=req_ids,
-            num_reqs=num_reqs,
+            num_reqs=num_reqs_padded,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
@@ -375,15 +330,14 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens=seq_lens,
             input_ids=input_ids,
             positions=positions,
-            mrope_positions=mrope_positions,
             inputs_embeds=None,
-            attn_metadata=attn_metadata,
-            slot_mappings=slot_mappings_by_layer,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
+            # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
+            attn_state=attn_state,
         )
         return self.input_batch
 
