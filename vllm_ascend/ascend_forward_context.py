@@ -1,26 +1,22 @@
-from functools import wraps
 import math
 from contextlib import contextmanager
 from enum import Enum
+from functools import wraps
 from typing import Any
 
 import torch
-from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
-from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 import vllm.envs as envs_vllm
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed import (get_dp_group, get_ep_group,
+                              get_tensor_model_parallel_world_size)
+from vllm.forward_context import (BatchDescriptor, get_forward_context,
+                                  set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    enable_sp,
-    flashcomm2_enable,
-    get_ascend_device_type,
-    has_layer_idx,
-    is_drafter_moe_model,
-    is_moe_model,
-    speculative_enable_dispatch_gmm_combine_decode,
-)
+from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
+                               get_ascend_device_type, has_layer_idx,
+                               is_drafter_moe_model, is_moe_model,
+                               speculative_enable_dispatch_gmm_combine_decode)
 
 
 class MoECommType(Enum):
@@ -66,7 +62,8 @@ def set_ascend_forward_context(
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
 
-        from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
+        from vllm_ascend.ops.fused_moe.moe_comm_method import \
+            get_moe_comm_method
 
         moe_comm_type = select_moe_comm_method(num_tokens, vllm_config, is_draft_model)
         forward_context.moe_comm_type = moe_comm_type
@@ -465,3 +462,43 @@ class ExtraForwardContext:
     def set_layer_idx(val: int | None):
         """Set the layer index in the current batch."""
         return ExtraForwardContext.set_attr("layer_idx", val)
+
+    @staticmethod
+    def max_tokens_across_pcp() -> int:
+        """The max tokens across pcp in the current batch."""
+        return ExtraForwardContext.get_attr("max_tokens_across_pcp", 0)
+
+    @staticmethod
+    def set_max_tokens_across_pcp(val: int):
+        """Set the max tokens across pcp in the current batch."""
+        return ExtraForwardContext.set_attr("max_tokens_across_pcp", val)
+
+    @staticmethod
+    def num_accept_tokens() -> int:
+        """The number of accept tokens in the current batch."""
+        return ExtraForwardContext.get_attr("num_accept_tokens", 0)
+
+    @staticmethod
+    def set_num_accept_tokens(val: int):
+        """Set the number of accept tokens in the current batch."""
+        return ExtraForwardContext.set_attr("num_accept_tokens", val)
+
+    @staticmethod
+    def in_profile_run() -> bool:
+        """A flag to indicate whether to run in profile mode."""
+        return ExtraForwardContext.get_attr("in_profile_run", False)
+
+    @staticmethod
+    def set_in_profile_run(val: bool):
+        """Set the in_profile_run flag."""
+        return ExtraForwardContext.set_attr("in_profile_run", val)
+
+    @staticmethod
+    def padded_num_tokens() -> int:
+        """The padded number of tokens in the current batch."""
+        return ExtraForwardContext.get_attr("padded_num_tokens", 0)
+
+    @staticmethod
+    def set_padded_num_tokens(val: int):
+        """Set the padded number of tokens in the current batch."""
+        return ExtraForwardContext.set_attr("padded_num_tokens", val)

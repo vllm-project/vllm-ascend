@@ -780,7 +780,7 @@ class AscendEagleProposer(EagleProposer):
 
         forward_context = get_forward_context()
         ExtraForwardContext.set_num_tokens(input_batch_size)
-        forward_context.num_accept_tokens = batch_size
+        ExtraForwardContext.set_num_accept_tokens(batch_size)
 
         for draft_step in range(self.num_speculative_tokens - 1):
             # Reset MOE layer index for each draft step iteration

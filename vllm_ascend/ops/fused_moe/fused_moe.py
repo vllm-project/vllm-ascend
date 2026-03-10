@@ -37,13 +37,12 @@ if not vllm_version_is("0.16.0"):
     from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ascend_forward_context import ExtraForwardContext, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.utils import (
     enable_sp,
@@ -394,13 +393,13 @@ class AscendFusedMoE(FusedMoE):
         # When static kernels are enabled, the forward pass runs twice (compilation + capture),
         # causing moe_layer_index to overflow. Wrap the index to prevent out-of-bounds errors.
         if self.enable_npugraph_ex_static_kernel:
-            moe_layer_index = ExtraForwardContext.moe_layer_index() % (len(forward_context.all_moe_layers))
+            moe_layer_index = forward_context.moe_layer_index % (len(forward_context.all_moe_layers))
             ExtraForwardContext.set_moe_layer_index(moe_layer_index)
 
         # Load balancing for token distribution among experts in dummy_run
         # TODO: The community only considers load balancing when DP > 1.
         # This approach may overlook some extreme scenarios.
-        enable_force_load_balance = forward_context.in_profile_run
+        enable_force_load_balance = ExtraForwardContext.in_profile_run()
 
         forward_context = get_forward_context()
         if self.multistream_overlap_gate:

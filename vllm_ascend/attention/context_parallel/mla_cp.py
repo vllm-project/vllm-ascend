@@ -10,7 +10,6 @@ from vllm.distributed import (
     get_decode_context_model_parallel_world_size,
     get_pcp_group,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec

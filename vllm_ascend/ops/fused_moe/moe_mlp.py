@@ -18,7 +18,6 @@
 import torch
 import torch_npu
 from torch.nn.functional import pad
-from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import ExtraForwardContext, MoECommType

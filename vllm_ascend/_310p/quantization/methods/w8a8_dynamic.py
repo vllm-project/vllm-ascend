@@ -21,7 +21,6 @@ from typing import Any
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
-from vllm.forward_context import get_forward_context
 
 from vllm_ascend._310p.fused_moe.experts_selector import select_experts
 from vllm_ascend.ascend_forward_context import ExtraForwardContext

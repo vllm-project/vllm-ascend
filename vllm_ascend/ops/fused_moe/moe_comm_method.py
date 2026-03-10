@@ -19,7 +19,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 import vllm_ascend.envs as envs_ascend

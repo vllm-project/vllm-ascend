@@ -188,7 +188,7 @@ class WeightPrefetchMethod:
         except AssertionError:
             return
 
-        if ExtraForwardContext.prefetch_mlp_gate_up_proj() or forward_context.prefetch_mlp_down_proj:
+        if ExtraForwardContext.prefetch_mlp_gate_up_proj() or ExtraForwardContext.prefetch_mlp_down_proj():
             torch.ops.vllm.prefetch_postprocess(stop_flag)
             ExtraForwardContext.set_prefetch_mlp_gate_up_proj(False)
             ExtraForwardContext.set_prefetch_mlp_down_proj(False)

@@ -23,10 +23,9 @@ import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import (  # type: ignore
-    AttentionBackend,
+from vllm.v1.attention.backend import (
+    AttentionBackend,  # type: ignore
     AttentionCGSupport,
     AttentionImpl,
     AttentionLayer,
@@ -40,6 +39,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.utils import (
@@ -57,7 +57,6 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
