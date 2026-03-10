@@ -125,6 +125,8 @@ html_theme_options = {
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 # html_static_path = ['_static']
+# Copy llms.txt to site root so it is available as /llms.txt.
+html_extra_path = ["llms.txt"]
 
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
 if READTHEDOCS_VERSION_TYPE == "tag":

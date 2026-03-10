@@ -178,11 +178,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
-
-        if vllm_config.model_config is not None:
-            maybe_auto_detect_quantization(vllm_config)
-
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
         ascend_config = init_ascend_config(vllm_config)
@@ -224,11 +219,15 @@ class NPUPlatform(Platform):
 
         from vllm.config.compilation import CUDAGraphMode
 
-        if ascend_config.xlite_graph_config.enabled and ascend_config.xlite_graph_config.full_mode:
-            logger.info("ACLGraph is disabled under xlite full mode")
-            enforce_eager = True
-            model_config.enforce_eager = True
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        if ascend_config.xlite_graph_config.enabled:
+            if ascend_config.xlite_graph_config.full_mode:
+                logger.info("ACLGraph is disabled under xlite full mode")
+                enforce_eager = True
+                model_config.enforce_eager = True
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            else:
+                logger.info("Falling back to FULL_DECODE_ONLY under xlite decode-only mode")
+                compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
