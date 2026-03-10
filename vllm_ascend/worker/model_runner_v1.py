@@ -1372,7 +1372,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
             ),
             self.maybe_get_kv_connector_output(
-                scheduler_output, clear_metadata=clear_kv_metadata
+                scheduler_output, defer_finalize=not clear_kv_metadata
             ) as kv_connector_output,
         ):
             hidden_states = self._model_forward(
