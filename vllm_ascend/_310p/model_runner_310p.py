@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import numpy as np
 import torch
 import torch_npu
@@ -24,6 +26,7 @@ from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -32,6 +35,128 @@ class NPUModelRunner310(NPUModelRunner):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
+        self.graph_uniform_decode_query_len = self.uniform_decode_query_len
+        if self.speculative_config is not None and self.speculative_config.method == "ngram":
+            self.graph_uniform_decode_query_len = 1
+
+    @contextmanager
+    def _temporary_graph_uniform_decode_query_len(self):
+        if self.graph_uniform_decode_query_len == self.uniform_decode_query_len:
+            yield
+            return
+
+        original_uniform_decode_query_len = self.uniform_decode_query_len
+        self.uniform_decode_query_len = self.graph_uniform_decode_query_len
+        try:
+            yield
+        finally:
+            self.uniform_decode_query_len = original_uniform_decode_query_len
+
+    def _should_disable_fullgraph_for_ngram_spec(self) -> bool:
+        return (
+            self.speculative_config is not None
+            and self.speculative_config.method == "ngram"
+            and self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit)
+        )
+
+    def _determine_batch_execution_and_padding(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        num_scheduled_tokens_np: np.ndarray,
+        max_num_scheduled_tokens: int,
+        use_cascade_attn: bool,
+        allow_microbatching: bool = False,
+        force_eager: bool = False,
+        force_uniform_decode: bool | None = None,
+        force_has_lora: bool | None = None,
+        force_num_active_loras: int | None = None,
+        num_encoder_reqs: int = 0,
+    ):
+        if (
+            force_uniform_decode is None
+            and self.graph_uniform_decode_query_len != self.uniform_decode_query_len
+            and max_num_scheduled_tokens == self.graph_uniform_decode_query_len
+            and num_tokens == max_num_scheduled_tokens * num_reqs
+        ):
+            is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+            decode_gate = is_all_decode if self.speculative_config else True
+            if decode_gate:
+                force_uniform_decode = True
+
+        force_eager = force_eager or self._should_disable_fullgraph_for_ngram_spec()
+        return super()._determine_batch_execution_and_padding(
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
+            use_cascade_attn=use_cascade_attn,
+            allow_microbatching=allow_microbatching,
+            force_eager=force_eager,
+            force_uniform_decode=force_uniform_decode,
+            force_has_lora=force_has_lora,
+            force_num_active_loras=force_num_active_loras,
+            num_encoder_reqs=num_encoder_reqs,
+        )
+
+    @torch.inference_mode()
+    def _dummy_run(
+        self,
+        num_tokens: int,
+        with_prefill: bool = False,
+        cudagraph_runtime_mode=None,
+        force_attention: bool = False,
+        uniform_decode: bool = False,
+        is_profile: bool = False,
+        create_mixed_batch: bool = False,
+        allow_microbatching: bool = True,
+        skip_eplb: bool = False,
+        remove_lora: bool = True,
+        is_graph_capturing: bool = False,
+        num_active_loras: int = 0,
+    ):
+        should_patch_uniform_decode_query_len = (
+            uniform_decode and self.graph_uniform_decode_query_len != self.uniform_decode_query_len
+        )
+        if should_patch_uniform_decode_query_len:
+            with self._temporary_graph_uniform_decode_query_len():
+                return super()._dummy_run(
+                    num_tokens=num_tokens,
+                    with_prefill=with_prefill,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    force_attention=force_attention,
+                    uniform_decode=uniform_decode,
+                    is_profile=is_profile,
+                    create_mixed_batch=create_mixed_batch,
+                    allow_microbatching=allow_microbatching,
+                    skip_eplb=skip_eplb,
+                    remove_lora=remove_lora,
+                    is_graph_capturing=is_graph_capturing,
+                    num_active_loras=num_active_loras,
+                )
+
+        return super()._dummy_run(
+            num_tokens=num_tokens,
+            with_prefill=with_prefill,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            force_attention=force_attention,
+            uniform_decode=uniform_decode,
+            is_profile=is_profile,
+            create_mixed_batch=create_mixed_batch,
+            allow_microbatching=allow_microbatching,
+            skip_eplb=skip_eplb,
+            remove_lora=remove_lora,
+            is_graph_capturing=is_graph_capturing,
+            num_active_loras=num_active_loras,
+        )
+
+    def _check_and_update_cudagraph_mode(
+        self,
+        attention_backends,
+        kv_cache_groups,
+    ) -> None:
+        with self._temporary_graph_uniform_decode_query_len():
+            super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
     def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
