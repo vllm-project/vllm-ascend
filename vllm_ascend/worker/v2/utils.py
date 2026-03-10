@@ -3,7 +3,7 @@ from contextlib import contextmanager
 import vllm
 import torch
 
-from vllm_ascend.worker.v2.block_table import AscendBlockTable
+from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 
 @contextmanager
@@ -31,7 +31,7 @@ def block_table_wrapper():
     try:
         # vllm-ascend need to initialize slot mapping as torch.int32 dtype,
         # but vllm default is torch.int64 dtype.
-        vllm.v1.worker.gpu.block_table.BlockTable = AscendBlockTable
+        vllm.v1.worker.gpu.block_table.BlockTables = AscendBlockTables
         yield
     finally:
         pass

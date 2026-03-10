@@ -17,10 +17,10 @@
 # This file is a part of the vllm-ascend project.
 #
 import torch
-from vllm.v1.worker.gpu.block_table import BlockTable
+from vllm.v1.worker.gpu.block_table import BlockTables
 
 
-class AscendBlockTable(BlockTable):
+class AscendBlockTables(BlockTables):
     """Block table for Ascend NPUs."""
 
     def __init__(
