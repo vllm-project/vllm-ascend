@@ -6,23 +6,35 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 
 ### Highlights
 
-- DeepSeek V3.2 now supports graph mode (piecewise and full_decode_only) with PCP and DCP context parallel. Additionally, PCP now supports MTP and chunked prefill for DeepSeek V3.2. [#6940](https://github.com/vllm-project/vllm-ascend/pull/6940) [#6917](https://github.com/vllm-project/vllm-ascend/pull/6917)
-- Qwen3-Next now supports PCP and DCP context parallel. [#6091](https://github.com/vllm-project/vllm-ascend/pull/6091)
 - MXFP8 MoE quantization is now supported for Qwen MoE models. [#6670](https://github.com/vllm-project/vllm-ascend/pull/6670)
 - Qwen3-Omni quantization adaptation and optimization is now available. [#6828](https://github.com/vllm-project/vllm-ascend/pull/6828)
+- GLM5-W8A8 quantization is now supported by parameterizing hardcoded MLA dimensions. [#6902](https://github.com/vllm-project/vllm-ascend/pull/6902)
 
 ### Features
 
 - [Experimental support] Support FabricMem Mode for ADXL/HIXL interconnect. [#6806](https://github.com/vllm-project/vllm-ascend/pull/6806)
 - Qwen3-Next now supports FlashComm1. [#6830](https://github.com/vllm-project/vllm-ascend/pull/6830)
 - NPUWorker Profiler now supports profile_prefix for better profiling experience. [#6968](https://github.com/vllm-project/vllm-ascend/pull/6968)
-- EPLB profiling now displays expert hotness comparison and time required for eplb adjustment. [#6877](https://github.com/vllm-project/vllm-ascend/pull/6877) [#7001](https://github.com/vllm-project/vllm-ascend/pull/7001)
+- EPLB profiling now displays expert hotness comparison and time required for eplb adjustment. [#6877](https://github.com/vllm-project/vllm-ascend/pull/6877) [#7001](https://github.com/vllm-project/vllm-ascend/pull/7001)]
+- Xlite Qwen3 MoE now supports Data Parallel. [#6715](https://github.com/vllm-project/vllm-ascend/pull/6715)
+- Mooncake Layerwise Connector now supports kv_pool. [#7032](https://github.com/vllm-project/vllm-ascend/pull/7032)
+- Eagle3 now supports QuaRot quantization without embedding. [#7038](https://github.com/vllm-project/vllm-ascend/pull/7038)
+
+### Hardware and Operator Support
+
+- 310P now supports w8a8sc quantization method. [#7075](https://github.com/vllm-project/vllm-ascend/pull/7075)
+- Added AscendC casual_conv1d_fn operator for Qwen3-Next. [#6661](https://github.com/vllm-project/vllm-ascend/pull/6661)
+- Added Ascend Ops recurrent_gated_delta_rule operator. [#6725](https://github.com/vllm-project/vllm-ascend/pull/6725)
+- Added GMM custom operator for MoE models. [#7010](https://github.com/vllm-project/vllm-ascend/pull/7010)
 
 ### Performance
 
 - Faster convolution computation improves TTFT by 0.95% and throughput by 0.59% for Qwen3-VL models. [#7017](https://github.com/vllm-project/vllm-ascend/pull/7017)
 - Optimize split_qkv_rmsnorm_rope operator. [#6827](https://github.com/vllm-project/vllm-ascend/pull/6827)
 - Implement global CPU slicing and improve IRQ binding for Ascend NPUs, ensuring non-overlapping CPU partitions and better resource management. [#6945](https://github.com/vllm-project/vllm-ascend/pull/6945)
+- Optimize MTP execution by reordering state update operation. [#6844](https://github.com/vllm-project/vllm-ascend/pull/6844)
+- Avoid CPU sync in mrope_positions copy by using full tensor copy. [#7014](https://github.com/vllm-project/vllm-ascend/pull/7014)
+- Cancel H2D synchronization for expert_map in MoE models. [#7000](https://github.com/vllm-project/vllm-ascend/pull/7000)
 
 ### Dependencies
 
@@ -31,12 +43,32 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 ### Deprecation & Breaking Changes
 
 - `enable_flash_comm_v1` config option has been renamed back to `enable_sp`. [#6883](https://github.com/vllm-project/vllm-ascend/pull/6883)
+- Reverted auto-detect quantization format from model files feature. [#6873](https://github.com/vllm-project/vllm-ascend/pull/6873)
+
+### Documentation
+
+- Added user/developer guide for CPU binding. [#7045](https://github.com/vllm-project/vllm-ascend/pull/7045)
+- Added metrics usage documentation and example. [#6962](https://github.com/vllm-project/vllm-ascend/pull/6962)
+- Added llms.txt for LLM discovery. [#6886](https://github.com/vllm-project/vllm-ascend/pull/6886)
+- Added GLM4.x multi-node deploy tutorial. [#6872](https://github.com/vllm-project/vllm-ascend/pull/6872)
+- Added explanation of 310p special param: max-model-len. [#7065](https://github.com/vllm-project/vllm-ascend/pull/7065)
 
 ### Others
 
 - Fix openEuler Dockerfile error. [#6871](https://github.com/vllm-project/vllm-ascend/pull/6871)
 - Many bug fixes including:
-  - Fix Eagle speculative decoding with Context Parallel enabled. [#6981](https://github.com/vllm-project/vllm-ascend/pull/6981)
+  - Fix Eagle speculative decoding with Context Parallel enabled. [#6981](https://github.com/vllm-project/vllm-ascend/pull/6981) [#7079](https://github.com/vllm-project/vllm-ascend/pull/7079)
+  - Fix LoRA accuracy issue introduced by upstream vLLM changes. [#6958](https://github.com/vllm-project/vllm-ascend/pull/6958)
+  - Fix streaming content-type in load balance proxy server. [#6985](https://github.com/vllm-project/vllm-ascend/pull/6985)
+  - Fix metadata execute error: integer modulo by zero. [#6521](https://github.com/vllm-project/vllm-ascend/pull/6521)
+  - Fix triton rope_siso implementation bug. [#7082](https://github.com/vllm-project/vllm-ascend/pull/7082)
+  - Fix incorrect layer count for MTP models in update_aclgraph_sizes. [#7064](https://github.com/vllm-project/vllm-ascend/pull/7064)
+  - Fix compilation errors for CANN versions subsequent to b020. [#7059](https://github.com/vllm-project/vllm-ascend/pull/7059)
+  - Fix quant config support in GLM4.6V. [#7062](https://github.com/vllm-project/vllm-ascend/pull/7062)
+  - Fix parameter ordering bug in _merge_multimodal_embeddings. [#7068](https://github.com/vllm-project/vllm-ascend/pull/7068)
+  - Fix fused mc2 bug in EPLB. [#6794](https://github.com/vllm-project/vllm-ascend/pull/6794)
+  - Fix kernel block size for computing slot mapping. [#7019](https://github.com/vllm-project/vllm-ascend/pull/7019)
+  - Fix layerwise stacking MTP error in P/D disaggregation. [#7036](https://github.com/vllm-project/vllm-ascend/pull/7036)
   - Fix RoPE dimension for npu_rotary_embedding. [#6880](https://github.com/vllm-project/vllm-ascend/pull/6880)
   - Fix Qwen-Omni quantization bugs. [#7042](https://github.com/vllm-project/vllm-ascend/pull/7042) [#7007](https://github.com/vllm-project/vllm-ascend/pull/7007)
   - Fix GDN layer accuracy in graph mode. [#6822](https://github.com/vllm-project/vllm-ascend/pull/6822)
@@ -53,6 +85,12 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
   - Fix 300I unquant model weight nd2nz error. [#6851](https://github.com/vllm-project/vllm-ascend/pull/6851)
   - Fix CPU binding logic. [#6889](https://github.com/vllm-project/vllm-ascend/pull/6889)
   - Fix Eagle fullgraph shape capture. [#6846](https://github.com/vllm-project/vllm-ascend/pull/6846)
+
+### Known Issue
+
+- Currently, DeepSeek v3.2’s PCP & DCP do not yet support the FlashComm1 feature, which may cause serve errors or other unknown errors.
+- In 4-node A3 PD disaggregation deployment with DeepSeek V3.2, the P-Node may hang when benchmarking at high concurrency (e.g., 2K/2K tokens with 512 concurrent requests).
+- MTP with large EP configurations may cause graph capture buffer overflow. Workaround: explicitly set `--compilation-config '{"max_cudagraph_capture_size": N}'` where `N = max_concurrency × (1 + num_speculative_tokens)`.
 
 ## v0.15.0rc1 - 2026.02.27
 
