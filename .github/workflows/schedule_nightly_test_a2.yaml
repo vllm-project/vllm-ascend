@@ -21,8 +21,8 @@ name: Nightly-A2
 
 on:
   schedule:
-      # Run test at 24:00 Beijing time (UTC+8)
-      - cron: "0 16 * * *"
+      # Run test at 23:45 Beijing time (UTC+8)
+      - cron: "45 15 * * *"
   workflow_dispatch:
   pull_request:
     branches:
@@ -50,6 +50,10 @@ jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
     runs-on: linux-aarch64-a2b3-0
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'nightly-test')
     outputs:
       should_run: ${{ steps.parse.outputs.should_run }}
       test_filter: ${{ steps.parse.outputs.test_filter }}
@@ -201,7 +205,7 @@ jobs:
     if: always() && needs.parse-trigger.outputs.should_run == 'true'
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         test_config:
           - name: multi-node-deepseek-dp
