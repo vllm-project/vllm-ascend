@@ -9,13 +9,13 @@
  */
 
  /*!
- * \file sparse_flash_attention.cpp
+ * \file sparse_flash_attention_custom.cpp
  * \brief
  */
 
 #include "kernel_operator.h"
-#include "sparse_flash_attention_template_tiling_key.h"
-#include "sparse_flash_attention_kernel_mla.h"
+#include "sparse_flash_attention_custom_template_tiling_key.h"
+#include "sparse_flash_attention_custom_kernel_mla.h"
 
 using namespace AscendC;
 
@@ -31,7 +31,7 @@ using namespace AscendC;
 
 template<int FLASH_DECODE, int LAYOUT_T, int KV_LAYOUT_T, int TEMPLATE_MODE>
  __global__ __aicore__ void
-sparse_flash_attention(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
+sparse_flash_attention_custom(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
                        __gm__ uint8_t *sparseIndices, __gm__ uint8_t *blocktable,
                        __gm__ uint8_t *actualSeqLengthsQuery, __gm__ uint8_t *actualSeqLengthsKV,
                        __gm__ uint8_t* queryRope, __gm__ uint8_t* keyRope,
@@ -44,10 +44,10 @@ sparse_flash_attention(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_
 
     if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16 && ORIG_DTYPE_KEY == DT_FLOAT16 &&
                   ORIG_DTYPE_ATTENTION_OUT == DT_FLOAT16) {
-        SFA_OP_IMPL(SparseFlashAttentionMla, SparseFlashAttentionTilingDataMla, half, half, half,
+        SFA_OP_IMPL(SparseFlashAttentionCustomMla, SparseFlashAttentionCustomTilingDataMla, half, half, half,
             FLASH_DECODE, static_cast<SFA_LAYOUT>(LAYOUT_T), static_cast<SFA_LAYOUT>(KV_LAYOUT_T), TEMPLATE_MODE);
     } else { // bf16
-        SFA_OP_IMPL(SparseFlashAttentionMla, SparseFlashAttentionTilingDataMla, bfloat16_t, bfloat16_t, bfloat16_t,
+        SFA_OP_IMPL(SparseFlashAttentionCustomMla, SparseFlashAttentionCustomTilingDataMla, bfloat16_t, bfloat16_t, bfloat16_t,
             FLASH_DECODE, static_cast<SFA_LAYOUT>(LAYOUT_T), static_cast<SFA_LAYOUT>(KV_LAYOUT_T), TEMPLATE_MODE);
     }
 }

@@ -9,18 +9,18 @@
  */
 
 /*!
- * \file lightning_indexer_service_cube.h
+ * \file lightning_indexer_custom_service_cube.h
  * \brief use 5 buffer for matmul l1, better pipeline
  */
-#ifndef LIGHTNING_INDEXER_SERVICE_CUBE_H
-#define LIGHTNING_INDEXER_SERVICE_CUBE_H
+#ifndef lightning_indexer_custom_SERVICE_CUBE_H
+#define lightning_indexer_custom_SERVICE_CUBE_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "lightning_indexer_common.h"
+#include "lightning_indexer_custom_common.h"
 
 namespace LIKernel {
 using namespace LICommon;

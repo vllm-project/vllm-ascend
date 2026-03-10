@@ -9,12 +9,12 @@
  */
 
 /*!
- * \file lightning_indexer_tiling.cpp
+ * \file lightning_indexer_custom_tiling.cpp
  * \brief
  */
 
-#include "lightning_indexer_tiling.h"
-#include "../op_kernel/lightning_indexer_template_tiling_key.h"
+#include "lightning_indexer_custom_tiling.h"
+#include "../op_kernel/lightning_indexer_custom_template_tiling_key.h"
 
 using namespace ge;
 using namespace AscendC;
@@ -72,7 +72,7 @@ ge::graphStatus LIInfoParser::CheckRequiredParaExistence() const
 ge::graphStatus LIInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OPS_LOG_E("LightningIndexer", "opName got from TilingContext is nullptr");
+        OPS_LOG_E("LightningIndexerCustom", "opName got from TilingContext is nullptr");
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -127,8 +127,8 @@ void LIInfoParser::GetInputParaInfo()
 
 void LIInfoParser::GetOutputParaInfo()
 {
-    opParamInfo_.attenOut.desc = context_->GetOutputDesc(LIGHTNING_INDEXER);
-    opParamInfo_.attenOut.shape = context_->GetOutputShape(LIGHTNING_INDEXER);
+    opParamInfo_.attenOut.desc = context_->GetOutputDesc(lightning_indexer_custom);
+    opParamInfo_.attenOut.shape = context_->GetOutputShape(lightning_indexer_custom);
 }
 
 ge::graphStatus LIInfoParser::GetAndCheckAttrParaInfo()
@@ -612,12 +612,12 @@ ge::graphStatus LIInfoParser::ParseAndCheck(LITilingInfo &liInfo)
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus TilingPrepareForLightningIndexer(gert::TilingParseContext * /* context */)
+static ge::graphStatus TilingPrepareForLightningIndexerCustom(gert::TilingParseContext * /* context */)
 {
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus LightningIndexerTiling::DoTiling(LITilingInfo *tilingInfo)
+ge::graphStatus LightningIndexerCustomTiling::DoTiling(LITilingInfo *tilingInfo)
 {
     // -------------set blockdim-----------------
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(tilingInfo->platformInfo);
@@ -674,21 +674,21 @@ ge::graphStatus LightningIndexerTiling::DoTiling(LITilingInfo *tilingInfo)
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus TilingForLightningIndexer(gert::TilingContext *context)
+ge::graphStatus TilingForLightningIndexerCustom(gert::TilingContext *context)
 {
-    OPS_ERR_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("LightningIndexer", "Tiling context is null."),
+    OPS_ERR_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("LightningIndexerCustom", "Tiling context is null."),
                return ge::GRAPH_FAILED);
     LITilingInfo liInfo;
     LIInfoParser LIInfoParser(context);
     if (LIInfoParser.ParseAndCheck(liInfo) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    LightningIndexerTiling liTiling(context);
+    LightningIndexerCustomTiling liTiling(context);
     return liTiling.DoTiling(&liInfo);
 }
 
-IMPL_OP_OPTILING(LightningIndexer)
-    .Tiling(TilingForLightningIndexer)
-    .TilingParse<LICompileInfo>(TilingPrepareForLightningIndexer);
+IMPL_OP_OPTILING(LightningIndexerCustom)
+    .Tiling(TilingForLightningIndexerCustom)
+    .TilingParse<LICompileInfo>(TilingPrepareForLightningIndexerCustom);
 
 } // namespace optiling

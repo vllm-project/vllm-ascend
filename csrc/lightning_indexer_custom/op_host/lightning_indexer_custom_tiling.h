@@ -9,12 +9,12 @@
  */
 
 /*!
- * \file lightning_indexer_tiling.h
+ * \file lightning_indexer_custom_tiling.h
  * \brief
  */
 
-#ifndef LIGHTNING_INDEXER_TILING_H_
-#define LIGHTNING_INDEXER_TILING_H_
+#ifndef lightning_indexer_custom_TILING_H_
+#define lightning_indexer_custom_TILING_H_
 
 #include "exe_graph/runtime/tiling_context.h"
 #include "tiling/platform/platform_ascendc.h"
@@ -49,7 +49,7 @@ constexpr uint32_t WEIGTHS_INDEX = 2;
 constexpr uint32_t ACTUAL_SEQ_Q_INDEX = 3;
 constexpr uint32_t ACTUAL_SEQ_K_INDEX = 4;
 constexpr uint32_t BLOCK_TABLE_INDEX = 5;
-constexpr uint32_t LIGHTNING_INDEXER = 0;
+constexpr uint32_t lightning_indexer_custom = 0;
 // Attributes Index
 constexpr uint32_t ATTR_QUERY_LAYOUT_INDEX = 0;
 constexpr uint32_t ATTR_KEY_LAYOUT_INDEX = 1;
@@ -80,7 +80,7 @@ TILING_DATA_FIELD_DEF(uint32_t, blockSize)
 TILING_DATA_FIELD_DEF(uint32_t, maxBlockNumPerBatch)
 TILING_DATA_FIELD_DEF(uint32_t, sparseMode)
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(LightningIndexer, LITilingData)
+REGISTER_TILING_DATA_CLASS(LightningIndexerCustom, LITilingData)
 
 struct LICompileInfo {};
 
@@ -201,9 +201,9 @@ public:
     ge::DataType outputType_ = ge::DT_FLOAT16;
 };
 
-class LightningIndexerTiling {
+class LightningIndexerCustomTiling {
 public:
-    explicit LightningIndexerTiling(gert::TilingContext *context) : context_(context){};
+    explicit LightningIndexerCustomTiling(gert::TilingContext *context) : context_(context){};
     ge::graphStatus DoTiling(LITilingInfo *tilingInfo);
 
 private:
@@ -212,4 +212,4 @@ private:
 };
 
 } // namespace optiling
-#endif // LIGHTNING_INDEXER_TILING_H_
+#endif // lightning_indexer_custom_TILING_H_

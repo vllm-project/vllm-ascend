@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file lightning_indexer_proto.cpp
+ * \file lightning_indexer_custom_proto.cpp
  * \brief
  */
 #include <graph/utils/type_utils.h>
@@ -27,9 +27,9 @@ constexpr uint32_t ATTR_QUERY_LAYOUT_INDEX = 0;
 constexpr uint32_t ATTR_KEY_LAYOUT_INDEX = 1;
 constexpr uint32_t ATTR_SPARSE_COUNT_INDEX = 2;
 
-static ge::graphStatus InferShapeLightningIndexer(gert::InferShapeContext *context)
+static ge::graphStatus InferShapeLightningIndexerCustom(gert::InferShapeContext *context)
 {
-    OPS_ERR_IF(context == nullptr, OPS_LOG_E("LightningIndexer", "InferShapeContext is nullptr!"),
+    OPS_ERR_IF(context == nullptr, OPS_LOG_E("LightningIndexerCustom", "InferShapeContext is nullptr!"),
                return ge::GRAPH_FAILED);
     const gert::Shape *queryShape = context->GetInputShape(QUERY_INDEX);
     OPS_LOG_E_IF_NULL(context, queryShape, return ge::GRAPH_FAILED);
@@ -72,25 +72,25 @@ static ge::graphStatus InferShapeLightningIndexer(gert::InferShapeContext *conte
         outShape->SetDim(1, keyShape->GetDim(nDimIndex));                // 1:Dim N
         outShape->SetDim(2, *seleced_count);                             // 2:Dim K
     }
-    OPS_LOG_D(context->GetNodeName(), "LightningIndexer InferShape end.");
+    OPS_LOG_D(context->GetNodeName(), "LightningIndexerCustom InferShape end.");
 
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus InferDataTypeLightningIndexer(gert::InferDataTypeContext *context)
+static ge::graphStatus InferDataTypeLightningIndexerCustom(gert::InferDataTypeContext *context)
 {
-    OPS_ERR_IF(context == nullptr, OPS_LOG_E("LightningIndexer", "InferDataTypeContext is nullptr!"),
+    OPS_ERR_IF(context == nullptr, OPS_LOG_E("LightningIndexerCustom", "InferDataTypeContext is nullptr!"),
                return ge::GRAPH_FAILED);
-    OPS_LOG_D(context->GetNodeName(), "Enter LightningIndexer InferDataType impl.");
+    OPS_LOG_D(context->GetNodeName(), "Enter LightningIndexerCustom InferDataType impl.");
     // default set q's dtype as fia's output type
     ge::DataType outputType = ge::DT_INT32;
     // attention_out, outidx:0
     context->SetOutputDataType(0, outputType);
-    OPS_LOG_D(context->GetNodeName(), "LightningIndexer InferDataType end.");
+    OPS_LOG_D(context->GetNodeName(), "LightningIndexerCustom InferDataType end.");
     return GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(LightningIndexer)
-    .InferShape(InferShapeLightningIndexer)
-    .InferDataType(InferDataTypeLightningIndexer);
+IMPL_OP_INFERSHAPE(LightningIndexerCustom)
+    .InferShape(InferShapeLightningIndexerCustom)
+    .InferDataType(InferDataTypeLightningIndexerCustom);
 } // namespace ops
