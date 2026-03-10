@@ -143,7 +143,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         chunked_context_metadata = None
         attn_mask_seqlens = common_long_seq_metadata.attn_mask_seqlens
         if num_prefills > 0:
-            query_lens = query_lens[num_decode_tokens:]
+            query_lens = query_lens[num_decodes:]
             context_lens_cpu = num_computed_tokens_cpu[num_decodes:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
             if self.chunked_prefill_enabled and max_context_len_cpu > 0:
