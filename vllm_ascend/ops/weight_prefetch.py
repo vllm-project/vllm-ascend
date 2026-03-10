@@ -96,11 +96,15 @@ class WeightPrefetchMethod:
         if not self.moe.is_active_this_forward:
             return
         forward_context = get_forward_context()
-        if not forward_context or forward_context.model_instance is None:
+        if not forward_context or ExtraForwardContext.model_instance() is None:
             return
 
         # layer_idx is subtracted by 1 because layer_idx was incremented by 1 at layernorm.
-        weight = forward_context.model_instance.model.layers[forward_context.layer_idx - 1].mlp.experts.w13_weight
+        weight = (
+            ExtraForwardContext.model_instance()
+            .model.layers[ExtraForwardContext.layer_idx() - 1]
+            .mlp.experts.w13_weight
+        )
         weight_size = weight.data.element_size() * weight.data.numel() * self.moe.prefetch_ratio.get(prefix, 0)
         torch.ops.vllm.prefetch_preprocess(weight=weight, start_flag=None, max_weight_size=int(weight_size))
 
@@ -123,7 +127,7 @@ class WeightPrefetchMethod:
         except AssertionError:
             return
         self.mlp.is_active_this_forward = (
-            forward_context.layer_idx is not None
+            ExtraForwardContext.layer_idx() is not None
             and ExtraForwardContext.num_tokens() is not None
             and ExtraForwardContext.num_tokens() < 500
         )
@@ -145,7 +149,7 @@ class WeightPrefetchMethod:
 
         # start point of gate_up_proj weight prefetch
         if curr_layer_prefix.split(".")[-2] == "self_attn":
-            model_instance = forward_context.model_instance
+            model_instance = ExtraForwardContext.model_instance()
             layer_idx = int(curr_layer_prefix.split(".")[2])
             weight = model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight
             if self.mlp_pre_version_compatibale_config:
@@ -157,11 +161,11 @@ class WeightPrefetchMethod:
             if weight_size > MAX_PREFETCH_WEIGHT_SIZE:
                 weight_size = MAX_PREFETCH_WEIGHT_SIZE
             torch.ops.vllm.prefetch_preprocess(weight=weight, start_flag=x_dependency, max_weight_size=int(weight_size))
-            forward_context.prefetch_mlp_gate_up_proj = True
+            ExtraForwardContext.set_prefetch_mlp_gate_up_proj(True)
 
     def _maybe_prefetch_mlp_down_weight_preprocess(self, x_dependency: torch.Tensor, forward_context: ForwardContext):
-        layer_idx = forward_context.layer_idx
-        model_instance = forward_context.model_instance
+        layer_idx = ExtraForwardContext.layer_idx()
+        model_instance = ExtraForwardContext.model_instance()
         weight = model_instance.model.layers[layer_idx].mlp.down_proj.weight
         if self.mlp_pre_version_compatibale_config:
             weight_size = self.mlp_pre_version_compatibale_config.get(self.MLP_DOWN, 0)
@@ -172,8 +176,8 @@ class WeightPrefetchMethod:
         if weight_size > MAX_PREFETCH_WEIGHT_SIZE:
             weight_size = MAX_PREFETCH_WEIGHT_SIZE
         torch.ops.vllm.prefetch_preprocess(weight=weight, start_flag=x_dependency, max_weight_size=int(weight_size))
-        forward_context.prefetch_mlp_down_proj = True
-        forward_context.layer_idx += 1
+        ExtraForwardContext.set_prefetch_mlp_down_proj(True)
+        ExtraForwardContext.set_layer_idx(layer_idx + 1)
 
     def maybe_prefetch_mlp_weight_postprocess(self, stop_flag: torch.Tensor):
         if not self.mlp.is_active_this_forward:
@@ -184,10 +188,10 @@ class WeightPrefetchMethod:
         except AssertionError:
             return
 
-        if forward_context.prefetch_mlp_gate_up_proj or forward_context.prefetch_mlp_down_proj:
+        if ExtraForwardContext.prefetch_mlp_gate_up_proj() or forward_context.prefetch_mlp_down_proj:
             torch.ops.vllm.prefetch_postprocess(stop_flag)
-            forward_context.prefetch_mlp_gate_up_proj = False
-            forward_context.prefetch_mlp_down_proj = False
+            ExtraForwardContext.set_prefetch_mlp_gate_up_proj(False)
+            ExtraForwardContext.set_prefetch_mlp_down_proj(False)
 
     def maybe_prefetch_mla_or_sla_weight_in_current_stream(
         self,

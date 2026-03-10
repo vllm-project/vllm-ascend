@@ -379,7 +379,7 @@ class AscendEagleProposer(EagleProposer):
             # Reset MOE layer index before first model call
             forward_context = get_forward_context()
             if forward_context is not None:
-                forward_context.moe_layer_index = 0
+                ExtraForwardContext.set_moe_layer_index(0)
 
             self._runnable(
                 num_input_tokens=num_tokens,
@@ -393,7 +393,7 @@ class AscendEagleProposer(EagleProposer):
                 num_tokens=num_tokens,
             )
             forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not ExtraForwardContext.capturing():
                 self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
 
     def _propose(
@@ -662,7 +662,7 @@ class AscendEagleProposer(EagleProposer):
             # Reset MOE layer index for forward pass
             forward_context = get_forward_context()
             if forward_context is not None:
-                forward_context.moe_layer_index = 0
+                ExtraForwardContext.set_moe_layer_index(0)
 
             draft_token_ids = self._runnable(
                 num_input_tokens=num_input_tokens,
@@ -786,7 +786,7 @@ class AscendEagleProposer(EagleProposer):
             # Reset MOE layer index for each draft step iteration
             forward_context = get_forward_context()
             if forward_context is not None:
-                forward_context.moe_layer_index = 0
+                ExtraForwardContext.set_moe_layer_index(0)
 
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.

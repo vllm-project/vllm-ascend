@@ -282,7 +282,7 @@ class ExtraForwardContext:
     """
 
     @staticmethod
-    def get_atrr(name: str, default: Any = None):
+    def get_attr(name: str, default: Any = None):
         forward_context = get_forward_context()
         if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
             return forward_context.additional_kwargs.get(name, default)
@@ -299,7 +299,7 @@ class ExtraForwardContext:
     @staticmethod
     def capturing() -> bool:
         """A flag to indicate whether to capture graph."""
-        return ExtraForwardContext.get_atrr("capturing", False)
+        return ExtraForwardContext.get_attr("capturing", False)
 
     @staticmethod
     def set_capturing(val: bool):
@@ -309,7 +309,7 @@ class ExtraForwardContext:
     @staticmethod
     def moe_comm_type() -> MoECommType | None:
         """The MoE communication type."""
-        return ExtraForwardContext.get_atrr("moe_comm_type", None)
+        return ExtraForwardContext.get_attr("moe_comm_type", None)
 
     @staticmethod
     def set_moe_comm_type(val: MoECommType | None):
@@ -319,7 +319,7 @@ class ExtraForwardContext:
     @staticmethod
     def moe_comm_method():
         """The MoE communication method."""
-        return ExtraForwardContext.get_atrr("moe_comm_method", None)
+        return ExtraForwardContext.get_attr("moe_comm_method", None)
 
     @staticmethod
     def set_moe_comm_method(val):
@@ -329,7 +329,7 @@ class ExtraForwardContext:
     @staticmethod
     def mmrs_fusion() -> bool:
         """A flag to indicate whether to use mmrs fusion."""
-        return ExtraForwardContext.get_atrr("mmrs_fusion", False)
+        return ExtraForwardContext.get_attr("mmrs_fusion", False)
 
     @staticmethod
     def set_mmrs_fusion(val: bool):
@@ -339,7 +339,7 @@ class ExtraForwardContext:
     @staticmethod
     def num_tokens() -> int:
         """The number of tokens in the current batch."""
-        return ExtraForwardContext.get_atrr("num_tokens", 0)
+        return ExtraForwardContext.get_attr("num_tokens", 0)
 
     @staticmethod
     def set_num_tokens(val: int):
@@ -349,7 +349,7 @@ class ExtraForwardContext:
     @staticmethod
     def flash_comm_v1_enabled() -> bool:
         """A flag to indicate whether to use flashcomm v1."""
-        return ExtraForwardContext.get_atrr("flash_comm_v1_enabled", False)
+        return ExtraForwardContext.get_attr("flash_comm_v1_enabled", False)
 
     @staticmethod
     def set_flash_comm_v1_enabled(val: bool):
@@ -359,7 +359,7 @@ class ExtraForwardContext:
     @staticmethod
     def flashcomm_v2_enabled() -> bool:
         """A flag to indicate whether to use flashcomm v2."""
-        return ExtraForwardContext.get_atrr("flashcomm_v2_enabled", False)
+        return ExtraForwardContext.get_attr("flashcomm_v2_enabled", False)
 
     @staticmethod
     def set_flashcomm_v2_enabled(val: bool):
@@ -369,7 +369,7 @@ class ExtraForwardContext:
     @staticmethod
     def pad_size() -> int:
         """The pad size in the current batch."""
-        return ExtraForwardContext.get_atrr("pad_size", 0)
+        return ExtraForwardContext.get_attr("pad_size", 0)
 
     @staticmethod
     def set_pad_size(val: int):
@@ -379,7 +379,7 @@ class ExtraForwardContext:
     @staticmethod
     def padded_length() -> int:
         """The padded length in the current batch."""
-        return ExtraForwardContext.get_atrr("padded_length", 0)
+        return ExtraForwardContext.get_attr("padded_length", 0)
 
     @staticmethod
     def set_padded_length(val: int):
@@ -389,7 +389,7 @@ class ExtraForwardContext:
     @staticmethod
     def max_tokens_across_dp() -> int:
         """The max tokens across dp in the current batch."""
-        return ExtraForwardContext.get_atrr("max_tokens_across_dp", 0)
+        return ExtraForwardContext.get_attr("max_tokens_across_dp", 0)
 
     @staticmethod
     def set_max_tokens_across_dp(val: int):
@@ -399,7 +399,7 @@ class ExtraForwardContext:
     @staticmethod
     def mc2_mask() -> torch.Tensor | None:
         """The mc2 mask in the current batch."""
-        return ExtraForwardContext.get_atrr("mc2_mask", None)
+        return ExtraForwardContext.get_attr("mc2_mask", None)
 
     @staticmethod
     def set_mc2_mask(val: torch.Tensor | None):
@@ -409,9 +409,59 @@ class ExtraForwardContext:
     @staticmethod
     def is_draft_model() -> bool:
         """A flag to indicate whether to use draft model."""
-        return ExtraForwardContext.get_atrr("is_draft_model", False)
+        return ExtraForwardContext.get_attr("is_draft_model", False)
 
     @staticmethod
     def set_is_draft_model(val: bool):
         """Set the is_draft_model flag."""
         return ExtraForwardContext.set_attr("is_draft_model", val)
+
+    @staticmethod
+    def moe_layer_index() -> int | None:
+        """The MoE layer index in the current batch."""
+        return ExtraForwardContext.get_attr("moe_layer_index", None)
+
+    @staticmethod
+    def set_moe_layer_index(val: int | None):
+        """Set the MoE layer index in the current batch."""
+        return ExtraForwardContext.set_attr("moe_layer_index", val)
+
+    @staticmethod
+    def prefetch_mlp_gate_up_proj() -> bool:
+        """A flag to indicate whether to prefetch mlp gate up proj."""
+        return ExtraForwardContext.get_attr("prefetch_mlp_gate_up_proj", False)
+
+    @staticmethod
+    def set_prefetch_mlp_gate_up_proj(val: bool):
+        """Set the prefetch mlp gate up proj flag."""
+        return ExtraForwardContext.set_attr("prefetch_mlp_gate_up_proj", val)
+
+    @staticmethod
+    def prefetch_mlp_down_proj() -> bool:
+        """A flag to indicate whether to prefetch mlp down proj."""
+        return ExtraForwardContext.get_attr("prefetch_mlp_down_proj", False)
+
+    @staticmethod
+    def set_prefetch_mlp_down_proj(val: bool):
+        """Set the prefetch mlp down proj flag."""
+        return ExtraForwardContext.set_attr("prefetch_mlp_down_proj", val)
+
+    @staticmethod
+    def model_instance() -> torch.nn.Module | None:
+        """The model instance."""
+        return ExtraForwardContext.get_attr("model_instance", None)
+
+    @staticmethod
+    def set_model_instance(val: torch.nn.Module | None):
+        """Set the model instance."""
+        return ExtraForwardContext.set_attr("model_instance", val)
+
+    @staticmethod
+    def layer_idx() -> int | None:
+        """The layer index in the current batch."""
+        return ExtraForwardContext.get_attr("layer_idx", None)
+
+    @staticmethod
+    def set_layer_idx(val: int | None):
+        """Set the layer index in the current batch."""
+        return ExtraForwardContext.set_attr("layer_idx", val)

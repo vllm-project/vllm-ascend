@@ -330,7 +330,6 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens=seq_lens,
             input_ids=input_ids,
             positions=positions,
-            inputs_embeds=None,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
