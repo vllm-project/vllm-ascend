@@ -25,10 +25,16 @@ class AscendPCPMetadata:
     head_attn_nomask_seqlens: torch.Tensor = None
     tail_attn_nomask_seqlens: torch.Tensor = None
     q_full_idx: torch.Tensor = None
+    pcp_use_hybrid_attn: bool = False
+    pcp_unpad_mask: torch.Tensor = None
     pcp_allgather_restore_idx: list[int] | None = None
+    pcp_fa_query_idx: torch.Tensor = None
+    pcp_padded_tokens_fla: int = 0
+    pcp_enter_fa_restore_idx: torch.Tensor = None
     block_table_cp: torch.Tensor = None
     valid_block_ids: torch.Tensor = None
     prefill_q_cum_seqlens: torch.Tensor = None
+    block_arange: torch.Tensor = None
 
 
 @dataclass
@@ -72,11 +78,11 @@ class AscendMetadataForPrefill:
         local_context_lens_allranks: list[list[int]] | None = None
         cp_kv_recover_idx_for_chunk: list[int] | None = None
         kv_inverse_idx_for_chunk: list[int] | None = None
-        batch_chunk_seq_mask: list[bool] | None = None
         local_total_toks: int | None = None
 
     """ Prefill Specific Metadata for Ascend"""
     pcp_metadata: AscendPCPMetadata | None = None
+    pcp_exit_fa_scatter_idx: torch.Tensor | None = None
     chunked_context: ChunkedContextMetadata | None = None
     block_tables: torch.Tensor = None
     actual_seq_lengths_q: torch.Tensor = None

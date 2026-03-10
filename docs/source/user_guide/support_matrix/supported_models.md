@@ -5,8 +5,9 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 **Legend Description**:
 
 - ✅ = Supported model/feature
-- ❌  = Not supported model/feature
-- 🟡  = Not tested or verified
+- 🔵 = Experimental supported model/feature
+- ❌ = Not supported model/feature
+- 🟡 = Not tested or verified
 
 ## Text-Only Language Models
 
