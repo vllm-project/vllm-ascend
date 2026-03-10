@@ -96,11 +96,9 @@ b635c310  feat(quant): add C8 INT8 KV cache support for Qwen/QuaRot models
 
 ### 7. `vllm_ascend/ops/fused_moe/token_dispatcher.py`
 
-- 修复 `global_bs` 计算，按 `kv_role` 三路分支：
-  - `kv_consumer`（纯 decode 服务器）：用 `decode_max_tokens`，HCCL buffer 极小
-  - `kv_producer`（纯 prefill 服务器）：用 `max_num_batched_tokens`，防止 MoeDistributeDispatchV2 DDR 越界；HCCL_BUFFSIZE 需随之配置（见启动脚本注释）
-  - 无 kv_transfer（普通非 PD 模型）：用 `decode_max_tokens`，与 `1d24c417` 之前行为一致，**修复非 C8 模型被意外放大 global_bs 的回归**
-- **注意**：CANN 的 HCCL ring-buffer 预分配大小由 `global_bs` 单独决定，与 `quant_mode`（0/2）无关。`VLLM_ASCEND_MOE_DISPATCH_WITH_QUANT` 环境变量对 HCCL_BUFFSIZE 无任何影响，相关 commit（`1027397b`）已回退。
+- **最终结论**：`global_bs` 公式保持上游原始值 `min(max_num_seqs × 1, 512)`，**未做任何修改**。
+- C8 模型（kv_producer，`max_num_batched_tokens=12288`）使用此公式可正常启动，**不会发生 DDR 越界**。
+- 曾错误地认为需要将 `global_bs` 扩大到 `max_num_batched_tokens` 以防止 DDR overflow，实测证明这个改动完全不必要，并且会导致 HCCL_BUFFSIZE 暴涨到 ~6.4 GB。
 
 ### 8. `vllm_ascend/ops/fused_moe/moe_mlp.py`
 
@@ -129,7 +127,7 @@ b635c310  feat(quant): add C8 INT8 KV cache support for Qwen/QuaRot models
 |------|------|------|
 | C8 decode 不支持 graph 模式 | ⚠️ 已绕过 | CANN `CheckFAIQKV` 拒绝混合 dtype；目前用 `cudagraph_mode=NONE`，待 CANN 升级后可实现 shadow float16 cache + graph replay |
 | C8 精度：per-channel offset 降级为 per-tensor | ⚠️ 工程妥协 | `_prepare_c8_scales` 用 `mean()` 将 per-channel offset 压成 per-tensor scalar 作为 FIA 的 `dequant_offset`；对于标准 per-channel 量化理论上有精度损失，实测 PD 精度正常 |
-| prefill HCCL_BUFFSIZE 较大 | ⚠️ 已知限制 | `global_bs = ceil(max_num_batched_tokens/tp) × ep`，HCCL_BUFFSIZE ∝ global_bs，与 quant_mode 无关。需在启动脚本中显式设置 `HCCL_BUFFSIZE` 为足够大的值；或降低 `max_num_batched_tokens` 来缩小 global_bs |
+| prefill HCCL_BUFFSIZE | ✅ 无问题 | `global_bs` 使用原始公式 `min(max_num_seqs, 512)`，C8 prefill 正常启动，HCCL buffer 极小 |
 | `full-pd/` 目录在 `.gitignore` | ℹ️ | 启动脚本本地修改不会被 git 追踪 |
 
 ---
