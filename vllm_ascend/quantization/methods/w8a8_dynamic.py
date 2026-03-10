@@ -79,10 +79,13 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
         quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+        # npu_quant_matmul requires float32 weight_scale when output_dtype is
+        # float16 (same constraint as npu_grouped_matmul). Use .to(float32)
+        # inline to guarantee correct dtype AND correct device.
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
-            layer.weight_scale,
+            layer.weight_scale.to(torch.float32),
             pertoken_scale=pertoken_scale,
             bias=bias,
             output_dtype=x.dtype,
@@ -94,7 +97,6 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         # cast quantized weight tensors in NZ format for higher inference speed
         layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
-        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
@@ -293,6 +295,22 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             torch.npu.empty_cache()
 
 
+def _c8_kv_scale_weight_loader(
+    param: torch.nn.Parameter, loaded_weight: torch.Tensor
+) -> None:
+    """Weight loader for C8 KV cache scales and offsets.
+
+    Handles per-channel QuaRot scales (numel = num_kv_heads * head_dim)
+    by resizing the parameter in-place before copying, avoiding shape
+    mismatch errors from default_weight_loader.
+    """
+    loaded_weight = loaded_weight.squeeze()
+    if param.data.shape != loaded_weight.shape:
+        param.data = loaded_weight.to(param.dtype).clone()
+    else:
+        param.data.copy_(loaded_weight)
+
+
 class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
     """C8 (INT8) KV cache quantization for standard GQA attention models.
 
@@ -311,15 +329,19 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
         layer.k_cache_scale = torch.nn.Parameter(
             torch.ones(1, dtype=torch.float32), requires_grad=False
         )
+        layer.k_cache_scale.weight_loader = _c8_kv_scale_weight_loader
         layer.k_cache_offset = torch.nn.Parameter(
             torch.zeros(1, dtype=torch.float32), requires_grad=False
         )
+        layer.k_cache_offset.weight_loader = _c8_kv_scale_weight_loader
         layer.v_cache_scale = torch.nn.Parameter(
             torch.ones(1, dtype=torch.float32), requires_grad=False
         )
+        layer.v_cache_scale.weight_loader = _c8_kv_scale_weight_loader
         layer.v_cache_offset = torch.nn.Parameter(
             torch.zeros(1, dtype=torch.float32), requires_grad=False
         )
+        layer.v_cache_offset.weight_loader = _c8_kv_scale_weight_loader
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(layer, "k_cache_scale"):

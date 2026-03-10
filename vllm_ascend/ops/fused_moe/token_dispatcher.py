@@ -124,6 +124,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         if compilation_config.cudagraph_capture_sizes:
             max_num_tokens = compilation_config.max_cudagraph_capture_size
         else:
+            # Revert to pre-1d24c417 formula: keep global_bs small to avoid
+            # inflating HCCL_BUFFSIZE. The upper bound of 512 matches the
+            # original upstream behavior. If DDR overflow is observed during
+            # profile/warmup runs, increase this value or use cudagraph mode.
             max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
         self.global_bs = num_tokens_per_tp_rank * self.ep_world_size

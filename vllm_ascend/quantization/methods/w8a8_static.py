@@ -63,10 +63,11 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
     ) -> dict[str, Any]:
         params_dict = {}
         params_dict["quant_bias"] = torch.empty(output_size, dtype=torch.int32)
-        if params_dtype == torch.bfloat16:
-            params_dict["deq_scale"] = torch.empty(output_size, dtype=torch.float32)
-        elif params_dtype == torch.float16:
-            params_dict["deq_scale"] = torch.empty(output_size, dtype=torch.int64)
+        # Always use float32 for deq_scale so that checkpoint values (float32)
+        # are loaded without numeric truncation.  Previously float16 models used
+        # int64 here, causing torch.copy_() to silently truncate float32 values
+        # like 0.05 to int64(0), making npu_quant_matmul output all zeros.
+        params_dict["deq_scale"] = torch.empty(output_size, dtype=torch.float32)
         params_dict["weight_scale"] = torch.empty(output_size, 1, dtype=params_dtype)
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
         return params_dict
@@ -130,10 +131,11 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
             quant_bias = bias
 
+        # npu_quant_matmul requires float32 scale regardless of output dtype.
         output = torch_npu.npu_quant_matmul(
             x,
             layer.weight,
-            layer.deq_scale,
+            layer.deq_scale.to(torch.float32),
             bias=quant_bias,
             output_dtype=layer.params_dtype,
         )

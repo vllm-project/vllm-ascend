@@ -98,7 +98,15 @@ def quant_apply_mlp(
         quantized_hidden_states = hidden_states
 
     bias1, bias2 = None, None
+    # _output_dtype must be captured before any scale normalization so that the
+    # original model dtype (e.g. float16) is preserved as the output dtype.
     _output_dtype = w2_scale[0].dtype
+    # NPU per-token quant requires all weight scales to be float32 when output
+    # dtype is float16. QuaRot models store scales as float16, so normalize
+    # here once to cover all gmm call sites in this function.
+    if _output_dtype == torch.float16:
+        w1_scale = [s.to(torch.float32) for s in w1_scale]
+        w2_scale = [s.to(torch.float32) for s in w2_scale]
 
     weight_prefetch_method = get_weight_prefetch_method()
     weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
@@ -152,6 +160,10 @@ def quant_apply_mlp(
                 quant_mode=1,
             )
         # gmm2: down_proj
+        # w2_scale is already float32 (normalized at function entry).
+        # swiglu_out_scale is computed at runtime and may still be float16.
+        if swiglu_out_scale.dtype == torch.float16:
+            swiglu_out_scale = swiglu_out_scale.to(torch.float32)
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w2,
@@ -161,7 +173,7 @@ def quant_apply_mlp(
             group_list_type=group_list_type,
             group_type=0,
             group_list=group_list,
-            output_dtype=w2_scale[0].dtype,
+            output_dtype=_output_dtype,
         )[0]
     elif w1_offset is not None:
         # gmm1: gate_up_proj
@@ -251,6 +263,10 @@ def quant_apply_mlp(
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
         # gmm2: down_proj
+        # w2_scale is already float32 (normalized at function entry).
+        # swiglu_out_scale is computed at runtime and may still be float16.
+        if swiglu_out_scale.dtype == torch.float16:
+            swiglu_out_scale = swiglu_out_scale.to(torch.float32)
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w2,
