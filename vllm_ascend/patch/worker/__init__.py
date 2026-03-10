@@ -17,8 +17,13 @@
 
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.utils import vllm_version_is
+
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
+
+if not vllm_version_is("v0.16.0"):
+    import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
 
 # isort: off
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa

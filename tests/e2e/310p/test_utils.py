@@ -15,9 +15,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from tests.e2e.conftest import VllmRunner
-from PIL import Image
 import os
+
+from PIL import Image
+
+from tests.e2e.conftest import VllmRunner
 
 
 def get_test_image():
@@ -32,14 +34,12 @@ def get_test_prompts():
     return ["<|image_pad|>Describe this image in detail."]
 
 
-def run_vl_model_test(model_name: str, 
-                      tensor_parallel_size: int, 
-                      max_tokens: int,
-                      dtype: str = "float16",
-                      enforce_eager: bool = True):
+def run_vl_model_test(
+    model_name: str, tensor_parallel_size: int, max_tokens: int, dtype: str = "float16", enforce_eager: bool = True
+):
     """
     Generic visual language model test function
-    
+
     Args:
         model_name: Model name, e.g., "Qwen/Qwen3-VL-4B"
         tensor_parallel_size: Tensor parallel size
@@ -52,9 +52,6 @@ def run_vl_model_test(model_name: str,
     prompts = get_test_prompts()
 
     with VllmRunner(
-            model_name,
-            tensor_parallel_size=tensor_parallel_size,
-            enforce_eager=enforce_eager,
-            dtype=dtype
+        model_name, tensor_parallel_size=tensor_parallel_size, enforce_eager=enforce_eager, dtype=dtype
     ) as vllm_model:
         vllm_model.generate_greedy(prompts, max_tokens, images=images)
