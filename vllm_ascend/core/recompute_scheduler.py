@@ -91,10 +91,7 @@ class RecomputeScheduler(Scheduler):
             and self.vllm_config.kv_transfer_config
             and self.vllm_config.kv_transfer_config.is_kv_consumer
         )
-        self.is_kv_producer = (
-            self.vllm_config.kv_transfer_config
-            and self.vllm_config.kv_transfer_config.is_kv_producer
-        )
+        self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)

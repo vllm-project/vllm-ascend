@@ -24,7 +24,12 @@ import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole, SupportsHMA
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+    SupportsHMA,
+)
 from vllm.distributed.parallel_state import (
     get_decode_context_model_parallel_rank,
     get_tensor_model_parallel_rank,
@@ -32,11 +37,19 @@ from vllm.distributed.parallel_state import (
     get_world_group,
 )
 from vllm.logger import logger
-from vllm.utils.torch_utils import get_dtype_size
 from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, AttentionSpec, MambaSpec, UniformTypeKVCacheSpecs, FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -70,6 +83,7 @@ class LayerMetadata:
     tensor_group_idx: list[int]
     kv_caches_base_addr: list[int]
     block_len: list[int]
+    block_size_scale: list[int]
 
 
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
@@ -83,6 +97,7 @@ class ReqMeta:
     token_ids: list[int] | None
     # Not None if layer-wise is disabled
     remote_block_ids: list[list[int]]
+    remote_block_size: list[list[int]]
     remote_engine_id: str | None
     remote_host: str | None
     remote_port: int | None
@@ -180,6 +195,7 @@ class KVCacheSendingLayerThread(threading.Thread):
     def __init__(
         self,
         engine: TransferEngine,
+        vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         kv_cache_specs: list[KVCacheSpec],
         attn_resharding_group_idx: set,
@@ -198,6 +214,7 @@ class KVCacheSendingLayerThread(threading.Thread):
     ):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.engine = engine
+        self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.kv_cache_specs = kv_cache_specs
         self.attn_resharding_group_idx = attn_resharding_group_idx
@@ -243,8 +260,6 @@ class KVCacheSendingLayerThread(threading.Thread):
         remote_layer_metadata = req_meta.remote_layer_metadata[layer_name]
         local_layer_metadata = self.layer_metadata[layer_name]
         local_block_ids = req_meta.local_block_ids[layer_group_idx]
-        if torch.distributed.get_rank() == 0:
-            print(f'{layer_name=} {layer_kv_cache_spec=} {remote_block_ids=} {local_block_ids=} {remote_layer_metadata=} {local_layer_metadata=}')
 
         if isinstance(layer_kv_cache_spec, MambaSpec):
             # only support one block transfer for mamba
@@ -253,20 +268,49 @@ class KVCacheSendingLayerThread(threading.Thread):
             local_conv_len, local_ssm_len = local_layer_metadata.block_len
             tp_ratio = self.tp_size // req_meta.remote_tp_size
             if tp_ratio == 1:
-                src_list.extend([local_conv_addr + local_block_ids[0] * local_conv_len, local_ssm_addr + local_block_ids[0] * local_ssm_len])
-                dst_list.extend([remote_conv_addr + remote_block_ids[0] * local_conv_len, remote_ssm_addr + remote_block_ids[0] * local_ssm_len])
+                src_list.extend(
+                    [
+                        local_conv_addr + local_block_ids[0] * local_conv_len,
+                        local_ssm_addr + local_block_ids[0] * local_ssm_len,
+                    ]
+                )
+                dst_list.extend(
+                    [
+                        remote_conv_addr + remote_block_ids[0] * local_conv_len,
+                        remote_ssm_addr + remote_block_ids[0] * local_ssm_len,
+                    ]
+                )
                 length_list.extend([local_conv_len, local_ssm_len])
             else:
                 conv_shape, ssm_shape = layer_kv_cache_spec.shapes
                 conv_dtype, ssm_dtype = layer_kv_cache_spec.dtypes
                 remote_conv_len, remote_ssm_len = remote_layer_metadata.block_len
                 # conv
+                linear_key_head_dim = self.vllm_config.model_config.hf_text_config.linear_key_head_dim
+                linear_num_key_heads = self.vllm_config.model_config.hf_text_config.linear_num_key_heads
+                linear_value_head_dim = self.vllm_config.model_config.hf_text_config.linear_value_head_dim
+                linear_num_value_heads = self.vllm_config.model_config.hf_text_config.linear_num_value_heads
+                local_num_key_heads = linear_num_key_heads // self.tp_size
+                local_num_value_heads = linear_num_value_heads // self.tp_size
+                local_conv_offsets = [
+                    0,
+                    local_num_key_heads * linear_key_head_dim,
+                    local_num_key_heads * 2 * linear_key_head_dim,
+                ]
+                local_conv_sizes = [
+                    local_num_key_heads * linear_key_head_dim,
+                    local_num_key_heads * linear_key_head_dim,
+                    local_num_value_heads * linear_value_head_dim,
+                ]
                 for i in range(conv_shape[0]):
-                    local_addr_offset = i * conv_shape[1] * get_dtype_size(conv_dtype)
-                    remote_addr_offset = i * conv_shape[1] * get_dtype_size(conv_dtype) * tp_ratio + (self.tp_rank % tp_ratio) * conv_shape[1] * get_dtype_size(conv_dtype)
-                    src_list.append(local_conv_addr + local_block_ids[0] * local_conv_len + local_addr_offset)
-                    dst_list.append(remote_conv_addr + remote_block_ids[0] * remote_conv_len + remote_addr_offset)
-                    length_list.append(conv_shape[1] * get_dtype_size(conv_dtype))
+                    for local_conv_offset, local_conv_size in zip(local_conv_offsets, local_conv_sizes):
+                        local_addr_offset = (i * conv_shape[1] + local_conv_offset) * get_dtype_size(conv_dtype)
+                        remote_addr_offset = (
+                            (i * conv_shape[1] * tp_ratio) + (self.tp_rank % tp_ratio) * local_conv_size
+                        ) * get_dtype_size(conv_dtype)
+                        src_list.append(local_conv_addr + local_block_ids[0] * local_conv_len + local_addr_offset)
+                        dst_list.append(remote_conv_addr + remote_block_ids[0] * remote_conv_len + remote_addr_offset)
+                        length_list.append(local_conv_size * get_dtype_size(conv_dtype))
                 # ssm
                 remote_addr_offset = (self.tp_rank % tp_ratio) * math.prod(ssm_shape) * get_dtype_size(ssm_dtype)
                 src_list.append(local_ssm_addr + local_block_ids[0] * local_ssm_len)
@@ -303,7 +347,9 @@ class KVCacheSendingLayerThread(threading.Thread):
                 layer_remote_kv_base_addr = remote_layer_metadata.kv_caches_base_addr
                 block_lens = local_layer_metadata.block_len
                 remote_block_lens = remote_layer_metadata.block_len
-                assert len(layer_remote_kv_base_addr) == 2, "Layer kv_cache resharding only supports two kv cache tensors."
+                assert len(layer_remote_kv_base_addr) == 2, (
+                    "Layer kv_cache resharding only supports two kv cache tensors."
+                )
                 src_list, dst_list, length_list = [], [], []
                 for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
                     zip(layer_local_kv_base_addr, layer_remote_kv_base_addr)
@@ -487,6 +533,7 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
             token_ids=token_ids or [],
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params.get("remote_block_ids", []),
+            remote_block_size=kv_transfer_params.get("remote_block_size", []),
             remote_engine_id=kv_transfer_params.get("remote_engine_id"),
             remote_host=kv_transfer_params.get("remote_host"),
             remote_port=kv_transfer_params.get("remote_port"),
@@ -598,11 +645,17 @@ class MooncakeLayerwiseConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
-        self.block_size = vllm_config.cache_config.block_size
+        self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
         self.engine_id = engine_id
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
+
+        # disable prefill context parallel on decoder nodes
+        if vllm_config.kv_transfer_config.is_kv_consumer:
+            assert vllm_config.parallel_config.prefill_context_parallel_size == 1, (
+                "Prefill context parallel is not support on decoder nodes"
+            )
 
         # Handshake base port
         self.side_channel_port = (
@@ -656,7 +709,7 @@ class MooncakeLayerwiseConnectorScheduler:
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
-            assert num_computed_tokens % self.block_size == 0
+            assert num_computed_tokens % min(self.block_size) == 0
             # Note: We use the full token count as transmit data here.
             count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
             return count, count > 0
@@ -698,6 +751,7 @@ class MooncakeLayerwiseConnectorScheduler:
                 do_remote_prefill=False,
                 do_remote_decode=True,
                 remote_block_ids=local_block_ids,
+                remote_block_size=self.block_size,
                 remote_engine_id=self.engine_id,
                 remote_host=self.side_channel_host,
                 remote_port=self.side_channel_port,
@@ -719,7 +773,7 @@ class MooncakeLayerwiseConnectorScheduler:
 
         # Layerwise prefiller add request need send
         if params is not None and params.get("do_remote_decode"):
-            local_block_ids = blocks.get_block_ids()
+            local_block_ids = list(blocks.get_block_ids())
             logger.debug(
                 f"MooncakeLayerwiseConnector update_state_after_alloc: add {request.request_id} to need send queue"
             )
@@ -771,7 +825,7 @@ class MooncakeLayerwiseConnectorScheduler:
                     send_req_info = self._reqs_need_send_layerwise[req_id]
                     # update local transferred tokens
                     send_req_info.update_transferred_tokens(
-                        round_down(send_req_info.local_computed_tokens, self.block_size)
+                        round_down(send_req_info.local_computed_tokens, min(self.block_size))
                     )
                     # update local computed tokens, not transfer spec decode tokens
                     spec_decode_tokens = (
@@ -903,6 +957,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.kv_send_layer_thread: KVCacheSendingLayerThread | None = None
 
         self.block_size: list[int] = [spec.block_size for spec in self.kv_cache_specs]
+        self.kernel_block_size_scale: list[int] = [1 for _ in range(self.num_kv_cache_groups)]
         self.layer_metadata: dict[str, LayerMetadata] = {}
         self.attn_resharding_group_idx = set[int]()
 
@@ -968,11 +1023,16 @@ class MooncakeLayerwiseConnectorWorker:
                 layer2group_ids[layer_name] = i
 
         use_mamba, use_attn, use_attn_mamba_hybrid = False, False, False
+        conv_total_padding_size = 0
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             for layer_name in kv_cache_tensor.shared_by:
                 layer_kv_cache_spec = self.kv_cache_specs[layer2group_ids[layer_name]]
                 if isinstance(layer_kv_cache_spec, MambaSpec):
                     use_mamba = True
+                    conv_shape, conv_dtype = layer_kv_cache_spec.shapes[0], layer_kv_cache_spec.dtypes[0]
+                    conv_total_padding_size = (
+                        self.kv_cache_config.num_blocks * math.prod(conv_shape) * get_dtype_size(conv_dtype)
+                    )
                 if isinstance(layer_kv_cache_spec, AttentionSpec):
                     use_attn = True
             if use_mamba and use_attn:
@@ -990,25 +1050,33 @@ class MooncakeLayerwiseConnectorWorker:
             layer_kv_cache_spec = kv_cache_groups[layer_kv_group_id].kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-            if self.pd_head_ratio > 1 and (isinstance(layer_kv_cache_spec, FullAttentionSpec) or isinstance(layer_kv_cache_spec, SlidingWindowSpec)):
+            if self.pd_head_ratio > 1 and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))):
                 self.attn_resharding_group_idx.add(layer_kv_group_id)
                 if use_resharding_buffer is False:
                     use_resharding_buffer = True
                     resharding_buffer = kv_cache_tuple[0]
                     self.resharding_stream = torch.npu.Stream()
-            single_layer_meta = LayerMetadata([], [], [])
+            single_layer_meta = LayerMetadata([], [], [], [])
             for single_kv_cache in kv_cache_tuple:
                 block_start_rank = 1
                 num_blocks = self.kv_cache_config.num_blocks
-                block_shape = single_kv_cache.shape[block_start_rank: ]
+                tensor_num_blocks = single_kv_cache.shape[0]
+                assert tensor_num_blocks % num_blocks == 0, (
+                    "The external block size must be an integer multiple of the kernel block size."
+                )
+                block_size_scale = tensor_num_blocks // num_blocks
+                block_shape = single_kv_cache.shape[block_start_rank:]
                 single_layer_meta.tensor_group_idx.append(layer_kv_group_id)
                 single_layer_meta.kv_caches_base_addr.append(single_kv_cache.data_ptr())
                 single_layer_meta.block_len.append(single_kv_cache.element_size() * math.prod(block_shape))
+                single_layer_meta.block_size_scale.append(block_size_scale)
+                self.kernel_block_size_scale[layer2group_ids[layer_name]] = block_size_scale
                 if single_kv_cache.data_ptr() not in ptrs and not use_attn_mamba_hybrid:
                     ptrs.append(single_kv_cache.data_ptr())
-                    lengths.append(num_blocks * single_kv_cache.element_size() * math.prod(block_shape))
-                logger.info(
-                    f"layer: {layer_name}, num_blocks: {num_blocks}, block_shape: {block_shape}")
+                    lengths.append(
+                        num_blocks * single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale
+                    )
+                logger.info(f"layer: {layer_name}, num_blocks: {num_blocks}, block_shape: {block_shape}")
             self.layer_metadata[layer_name] = single_layer_meta
 
         if use_attn_mamba_hybrid:
@@ -1016,6 +1084,8 @@ class MooncakeLayerwiseConnectorWorker:
                 tensor_addrs = []
                 for layer_name in kv_cache_tensor.shared_by:
                     tensor_addrs.extend(self.layer_metadata[layer_name].kv_caches_base_addr)
+                    if "mtp" in layer_name:
+                        tensor_addrs.append(min(tensor_addrs) - conv_total_padding_size)
                 assert min(set(tensor_addrs)) % (2 * 1024 * 1024) == 0, "Tensor start addr is not align with 2M."
                 ptrs.append(min(set(tensor_addrs)))
                 lengths.append(kv_cache_tensor.size)
@@ -1025,9 +1095,19 @@ class MooncakeLayerwiseConnectorWorker:
             self.create_kv_buffer(resharding_buffer)
 
         num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
+        mtp_layer_name = ""
         for layer_name in kv_caches:
+            if "mtp" in layer_name:
+                mtp_layer_name = layer_name
+                continue
             self.index_to_name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
-            assert len(self.index_to_name[extract_layer_index(layer_name, num_attn_module)]) == 1, "Mooncake Layerwise Connector does not support multiple `attn_module` in one layer now."
+            assert len(self.index_to_name[extract_layer_index(layer_name, num_attn_module)]) == 1, (
+                "Mooncake Layerwise Connector does not support multiple `attn_module` in one layer now."
+            )
+        if mtp_layer_name != "":
+            self.index_to_name[max(self.index_to_name.keys()) + 1].append(mtp_layer_name)
+        if self.total_layers < len(self.layer_metadata.keys()):
+            self.total_layers = len(self.layer_metadata.keys())
 
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
@@ -1038,6 +1118,7 @@ class MooncakeLayerwiseConnectorWorker:
             ready_event = threading.Event()
             self.kv_send_layer_thread = KVCacheSendingLayerThread(
                 engine=self.engine,
+                vllm_config=self.vllm_config,
                 kv_cache_config=self.kv_cache_config,
                 kv_cache_specs=self.kv_cache_specs,
                 attn_resharding_group_idx=self.attn_resharding_group_idx,
@@ -1193,9 +1274,11 @@ class MooncakeLayerwiseConnectorWorker:
             self.dcp_rank,
         )
         return transfer_mappings
-    
+
     def _get_kv_split_metadata_for_mamba(self, req_meta: ReqMeta, req_idx: int, req_id: str, group_idx: int):
-        assert self.tp_size >= req_meta.remote_tp_size, "Mamba group prefill TP_size must equal or larger than decode TP_size."
+        assert self.tp_size >= req_meta.remote_tp_size, (
+            "Mamba group prefill TP_size must equal or larger than decode TP_size."
+        )
         remote_tp_size = req_meta.remote_tp_size
         tp_raito = self.tp_size // remote_tp_size
         remote_host = req_meta.remote_host
@@ -1209,6 +1292,39 @@ class MooncakeLayerwiseConnectorWorker:
             }
 
         return transfer_mappings
+
+    def _align_remote_block_ids(self, req_meta: ReqMeta):
+        remote_block_size = req_meta.remote_block_size
+        remote_block_ids = req_meta.remote_block_ids
+        for i in range(self.num_kv_cache_groups):
+            if isinstance(self.kv_cache_specs[i], MambaSpec):
+                continue
+            if remote_block_size[i] != self.block_size[i] and len(req_meta.remote_block_ids[i]) > 0:
+                assert remote_block_size[i] > self.block_size[i] and remote_block_size[i] % self.block_size[i] == 0, (
+                    "Remote block size must be divisible by local block size."
+                )
+                assert self.pcp_size * self.dcp_size * req_meta.remote_pcp_size * req_meta.remote_dcp_size == 1, (
+                    "Context parallel does not support different P/D block size now."
+                )
+                pd_block_size_ratio = remote_block_size[i] // self.block_size[i]
+                remtote_block_ids_with_scale = [
+                    block_id * pd_block_size_ratio + j
+                    for block_id in remote_block_ids[i]
+                    for j in range(pd_block_size_ratio)
+                ]
+                req_meta.remote_block_ids[i] = remtote_block_ids_with_scale
+
+    def _get_kernel_block_ids(self, block_ids):
+        for i in range(self.num_kv_cache_groups):
+            if isinstance(self.kv_cache_specs[i], MambaSpec):
+                continue
+            if len(block_ids[i]) > 0:
+                block_ids[i] = [
+                    block_id * self.kernel_block_size_scale[i] + j
+                    for block_id in block_ids[i]
+                    for j in range(self.kernel_block_size_scale[i])
+                ]
+        return block_ids
 
     def start_load_kv(self, metadata: MooncakeLayerwiseConnectorMetadata):
         """Start loading KV blocks from remote engine."""
@@ -1225,28 +1341,37 @@ class MooncakeLayerwiseConnectorWorker:
             update_metadata = {}
             for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
                 transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
+                self._align_remote_block_ids(req_meta)
                 for i, kv_cache_spec in enumerate(self.kv_cache_specs):
                     if isinstance(kv_cache_spec, MambaSpec):
-                        single_group_transfer_mappings = self._get_kv_split_metadata_for_mamba(req_meta, req_idx, req_id, i)
+                        single_group_transfer_mappings = self._get_kv_split_metadata_for_mamba(
+                            req_meta, req_idx, req_id, i
+                        )
                     else:
                         single_group_transfer_mappings = self._get_kv_split_metadata(req_meta, req_idx, req_id, i)
                     for (host, port), block_dict in single_group_transfer_mappings.items():
-                        if (host, port) not in transfer_mappings.keys():
+                        if (host, port) not in transfer_mappings:
                             transfer_mappings[(host, port)] = {
                                 "local_block_ids": [[] for _ in range(self.num_kv_cache_groups)],
                                 "remote_block_ids": [[] for _ in range(self.num_kv_cache_groups)],
                                 "trans_count": [0 for _ in range(self.num_kv_cache_groups)],
                             }
-                        transfer_mappings[(host, port)]["local_block_ids"][i].extend(single_group_transfer_mappings[(host, port)]["local_block_ids"])
-                        transfer_mappings[(host, port)]["remote_block_ids"][i].extend(single_group_transfer_mappings[(host, port)]["remote_block_ids"])
-                        transfer_mappings[(host, port)]["trans_count"][i] = single_group_transfer_mappings[(host, port)]["trans_count"]
+                        transfer_mappings[(host, port)]["local_block_ids"][i].extend(
+                            single_group_transfer_mappings[(host, port)]["local_block_ids"]
+                        )
+                        transfer_mappings[(host, port)]["remote_block_ids"][i].extend(
+                            single_group_transfer_mappings[(host, port)]["remote_block_ids"]
+                        )
+                        transfer_mappings[(host, port)]["trans_count"][i] = single_group_transfer_mappings[
+                            (host, port)
+                        ]["trans_count"]
                 assert len(transfer_mappings) <= 1, f"Not support add mutil transfer task for req_id:{req_id}"
                 update_req_meta = copy.deepcopy(req_meta)
                 for (host, port), block_dict in transfer_mappings.items():
                     update_req_meta.remote_host = host
                     update_req_meta.remote_port = port
-                    update_req_meta.local_block_ids = block_dict["local_block_ids"]
-                    update_req_meta.remote_block_ids = block_dict["remote_block_ids"]
+                    update_req_meta.local_block_ids = self._get_kernel_block_ids(block_dict["local_block_ids"])
+                    update_req_meta.remote_block_ids = self._get_kernel_block_ids(block_dict["remote_block_ids"])
                     update_req_meta.trans_count = block_dict["trans_count"]
                     update_metadata[req_id] = update_req_meta
             metadata.requests = {}
@@ -1264,16 +1389,26 @@ class MooncakeLayerwiseConnectorWorker:
                 send_task.group_seq_start_tensor = [None for _ in range(self.num_kv_cache_groups)]
                 device = self.k_buffer.device  # type: ignore
                 for i in self.attn_resharding_group_idx:
-                    send_task.group_rearrange_block_ids[i].extend(sorted(
-                        {block_id for req_id in metadata.requests for block_id in metadata.requests[req_id].local_block_ids[i]}
-                    ))
+                    send_task.group_rearrange_block_ids[i].extend(
+                        sorted(
+                            {
+                                block_id
+                                for req_id in metadata.requests
+                                for block_id in metadata.requests[req_id].local_block_ids[i]
+                            }
+                        )
+                    )
                     flat_block_ids = send_task.group_rearrange_block_ids[i]
                     block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
                     send_task.group_num_blocks[i] = len(flat_block_ids)
-                    send_task.group_num_tokens[i] = send_task.group_num_blocks[i] * self.block_size[i]
+                    send_task.group_num_tokens[i] = send_task.group_num_blocks[i] * (
+                        self.block_size[i] // self.kernel_block_size_scale[i]
+                    )
 
                     send_task.group_block_table[i] = block_ids_tensor.view(1, -1)
-                    send_task.group_block_len_tensor[i] = torch.tensor([send_task.group_num_tokens[i]], dtype=torch.int32, device=device)
+                    send_task.group_block_len_tensor[i] = torch.tensor(
+                        [send_task.group_num_tokens[i]], dtype=torch.int32, device=device
+                    )
                     send_task.group_seq_start_tensor[i] = torch.tensor([0], dtype=torch.int32, device=device)
 
     def save_kv_layer(
@@ -1289,8 +1424,9 @@ class MooncakeLayerwiseConnectorWorker:
             # get reshape and cache event
             if layer_name == "":
                 layer_name = self.index_to_name[self.current_layer][0]
-            if (type(attn_metadata) == dict and not getattr(attn_metadata[layer_name], "reshape_cache_event", None)) or \
-                (not getattr(attn_metadata, "reshape_cache_event", None)):
+            if (
+                type(attn_metadata) is dict and not getattr(attn_metadata[layer_name], "reshape_cache_event", None)
+            ) or (not getattr(attn_metadata, "reshape_cache_event", None)):
                 reshape_cache_event = torch.npu.Event()
                 reshape_cache_event.record()
             elif self.use_mla:
@@ -1302,17 +1438,27 @@ class MooncakeLayerwiseConnectorWorker:
             layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
             keys = None
             values = None
-            if self.pd_head_ratio != 1 and \
-                (isinstance(self.kv_cache_specs[layer_group_idx], FullAttentionSpec) or \
-                    isinstance(self.kv_cache_specs[layer_group_idx], SlidingWindowSpec)):
+            if (
+                self.pd_head_ratio != 1
+                and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
+                and send_task.group_num_blocks[layer_group_idx] > 0
+            ):
                 assert self.resharding_stream is not None
                 with npu_stream_switch(self.resharding_stream):
                     reshape_cache_event.wait()
                     dtype = self.k_buffer.dtype  # type: ignore
                     device = self.k_buffer.device  # type: ignore
                     # Initialize buffers
-                    keys = torch.empty((send_task.group_num_tokens[layer_group_idx], *kv_layer[0].size()[-2:]), dtype=dtype, device=device)
-                    values = torch.empty((send_task.group_num_tokens[layer_group_idx], *kv_layer[1].size()[-2:]), dtype=dtype, device=device)
+                    keys = torch.empty(
+                        (send_task.group_num_tokens[layer_group_idx], *kv_layer[0].size()[-2:]),
+                        dtype=dtype,
+                        device=device,
+                    )
+                    values = torch.empty(
+                        (send_task.group_num_tokens[layer_group_idx], *kv_layer[1].size()[-2:]),
+                        dtype=dtype,
+                        device=device,
+                    )
 
                     # Load cache data into buffers
                     torch_npu.atb.npu_paged_cache_load(
@@ -1332,7 +1478,9 @@ class MooncakeLayerwiseConnectorWorker:
                         .reshape_as(keys)
                     )
                     values = (
-                        values.view(send_task.group_num_blocks[layer_group_idx], self.pd_head_ratio, -1, *values.shape[1:])
+                        values.view(
+                            send_task.group_num_blocks[layer_group_idx], self.pd_head_ratio, -1, *values.shape[1:]
+                        )
                         .transpose(0, 1)
                         .reshape_as(values)
                     )
@@ -1415,15 +1563,15 @@ class MooncakeLayerwiseConnectorWorker:
                 session_id = f"{req_meta.remote_host}:{agent_meta.te_rpc_port}"
                 first_layer_name = next(iter(self.layer_metadata.keys()))
                 ret = self.engine.batch_transfer_sync_write(
-                    session_id, [self.layer_metadata[first_layer_name].kv_caches_base_addr[0]],
-                    [agent_meta.layer_metadata[first_layer_name].kv_caches_base_addr[0]], [128]
+                    session_id,
+                    [self.layer_metadata[first_layer_name].kv_caches_base_addr[0]],
+                    [agent_meta.layer_metadata[first_layer_name].kv_caches_base_addr[0]],
+                    [128],
                 )
                 if ret < 0:
                     logger.error(f"Mooncake transfer failed to create link to device {session_id}")
         req_meta.remote_te_rpc_port = self.remote_te_port[req_meta.remote_engine_id][req_meta.remote_port]
-        req_meta.remote_layer_metadata = self.remote_layer_metadata[req_meta.remote_engine_id][
-            req_meta.remote_port
-        ]
+        req_meta.remote_layer_metadata = self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port]
         return req_meta
 
     def send_done_send_signal(self, req_id, req_meta, group_idx):
@@ -1518,7 +1666,7 @@ def ensure_zmq_send(
     socket: zmq.Socket,  # type: ignore
     data: bytes,
     path: str,
-    max_retries: int = 3,
+    max_retries: int = 999,
 ):
     retries_left = max_retries
     while True:
@@ -1540,7 +1688,7 @@ def ensure_zmq_recv(
     poller: zmq.Poller,  # type: ignore
     path: str,
     timeout: float = 1.0,
-    max_retries: int = 3,
+    max_retries: int = 999,
 ) -> bytes:
     retries_left = max_retries
     while True:

@@ -67,7 +67,6 @@ def init_ascend_model_parallel(
         if num_head_replica <= 1:
             group_ranks = all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(0)
         else:
-
             group_ranks = all_ranks.clone().view(
                 global_dp_size * pcp_size, -1, num_head_replica
             )  # [DP_size, num_head, num_head_replica]
