@@ -17,7 +17,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.llama import LlamaDecoderLayer
+from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaDecoderLayer
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM, LlamaModel
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -432,7 +432,7 @@ class VwnLlamaModel(nn.Module):
         return loaded_params
 
 
-class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
+class Eagle3VwnLlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -448,7 +448,7 @@ class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
         # Store target layer count in draft config for
         # proper layer_types indexing in draft models
         self.config.target_layer_count = target_layer_num
-        self.model = LlamaModel(
+        self.model = VwnLlamaModel(
             vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
         )
 
