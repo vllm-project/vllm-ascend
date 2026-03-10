@@ -6,21 +6,21 @@ CPU Binding is a performance optimization feature for vLLM, specifically designe
 
 ## Usage
 
-### Online serving example with CPU binding enabled (by default):
+### Online serving example with CPU binding enabled (by default)
 
 ```bash
 vllm serve Qwen/Qwen2.5-7B-Instruct \
   --additional-config '{"enable_cpu_binding": true}'
 ```
 
-### Online serving example with CPU binding disabled:
+### Online serving example with CPU binding disabled
 
 ```bash
 vllm serve Qwen/Qwen2.5-7B-Instruct \
   --additional-config '{"enable_cpu_binding": false}'
 ```
 
-### Offline inference example with CPU binding enabled:
+### Offline inference example with CPU binding enabled
 
 ```python
 from vllm import LLM
@@ -31,7 +31,7 @@ llm = LLM(
 )
 ```
 
-### Offline inference example with CPU binding disabled:
+### Offline inference example with CPU binding disabled
 
 ```python
 from vllm import LLM
@@ -70,7 +70,7 @@ sudo dnf install -y util-linux numactl procps-ng
 For best results, if you run inside a docker container, which `systemctl` is likely unavailable, stop `irqbalance` service on the host manually before starting vLLM. Also make sure the container has the necessary permissions to write to `/proc/irq/*/smp_affinity` for IRQ binding:
 
 - **Stop `irqbalance` service**:
-    
+
     For example, on Ubuntu system, you can run the following command to stop irqbalance:
     ```bash
     sudo systemctl stop irqbalance
@@ -83,9 +83,8 @@ For best results, if you run inside a docker container, which `systemctl` is lik
     ```
 
 - **Permissions**:
-  - Read access to `/proc/self/status` and `/proc/interrupts`
-  - Write access to `/proc/irq/*/smp_affinity` for IRQ binding
-
+    - Read access to `/proc/self/status` and `/proc/interrupts`
+    - Write access to `/proc/irq/*/smp_affinity` for IRQ binding
 
 ## Common Issues & Troubleshooting
 
