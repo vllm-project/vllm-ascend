@@ -146,7 +146,6 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
             mixed_qkv_non_spec = mixed_qkv
 
         # 1.1: Process the multi-query part
-        
         if spec_sequence_masks is not None:
             conv_weights_T = conv_weights.transpose(0, 1)
             mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_update(

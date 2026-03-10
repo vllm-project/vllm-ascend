@@ -19,7 +19,7 @@ namespace Transformer {
 namespace OpTiling {
 static const gert::Shape g_vec_1_shape = {1};
 
-const gert::Shape &EnsureNotScalar(const gert::Shape &inShape)
+const gert::Shape &EnsureNotScalar_UPDATE(const gert::Shape &inShape)
 {
     if (inShape.IsScalar()) {
         return g_vec_1_shape;

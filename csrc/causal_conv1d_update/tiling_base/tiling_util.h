@@ -20,7 +20,7 @@
 namespace Ops {
 namespace Transformer {
 namespace OpTiling {
-const gert::Shape& EnsureNotScalar(const gert::Shape& inShape);
+const gert::Shape& EnsureNotScalar_UPDATE(const gert::Shape& inShape);
 } // namespace OpTiling
 } // namespace Transformer
 } // namespace Ops
