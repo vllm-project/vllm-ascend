@@ -1109,12 +1109,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                         get_tp_group(),
                         async_op=async_op,
                     )
-                    k_li_ag_handle = None
-                    k_li_scale_ag_handle = None
                 else:
                     # due to different dtypes, we have to split commu pass
                     assert k_li_scale is not None
-                    fused_kv_no_split, kv_ag_handle = all_gather_async(
+                    fused_kv_no_split, _ = all_gather_async(
                         torch.cat(
                             [
                                 k_pe.view(-1, k_pe.shape[-1]),
@@ -1125,25 +1123,23 @@ class AscendSFAImpl(MLAAttentionImpl):
                         get_tp_group(),
                         async_op=async_op,
                     )
-                    k_li, k_li_ag_handle = all_gather_async(
+                    k_li, _ = all_gather_async(
                         k_li,
                         get_tp_group(),
                         async_op=async_op,
                     )
-                    k_li_scale, k_li_scale_ag_handle = all_gather_async(
+                    k_li_scale, kv_ag_handle = all_gather_async(
                         k_li_scale,
                         get_tp_group(),
                         async_op=async_op,
                     )
-                handles = [kv_ag_handle, k_li_ag_handle, k_li_scale_ag_handle]
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             q_pe = self.rope_single(q_pe, cos, sin)
 
             if self.enable_dsa_cp:
-                valid_handles: list[Work] = [h for h in handles if h is not None]
-                for handle in valid_handles:
-                    handle.wait()
+                if kv_ag_handle is not None:
+                    kv_ag_handle.wait()
 
                 if self.enable_dsa_cp_with_layer_shard:
                     for layer in self.layer_sharding_kwargs or []:
