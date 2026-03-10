@@ -38,6 +38,10 @@ class NPUModelRunner310(NPUModelRunner):
         self.graph_uniform_decode_query_len = self.uniform_decode_query_len
         if self.speculative_config is not None and self.speculative_config.method == "ngram":
             self.graph_uniform_decode_query_len = 1
+            # Keep dispatcher's uniform decode shape definition in sync with the
+            # 310P ngram graph path, otherwise key init/dispatch may assert on
+            # non-multiple capture sizes.
+            self.cudagraph_dispatcher.uniform_decode_query_len = self.graph_uniform_decode_query_len
 
     @contextmanager
     def _temporary_graph_uniform_decode_query_len(self):
