@@ -16,6 +16,7 @@
 #
 
 from vllm.triton_utils import HAS_TRITON
+
 from vllm_ascend.utils import vllm_version_is
 
 if HAS_TRITON:
