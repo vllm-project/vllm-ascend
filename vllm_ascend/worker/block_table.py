@@ -260,15 +260,11 @@ class MultiGroupBlockTable:
             # so the block_size which used for calc max_num_blocks_per_req
             # must be multiplied by dcp_world_size.
             total_cp_world_size = get_total_cp_world_size()
-            max_num_blocks = [
-                cdiv(max_model_len, block_size * total_cp_world_size)
-                for block_size in block_sizes
-            ]
+            max_num_blocks = [cdiv(max_model_len, block_size * total_cp_world_size) for block_size in block_sizes]
 
         if len(max_num_blocks) != len(block_sizes):
             raise ValueError(
-                f"max_num_blocks length ({len(max_num_blocks)}) "
-                f"must match block_sizes length ({len(block_sizes)})"
+                f"max_num_blocks length ({len(max_num_blocks)}) must match block_sizes length ({len(block_sizes)})"
             )
 
         # Use zip to pair block_sizes with kernel_sizes one-to-one
@@ -284,9 +280,7 @@ class MultiGroupBlockTable:
                 cp_kv_cache_interleave_size,
                 num_speculative_tokens,
             )
-            for block_size, kernel_size_list, max_num_blocks_per_req in zip(
-                block_sizes, kernel_sizes, max_num_blocks
-            )
+            for block_size, kernel_size_list, max_num_blocks_per_req in zip(block_sizes, kernel_sizes, max_num_blocks)
         ]
 
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:

@@ -80,7 +80,6 @@ from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
-    check_attention_cp_compatibility,
     get_total_cp_world_size,
 )
 from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
@@ -3015,19 +3014,13 @@ class NPUModelRunner(GPUModelRunner):
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
-            max_num_blocks_per_req = cdiv(
-                max_model_len, block_sizes[i] * get_total_cp_world_size()
-            )
+            max_num_blocks_per_req = cdiv(max_model_len, block_sizes[i] * get_total_cp_world_size())
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
-                    max_num_blocks_per_req
-                    if self.cache_config.enable_prefix_caching
-                    else 1
+                    max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
                 ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
 
-                max_num_blocks_per_req = max(
-                    max_num_blocks_per_req, mamba_blocks_per_req
-                )
+                max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
             max_num_blocks.append(max_num_blocks_per_req)
         
         if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:

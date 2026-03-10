@@ -1,6 +1,5 @@
 # mypy: ignore-errors
 
-import torch
 
 import vllm
 from vllm.triton_utils import tl, triton
