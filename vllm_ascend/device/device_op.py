@@ -49,7 +49,7 @@ class BaseDeviceAdaptor:
         active_expert_range=None,
         quant_mode: int = -1,
     ):
-        if get_forward_context().num_tokens <= DeviceOperator.small_batch_gmm_batch_num:
+        if quant_mode == -1 and get_forward_context().num_tokens <= DeviceOperator.small_batch_gmm_batch_num:
             return torch_npu.npu_moe_init_routing_v2(
                 hidden_states,
                 topk_ids,
