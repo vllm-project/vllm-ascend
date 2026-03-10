@@ -24,9 +24,12 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 - Optimize split_qkv_rmsnorm_rope operator. [#6827](https://github.com/vllm-project/vllm-ascend/pull/6827)
 - Implement global CPU slicing and improve IRQ binding for Ascend NPUs, ensuring non-overlapping CPU partitions and better resource management. [#6945](https://github.com/vllm-project/vllm-ascend/pull/6945)
 
-### User-Facing Changes
+### Dependencies
 
 - CANN is upgraded to 8.5.1. [#6897](https://github.com/vllm-project/vllm-ascend/pull/6897)
+
+### Deprecation & Breaking Changes
+
 - `enable_flash_comm_v1` config option has been renamed back to `enable_sp`. [#6883](https://github.com/vllm-project/vllm-ascend/pull/6883)
 
 ### Others
