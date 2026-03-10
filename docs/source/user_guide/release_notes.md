@@ -6,7 +6,6 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 
 ### Highlights
 
-- MXFP8 MoE quantization is now supported for Qwen MoE models. [#6670](https://github.com/vllm-project/vllm-ascend/pull/6670)
 - Qwen3-Omni quantization adaptation and optimization is now available. [#6828](https://github.com/vllm-project/vllm-ascend/pull/6828)
 - GLM5-W8A8 quantization is now supported by parameterizing hardcoded MLA dimensions. [#6902](https://github.com/vllm-project/vllm-ascend/pull/6902)
 
