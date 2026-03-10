@@ -218,6 +218,9 @@ def _triton_rope_siso(
         new_qk_tile_1 = qk_tile_1 * cos_row - qk_tile_2 * sin_row
         tl.store(qk_start_ptr + first_half_offsets, new_qk_tile_1, mask=first_mask)
 
+        new_qk_tile_2 = qk_tile_2 * cos_row + qk_tile_1 * sin_row
+        tl.store(qk_start_ptr + second_half_offsets, new_qk_tile_2, mask=second_mask)
+
 
 def rope_forward_triton(
     q: torch.Tensor,
