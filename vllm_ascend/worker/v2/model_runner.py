@@ -73,7 +73,6 @@ class NPUModelRunner(GPUModelRunner):
         # NPU specific initializations can be added below.
         self.cudagraph_manager: AclGraphManager = AclGraphManager(
             self.vllm_config,
-            self.uses_mrope,
             self.use_aux_hidden_state_outputs,
             self.device,
             self,

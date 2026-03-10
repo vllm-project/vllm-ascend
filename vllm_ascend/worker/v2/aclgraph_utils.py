@@ -47,7 +47,6 @@ class AclGraphManager(CudaGraphManager):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        use_mrope: bool,
         use_aux_hidden_state_outputs: bool,
         device: torch.device,
         model_runner: Any,  # NPUModelRunner type, in case circular import, so we pass it as Any
@@ -58,7 +57,6 @@ class AclGraphManager(CudaGraphManager):
         self.model_runner = model_runner
         super().__init__(
             vllm_config,
-            use_mrope,
             use_aux_hidden_state_outputs,
             device,
         )
