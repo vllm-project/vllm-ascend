@@ -29,10 +29,10 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
-from vllm.v1.worker.gpu.cudagraph_utils import prepare_inputs_to_capture as prepare_inputs_to_capture_gpu
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.utils import AttentionGroup
+from vllm.logger import logger
 
 from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
@@ -127,6 +127,7 @@ class AclGraphManager(CudaGraphManager):
 
     def run_fullgraph(self, num_tokens: int) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
+        logger.info_once(f"run_fullgraph with num_tokens={num_tokens}")
         ret = super().run_fullgraph(num_tokens)
         assert self.model_runner.cudagraph_and_dp_padding is not None
 

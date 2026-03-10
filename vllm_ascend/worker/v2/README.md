@@ -6,3 +6,4 @@ please see [Model Runner V2](https://github.com/vllm-project/vllm-ascend/issues/
 to get specific plans.
 
 supported vllm version: main@15d76f74e2fdb12a95ea00f0ca283acf6219a2b7
+ 
