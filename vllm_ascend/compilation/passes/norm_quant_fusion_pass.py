@@ -76,8 +76,10 @@ class AddRMSNormQuantPattern(BasePattern):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
+            # npu_add_rms_norm_quant requires zeroPoints in int32 or bfloat16.
+            # aclnn_input_offset is float16 for float16 models, so cast here.
             output = torch.ops.npu.npu_add_rms_norm_quant(
-                rms_norm_input, residual, rms_norm_weight, scale, offset, epsilon=self.eps
+                rms_norm_input, residual, rms_norm_weight, scale, offset.to(torch.int32), epsilon=self.eps
             )
             quantized_output = output[0]
             out1 = output[2]
@@ -139,8 +141,10 @@ class AddRMSNormQuantPatternWithBias(BasePattern):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
+            # npu_add_rms_norm_quant requires zeroPoints in int32 or bfloat16.
+            # aclnn_input_offset is float16 for float16 models, so cast here.
             output = torch.ops.npu.npu_add_rms_norm_quant(
-                rms_norm_input, residual, rms_norm_weight, scale, offset, epsilon=self.eps, beta=bias
+                rms_norm_input, residual, rms_norm_weight, scale, offset.to(torch.int32), epsilon=self.eps, beta=bias
             )
             quantized_output = output[0]
             out1 = output[2]
@@ -200,8 +204,10 @@ class AddRMSNormQuantSPPattern(BasePattern):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
+            # npu_add_rms_norm_quant requires zeroPoints in int32 or bfloat16.
+            # aclnn_input_offset is float16 for float16 models, so cast here.
             output = torch.ops.npu.npu_add_rms_norm_quant(
-                rms_norm_input, residual, rms_norm_weight, scale, offset, epsilon=self.eps
+                rms_norm_input, residual, rms_norm_weight, scale, offset.to(torch.int32), epsilon=self.eps
             )
             quantized_output = output[0]
             out1 = output[2]
@@ -265,8 +271,10 @@ class AddRMSNormQuantSPPatternWithBias(BasePattern):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
+            # npu_add_rms_norm_quant requires zeroPoints in int32 or bfloat16.
+            # aclnn_input_offset is float16 for float16 models, so cast here.
             output = torch.ops.npu.npu_add_rms_norm_quant(
-                rms_norm_input, residual, rms_norm_weight, scale, offset, epsilon=self.eps, beta=bias
+                rms_norm_input, residual, rms_norm_weight, scale, offset.to(torch.int32), epsilon=self.eps, beta=bias
             )
             quantized_output = output[0]
             out1 = output[2]

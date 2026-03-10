@@ -598,6 +598,22 @@ class KVCacheRecvingThread(threading.Thread):
             k_caches.append(k_cache_layer)
             v_caches.append(v_cache_layer)
 
+        if k_cache.dtype == torch.int8:
+            # aclnnTransposeKvCacheByBlock does not support INT8 KV cache (C8).
+            # Reinterpret pairs of INT8 bytes as float16 so the float16-capable
+            # CANN op can be reused without any data copy.  The op only rearranges
+            # the head and block dimensions and never splits within head_dim, so
+            # the byte-level reinterpretation is safe and produces the same result
+            # as an INT8-native transpose would.  The INT8 cache tensors share
+            # memory with the float16 views, so the op modifies them in-place.
+            k_caches_view = [k.view(torch.float16) for k in k_caches]
+            v_caches_view = [v.view(torch.float16) for v in v_caches]
+            torch.ops._C_ascend.transpose_kv_cache_by_block(
+                k_caches_view, v_caches_view, block_ids_tensor,
+                block_size, num_kv_head, head_dim // 2, tp_num_need_pulls, layers
+            )
+            return
+
         torch.ops._C_ascend.transpose_kv_cache_by_block(
             k_caches, v_caches, block_ids_tensor, block_size, num_kv_head, head_dim, tp_num_need_pulls, layers
         )
