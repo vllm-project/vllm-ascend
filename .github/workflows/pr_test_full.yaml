@@ -93,7 +93,7 @@ jobs:
   parse-comment:
     name: Parse /e2e comment
     runs-on: linux-aarch64-a2b3-0
-    if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-test') }}
+    if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ready') }}
     outputs:
       allowed: ${{ steps.resolve.outputs.allowed }}
       pr_sha: ${{ steps.resolve.outputs.pr_sha }}
@@ -109,7 +109,7 @@ jobs:
           script: |
             let actor, prSha, prNumber, prAuthor, commentBody;
 
-            // pull_request event with 'e2e-test' label: search comments for the latest /e2e command.
+            // pull_request event with 'ready' label: search comments for the latest /e2e command.
             prNumber = context.payload.pull_request.number;
             prAuthor = context.payload.pull_request.user.login;
             prSha = context.payload.pull_request.head.sha;
@@ -191,7 +191,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_version: [4034c3d32e30d01639459edd3ab486f56993876d, v0.16.0]
+        vllm_version: [8a680463fab3bc9e6760417cd5c0a6aa58283065, v0.17.0]
     needs: [parse-comment]
     if: ${{ needs.parse-comment.outputs.allowed == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
