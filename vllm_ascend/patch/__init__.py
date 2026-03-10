@@ -332,3 +332,14 @@
 #       https://github.com/vllm-project/vllm/pull/36225
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
+#
+# ** 17. File: worker/patch_qwen3_5.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
+#    Why:
+#       The class Qwen3_5GatedDeltaNet reuse the `_forward_core` method of Qwen3NextGatedDeltaNet,
+#       but the ascendC ops of Qwen3NextGatedDeltaNet do not support ssm_state with float32 format.
+#    How：
+#       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
+#    Future Plan:
+#       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
