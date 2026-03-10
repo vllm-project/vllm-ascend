@@ -160,7 +160,9 @@ def gen_build_info():
     if "ascend950" in soc_version:
         device_type = "A5"
     else:
-        assert soc_version in soc_to_device, f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
+        assert soc_version in soc_to_device, (
+            f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
+        )
         device_type = soc_to_device[soc_version]
 
     package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
