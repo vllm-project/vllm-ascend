@@ -33,9 +33,24 @@ MINICPM_MODELS = [
     "OpenBMB/MiniCPM4-0.5B",
 ]
 
+QWEN3_5_MODELS = [
+    "Qwen/Qwen3.5-0.8B",
+]
+
 WHISPER_MODELS = [
     "openai-mirror/whisper-large-v3-turbo",
 ]
+
+
+@pytest.mark.parametrize("model", QWEN3_5_MODELS)
+def test_qwen3_5(model) -> None:
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(model, max_model_len=512, gpu_memory_utilization=0.7) as runner:
+        runner.generate_greedy(example_prompts, max_tokens)
 
 
 @pytest.mark.parametrize("model", MINICPM_MODELS)
