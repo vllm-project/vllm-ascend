@@ -99,10 +99,13 @@ def quant_apply_mlp(
 
     bias1, bias2 = None, None
     # w1_scale and w2_scale are pre-converted to float32 in
-    # process_weights_after_loading (w13_weight_scale_fp32 / w2_weight_scale_fp32),
-    # so they are always float32 here. Capture output dtype from w2_scale to
-    # determine the model's activation dtype for npu_grouped_matmul output_dtype.
-    _output_dtype = hidden_states.dtype
+    # process_weights_after_loading (w13_weight_scale_fp32 / w2_weight_scale_fp32).
+    # Determine the model's activation dtype (float16/bfloat16) for use as
+    # npu_grouped_matmul output_dtype. hidden_states may be INT8 (quantized),
+    # so we derive dtype from dynamic_scale (always float16/bf16 per-token
+    # scale) when present, or from hidden_states directly when it is the
+    # unquantized float activation (dynamic_scale is None).
+    _output_dtype = dynamic_scale.dtype if dynamic_scale is not None else hidden_states.dtype
 
     weight_prefetch_method = get_weight_prefetch_method()
     weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
