@@ -708,7 +708,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "sgmv_expand(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y,"
         "            int slice_offset, int slice_size) -> Tensor");
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
-
+#ifndef _ASCEND950
     ops.def(
         "mla_preprocess(Tensor hiddenState, Tensor wdqkv,"
         "               Tensor? descale0, Tensor gamma1, Tensor? beta1, Tensor wuq, Tensor? descale1,"
@@ -873,4 +873,5 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> Tensor[]"
     );
     ops.impl("moe_grouped_matmul", torch::kPrivateUse1,&vllm_ascend::moe_grouped_matmul);
+#endif
 }
