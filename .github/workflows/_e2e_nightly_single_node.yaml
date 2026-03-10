@@ -26,13 +26,26 @@ on:
       image:
         required: false
         type: string
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11"
       tests:
-        required: true
+        required: false
+        type: string
+      config_file_path:
+        required: false
         type: string
       name:
         required: false
         type: string
+      vllm_version:
+        required: false
+        type: string
+        default: "v0.16.0"
+      is_pr_test:
+        required: true
+        type: boolean
+      is_run:
+        required: true
+        type: boolean
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -44,13 +57,14 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.tests }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path || inputs.tests }}
   cancel-in-progress: true
 
 jobs:
   e2e-nightly:
-    name: ${{ inputs.tests }}
+    name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.is_run }}
     timeout-minutes: 600
     container:
       image: ${{ inputs.image }}
@@ -62,6 +76,60 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+      
+      - name: uninstall vlm vllm-ascend and remove code (if pr test)
+        if: ${{ inputs.is_pr_test }}
+        run: |
+          pip uninstall -y vllm vllm-ascend || true
+          rm -rf /vllm-workspace/vllm /vllm-workspace/vllm-ascend
+
+      - name: Checkout vllm-project/vllm repo
+        if: ${{ inputs.is_pr_test }}
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm_version }}
+          path: ./temp-vllm 
+          fetch-depth: 1
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        if: ${{ inputs.is_pr_test }}
+        uses: actions/checkout@v6
+        with:
+          path: ./temp-vllm-ascend
+          fetch-depth: 1
+
+      - name: Move code to /vllm-workspace
+        if: ${{ inputs.is_pr_test }}
+        run: |
+          mv ./temp-vllm /vllm-workspace/vllm
+          mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
+          ls -R /vllm-workspace
+
+      - name: Install vllm-project/vllm from source
+        if: ${{ inputs.is_pr_test }}
+        working-directory: /vllm-workspace/vllm
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+      
+      - name: Install vllm-project/vllm-ascend
+        if: ${{ inputs.is_pr_test }}
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Install aisbench
+        if: ${{ inputs.is_pr_test }}
+        shell: bash -l {0} 
+        run: |
+          git clone -b v3.0-20250930-master --depth 1 https://gitee.com/aisbench/benchmark.git /vllm-workspace/vllm-ascend/benchmark
+          cd /vllm-workspace/vllm-ascend/benchmark
+          pip install pytest asyncio pytest-asyncio
+          pip install -e . -r requirements/api.txt -r requirements/extra.txt
+          python3 -m pip cache purge
 
       - name: Show vLLM and vLLM-Ascend version
         working-directory: /vllm-workspace
@@ -114,14 +182,34 @@ jobs:
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
-      - name: Run vllm-project/vllm-ascend test
+      - name: Validate Inputs
+        run: |
+          if [[ -z "${{ inputs.tests }}" && -z "${{ inputs.config_file_path }}" ]]; then
+            echo "Error: Either 'tests' or 'config_file_path' must be provided."
+            exit 1
+          fi
+
+      - name: Run Pytest (py-driven)
+        if: ${{ inputs.tests != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
-          BENCHMARK_HOME: /vllm-workspace/vllm-ascend/benchmark
         working-directory: /vllm-workspace/vllm-ascend
         run: |
-          # ignore test_dispatch_ffn_combine until the test is fixed
-          pytest -sv ${{ inputs.tests }} \
+          echo "Running pytest with tests path: ${{ inputs.tests }}"
+          pytest -sv "${{ inputs.tests }}" \
           --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
+
+      - name: Run Pytest (YAML-driven)
+        if: ${{ always() && inputs.config_file_path != '' }} 
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+          VLLM_CI_RUNNER: ${{ inputs.runner }}
+          CONFIG_YAML_PATH: ${{ inputs.config_file_path }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
+          echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
+          pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py

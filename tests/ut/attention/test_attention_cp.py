@@ -81,6 +81,9 @@ class TestAscendAttentionCPImpl(TestBase):
             [0])
         attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx = torch.tensor(
             [0])
+        attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx = torch.tensor(
+            [0, 1])
+        attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn = False
 
         output, attn_lse = self.impl._forward_prefill_cp(
             query, key, value, attn_metadata)
@@ -166,8 +169,6 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata.prefill.chunked_context = MagicMock()
         local_context_lens_allranks = torch.tensor([[[256, 256], [256, 256]]])
         attn_metadata.prefill.chunked_context.local_context_lens_allranks = local_context_lens_allranks
-        attn_metadata.prefill.chunked_context.batch_chunk_seq_mask = torch.randint(
-            0, 2, (1024, ), dtype=torch.bool)
         attn_metadata.prefill.chunked_context.local_total_toks = local_context_lens_allranks[:,
                                                                                              0,
                                                                                              0].sum(
@@ -257,12 +258,23 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata.prefill = MagicMock()
         attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx = torch.tensor(
             [0, 3, 1, 2, 0, 0, 0, 0])
+        attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn = False
+        attn_metadata.prefill.pcp_metadata.pcp_padded_tokens_fla = 0
+        attn_metadata.prefill.pcp_metadata.pcp_enter_fa_restore_idx = torch.arange(
+            num_tokens * 3 * self.impl.pcp_size
+        )
+        attn_metadata.prefill.pcp_metadata.pcp_unpad_mask = torch.tensor(
+            [True, False, True, True, True, True, True, True]
+        )
 
+        query = torch.rand(num_tokens, num_heads, head_size)
         key = torch.randn(num_tokens, num_heads, head_size)
         value = torch.randn(num_tokens, num_heads, head_size)
+        output = torch.rand(num_tokens, num_heads * head_size)
 
-        key, value = self.impl.reshape_and_cache(key, value, kv_cache,
-                                                 attn_metadata)
+        query, key, value, output = self.impl.reshape_and_cache(
+            query, key, value, kv_cache, attn_metadata, output
+        )
         self.assertEqual(key.shape[0], num_tokens * self.impl.pcp_size)
         self.assertEqual(key.shape[1], num_heads)
         self.assertEqual(key.shape[2], head_size)
