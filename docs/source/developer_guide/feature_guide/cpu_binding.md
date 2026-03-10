@@ -19,8 +19,8 @@ On multi‑socket ARM systems, the OS scheduler may place vLLM threads on CPUs f
 
   | Device type | Default mode | Description |
   | ----------- | ------------ | ------------ |
-  | A3 (no affinity) | `global_slice` | Slice the cpuset by global logical NPU IDs to avoid CPU overlap across multi‑process groups. |
-  | A2 / 310P / others | `topo_affinity` | Use NPU topology affinity (`npu‑smi info -t topo`) as a base. To prevent bandwidth contention, if more than one NPU is assigned to a single NUMA node, the CPU pool is expanded to include CPUs from the nearest adjacent NUMA node(s) while retaining CPUs from the original NUMA node. |
+  | A3 (No Affinity) | `global_slice` | Splits the allowed CPU list evenly based on the **total number of global logical NPUs**, ensuring each NPU is assigned a contiguous segment of CPU cores. This prevents CPU core overlap across multiple process groups. |
+  | A2 / 310P / Others | `topo_affinity` | Allocates CPUs based on NPU topology affinity (`npu‑smi info -t topo`). If multiple NPUs are assigned to a single NUMA node (which may cause bandwidth contention), the CPU allocation extends to adjacent NUMA nodes. |
 
     - **Default**: enabled (enable_cpu_binding = true).
     - **Fallback**: If NPU topo affinity is unavailable, global_slice is used.
@@ -160,14 +160,9 @@ With the current `global_slice` strategy, some CPU/NPU layouts cannot avoid cros
 
 **Inputs**:
 
-- npu_affinity = {0: [0,1,2,3], 1: [4,5,6,7]} (from npu-smi info -t topo)
+- npu_affinity = {0: [0..7], 1: [0..7]} (from `npu-smi info -t topo`)
 - allowed_cpus = [0..15] (16 CPUs)
 - NUMA nodes = 0..1 (2 NUMA nodes; NUMA0 = 0..7, NUMA1 = 8..15)
-
-**Topo base**:
-
-- NPU0 base = [0,1,2,3]
-- NPU1 base = [4,5,6,7]
 
 **NUMA extension**:
 
@@ -201,51 +196,7 @@ Because both pools are identical, the allocator applies average distribution acr
 
 To resolve, either reduce total_npus or enlarge the cpuset so that each NPU has at least 5 CPUs.
 
-## Usage
-
-### Minimum working example (online)
-
-```bash
-vllm serve Qwen/Qwen2.5-7B-Instruct \
-  --additional-config '{"enable_cpu_binding": true}'
-```
-
-### Disable CPU binding (online)
-
-```bash
-vllm serve Qwen/Qwen2.5-7B-Instruct \
-  --additional-config '{"enable_cpu_binding": false}'
-```
-
-### Minimum working example (offline)
-
-```python
-from vllm import LLM
-
-llm = LLM(
-    model="Qwen/Qwen2.5-7B-Instruct",
-    additional_config={"enable_cpu_binding": True},
-)
-```
-
-### Disable CPU binding (offline)
-
-```python
-from vllm import LLM
-
-llm = LLM(
-  model="Qwen/Qwen2.5-7B-Instruct",
-  additional_config={"enable_cpu_binding": False},
-)
-```
-
-### Configuration options
-
-| Name | Type | Default | Description |
-| ---- | ---- | ------- | ----------- |
-| `enable_cpu_binding` | bool | `True` | Enable CPU binding (default). Only takes effect on ARM CPUs; A3 uses the global-slicing CPU allocation strategy and other device types use the topo-affinity strategy. Set to `False` to disable. |
-
-### Outputs and verification
+### Logging and verification
 
 - Logs show the selected binding mode and the allocation plan, for example:
     - `[cpu_bind_mode] mode=global_slice rank=0 visible_npus=[...]`
@@ -265,64 +216,9 @@ llm = LLM(
 - **IRQ side effects**: irqbalance may be stopped to avoid overriding bindings.
 - **Per‑process behavior**: Only the current rank’s NPU is used for IRQ binding to avoid cross‑process overwrite.
 
-## Troubleshooting
-
-### Error: “Can not get running npu info.”
-
-**Cause**: npu‑smi process table is empty or ASCEND_RT_VISIBLE_DEVICES filters out all entries.
-
-**Fix**:
-
-1. Ensure the process is running on visible NPUs.
-2. Check ASCEND_RT_VISIBLE_DEVICES and verify it matches actual logical NPU IDs.
-
-### Error: “Insufficient CPUs for binding with IRQ/ACL/REL reservations...”
-
-**Cause**: The cpuset is too small for the number of logical NPUs (minimum 5 CPUs per NPU).
-
-**Fix**:
-
-- Increase the cpuset size or reduce visible NPUs.
-
-### Warning: “NPU topo affinity not found, fallback to global-slice CPU binding.”
-
-**Cause**: npu‑smi topo info is unavailable.
-
-**Fix**:
-
-- Verify npu‑smi installation and permissions.
-
-### Warning: “Bind cpus failed in rankX: ... Skip binding cpu.”
-
-**Cause**: Any failure in binding sequence (taskset, lscpu, /proc/irq access).
-
-**Fix**:
-
-- Check taskset availability and permissions.
-- Ensure /proc/self/status contains Cpus_allowed_list.
-- Verify required commands (npu‑smi, lscpu) are present.
-
 ### Debug logging
 
 Use the standard vLLM logging configuration to enable debug logs. The binding process emits debug messages (e.g., `[cpu_global_slice] ...`) when debug level is enabled.
-
-## FAQ
-
-**Q1: Does CPU binding work on x86_64?**
-
-No. The binding is skipped on non‑ARM CPUs.
-
-**Q2: Why are only the current rank’s IRQs bound?**
-
-To avoid multiple processes overwriting IRQ affinity settings for the same device.
-
-**Q3: What if my cpuset already limits CPUs?**
-
-The binder uses Cpus_allowed_list from /proc/self/status as the only eligible CPU set. Ensure this list is large enough.
-
-**Q4: Does CPU binding change model outputs?**
-
-No. It only affects host‑side affinity and should not change numerical results.
 
 ## References
 
