@@ -43,7 +43,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 
 #### Initial Setup (Record Expert Map)
 
-We need to add environment variable `export EXPERT_MAP_RECORD="true"` to record expert map.Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
+We need to add environment variable `export EXPERT_MAP_RECORD="true"` to record expert map. Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
 
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
@@ -66,7 +66,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{
-    "expert_map_path": "/path/to/eplb.json"
+    "eplb_config": {"expert_map_path": "/path/to/eplb.json"}
   }'
 ```
 

@@ -26,11 +26,12 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod, get_compressed_expert_map
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
 from vllm_ascend.utils import vllm_version_is
 
-if not vllm_version_is("0.15.0"):
+if not vllm_version_is("0.16.0"):
     from vllm.model_executor.layers.fused_moe.fused_moe_method_base import FusedMoEMethodBase  # type: ignore
     from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter  # type: ignore
     from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
@@ -122,6 +123,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
         )
+        if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                capturer.capture(
+                    layer_id=layer.layer_id,
+                    topk_ids=topk_ids,
+                )
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
@@ -161,7 +169,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         return final_hidden_states
 
 
-if not vllm_version_is("0.15.0"):
+if not vllm_version_is("0.16.0"):
     # Please remove this inheritance after extending vllm, todo(wxs)
     class AscendMoERunner(DefaultMoERunner):
         """
@@ -278,9 +286,7 @@ class AscendFusedMoE(FusedMoE):
         )
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
-        self.local_num_experts = (
-            torch.sum(self._expert_map != -1).item() if self._expert_map is not None else self.global_num_experts
-        )
+        self.local_num_experts = self.global_num_experts // self.ep_size
         if self._expert_map is not None:
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
@@ -312,13 +318,14 @@ class AscendFusedMoE(FusedMoE):
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
 
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
-        if not vllm_version_is("0.15.0"):
+        if not vllm_version_is("0.16.0"):
             self.runner = self._init_runner()
 
-    if not vllm_version_is("0.15.0"):
+    if not vllm_version_is("0.16.0"):
 
         def _init_runner(self):
             # Storing the runner in the FusedMoE is an intermediate state, eventually
@@ -364,7 +371,7 @@ class AscendFusedMoE(FusedMoE):
         """
         return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
 
-    if not vllm_version_is("0.15.0"):
+    if not vllm_version_is("0.16.0"):
 
         def forward(
             self,
@@ -383,6 +390,10 @@ class AscendFusedMoE(FusedMoE):
         assert self.quant_method is not None
 
         forward_context = get_forward_context()
+        # When static kernels are enabled, the forward pass runs twice (compilation + capture),
+        # causing moe_layer_index to overflow. Wrap the index to prevent out-of-bounds errors.
+        if self.enable_npugraph_ex_static_kernel:
+            forward_context.moe_layer_index = forward_context.moe_layer_index % (len(forward_context.all_moe_layers))
 
         # Load balancing for token distribution among experts in dummy_run
         # TODO: The community only considers load balancing when DP > 1.
@@ -432,7 +443,7 @@ class AscendFusedMoE(FusedMoE):
         hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            replace_allreduce=forward_context.sp_enabled,
+            replace_allreduce=forward_context.flash_comm_v1_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type,
         )
@@ -511,8 +522,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     ):
         AscendFusedMoE.__init__(self, **kwargs)
 
-        if not vllm_version_is("0.15.0"):
-            self._routed_input_transform = routed_input_transform
+        self._routed_input_transform = routed_input_transform
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
@@ -525,7 +535,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             logger.info_once("Sequence parallelism is enabled, shared experts are replicated for best performance.")
 
         self._gate = gate
-        if not vllm_version_is("0.15.0"):
+        if not vllm_version_is("0.16.0"):
             # Recreate the runner with the correct shared_experts parameter
             # The parent class created the runner before self._shared_experts was set
             self.runner = self._init_runner()
