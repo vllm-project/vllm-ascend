@@ -1258,6 +1258,10 @@ class NPUModelRunner(GPUModelRunner):
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
+                # NOTE(Angazenn): According to https://github.com/vllm-project/vllm/pull/30877,
+                # there should be a corresponding 'postprocess_mamba'. However, it is called inside
+                # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
+                # We simply utilize the implementation in vLLM.
                 if self.cache_config.mamba_cache_mode == "align":
                     mamba_utils.preprocess_mamba(
                         scheduler_output,
