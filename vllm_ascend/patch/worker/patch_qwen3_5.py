@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.utils import enable_sp
@@ -250,6 +251,7 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
             else:
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
+        maybe_save_kv_layer_to_connector("", [])
 
 
 Qwen3_5GatedDeltaNet._forward_core = AscendQwen3_5GatedDeltaNet._forward_core
