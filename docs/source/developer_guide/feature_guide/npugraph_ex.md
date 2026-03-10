@@ -1,8 +1,8 @@
 # Npugraph_ex
 
-## How it works?
+## How Does It Work?
 
-Optimization based on Fx graphs, can be considered an acceleration solution for the aclgraph mode.
+This is an optimization based on Fx graphs, which can be considered an acceleration solution for the aclgraph mode.
 
 You can get its code [here](https://gitcode.com/Ascend/torchair)
 
