@@ -53,7 +53,7 @@ def cumsum_group_list(group_list: torch.Tensor,
     if src_list_type == 2 and dst_list_type == 0:
         experts = pad(group_list[:, 0], (1, 0))
         tokens = pad(group_list[:, 1].cumsum(dim=0), (1, 0))
-        cumsum_group_list = torch.full(size=(expert_num, ),
+        cumsum_group_list = torch.full(size=(expert_num,),
                                        fill_value=active_num,
                                        dtype=group_list.dtype,
                                        device=group_list.device)
@@ -87,6 +87,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         quantized_hidden_states = None
         pertoken_scale = None
     elif dynamic_scale is None:
+        print(f" dynamic_scale is None")
         unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
             hidden_states)
@@ -112,7 +113,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = (
                 torch.ops._C_ascend.
-                grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+                    grouped_matmul_swiglu_quant_weight_nz_tensor_list(
                     x=hidden_states,
                     weight=w1,
                     weight_scale=w1_scale,
@@ -203,6 +204,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                     [group_list[:1],
                      torch.diff(group_list, dim=0)])
                 group_list_type = 1
+            # w1_scale_bias = w1_scale_bias.to(torch.float32)
+            # w2_scale_bias = w2_scale_bias.to(torch.float32)
             bias1 = [w1_scale_bias] if not fusion else w1_scale_bias
             bias2 = [w2_scale_bias]
             # TODO w4a8 scene: dynamic acquisition of dtype in the future
@@ -212,7 +215,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = (
                 torch.ops._C_ascend.
-                grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+                    grouped_matmul_swiglu_quant_weight_nz_tensor_list(
                     x=hidden_states,
                     weight=w1,
                     weight_scale=w1_scale,
@@ -282,7 +285,6 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
                       group_list_type: int = 1,
                       topk_scales: Optional[torch.Tensor] = None,
                       need_trans: bool = True) -> torch.Tensor:
-
     if need_trans:
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
@@ -379,8 +381,8 @@ def fused_experts(
         group_ep: str,
         ep_rank_size: int,
         ep_rank_id: int,
-        moe_expert_num:int,
-    ):
+        moe_expert_num: int,
+):
     output, _ = torch.ops.umdk_cam_op_lib.dispatch_gmm_combine_decode(
         x=hidden_states,
         expert_ids=topk_ids,
@@ -400,3 +402,96 @@ def fused_experts(
         quant_mode=0,
         global_bs=0)
     return output
+
+
+def dispatch_experts(
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        x_active_mask: torch.Tensor,
+        group_ep: str,
+        ep_rank_size: int,
+        ep_rank_id: int,
+        moe_expert_num: int,
+):
+    """
+    Dispatch阶段：将token分发到对应的专家
+    返回值：dispatch_output的所有输出
+    """
+
+    dispatch_kwargs = {
+        "x": hidden_states,
+        "expert_ids": topk_ids,
+        "expert_shard_type": 0,
+        "shared_expert_rank_num": 0,
+        "moe_expert_num": moe_expert_num,
+        "global_bs": 0,
+        "expert_token_nums_type": 0,
+        "scales": None,
+        "quant_mode": 0,
+        "group_ep": group_ep,
+        "ep_world_size": ep_rank_size,
+        "ep_rank_id": ep_rank_id,
+        "x_active_mask": x_active_mask,
+        "group_tp": group_ep,
+        "tp_world_size": 1,
+        "tp_rank_id": 0,
+    }
+
+    dispatch_output = torch_npu.npu_moe_distribute_dispatch_v2(**dispatch_kwargs)
+
+    # 返回所有输出，保持与原函数完全相同的解析方式
+    return dispatch_output
+
+
+def combine_experts(
+        gmm2_output: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        x_active_mask: torch.Tensor,
+        assist_info_for_combine: torch.Tensor,
+        ep_recv_counts: torch.Tensor,
+        tp_recv_counts: torch.Tensor,
+        expand_scales: torch.Tensor,
+        group_ep: str,
+        ep_rank_size: int,
+        ep_rank_id: int,
+        moe_expert_num: int,
+):
+    """
+    Combine阶段：将计算结果重新组合
+    返回值：combined_output
+    """
+    combine_kwargs = {
+        "expand_x": gmm2_output,
+        "expert_ids": topk_ids,
+        "expert_scales": topk_weights.to(torch.float32) if topk_weights is not None else None,
+        "expert_shard_type": 0,
+        "shared_expert_rank_num": 0,
+        "moe_expert_num": moe_expert_num,
+        "global_bs": 0,
+        "ep_send_counts": ep_recv_counts,
+        "group_ep": group_ep,
+        "ep_world_size": ep_rank_size,
+        "ep_rank_id": ep_rank_id,
+        "expand_scales": expand_scales,
+        "x_active_mask": x_active_mask,
+        "tp_send_counts": tp_recv_counts,
+        "group_tp": group_ep,
+        "tp_world_size": 1,
+        "tp_rank_id": 0,
+    }
+
+    # 添加assist_info_for_combine
+    if hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
+        combine_kwargs["assist_info_for_combine"] = assist_info_for_combine
+    else:
+        combine_kwargs["expand_idx"] = assist_info_for_combine
+
+    # 调用combine算子
+    if hasattr(torch_npu, "npu_moe_distribute_combine_v2"):
+        combined_output = torch_npu.npu_moe_distribute_combine_v2(**combine_kwargs)
+    else:
+        combined_output = torch_npu.npu_moe_distribute_combine(**combine_kwargs)
+
+    return combined_output

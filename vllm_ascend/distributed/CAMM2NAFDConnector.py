@@ -12,7 +12,7 @@ import pickle
 
 import re
 
-from torch.distributed.distributed_c10d import _update_default_pg, _get_default_group
+from vllm_ascend.ascend_config import get_ascend_config
 
 from vllm.distributed.parallel_state import init_afd_process_group, init_model_parallel_group
 from vllm.logger import init_logger
@@ -62,7 +62,12 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         self.quant_mode = 0
         self.use_aclgraph = self._use_aclgraph()
         self.dst_list = []
-        print(f'self.use_aclgraph in CAMM2NAFDConnector is {self.use_aclgraph}')
+        ascend_config = get_ascend_config()
+        self.mix_placement = getattr(ascend_config, "mix_placement", False)
+        self.num_logical_experts = self.hf_config.n_routed_experts
+        self.num_shared_experts = self.hf_config.n_shared_experts
+        print(f'self.use_aclgraph in CAMM2NAFDConnector is {self.use_aclgraph}, '
+              f'mix_placement: {self.mix_placement}')
 
     def _use_aclgraph(self) -> bool:
         return self.config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and \
@@ -159,6 +164,10 @@ class CAMM2NAFDConnector(AFDConnectorBase):
 
         config = kwargs.get('config')
         batch_size = kwargs.get('batch_size')
+        if self.mix_placement:
+            k = self.hf_config.num_experts_per_tok + self.num_shared_experts
+        else:
+            k = self.hf_config.num_experts_per_tok
         if config:
             metadata.connector_data.moe_expert_num = config.n_routed_experts
             # TODO: quant_mode and aiv_num read from config
@@ -167,7 +176,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             metadata.connector_data.scale = None
             metadata.connector_data.batch_size = batch_size
             metadata.connector_data.h = config.hidden_size
-            metadata.connector_data.k = config.num_experts_per_tok
+            metadata.connector_data.k = k
 
     def select_experts(
             self,
@@ -179,7 +188,12 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             topk_group: Optional[int] = None,
             num_expert_group: Optional[int] = None,
             custom_routing_function: Optional[Any] = None,
+            routed_scaling_factor=1.0,
             e_score_correction_bias: Optional[torch.Tensor] = None,
+            mix_placement: Optional[bool] = False,
+            num_logical_experts: int = -1,
+            num_shared_experts: int = 0,
+            global_num_experts: int = -1,
             **kwargs
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return select_experts(
@@ -191,7 +205,12 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
-            e_score_correction_bias=e_score_correction_bias
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            mix_placement=mix_placement,
+            num_logical_experts=num_logical_experts,
+            num_shared_experts=num_shared_experts,
+            global_num_experts=global_num_experts,
         )
 
     def compute_moe(self, experts, hidden_states, **kwargs):
@@ -221,6 +240,13 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         if metadata.connector_data:
             get_forward_context().cam_afdconnector_data = metadata.connector_data
 
+        if self.mix_placement:
+            k = self.hf_config.num_experts_per_tok + self.num_shared_experts
+            moe_expert_num = self.hf_config.n_routed_experts + self.num_shared_experts
+        else:
+            k = self.hf_config.num_experts_per_tok
+            moe_expert_num = self.hf_config.n_routed_experts
+
         return torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
                                                    self.hccl_comm_name,
                                                    self.hccl_comm_name2,
@@ -228,10 +254,10 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                                                    self.rank,
                                                    self.ffn_size,
                                                    self.attn_size,
-                                                   self.hf_config.n_routed_experts,
+                                                   moe_expert_num,
                                                    self.max_num_reqs,
                                                    self.hf_config.hidden_size,
-                                                   self.hf_config.num_experts_per_tok,
+                                                   k,
                                                    self.quant_mode), None
 
     # MOE发给ATTN（ATTN接收）
@@ -258,6 +284,10 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         handle = metadata.handle
 
         groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
+        if self.mix_placement:
+            totalExpertNum = moe_expert_num + self.num_shared_experts
+        else:
+            totalExpertNum = moe_expert_num + shared_expert_num
 
         torch.ops.umdk_cam_op_lib.cam_e2a(expandXOut=ffn_output, simulateExpertIds=handle[0],
                                           simulateExpertScales=handle[1],
@@ -269,7 +299,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                                           batchSize=batch_size, hiddenSize=h, topk=k,
                                           expertRankSize=self.ffn_size, attentionRankSize=self.attn_size,
                                           sharedExpertNum=shared_expert_num,
-                                          totalExpertNum=moe_expert_num + shared_expert_num,
+                                          totalExpertNum=totalExpertNum,
                                           rank=self.rank,
                                           loadBalancingRankNum=1, loadBalancingThreshold=0,
                                           groupEp=groupEp,
@@ -291,6 +321,10 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         expandXOutDType = torch.tensor([], dtype=torch.bfloat16 if not quant_mode else torch.int8, device='npu')
 
         groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
+        if self.mix_placement:
+            totalExpertNum = moe_expert_num + self.num_shared_experts
+        else:
+            totalExpertNum = moe_expert_num + shared_expert_num
 
         outputs = torch.ops.umdk_cam_op_lib.cam_a2e(expandX=torch.tensor([], dtype=torch.bfloat16, device='npu'),
                                                     expertIds=torch.tensor([], dtype=torch.int32, device='npu'),
@@ -300,7 +334,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                                                     commId=0, batchSize=batch_size, hiddenSize=h, topk=k,
                                                     expertRankSize=self.ffn_size, attentionRankSize=self.attn_size,
                                                     sharedExpertNum=shared_expert_num,
-                                                    totalExpertNum=moe_expert_num + shared_expert_num, rank=self.rank,
+                                                    totalExpertNum=totalExpertNum, rank=self.rank,
                                                     loadBalancingRankNum=1, loadBalancingThreshold=0,
                                                     dynamicQuant=quant_mode,
                                                     groupEp=groupEp,
@@ -308,6 +342,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
 
         # [hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize]
         expertTokenNums = outputs[3].to(torch.int64)  # expertTokenNums
+
         return AFDRecvOutput(
             hidden_states=outputs[0],
             metadata=afdmetadata,
@@ -363,6 +398,11 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         max_num_tokens = kwargs.get('max_num_tokens', 0)
         hf_config = self.config.model_config.hf_config
 
+        if self.mix_placement:
+            k = self.hf_config.num_experts_per_tok + self.num_shared_experts
+        else:
+            k = self.hf_config.num_experts_per_tok
+
         return CAMM2NAFDConnectorMetadata(
             moe_expert_num=hf_config.n_routed_experts,
             shared_expert_num=0,
@@ -372,7 +412,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             aiv_num=48,
             batch_size=max_num_tokens,
             h=hf_config.hidden_size,
-            k=hf_config.num_experts_per_tok
+            k=k
         )
 
     def update_metadata(self, metadata, recv_output):

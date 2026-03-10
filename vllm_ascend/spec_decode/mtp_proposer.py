@@ -41,6 +41,7 @@ class MtpProposer(EagleProposer):
             num_tokens,
             num_tokens_across_dp,
             with_prefill,
+            _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
         if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
@@ -249,14 +250,10 @@ class MtpProposer(EagleProposer):
         assert self.runner is not None
 
         # Note(qcs): We may need to refactor these check logics.
-        if self.runner.use_aclgraph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
+        if self.use_cuda_graph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
                 -1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
-        elif self.use_aclgraph and num_tokens <= self.runner.cudagraph_batch_sizes[
-                -1]:
-            # Acl graph mode, add padding to the batch size
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
         else:
             # Eager mode, no padding needed
             num_input_tokens = num_tokens
@@ -265,9 +262,9 @@ class MtpProposer(EagleProposer):
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
         # eager/acl piecewise mode need to update num_tokens_across_dp
-        (num_input_tokens, num_tokens_across_dp,
-         with_prefill) = self.runner._sync_metadata_across_dp(
-             num_input_tokens, self.runner.with_prefill)
+        (num_input_tokens, num_tokens_across_dp, with_prefill,
+         _) = self.runner._sync_metadata_across_dp(num_input_tokens,
+                                                   self.runner.with_prefill)
 
         # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
         if scheduler_output and not self.enable_shared_expert_dp:
@@ -300,6 +297,7 @@ class MtpProposer(EagleProposer):
         # update the graph_pad_size in common_attn_metadata, to tell the
         # builder padding some elements.
         common_attn_metadata.graph_pad_size = graph_pad_size
+        common_attn_metadata.num_input_tokens = num_input_tokens
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata_mtp = builder.build(0, common_attn_metadata,
                                           self.runner.get_model())
@@ -337,8 +335,14 @@ class MtpProposer(EagleProposer):
                         decode_metadata = getattr(attn_metadata[layer_name],
                                                   "decode", None)
                         if self.use_async_scheduling and decode_metadata is not None:
-                            actual_size = len(
-                                decode_metadata.actual_seq_lengths_q)
+                            if self.pcp_size * self.dcp_size > 1:
+                                actual_size = sum(
+                                    attn_metadata[layer_name].
+                                    query_lens[:attn_metadata[layer_name].
+                                               num_decodes])
+                            else:
+                                actual_size = len(
+                                    decode_metadata.actual_seq_lengths_q)
 
                             decode_metadata.seq_lens_list = \
                                 decode_metadata.seq_lens_list[:actual_size]

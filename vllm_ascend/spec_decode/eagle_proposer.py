@@ -8,7 +8,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import (get_pp_group, get_tp_group,
+                                             get_world_group,
+                                             init_model_parallel_group,
+                                             patch_tensor_parallel_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -119,14 +122,33 @@ class EagleProposer(VllmEagleProposer):
         self.pcp_rank = self.runner.pcp_rank
         self.dcp_rank = self.runner.dcp_rank
 
-        self.use_aclgraph = self.runner._use_aclgraph()
-
         self.full_indices = range(
             self.runner.max_num_tokens * self.pcp_size * self.dcp_size +
             self.pcp_size * self.dcp_size * self.runner.max_num_reqs)
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config,
                                   "index_topk")
+        # NOTE:
+        # `draft_tensor_parallel_size` does not take effect for Eagle:
+        # the draft model uses the same TP size as the target model in practice.
+        # so we applied this patch to set tp=1 of draft model separately.
+        # Due to verification of `_verify_and_get_draft_tp` in vllm,
+        # the value of `draft_tensor_parallel_size` here will either be 1 separately
+        # or the same as target model.
+        # TODO(zhaomingyu13): If we want to adapt to the case where draft model tp
+        # is not 1 and differs from target model, this part should be rewritten.
+        if (vllm_config.parallel_config.tensor_parallel_size
+                != self.speculative_config.draft_tensor_parallel_size):
+            tp_group = init_model_parallel_group(
+                [[get_world_group().rank]],
+                get_world_group().rank,
+                torch.distributed.get_backend(get_world_group().device_group),
+                use_message_queue_broadcaster=True,
+                group_name="tp",
+            )
+            self.tp_group_context = patch_tensor_parallel_group(tp_group)
+        else:
+            self.tp_group_context = nullcontext()
 
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: ContextManager[Any] = nullcontext()
@@ -160,28 +182,21 @@ class EagleProposer(VllmEagleProposer):
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
-            if self.method == "mtp":
-                if self.vllm_config.model_config.is_deepseek_mla and \
+            # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
+            # check if mtp model use main model's embedding and LMhead
+            if hasattr(model, "model") and hasattr(model.model, "embed_tokens") and \
                     torch.equal(self.model.model.embed_tokens.weight,
                                 model.model.embed_tokens.weight):
-                    # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
-                    # check if mtp model use main model's embedding and LMhead
-                    logger.info(
-                        "The MTP head shares the same vocab embedding" \
-                        " with the target model."
-                    )
-                    self.model.model.embed_tokens = model.model.embed_tokens
-                else:
-                    logger.info(
-                        " The MTP head loaded its own vocab embedding" \
-                        " weights instead of sharing them with the target model."
-                    )
-            else:
                 logger.info(
                     "The EAGLE head shares the same vocab embedding" \
                     " with the target model."
                 )
                 self.model.model.embed_tokens = model.model.embed_tokens
+            else:
+                logger.info(
+                    " The EAGLE head loaded its own vocab embedding" \
+                    " weights instead of sharing them with the target model."
+                )
         else:
             logger.info(
                 "Since PP > 1 or other reasons the model head loaded its own vocab embedding" \

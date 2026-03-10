@@ -13,6 +13,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from unittest.mock import patch
+
 from vllm.config import VllmConfig
 
 from tests.ut.base import TestBase
@@ -33,7 +35,9 @@ class TestAscendConfig(TestBase):
         return wrapper
 
     @_clean_up_ascend_config
-    def test_init_ascend_config_without_additional_config(self):
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_init_ascend_config_without_additional_config(
+            self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
         ascend_config = init_ascend_config(test_vllm_config)
@@ -45,7 +49,9 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
 
     @_clean_up_ascend_config
-    def test_init_ascend_config_with_additional_config(self):
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_init_ascend_config_with_additional_config(
+            self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "ascend_compilation_config": {
@@ -53,8 +59,11 @@ class TestAscendConfig(TestBase):
             },
             "multistream_overlap_shared_expert": True,
             "expert_map_path": "test_expert_map_path",
+            "eplb_config": {
+                "expert_map_path": "test_expert_map_path",
+            },
             "refresh": True,
-            "enable_kv_nz": False
+            "enable_kv_nz": False,
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
@@ -66,7 +75,9 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.enable_kv_nz)
 
     @_clean_up_ascend_config
-    def test_init_ascend_config_enable_npugraph_ex(self):
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_init_ascend_config_enable_npugraph_ex(
+            self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "enable_npugraph_ex": True,
@@ -76,7 +87,8 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.enable_npugraph_ex)
 
     @_clean_up_ascend_config
-    def test_get_ascend_config(self):
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_get_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(get_ascend_config(), ascend_config)
@@ -87,7 +99,8 @@ class TestAscendConfig(TestBase):
             get_ascend_config()
 
     @_clean_up_ascend_config
-    def test_clear_ascend_config(self):
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_clear_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(get_ascend_config(), ascend_config)

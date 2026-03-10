@@ -29,10 +29,6 @@ class EplbAdaptor():
         raise NotImplementedError
 
     @abstractmethod
-    def get_init_expert_map(self, num_moe_layers: Any) -> Any:
-        raise NotImplementedError
-
-    @abstractmethod
     def do_update_expert_map(self, layer_id: Any,
                              updated_expert_map: Any) -> Any:
         raise NotImplementedError

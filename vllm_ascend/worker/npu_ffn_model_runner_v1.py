@@ -159,7 +159,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     #TODO(yxj):self.decode_max_num_token * self.attn_size * (self.topk // self.ffn_size)
                     max_num_tokens = self.decode_max_num_token * self.topk * self.attn_size
                 else:
-                    max_num_tokens = self.decode_max_num_token * self.topk * self.attn_size
+                    # max_num_tokens = self.decode_max_num_token * self.topk * self.attn_size
+                    max_num_tokens = self.decode_max_num_token
                 acl_graph_info = self._acl_graphs_ubatch_full.get(max_num_tokens)
                 graph = acl_graph_info['graph']
                 graph.replay()
@@ -313,7 +314,6 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                    force_attention: bool = False,
                    uniform_decode: bool = False,
                    **kwargs):
-        
         is_ubatch = self.connector.recv_is_ubatch()
         print(f'is_ubatch in _dummy_run is {is_ubatch}')
         
