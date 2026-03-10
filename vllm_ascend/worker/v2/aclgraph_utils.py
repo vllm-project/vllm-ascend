@@ -33,6 +33,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.utils import AttentionGroup
 from vllm.logger import logger
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
@@ -99,6 +100,7 @@ class AclGraphManager(CudaGraphManager):
         num_tokens: int,
         capture_cg_mode: CUDAGraphMode,
         model: nn.Module,
+        model_state: ModelState,
         input_buffers: InputBuffers,
         mrope_positions: torch.Tensor | None,
         inputs_embeds: torch.Tensor | None,
@@ -113,6 +115,7 @@ class AclGraphManager(CudaGraphManager):
                 num_tokens,
                 capture_cg_mode,
                 model,
+                model_state,
                 input_buffers,
                 mrope_positions,
                 inputs_embeds,
