@@ -1,4 +1,4 @@
-# CPU Binding for vLLM Ascend
+# CPU Binding
 
 ## Core Concepts & Working Principles
 

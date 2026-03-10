@@ -20,7 +20,7 @@ On multi‑socket ARM systems, the OS scheduler may place vLLM threads on CPUs f
   | Device type | Default mode | Description |
   | ----------- | ------------ | ------------ |
   | A3 (no affinity) | `global_slice` | Slice the cpuset by global logical NPU IDs to avoid CPU overlap across multi‑process groups. |
-  | A2 / 310P / others | `topo_affinity` | Use NPU topology affinity (`npu‑smi info -t topo`) as a base. To prevent bandwidth contention, if more than one NPU is assigned to a single NUMA node, the allocation will extend to the nearest NUMA node. |
+  | A2 / 310P / others | `topo_affinity` | Use NPU topology affinity (`npu‑smi info -t topo`) as a base. To prevent bandwidth contention, if more than one NPU is assigned to a single NUMA node, the CPU pool is expanded to include CPUs from the nearest adjacent NUMA node(s) while retaining CPUs from the original NUMA node. |
 
     - **Default**: enabled (enable_cpu_binding = true).
     - **Fallback**: If NPU topo affinity is unavailable, global_slice is used.
@@ -132,7 +132,10 @@ Note: When a pool size is exactly 5, `main` has a single CPU (pool[2]). If any p
 
 - With the symmetric NUMA layout above (NUMA0 = 0..7, NUMA1 = 8..16), NPU0 stays within NUMA0, NPU2 stays within NUMA1, but NPU1 spans both NUMA0 (6,7) and NUMA1 (8..11). This is a direct consequence of global slicing over the ordered cpuset; the remainder distribution does not enforce NUMA boundaries.
 - If the cpuset numbering is interleaved across NUMA nodes (non‑symmetric layout), cross‑NUMA pools can happen even earlier. This is why symmetric NUMA layout is recommended for best locality.
-- **Note (limitation / future improvement)**: With the current global slicing strategy, some layouts cannot avoid cross‑NUMA pools. A future enhancement should incorporate NUMA node boundaries into the slicing logic so that pools remain within a single NUMA node whenever possible.
+
+### Known limitations and future improvements
+
+With the current `global_slice` strategy, some CPU/NPU layouts cannot avoid cross‑NUMA pools. A future enhancement should incorporate NUMA node boundaries into the slicing logic so that pools remain within a single NUMA node whenever possible.
 
 ### Example 4: global_slice with visible subset of NPUs
 
@@ -240,7 +243,7 @@ llm = LLM(
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enable_cpu_binding` | bool | `True` | Enable CPU binding (default). Only takes effect on ARM CPUs; A3 uses global-slicing CPU allocation strategy and other device types use topo-affinity's. Set to `False` to disable. |
+| `enable_cpu_binding` | bool | `True` | Enable CPU binding (default). Only takes effect on ARM CPUs; A3 uses the global-slicing CPU allocation strategy and other device types use the topo-affinity strategy. Set to `False` to disable. |
 
 ### Outputs and verification
 
