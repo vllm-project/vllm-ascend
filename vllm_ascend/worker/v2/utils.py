@@ -1,6 +1,9 @@
 from contextlib import contextmanager
 
+import vllm
 import torch
+
+from vllm_ascend.worker.v2.block_table import AscendBlockTable
 
 
 @contextmanager
@@ -18,6 +21,17 @@ def torch_cuda_wrapper():
         torch.cuda.set_stream = torch.npu.set_stream
         torch.cuda.current_device = torch.npu.current_device
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        yield
+    finally:
+        pass
+
+
+@contextmanager
+def block_table_wrapper():
+    try:
+        # vllm-ascend need to initialize slot mapping as torch.int32 dtype,
+        # but vllm default is torch.int64 dtype.
+        vllm.v1.worker.gpu.block_table.BlockTable = AscendBlockTable
         yield
     finally:
         pass

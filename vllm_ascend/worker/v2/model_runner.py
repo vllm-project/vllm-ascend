@@ -50,6 +50,7 @@ from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import set_weight_prefetch_method
+from vllm_ascend.worker.v2.utils import block_table_wrapper
 
 logger = init_logger(__name__)
 
@@ -58,7 +59,7 @@ class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        with torch_cuda_wrapper():
+        with torch_cuda_wrapper(), block_table_wrapper():
             super().__init__(vllm_config, device)
 
         # because we will override these attribute, delete these attribute to
@@ -131,7 +132,7 @@ class NPUModelRunner(GPUModelRunner):
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
         # we need to update full graph params in run_fullgraph,
-        # so we need to create a stream to update full graph params.
+        # so create a stream to update full graph params.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
 
@@ -273,7 +274,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
 
-        query_start_loc_np = query_start_loc_np[: num_reqs + 1]
+        query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         max_query_len = num_scheduled_tokens.max().item()
@@ -298,6 +299,9 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.seq_lens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
+
+        # Pad for full CUDA graph mode.
+        self.seq_lens_np[num_reqs_padded:] = 0
 
         # Prepare M-RoPE positions.
         if self.uses_mrope:
