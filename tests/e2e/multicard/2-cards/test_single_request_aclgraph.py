@@ -39,8 +39,7 @@ api_keyword_args = {
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dp_size", DATA_PARALLELS)
-async def test_models_single_request_aclgraph_dp2(model: str,
-                                                  dp_size: int) -> None:
+async def test_models_single_request_aclgraph_dp2(model: str, dp_size: int) -> None:
     port = get_open_port()
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
@@ -48,36 +47,51 @@ async def test_models_single_request_aclgraph_dp2(model: str,
     }
     if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
         server_args = [
-            "--no-enable-prefix-caching", "--tensor-parallel-size", "1",
+            "--no-enable-prefix-caching",
+            "--tensor-parallel-size",
+            "1",
             "--data-parallel-size",
-            str(dp_size), "--quantization", "ascend", "--max-model-len",
-            "1024", "--port",
-            str(port), "--trust-remote-code", "--gpu-memory-utilization", "0.9"
+            str(dp_size),
+            "--quantization",
+            "ascend",
+            "--max-model-len",
+            "1024",
+            "--port",
+            str(port),
+            "--trust-remote-code",
+            "--gpu-memory-utilization",
+            "0.9",
         ]
     else:
         server_args = [
-            "--no-enable-prefix-caching", "--tensor-parallel-size", "1",
+            "--no-enable-prefix-caching",
+            "--tensor-parallel-size",
+            "1",
             "--data-parallel-size",
-            str(dp_size), "--port",
-            str(port), "--trust-remote-code", "--gpu-memory-utilization", "0.9"
+            str(dp_size),
+            "--port",
+            str(port),
+            "--trust-remote-code",
+            "--gpu-memory-utilization",
+            "0.9",
         ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(model,
-                            vllm_serve_args=server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+    with RemoteOpenAIServer(
+        model, vllm_serve_args=server_args, server_port=port, env_dict=env_dict, auto_port=False
+    ) as server:
         client = server.get_async_client()
 
         try:
-            batch = await asyncio.wait_for(client.completions.create(
-                model=model,
-                prompt=prompts,
-                **request_keyword_args,
-            ),
-                                           timeout=10.0)
+            batch = await asyncio.wait_for(
+                client.completions.create(
+                    model=model,
+                    prompt=prompts,
+                    **request_keyword_args,
+                ),
+                timeout=10.0,
+            )
         except asyncio.TimeoutError:
             pytest.fail("Model did not return response within 10 seconds")
 
