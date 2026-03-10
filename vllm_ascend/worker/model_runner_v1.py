@@ -231,6 +231,16 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+        # patch for vllm#35552
+        # self.cudagraph_batch_sizes sorts in ascending order.
+        if (
+            self.compilation_config.cudagraph_capture_sizes
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            self.cudagraph_batch_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        else:
+            self.cudagraph_batch_sizes = []
+
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
         self.query_start_loc = self._make_buffer(
