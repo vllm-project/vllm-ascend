@@ -114,6 +114,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               **kwargs) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
+        n_shared_experts = layer.n_shared_experts
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -126,6 +127,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
+            mix_placement=layer.mix_placement,
+            num_logical_experts=router_logits.shape[1],
+            num_shared_experts=n_shared_experts,
             global_num_experts=global_num_experts)
 
         if zero_expert_num > 0 and zero_expert_type is not None:

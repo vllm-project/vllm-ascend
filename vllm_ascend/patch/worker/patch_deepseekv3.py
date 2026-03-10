@@ -91,7 +91,7 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
         ascend_config = get_ascend_config()
         mix_placement = getattr(ascend_config, "mix_placement", False)
         self.mix_placement = mix_placement
-        if (config.n_shared_experts is None or mix_placement):
+        if config.n_shared_experts is None or mix_placement:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -124,8 +124,8 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
             scoring_func=config.scoring_func,
             # we do scaling outside, set factor to 1.0 to avoid double mul
             # aiter applies routed_scaling_factor internally
-            routed_scaling_factor=1.0,
-            # if not mix_placement else self.routed_scaling_factor,
+            routed_scaling_factor=1.0
+            if not mix_placement else self.routed_scaling_factor,
             e_score_correction_bias=self.gate.e_score_correction_bias \
             if self.gate is not None else None,
             enable_eplb=self.enable_eplb,

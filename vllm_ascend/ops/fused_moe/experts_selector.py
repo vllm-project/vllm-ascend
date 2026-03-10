@@ -100,7 +100,7 @@ def select_experts(hidden_states: torch.Tensor,
             global_num_experts=global_num_experts,
         )
     if mix_placement:
-        shared_expert_routing_factor = 0.4
+        shared_expert_routing_factor = 1.0/routed_scaling_factor
         batch_size = topk_ids.shape[0]
         pad_shared_expert_ids = torch.arange(
             num_logical_experts,
