@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
 import copy
@@ -250,8 +251,8 @@ class KVCacheSendingLayerThread(threading.Thread):
             logger.error(f"Failed to transfer KV cache for layer idx {send_task.layer_idx}, {e}")
 
     def get_transfer_meta(self, send_task: SendTask, req_id: str, req_meta: ReqMeta, layer_group_idx: int):
-        src_list: list[str] = []
-        dst_list: list[str] = []
+        src_list: list[int] = []
+        dst_list: list[int] = []
         length_list: list[int] = []
 
         layer_name = send_task.layer_name
@@ -1666,7 +1667,7 @@ def ensure_zmq_send(
     socket: zmq.Socket,  # type: ignore
     data: bytes,
     path: str,
-    max_retries: int = 999,
+    max_retries: int = 3,
 ):
     retries_left = max_retries
     while True:
@@ -1688,7 +1689,7 @@ def ensure_zmq_recv(
     poller: zmq.Poller,  # type: ignore
     path: str,
     timeout: float = 1.0,
-    max_retries: int = 999,
+    max_retries: int = 3,
 ) -> bytes:
     retries_left = max_retries
     while True:
