@@ -99,7 +99,7 @@ benchmarks:
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 512
     max_out_len: 3000
-    batch_size: 1
+    batch_size: 512
     request_rate: 11.2
     baseline: 148 # after switch vllm to 0.15.0, the baseline reduced significantly, need to confirm if it's a regression or just a more strict measurement
     threshold: 0.97
@@ -114,12 +114,12 @@ benchmarks:
     baseline: 95
     threshold: 5
 
-  # acc_aime2025:
-  #   case_type: accuracy
-  #   dataset_path: vllm-ascend/aime2025
-  #   request_conf: vllm_api_general_chat
-  #   dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-  #   max_out_len: 80000
-  #   batch_size: 32
-  #   baseline: 40
-  #   threshold: 7
+  acc_aime2025:
+    case_type: accuracy
+    dataset_path: vllm-ascend/aime2025
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 80000
+    batch_size: 32
+    baseline: 40
+    threshold: 7
