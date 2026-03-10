@@ -23,8 +23,6 @@ on:
       - '*-dev'
       - 'releases/v*'
     types: [ labeled, synchronize ]
-  issue_comment:
-    types: [created]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -41,7 +39,7 @@ permissions:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'issue_comment' && github.event.issue.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -92,33 +90,10 @@ jobs:
       contains_310: false
       type: full
 
-  # ── Comment-triggered E2E tests (/e2e <test1> [test2] ...) ─────────────────
-  #
-  # Usage: comment "/e2e <test-paths>" on a PR to trigger specific test cases.
-  # Multiple tests can be separated by spaces or newlines. Examples:
-  #   /e2e tests/e2e/singlecard/test_models.py
-  #   /e2e tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
-  #   /e2e tests/e2e/singlecard/test_models.py tests/e2e/multicard/2-cards/test_qwen3_moe.py
-  #
-  # Allowed: PR author, or collaborator with write/admin access.
-  # Runner is auto-selected based on test path:
-  #   multicard/2-cards → linux-aarch64-a3-2
-  #   multicard/4-cards → linux-aarch64-a3-4
-  #   310p              → linux-aarch64-310p-1
-  #   otherwise         → linux-aarch64-a2b3-1 (singlecard)
-
   parse-comment:
     name: Parse /e2e comment
     runs-on: linux-aarch64-a2b3-0
-    # Two ways to trigger:
-    #   1. issue_comment (after this workflow is merged to main): comment "/e2e <test-paths>" on any PR.
-    #   2. pull_request with 'e2e-test' label (works on unmerged PRs): comment "/e2e <test-paths>"
-    #      then add the 'e2e-test' label. The workflow runs from the PR branch and searches comments.
-    if: >-
-      ${{
-        (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/e2e')) ||
-        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-test'))
-      }}
+    if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-test') }}
     outputs:
       allowed: ${{ steps.resolve.outputs.allowed }}
       pr_sha: ${{ steps.resolve.outputs.pr_sha }}
@@ -134,42 +109,27 @@ jobs:
           script: |
             let actor, prSha, prNumber, prAuthor, commentBody;
 
-            if (context.eventName === 'issue_comment') {
-              // Triggered by comment on a merged workflow (main branch): comment body is directly available.
-              actor = context.actor;
-              prNumber = context.issue.number;
-              prAuthor = context.payload.issue.user.login;
-              commentBody = context.payload.comment.body;
-              const pr = await github.rest.pulls.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-              });
-              prSha = pr.data.head.sha;
-            } else {
-              // pull_request event with 'e2e-test' label: workflow runs from PR branch,
-              // search comments for the latest /e2e command.
-              prNumber = context.payload.pull_request.number;
-              prAuthor = context.payload.pull_request.user.login;
-              prSha = context.payload.pull_request.head.sha;
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                per_page: 100,
-              });
-              for (let i = comments.length - 1; i >= 0; i--) {
-                if (comments[i].body && comments[i].body.trim().match(/^\/e2e/m)) {
-                  commentBody = comments[i].body;
-                  actor = comments[i].user.login;
-                  break;
-                }
+            // pull_request event with 'e2e-test' label: search comments for the latest /e2e command.
+            prNumber = context.payload.pull_request.number;
+            prAuthor = context.payload.pull_request.user.login;
+            prSha = context.payload.pull_request.head.sha;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            for (let i = comments.length - 1; i >= 0; i--) {
+              if (comments[i].body && comments[i].body.trim().match(/^\/e2e/m)) {
+                commentBody = comments[i].body;
+                actor = comments[i].user.login;
+                break;
               }
-              if (!actor) {
-                core.setOutput('allowed', 'false');
-                core.info('No /e2e comment found; skipping.');
-                return;
-              }
+            }
+            if (!actor) {
+              core.setOutput('allowed', 'false');
+              core.info('No /e2e comment found; skipping.');
+              return;
             }
 
             // Allow PR author or any collaborator with write/admin access
@@ -231,7 +191,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_version: [15d76f74e2fdb12a95ea00f0ca283acf6219a2b7, v0.16.0]
+        vllm_version: [4034c3d32e30d01639459edd3ab486f56993876d, v0.16.0]
     needs: [parse-comment]
     if: ${{ needs.parse-comment.outputs.allowed == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
