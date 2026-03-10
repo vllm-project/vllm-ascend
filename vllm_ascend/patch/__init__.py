@@ -108,6 +108,27 @@
 #       remove this patch once upstream no longer requires these global symbols or
 #       provides a backend-safe initialization path.
 #
+# ** 7. File: platform/patch_worker_base.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.worker_base.WorkerWrapperBase.adjust_rank`
+#    Why:
+#       When using Ray executor with pipeline parallelism (PP >= 3), the upstream
+#       `WorkerWrapperBase.adjust_rank()` method updates `rpc_rank` but leaves
+#       `global_rank` stale. During `initialize_from_config`, each worker selects
+#       `kv_cache_configs[self.global_rank]` to get its per-worker KV cache config.
+#       With stale `global_rank`, workers in non-first PP stages pick the wrong
+#       config (e.g., a PP rank 2 worker gets the PP rank 0 config containing
+#       layers 0-22), causing a KeyError when the layer names in the config are
+#       looked up in the worker's `static_forward_context`.
+#    How：
+#       Monkey-patch `adjust_rank` to also update `self.global_rank` whenever
+#       `self.rpc_rank` is updated.
+#    Related PR (if no, explain why):
+#       Upstream issue: https://github.com/vllm-project/vllm/issues/30128
+#       Upstream PR: https://github.com/vllm-project/vllm/pull/33700
+#    Future Plan:
+#       Remove this patch when vLLM merges PR #33700.
+#
 # * Worker Patch:
 # ===============
 #
