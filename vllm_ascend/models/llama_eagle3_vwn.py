@@ -18,6 +18,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaDecoderLayer
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM, LlamaModel
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -247,6 +248,10 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
         )
 
         self.layer_idx = layer_idx
+
+    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
+        """Use drafter's quantization config instead of verifier's."""
+        return get_draft_quant_config(vllm_config)
 
     def forward(
         self,
