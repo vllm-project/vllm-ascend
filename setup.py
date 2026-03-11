@@ -101,7 +101,6 @@ def get_chip_type() -> str:
             assert npu_name
             return (chip_name + "_" + npu_name).lower()
         else:
-            # TODO(zzzzwwjj): Currently, A5's chip name has not determined yet.
             raise ValueError(f"Unable to recognize chip name: {chip_name}, please manually set env SOC_VERSION")
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Get chip info failed: {e}")
