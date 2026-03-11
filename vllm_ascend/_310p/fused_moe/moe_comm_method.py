@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import torch
-from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult

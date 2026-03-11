@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 

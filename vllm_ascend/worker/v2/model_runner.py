@@ -18,14 +18,12 @@
 #
 
 import functools
-import sys
 
 import numpy as np
 import torch
 import vllm
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
@@ -123,6 +121,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        # set this just the same as model runner v1, or it will raise error.
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
         # we need to update full graph params in run_fullgraph,

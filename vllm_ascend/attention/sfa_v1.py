@@ -11,16 +11,20 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
-from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MLAAttentionImpl  # type: ignore
+from vllm.v1.attention.backend import (
+    AttentionBackend,  # type: ignore
+    AttentionCGSupport,
+    MLAAttentionImpl,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,

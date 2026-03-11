@@ -29,6 +29,7 @@ from vllm_ascend.attention.mla_v1 import (
 )
 # isort: on
 
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata,
     CPChunkedContextMetadata,
@@ -38,7 +39,6 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
 from vllm_ascend.utils import weak_ref_tensors
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 

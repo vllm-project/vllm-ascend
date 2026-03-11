@@ -33,6 +33,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
@@ -52,7 +53,6 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.compilation.acl_graph import get_graph_params, update_graph_params_workspaces
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):

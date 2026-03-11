@@ -22,7 +22,6 @@ import torch
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import get_ep_group
-from vllm.forward_context import get_forward_context
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config

@@ -19,27 +19,26 @@
 from contextlib import contextmanager
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
 import vllm
 from vllm.config import VllmConfig
-from vllm.forward_context import set_forward_context, get_forward_context
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.logger import logger
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
-from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.utils import AttentionGroup
-from vllm.logger import logger
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import ExtraForwardContext
-from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
-from vllm_ascend.compilation.acl_graph import update_full_graph_params
-from vllm_ascend.compilation.acl_graph import set_graph_params
+from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 
 class AclGraphManager(CudaGraphManager):

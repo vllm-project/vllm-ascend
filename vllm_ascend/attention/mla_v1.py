@@ -11,11 +11,16 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MLAAttentionImpl  # type: ignore
+from vllm.v1.attention.backend import (
+    AttentionBackend,  # type: ignore
+    AttentionCGSupport,
+    MLAAttentionImpl,
+)
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import ExtraForwardContext
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
@@ -44,14 +49,8 @@ from vllm_ascend.ops.layer_shard_linear import (
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
-from vllm_ascend.utils import (
-    ACL_FORMAT_FRACTAL_ND,
-    get_weight_prefetch_method,
-    maybe_trans_nz,
-    weak_ref_tensors,
-)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, get_weight_prefetch_method, maybe_trans_nz, weak_ref_tensors
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput

@@ -24,8 +24,8 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.attention.backend import (
-    AttentionBackend,  # type: ignore
     AttentionCGSupport,
     AttentionImpl,
     AttentionLayer,
