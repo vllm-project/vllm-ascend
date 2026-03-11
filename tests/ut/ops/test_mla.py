@@ -160,9 +160,6 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_forward_context = MagicMock(spec=ForwardContext)
         mock_forward_context.flash_comm_v1_enabled = False
         mock_get_forward_context.return_value = mock_forward_context
-
-        mock_forward_context_2 = MagicMock(spec=ForwardContext)
-        mock_forward_context_2.flash_comm_v1_enabled = False
         mock_get_forward_context_2.return_value = mock_forward_context
 
         mock_mla_forward.return_value = (3, self.hidden_size)

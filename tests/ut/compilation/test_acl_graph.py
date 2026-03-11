@@ -186,12 +186,13 @@ class TestACLGraphWrapper(TestBase):
         self.mock_runnable.assert_called_once_with("arg1", "arg2")
         self.assertEqual(result, "test_output")
 
-    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.ascend_forward_context.get_forward_context')
+    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     def test_call_with_mismatched_runtime_mode(self, mock_envs,
                                                mock_current_platform,
+                                               mock_get_forward_context,
                                                mock_get_forward_context_2):
         """Test __call__ method when runtime mode doesn't match wrapper mode"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
@@ -776,10 +777,10 @@ class TestPCPDCPGraphParams(TestBase):
         self.graph_params.events[4].append(mock_event)
         self.graph_params.handles[4].append(MagicMock())
 
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('torch.npu.graph_task_update_end', )
     @patch('torch.npu.graph_task_update_begin', MagicMock())
     @patch('torch_npu.npu_fused_infer_attention_score.out', MagicMock())
-    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     def test_update_mla_dcp_pcp_params(self, _mock_graph_task_end, mock_context):
         input_positions = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])
         block_table = torch.zeros(2, 5, dtype=torch.long)
@@ -810,7 +811,7 @@ class TestPCPDCPGraphParams(TestBase):
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
         forward_context.is_draft_model = False
-        mock_context = forward_context
+        mock_context.return_value = forward_context
 
         num_heads = 256
         scale = 0.1
