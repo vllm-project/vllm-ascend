@@ -151,15 +151,15 @@ __aicore__ inline void MergeSort(const LocalTensor<float> &mrgDst, int32_t mrgDs
                                  int32_t mrgSrcNum, LocalTensor<float> &tmpTensor)
 {
     AscendC::MrgSort4Info params;
-    params.elementLengths[0] = mrgDstNum;
-    params.elementLengths[1] = mrgSrcNum;
+    params.elementLengths[0] = mrgSrcNum;
+    params.elementLengths[1] = mrgDstNum;
     params.ifExhaustedSuspension = false;
     params.validBit = 0b0011;
     params.repeatTimes = 1;
 
     AscendC::MrgSortSrcList<float> srcList;
-    srcList.src1 = mrgDst;
-    srcList.src2 = mrgSrc;
+    srcList.src1 = mrgSrc;
+    srcList.src2 = mrgDst;
 
     AscendC::MrgSort<float>(tmpTensor, srcList, params);
     AscendC::PipeBarrier<PIPE_V>();

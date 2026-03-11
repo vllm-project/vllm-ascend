@@ -587,7 +587,7 @@ __aicore__ inline void LIQPreload<LIQT>::ProcessInvalid()
         uint64_t baseSize = tmpBlockIdx * singleCoreSize;
         if (baseSize < totalOutputSize) {
             uint64_t dealSize =
-                (baseSize + singleCoreSize > totalOutputSize) ? singleCoreSize : totalOutputSize - baseSize;
+                (baseSize + singleCoreSize <= totalOutputSize) ? singleCoreSize : totalOutputSize - baseSize;
             GlobalTensor<OUT_T> output = indiceOutGm[baseSize];
             AscendC::InitGlobalMemory(output, dealSize, constInfo.INVALID_IDX);
         }
