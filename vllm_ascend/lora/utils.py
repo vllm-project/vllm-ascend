@@ -22,8 +22,8 @@ from vllm_ascend.ops.linear import (
     AscendColumnParallelLinear,
     AscendMergedColumnParallelLinear,
     AscendQKVParallelLinear,
-    AscendRowParallelLinear,
     AscendReplicatedLinear,
+    AscendRowParallelLinear,
 )
 from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding
 

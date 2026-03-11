@@ -736,7 +736,7 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
     return None, get_tp_group().rank_in_group, get_tp_group().world_size
 
 
-def get_replicated_op(disable_tp, prefix, layer):
+def get_replicated_op(disable_tp, prefix, layer) -> tuple[CustomReplicatedOp | None, int | None, int | None]::
     if disable_tp:
         return None, None, None
 
