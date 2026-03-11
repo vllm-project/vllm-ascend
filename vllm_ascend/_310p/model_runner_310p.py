@@ -30,15 +30,20 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
+_NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
+
 
 class NPUModelRunner310(NPUModelRunner):
+    # Inherited from parent runner; annotated here to satisfy strict type checks.
+    uniform_decode_query_len: int
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
         if self.speculative_config is not None and self.speculative_config.method == "ngram":
             # 310P ngram requires decode-only graph shapes to be built with q_len=1.
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.
-            self.cudagraph_dispatcher.uniform_decode_query_len = 1
+            self.cudagraph_dispatcher.uniform_decode_query_len = _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN
 
     @contextmanager
     def temporary_modify_uniform_decode_query_len(self):
@@ -51,7 +56,7 @@ class NPUModelRunner310(NPUModelRunner):
             return
 
         original_uniform_decode_query_len = self.uniform_decode_query_len
-        self.uniform_decode_query_len = self.cudagraph_dispatcher.uniform_decode_query_len
+        self.uniform_decode_query_len = _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN
         try:
             yield
         finally:
@@ -75,7 +80,7 @@ class NPUModelRunner310(NPUModelRunner):
             force_eager = True
 
         if force_uniform_decode is None and self.attn_state == AscendAttentionState.DecodeOnly:
-            decode_query_len = self.cudagraph_dispatcher.uniform_decode_query_len
+            decode_query_len = _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN
             if (
                 max_num_scheduled_tokens == decode_query_len
                 and num_tokens == max_num_scheduled_tokens * num_reqs
