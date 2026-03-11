@@ -2376,20 +2376,9 @@ class NPUModelRunner(GPUModelRunner):
     def profile_run(self) -> None:
         self.eplb_warmup()
         mc2_tokens_capacity = get_mc2_tokens_capacity()
-        # For kv_consumer (decode-only) servers, the actual per-forward-pass token
-        # count is bounded by max_num_seqs (≤ mc2_tokens_capacity), so MC2 dispatch
-        # will be warmed up correctly inside super().profile_run() at the decode
-        # batch size.  Calling the explicit MC2 dummy run here is unnecessary and
-        # causes DDR overflow on multi-node setups where ep_world_size spans both
-        # nodes (ep_world_size=32 vs intra-node 16), because the cross-node
-        # npu_moe_distribute_dispatch_v2 dispatch fails during the first call with
-        # the larger global_bs derived from ep_world_size=32.
-        kv_tc = self.vllm_config.kv_transfer_config
-        is_kv_consumer = kv_tc is not None and getattr(kv_tc, "kv_role", None) == "kv_consumer"
-        if (not is_kv_consumer
-                and self.max_num_tokens > mc2_tokens_capacity
-                and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
-                in {MoECommType.MC2, MoECommType.FUSED_MC2}):
+        if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
+            mc2_tokens_capacity, self.vllm_config
+        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
             self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
         origin_max_num_tokens = self.max_num_tokens
         # in the pcp scenario, the split sequence needs to be used for profile run
