@@ -46,14 +46,6 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import block_table_wrapper, model_states_wrapper, torch_cuda_wrapper
-from vllm_ascend.ascend_forward_context import (  # isort: skip
-    MoECommType,
-    get_mc2_tokens_capacity,
-    select_moe_comm_method,
-    set_ascend_forward_context,
-    set_mc2_mask,
-    set_mc2_tokens_capacity,
-)
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -145,20 +137,6 @@ class NPUModelRunner(GPUModelRunner):
         # we need to use input_batch to set forward_context in run_fullgraph.
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
-
-        # set this just the same as model runner v1, it's used for select moe comm method.
-        set_mc2_tokens_capacity(
-            vllm_config,
-            self.max_num_reqs,
-            self.cudagraph_manager.uniform_decode_query_len,
-            self.dtype,
-            self.device,
-        )
-        # set mc2_mask just the same as model runner v1, it's used for moe model.
-        set_mc2_mask(
-            vllm_config,
-            self.max_num_reqs,
-        )
 
     @torch.inference_mode()
     def execute_model(
