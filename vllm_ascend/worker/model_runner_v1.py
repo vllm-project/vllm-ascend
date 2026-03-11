@@ -121,8 +121,8 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     lmhead_tp_enable,
-    vllm_version_is,
     set_weight_prefetch_method,
+    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -400,9 +400,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.compilation_config.cudagraph_capture_sizes
                 and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             ):
-                self.cudagraph_batch_sizes = sorted(
-                    self.compilation_config.cudagraph_capture_sizes
-                )
+                self.cudagraph_batch_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
             else:
                 self.cudagraph_batch_sizes = []
 
