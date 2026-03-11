@@ -267,6 +267,9 @@ def enable_custom_op():
 
     # There are some customed operators which aren't implemented
     # with batch invariant in vllm-ascend, we need to disable them.
+    # FIXME(linfeng): Currently custom op compilation and execution are partially available
+    # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
+    # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
     if vllm_is_batch_invariant() or get_ascend_device_type() == AscendDeviceType.A5:
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED

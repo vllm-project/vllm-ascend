@@ -85,7 +85,6 @@ if(SOC_VERSION MATCHES "ascend950")
     message(STATUS "A5 hardware detected: disabling MLAPO operators")
     message(STATUS "A5 hardware detected: excluding batch_matmul_transpose operators")
     list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
-    add_compile_definitions(_ASCEND950)
 endif()
 
 ascendc_library(vllm_ascend_kernels SHARED
