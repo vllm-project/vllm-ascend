@@ -867,20 +867,21 @@ class AscendMLAImpl(MLAAttentionImpl):
         # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
         # self.W_UV = maybe_trans_nz(self.W_UV)
 
-        if self.enable_mlapo:
+        if self.enable_mlapo and not get_ascend_device_type() == AscendDeviceType.A5:
             # Currently mlapo only supports W8A8 quantization in MLA scenario
             # TODO(whx): modify this limitation when mlapo supports floating point
             if self.fused_qkv_a_proj is None or not isinstance(
-                getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod
-            ):
+                    getattr(self.fused_qkv_a_proj.quant_method, 'quant_method',
+                            None), AscendW8A8LinearMethod):
                 self.enable_mlapo = False
                 logger.warning_once(
                     "Currently mlapo only supports W8A8 quantization in MLA scenario."
                     "Some layers in your model are not quantized with W8A8,"
-                    "thus mlapo is disabled for these layers."
-                )
-        if self.enable_mlapo:
+                    "thus mlapo is disabled for these layers.")
+        if self.enable_mlapo and not get_ascend_device_type() == AscendDeviceType.A5:
             self._process_weights_for_fused_mlapo(act_dtype)
+        elif self.enable_mlapo:
+            self._process_weights_for_fused_mlapo_a5()
         else:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
@@ -957,6 +958,22 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.q_proj.deq_scale = None
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
+
+    def _process_weights_for_fused_mlapo_a5(self):
+        weight_dq = self.fused_qkv_a_proj.weight.data[..., :self.q_lora_rank].contiguous()
+        self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
+        
+        weight_uq_qr = self.q_proj.weight.data.contiguous()
+        self.weight_uq_qr_scale = self.q_proj.weight_scale.data.reshape(self.q_proj.weight_scale.data.shape[1], -1)
+        self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
+        
+        weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank:].contiguous()
+        self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
+
+        weight_scale = self.fused_qkv_a_proj.weight_scale
+        weight_scale = weight_scale.reshape(-1, weight_scale.shape[0]*weight_scale.shape[2])
+        self.weight_dq_scale = weight_scale[:self.q_lora_rank,...]
+        self.weight_dkv_kr_scale = weight_scale[self.q_lora_rank:,...]
 
     def get_context_seq_len_npu(self, index: int, attn_metadata: AscendMLAMetadata):
         prefill_metadata = attn_metadata.prefill
@@ -1461,6 +1478,47 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         decode_preprocess_res = DecodeMLAPreprocessResult(decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)
         return decode_preprocess_res, None
+    
+    def _mla_preprocess_only_decode_a5(self, hidden_states, kv_cache, attn_metadata):
+        bsz = attn_metadata.num_decode_tokens
+        hidden_states = hidden_states[:bsz].unsqueeze(1)
+        #TODO:Enable both quantized method and unquantized method.
+        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
+        dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0]*hidden_states.shape[1], -1)
+        cos_shape = attn_metadata.decode.cos.shape
+        cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
+        sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
+
+        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+        
+        decode_q_nope, decode_q_pe, _, _, _ = torch_npu.npu_mla_prolog_v3(
+            token_x=hidden_states, 
+            weight_dq=self.weight_dq, 
+            weight_uq_qr=self.weight_uq_qr, 
+            weight_uk=self.W_UK_T,
+            weight_dkv_kr=self.weight_dkv_kr, 
+            rmsnorm_gamma_cq=self.q_a_layernorm.weight.data, 
+            rmsnorm_gamma_ckv=self.kv_a_layernorm.weight.data, 
+            rope_sin=sin, 
+            rope_cos=cos, 
+            kv_cache=decode_k_nope, 
+            kr_cache=decode_k_pe, 
+            cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1).to(torch.int64), 
+            dequant_scale_x=dynamic_scale, 
+            dequant_scale_w_dq=self.weight_dq_scale, 
+            dequant_scale_w_uq_qr=self.weight_uq_qr_scale, 
+            dequant_scale_w_dkv_kr=self.weight_dkv_kr_scale, 
+            cache_mode="PA_BSND",
+            query_quant_mode=0, 
+            weight_quant_mode=3)
+
+        decode_q_nope = decode_q_nope.view(bsz, self.num_heads,
+                                        self.kv_lora_rank)
+        decode_q_pe = decode_q_pe.view(bsz, self.num_heads, -1)
+
+        decode_preprocess_res = DecodeMLAPreprocessResult(
+            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)
+        return decode_preprocess_res, None
 
     def mla_preprocess_prefill(self, q_c, kv_no_split, kv_cache, attn_metadata):
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -1608,12 +1666,12 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # MLA Preprocess
         if self.enable_mlapo and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
+            mla_decode_preprocess_func = self._mla_preprocess_only_decode_a5 if get_ascend_device_type() == AscendDeviceType.A5 else self._mla_preprocess_only_decode
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
             )
-            decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess_only_decode(
-                hidden_states, kv_cache, attn_metadata
-            )
+            decode_preprocess_res, prefill_preprocess_res = mla_decode_preprocess_func(
+                hidden_states, kv_cache, attn_metadata)
         else:
             decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
                 layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv
