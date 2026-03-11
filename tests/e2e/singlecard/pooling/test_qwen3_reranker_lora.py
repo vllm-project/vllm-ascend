@@ -1,31 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: E501
-
-"""
-What is the difference between the official original version and one
-that has been converted into a sequence classification model?
-
-Qwen3-Reranker is a language model that doing reranker by using the
-logits of "no" and "yes" tokens.
-This requires computing logits for all 151,669 tokens in the vocabulary,
-making it inefficient and incompatible with vLLM's score() API.
-
-A conversion method has been proposed to transform the original model into a
-sequence classification model. This converted model:
-1. Is significantly more efficient
-2. Fully supports vLLM's score() API
-3. Simplifies initialization parameters
-Reference: https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/discussions/3
-Reference: https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/convert_model_to_seq_cls.py
-
-For the converted model, initialization would simply be:
-llm = LLM(model="tomaarsen/Qwen3-Reranker-0.6B-seq-cls", runner="pooling")
-
-This example demonstrates loading the ORIGINAL model with special overrides
-to make it compatible with vLLM's score API.
-"""
-
 from pathlib import Path
 
 from vllm import LLM
