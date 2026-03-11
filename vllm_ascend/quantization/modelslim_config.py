@@ -70,6 +70,12 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "language_model.lm_head.": "lm_head.",
         "language_model.model.": "model.language_model.",
     },
+    "kimi_k2": {
+        "language_model.layers.": "language_model.model.layers.",
+        # mm projector
+        "mm_projector.proj.0": "mm_projector.linear_1",
+        "mm_projector.proj.2": "mm_projector.linear_2",
+    },
 }
 
 # key: model_type
@@ -466,16 +472,6 @@ class AscendModelSlimConfig(QuantizationConfig):
         # Store the original mapper
         self.hf_to_vllm_mapper = hf_to_vllm_mapper
 
-        # Check if manual mapping exists for this model type
-        # Manual mapping takes priority and is used exclusively to avoid conflicts
-        if hasattr(self, "model_type") and self.model_type in QUANT_MODEL_PREFIX_MAPPINGS:
-            manual_mapping = QUANT_MODEL_PREFIX_MAPPINGS[self.model_type]
-            # Manual mapping is already in vLLM -> HF direction, use directly
-            self.vllm_to_hf_mapper = WeightsMapper(orig_to_new_prefix=manual_mapping)
-            logger.debug(f"Using manual mapping for {self.model_type}: {manual_mapping}")
-            return
-
-        # No manual mapping, use hf_to_vllm_mapper and reverse it
         # Try different ways to get the mapping based on WeightsMapper implementation
         mapping_attrs = ["orig_to_new_prefix"]
         orig_to_new_prefix = {}
@@ -500,8 +496,16 @@ class AscendModelSlimConfig(QuantizationConfig):
             logger.info("No valid reverse mapping found for WeightsMapper.")
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
-        # Store model_type for backward compatibility mappings
+        # Store model_type for reference
         self.model_type = model_type
+
+        # Check if manual mapping exists for this model type
+        # Manual mapping takes priority and is used exclusively to avoid conflicts
+        if model_type in QUANT_MODEL_PREFIX_MAPPINGS:
+            manual_mapping = QUANT_MODEL_PREFIX_MAPPINGS[model_type]
+            # Manual mapping is already in vLLM -> HF direction, use directly
+            mapper = WeightsMapper(orig_to_new_prefix=manual_mapping)
+            return mapper._map_name(prefix)
 
         # Use the reverse mapper (vLLM to HF) if available
         if hasattr(self, "vllm_to_hf_mapper") and self.vllm_to_hf_mapper:
