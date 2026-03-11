@@ -3,7 +3,22 @@
 ## Run Docker Container
 
 :::{note}
-w4a8 quantization feature is supported by v0.9.1rc2 and later.
+W4A8 quantization feature is supported since v0.9.1rc2. For reliable quantization
+(especially the model save step), use **v0.15.0rc1 or later**.
+:::
+
+:::{important}
+**CANN Version**: The msmodelslim quantization tool requires CANN **8.1.RC2 or later**.
+Using CANN 8.1.RC1 or earlier may cause a tensor size mismatch error during the
+quantization save step:
+
+```
+RuntimeError: The size of tensor a (65536) must match the size of tensor b (16)
+  at non-singleton dimension 0
+```
+
+Upgrade your CANN toolkit or use a vllm-ascend Docker image that includes a
+compatible CANN version (v0.15.0rc1 or later).
 :::
 
 ```{code-block} bash
@@ -35,7 +50,9 @@ see <https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8>
 :::
 
 ```bash
-# The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
+# The branch below has been verified to work with vllm-ascend v0.15.0rc1+.
+# Using an older or incompatible msit branch may cause a tensor size mismatch
+# error during the quantization save step.
 git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitcode.com/Ascend/msit
 
 cd msit/msmodelslim
