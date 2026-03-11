@@ -22,7 +22,7 @@ from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
 def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
     try:
-        forward_context = get_forward_context()
+        get_forward_context()
     except AssertionError:
         return residual
 

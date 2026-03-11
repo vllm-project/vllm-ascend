@@ -1496,7 +1496,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                     reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
-        forward_context = get_forward_context()
         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
         assert (
             attn_metadata.num_decodes is not None

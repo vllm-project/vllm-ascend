@@ -222,7 +222,6 @@ class AscendFusedMoE310(FusedMoE):
     ) -> torch.Tensor:
         assert self.quant_method is not None
         assert self.routed_scaling_factor == 1.0, "routed_scaling_factor != 1.0 is not supported."
-        forward_context = get_forward_context()
 
         hidden_states, router_logits, _, context_metadata = ExtraForwardContext.moe_comm_method().prepare(
             hidden_states=hidden_states, router_logits=router_logits, quant_type=self.quant_type

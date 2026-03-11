@@ -184,7 +184,7 @@ class WeightPrefetchMethod:
             return
 
         try:
-            forward_context = get_forward_context()
+            get_forward_context()
         except AssertionError:
             return
 

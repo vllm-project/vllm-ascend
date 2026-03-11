@@ -560,7 +560,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "actual_seq_lengths": torch.arange(attn_metadata.num_decodes_flatten) + 1,
         }
         graph_params = get_graph_params()
-        forward_context: ForwardContext = get_forward_context()
         num_tokens = query.shape[0]
         if ExtraForwardContext.capturing():
             stream = torch_npu.npu.current_stream()
