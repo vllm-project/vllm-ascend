@@ -161,12 +161,13 @@ class TestACLGraphWrapper(TestBase):
                             vllm_config=self.mock_vllm_config,
                             runtime_mode=CUDAGraphMode.NONE)
 
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     def test_call_with_none_runtime_mode(self, mock_envs,
                                          mock_current_platform,
-                                         mock_get_forward_context):
+                                         mock_get_forward_context, mock_get_forward_context_2):
         """Test __call__ method when runtime mode is NONE"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
@@ -778,7 +779,8 @@ class TestPCPDCPGraphParams(TestBase):
     @patch('torch.npu.graph_task_update_end', )
     @patch('torch.npu.graph_task_update_begin', MagicMock())
     @patch('torch_npu.npu_fused_infer_attention_score.out', MagicMock())
-    def test_update_mla_dcp_pcp_params(self, _mock_graph_task_end):
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
+    def test_update_mla_dcp_pcp_params(self, _mock_graph_task_end, mock_context):
         input_positions = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])
         block_table = torch.zeros(2, 5, dtype=torch.long)
         seq_lens = torch.tensor([4, 4])
@@ -808,6 +810,7 @@ class TestPCPDCPGraphParams(TestBase):
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
         forward_context.is_draft_model = False
+        mock_context = forward_context
 
         num_heads = 256
         scale = 0.1
