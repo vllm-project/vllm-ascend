@@ -18,7 +18,6 @@ from collections.abc import Callable
 
 import torch
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
