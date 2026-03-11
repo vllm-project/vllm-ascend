@@ -132,7 +132,7 @@ class NPUModelRunner(GPUModelRunner):
         # we need to use return value of `get_cudagraph_and_dp_padding`
         # to set forward_context in `run_fullgraph`.
         # so we can inherit `execute_model` method.
-        self.cudagraph_and_dp_padding: tuple[torch.npu.CUDAGraph | None, torch.Tensor | None] | None = None
+        self.cudagraph_and_dp_padding: tuple[int, torch.Tensor | None, int] | None = None
 
         # we need to use input_batch to set forward_context in run_fullgraph.
         # so we can inherit `execute_model` method.
