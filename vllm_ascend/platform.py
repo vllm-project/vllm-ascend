@@ -173,6 +173,7 @@ class NPUPlatform(Platform):
         `max_cudagraph_capture_size` or `cudagraph_capture_sizes`.
         """
         compilation_config = vllm_config.compilation_config
+
         if compilation_config.max_cudagraph_capture_size is not None:
             return None
         if compilation_config.cudagraph_capture_sizes is not None:
@@ -242,7 +243,6 @@ class NPUPlatform(Platform):
 
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
-
         ascend_config = init_ascend_config(vllm_config)
 
         if vllm_config.kv_transfer_config is not None:
@@ -250,12 +250,14 @@ class NPUPlatform(Platform):
             if not getattr(vllm_config.kv_transfer_config, "_engine_id_patched", False):
                 vllm_config.kv_transfer_config.engine_id = f"{vllm_config.kv_transfer_config.engine_id}-{uuid4().hex}"
                 vllm_config.kv_transfer_config._engine_id_patched = True
-        from vllm.config import CompilationMode  # noqa: E402
+
+        from vllm.config import CompilationMode
 
         compilation_config = vllm_config.compilation_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
+
         ascend_compilation_config = ascend_config.ascend_compilation_config
         if ascend_compilation_config:
             vllm_config.additional_config.setdefault("ascend_compilation_config", {}).update(
@@ -267,7 +269,7 @@ class NPUPlatform(Platform):
         ascend_config.update_compile_ranges_split_points()
 
         if model_config and hasattr(model_config.hf_text_config, "index_topk"):
-            vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
+            cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         if ascend_fusion_config:
@@ -280,7 +282,7 @@ class NPUPlatform(Platform):
             enforce_eager = False
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
-
+        
         from vllm.config.compilation import CUDAGraphMode
 
         if ascend_config.xlite_graph_config.enabled:
@@ -289,6 +291,8 @@ class NPUPlatform(Platform):
                 enforce_eager = True
                 model_config.enforce_eager = True
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+                compilation_config.max_cudagraph_capture_size = 0
+                compilation_config.cudagraph_capture_sizes = []
             else:
                 logger.info("Falling back to FULL_DECODE_ONLY under xlite decode-only mode")
                 compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
@@ -298,8 +302,6 @@ class NPUPlatform(Platform):
             compilation_config.mode = CompilationMode.NONE
             if compilation_config.splitting_ops is None:
                 compilation_config.splitting_ops = []
-
-        compilation_config.cudagraph_num_of_warmups = 1
 
         if compilation_config.mode not in [CompilationMode.NONE, CompilationMode.VLLM_COMPILE]:
             logger.warning(
@@ -312,6 +314,7 @@ class NPUPlatform(Platform):
         # `apply_config_platform_defaults`, so this late pass should only honor
         # the current max / size inputs after the mode adjustments above.
         vllm_config._set_cudagraph_sizes()
+
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
         if (
@@ -350,15 +353,17 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            compilation_config.max_cudagraph_capture_size = 0
+            compilation_config.cudagraph_capture_sizes = []
+        elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
             logger.info("PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode")
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (
                 "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == "
                 "CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
             )
             compilation_config.set_splitting_ops_for_v1(
-                all2all_backend=vllm_config.parallel_config.all2all_backend,
-                data_parallel_size=vllm_config.parallel_config.data_parallel_size,
+                all2all_backend=parallel_config.all2all_backend,
+                data_parallel_size=parallel_config.data_parallel_size,
             )
             compilation_config.use_inductor = False
             # NOTE: Theoretically, we should also add vllm::mla_forward in the attention ops.
@@ -370,53 +375,17 @@ class NPUPlatform(Platform):
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-        elif (
-            compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-            or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-        ):
+        elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             logger.info(
                 "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
             )
             compilation_config.use_inductor = False
             compilation_config.splitting_ops = []
-            warning_message = """\033[91m
-            **********************************************************************************
-            * WARNING: You have enabled the *full graph* feature.
-            * This is an early experimental stage and may involve various unknown issues.
-            * A known problem is that capturing too many batch sizes can lead to OOM
-            * (Out of Memory) errors or inference hangs. If you encounter such issues,
-            * consider reducing `gpu_memory_utilization` or manually specifying a smaller
-            * batch size for graph capture.
-            * For more details, please refer to:
-            * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
-            **********************************************************************************\033[0m
-            """
-            logger.warning(warning_message)
-        else:
-            logger.info(
-                "%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode
-            )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            compilation_config.mode = CompilationMode.NONE
-            ascend_config.ascend_compilation_config.enable_npugraph_ex = False
 
-        # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
-        # Then, we will have to discuss the error handling strategy and user experience
-        if (
-            compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and os.environ.get("ASCEND_LAUNCH_BLOCKING", "0") == "1"
-        ):
-            raise ValueError(
-                "ACL graph is incompatible with ASCEND_LAUNCH_BLOCKING=1. "
-                "Please unset ASCEND_LAUNCH_BLOCKING or set it to 0. If you "
-                "need ASCEND_LAUNCH_BLOCKING for debugging, consider other methods — "
-                "for example, check the plog files (default: $HOME/ascend/log/debug) "
-                "for more information about runtime errors."
-            )
 
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
-            if not vllm_config.compilation_config.pass_config.enable_sp:
+            if not compilation_config.pass_config.enable_sp:
                 parallel_config.all2all_backend = "flashinfer_all2allv"
             if is_310p():
                 parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
@@ -434,7 +403,6 @@ class NPUPlatform(Platform):
 
         if ascend_config.recompute_scheduler_enable:
             from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
-
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
 
@@ -470,14 +438,11 @@ class NPUPlatform(Platform):
                 f" == block_size({cache_config.block_size}). "
                 f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
             )
-            vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
+            parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
 
         if enable_sp(vllm_config):
-            assert vllm_config.parallel_config.tensor_parallel_size > 1, (
-                "Flash Comm v1 is only supported when tp_size > 1."
-            )
-
-            assert not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel, (
+            assert parallel_config.tensor_parallel_size > 1, "Flash Comm v1 is only supported when tp_size > 1."
+            assert not is_moe_model(vllm_config) or parallel_config.enable_expert_parallel, (
                 "Flash Comm v1 requires enable_expert_parallel=True for MoE models."
             )
 
