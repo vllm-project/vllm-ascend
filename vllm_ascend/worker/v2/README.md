@@ -7,4 +7,3 @@ to get specific plans.
 
 supported vllm version: main@4034c3d32e30d01639459edd3ab486f56993876d
 related PR: https://github.com/vllm-project/vllm-ascend/pull/7110
- 
