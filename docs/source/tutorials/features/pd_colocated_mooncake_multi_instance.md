@@ -197,7 +197,11 @@ The template for the mooncake.json file is as follows:
 | protocol              | ascend              | Ascend proprietary protocol    |
 | use_ascend_direct     | true                | Enable direct hardware access  |
 | master_server_address | 90.90.100.188:50088(for example) | Master server address|
-| global_segment_size   | 107374182400    | Size per segment (100 GB)      |
+| global_segment_size   | 107374182400    | Size per segment (100 GB). If Mooncake initialization is unstable in your environment, lower this value first.      |
+
+:::{note}
+`global_segment_size` affects the amount of memory registered to Mooncake per card. Oversized values may trigger intermittent initialization failures on some environments. If you hit initialization issues, lower `global_segment_size` first and tune upward gradually.
+:::
 
 ## vLLM Instance Deployment
 
