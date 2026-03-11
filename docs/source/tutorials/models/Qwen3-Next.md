@@ -53,6 +53,29 @@ docker run --rm \
 
 The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
 
+:::{important}
+**CANN Version Requirement**: Qwen3-Next requires CANN **8.2.RC1 or later** with
+a compatible Bisheng compiler. Earlier CANN versions may fail at inference time
+with a Triton compilation error:
+
+```
+fatal error: error in backend: not support bf16 type cast
+```
+
+This error occurs because the Bisheng compiler in older CANN versions does not
+support bf16 type casts in Triton kernels (used by the linear attention / GDN
+attention layers). If you encounter this error:
+
+1. Verify your CANN version: ``cat /usr/local/Ascend/ascend-toolkit/latest/version.cfg``
+2. Ensure the Bisheng compiler version matches the CANN version (mismatched versions
+   from different CANN releases will also trigger this error)
+3. Upgrade to the recommended CANN version listed in the
+   [installation guide](../../getting_started/installation.md)
+
+Note: The service may start successfully but fail on the first inference request,
+since Triton kernels are JIT-compiled at first use.
+:::
+
 ### Inference
 
 :::::{tab-set}
