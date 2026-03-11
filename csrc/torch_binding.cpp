@@ -920,6 +920,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("moe_grouped_matmul", torch::kPrivateUse1,&vllm_ascend::moe_grouped_matmul);
 
+    // This operator is planned to be integrated into PTA in the near future.
+    // Once that happens, the implementation in csrc will be removed.
     ops.def(
         "npu_lightning_indexer_quant(Tensor query, Tensor key, Tensor weights, Tensor query_dequant_scale, "
         "                            Tensor key_dequant_scale, *, Tensor? actual_seq_lengths_query=None, "

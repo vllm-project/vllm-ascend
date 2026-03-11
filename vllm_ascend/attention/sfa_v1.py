@@ -55,7 +55,6 @@ from vllm_ascend.utils import (
     enable_dsa_cp_with_o_proj_tp,
     get_weight_prefetch_method,
     maybe_trans_nz,
-    use_sparse_c8_indexer,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -431,7 +430,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.use_torch_npu_lightning_indexer = True
 
         # dsa c8
-        self.use_sparse_c8_indexer = use_sparse_c8_indexer()
+        self.use_sparse_c8_indexer = ascend_config.enable_sparse_c8
         if self.use_sparse_c8_indexer:
             self.c8_k_cache_dtype = torch.int8
             self.c8_k_scale_cache_dtype = torch.float16

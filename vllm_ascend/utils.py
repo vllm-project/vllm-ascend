@@ -1169,16 +1169,6 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     return vllm_config.kv_transfer_config is None
 
 
-@lru_cache(maxsize=1)
-def use_sparse_c8_indexer() -> bool:
-    from vllm.config import get_current_vllm_config
-
-    vllm_config = get_current_vllm_config()
-    use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
-
-    return use_sparse and envs_ascend.VLLM_ASCEND_ENABLE_SPARSE_C8 and get_ascend_device_type() != AscendDeviceType.A5
-
-
 def check_gdn_layer(vllm_config) -> bool:
     """
     gdn layer is marked with `linear_attention`.
