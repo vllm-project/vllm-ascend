@@ -72,13 +72,15 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         cls,
         attn_backend: AttentionBackendEnum,
         cu_seqlens: np.ndarray,
+        device: torch.device,
     ) -> np.ndarray | None:
-        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-        return seq_lens
+        if cu_seqlens is None:
+            return None
 
-    @classmethod
-    def use_cpu_seq_lens(cls) -> bool:
-        return True
+        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+        seq_lens = torch.from_numpy(seq_lens).to("cpu", non_blocking=True)
+
+        return seq_lens
 
     def _reshape_qkv_to_3d(
         self,
@@ -116,7 +118,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         # If cu_seqlens is not provided, we create a default one assuming all sequences have the same length.
         # This is used by models such as Hunyuan-OCR, which always pass None as cu_seqlens and rely on the operator to
         # compute it internally.
-        return torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
+        cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
+        return cu_seqlens
 
     def forward_oot(
         self,
@@ -132,10 +135,13 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         is_reshaped = query.dim() == 4
 
         if sequence_lengths is not None:
+            # Use pre-compute seq_lens before vision blocks.
             if sequence_lengths.device.type != "cpu":
                 sequence_lengths = sequence_lengths.to("cpu")
             seq_lens_cpu = sequence_lengths
         else:
+            # Convert cu_seqlens to seq_lens and move it to CPU, since FA requires CPU seq_lens.
+            # NOTE: This will considerably hurt performance.
             cu_seqlens = self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens)
             seq_lens_cpu = torch.diff(cu_seqlens).to("cpu")
 
