@@ -20,9 +20,8 @@ def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Con
 class AscendDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__(vllm_config, prefix)
-        quant_optional = vllm_config.quant_config.quant_description.get("optional", None)
-        self.use_rot = quant_optional.get("quarot", None) if quant_optional is not None else None
-        if self.use_rot is not None and self.config.model_type == "glm_moe_dsa":
+        self.is_rot_used = vllm_config.quant_config.quant_description.get("is_rot_used", False)
+        if self.is_rot_used and self.config.model_type == "glm_moe_dsa":
             self.rot = nn.Linear(self.config.hidden_size, self.config.hidden_size, bias=False)
 
     def forward(
@@ -37,7 +36,7 @@ class AscendDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         # masking inputs at position 0, as not needed by MTP
         inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
-        if self.use_rot is not None and self.config.model_type == "glm_moe_dsa":
+        if self.is_rot_used and self.config.model_type == "glm_moe_dsa":
             previous_hidden_states = self.rot(previous_hidden_states)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
