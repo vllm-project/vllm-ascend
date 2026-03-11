@@ -112,3 +112,4 @@ if self.speculative_config:
 
 - Due to the fact that only a single layer of weights is exposed in DeepSeek's MTP, the accuracy and performance are not effectively guaranteed in scenarios where MTP > 1 (especially MTP ≥ 3). Moreover, due to current operator limitations, MTP supports a maximum of 15.
 - In the fullgraph mode with MTP > 1, the capture size of each ACLGraph must be an integer multiple of (num_speculative_tokens + 1).
+- For DeepSeek-R1 quantized deployment, vLLM Ascend currently supports `W8A8 + MTP float quantization` only. MTP mix quantization is not supported yet. If you are converting the model with ModelSlim, make sure the MTP part uses float quantization before enabling MTP serving.
