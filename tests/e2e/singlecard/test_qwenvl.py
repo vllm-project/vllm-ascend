@@ -2,16 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 
-import pytest
 import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils.torch_utils import set_default_torch_num_threads
 
-from tests.e2e.conftest import (VllmRunner, cleanup_dist_env_and_memory,
-                                wait_until_npu_memory_free)
-from vllm_ascend.ascend_config import clear_ascend_config
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
