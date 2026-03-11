@@ -403,6 +403,7 @@ class NPUModelRunner(GPUModelRunner):
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
         """
+        assert self.cudagraph_and_dp_padding is not None
         _num_tokens_after_padding, _num_tokens_across_dp, synced_cudagraph_mode = self.cudagraph_and_dp_padding
         cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
         if cudagraph_runtime_mode != CUDAGraphMode.FULL:
