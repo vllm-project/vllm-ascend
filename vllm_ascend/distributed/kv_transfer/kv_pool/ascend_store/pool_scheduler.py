@@ -78,7 +78,7 @@ class KVPoolScheduler:
         else:
             token_len = len(request.prompt_token_ids)
 
-        if token_len <= self._block_size:
+        if token_len < self._block_size:
             return 0, False
 
         num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
