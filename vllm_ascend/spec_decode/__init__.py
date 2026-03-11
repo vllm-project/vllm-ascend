@@ -25,7 +25,7 @@ from vllm_ascend.spec_decode.suffix_proposer import SuffixDecodingProposer
 def get_spec_decode_method(method, vllm_config, device, runner):
     if method == "ngram":
         return NgramProposer(vllm_config, device, runner)
-    elif method in ("eagle", "eagle3"):
+    elif method in ("eagle", "eagle3", "dflash"):
         return EagleProposer(vllm_config, device, runner)
     elif method == "mtp":
         return MtpProposer(vllm_config, device, runner)

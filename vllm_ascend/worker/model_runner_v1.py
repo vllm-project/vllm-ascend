@@ -383,7 +383,7 @@ class NPUModelRunner(GPUModelRunner):
             self.decode_token_per_req = 1 + spec_token_num
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
-                if self.speculative_config.method == "eagle3":
+                if self.speculative_config.method in ("eagle3", "dflash"):
                     assert isinstance(self.drafter, EagleProposer)
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state)
@@ -1450,21 +1450,31 @@ class NPUModelRunner(GPUModelRunner):
                         else:
                             target_hidden_states = hidden_states[token_indices]
                 assert self.drafter is not None
-                draft_token_ids = self.drafter._propose(
-                    target_token_ids=target_token_ids,
-                    target_positions=target_positions,
-                    target_hidden_states=target_hidden_states,
-                    next_token_ids=next_token_ids,
-                    last_token_indices=token_indices_to_sample,
-                    common_attn_metadata=common_attn_metadata,
-                    sampling_metadata=sampling_metadata,
-                    req_scheduled_tokens=req_scheduled_tokens,
-                    long_seq_metadata=long_seq_metadata,
-                    num_prefill_reqs=num_prefill_reqs,
-                    num_decode_reqs=num_decode_reqs,
-                    scheduler_output=scheduler_output,
-                    num_scheduled_tokens=num_scheduled_tokens,
-                )
+                if self.speculative_config.method == "dflash":
+                    draft_token_ids = self.drafter._dflash_propose(
+                        target_token_ids=target_token_ids,
+                        target_positions=target_positions,
+                        target_hidden_states=target_hidden_states,
+                        next_token_ids=next_token_ids,
+                        last_token_indices=token_indices_to_sample,
+                        common_attn_metadata=common_attn_metadata
+                    )
+                else:
+                    draft_token_ids = self.drafter._propose(
+                        target_token_ids=target_token_ids,
+                        target_positions=target_positions,
+                        target_hidden_states=target_hidden_states,
+                        next_token_ids=next_token_ids,
+                        last_token_indices=token_indices_to_sample,
+                        common_attn_metadata=common_attn_metadata,
+                        sampling_metadata=sampling_metadata,
+                        req_scheduled_tokens=req_scheduled_tokens,
+                        long_seq_metadata=long_seq_metadata,
+                        num_prefill_reqs=num_prefill_reqs,
+                        num_decode_reqs=num_decode_reqs,
+                        scheduler_output=scheduler_output,
+                        num_scheduled_tokens=num_scheduled_tokens,
+                    )
 
             else:
                 raise ValueError("Unknown speculative decoding method: "
@@ -2387,7 +2397,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
                     self.model.set_aux_hidden_state_layers(
-                        self.model.get_eagle3_aux_hidden_state_layers())
+                        self.model.get_eagle3_aux_hidden_state_layers(self.drafter.method))
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config,
