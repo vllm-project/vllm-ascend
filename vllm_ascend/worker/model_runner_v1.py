@@ -1314,48 +1314,27 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
-        if vllm_version_is("0.16.0"):
-            with (
-                record_function_or_nullcontext("forward"),
-                set_ascend_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    aclgraph_runtime_mode=cudagraph_mode,
-                    batch_descriptor=batch_desc,
-                    num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
-                    model_instance=self.model,
-                    max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
-                    skip_compiled=has_encoder_input,
-                ),
-                self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
-            ):
-                hidden_states = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-                )
-        else:
-            with (
-                record_function_or_nullcontext("forward"),
-                set_ascend_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    aclgraph_runtime_mode=cudagraph_mode,
-                    batch_descriptor=batch_desc,
-                    num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
-                    model_instance=self.model,
-                    max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
-                    skip_compiled=has_encoder_input,
-                ),
-                self.maybe_get_kv_connector_output(
-                    scheduler_output, clear_metadata=clear_kv_metadata
-                ) as kv_connector_output,
-            ):
-                hidden_states = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-                )
+        with (
+            record_function_or_nullcontext("forward"),
+            set_ascend_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens_padded,
+                num_tokens_across_dp=num_tokens_across_dp,
+                aclgraph_runtime_mode=cudagraph_mode,
+                batch_descriptor=batch_desc,
+                num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
+                model_instance=self.model,
+                max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
+                skip_compiled=has_encoder_input,
+            ),
+            self.maybe_get_kv_connector_output(
+                scheduler_output, clear_metadata=clear_kv_metadata
+            ) as kv_connector_output,
+        ):
+            hidden_states = self._model_forward(
+                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+            )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -1913,23 +1892,14 @@ class NPUModelRunner(GPUModelRunner):
             if force_eager:
                 return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
-            if vllm_version_is("0.16.0"):
-                return self.cudagraph_dispatcher.dispatch(
-                    num_tokens=num_tokens,
-                    has_lora=has_lora,
-                    uniform_decode=uniform_decode,
-                    disable_full=disable_full,
-                    num_active_loras=num_active_loras,
-                )
-            else:
-                return self.cudagraph_dispatcher.dispatch(
-                    num_tokens=num_tokens,
-                    has_lora=has_lora,
-                    uniform_decode=uniform_decode,
-                    valid_modes=valid_modes,
-                    invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
-                    num_active_loras=num_active_loras,
-                )
+            return self.cudagraph_dispatcher.dispatch(
+                num_tokens=num_tokens,
+                has_lora=has_lora,
+                uniform_decode=uniform_decode,
+                valid_modes=valid_modes,
+                invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
+                num_active_loras=num_active_loras,
+            )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
         num_tokens_padded = batch_descriptor.num_tokens
@@ -1951,16 +1921,10 @@ class NPUModelRunner(GPUModelRunner):
                 dp_rank = self.parallel_config.data_parallel_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
                 # Re-dispatch with DP padding
-                if vllm_version_is("0.16.0"):
-                    cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-                        num_tokens_padded,
-                        disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
-                    )
-                else:
-                    cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-                        num_tokens_padded,
-                        valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
-                    )
+                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                    num_tokens_padded,
+                    valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
+                )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
