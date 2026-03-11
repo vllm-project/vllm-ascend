@@ -21,7 +21,8 @@ class AscendDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__(vllm_config, prefix)
         self.is_rot_used = vllm_config.quant_config.quant_description.get("is_rot_used", False)
-        if self.is_rot_used and self.config.model_type == "glm_moe_dsa":
+        self.target_model_type = vllm_config.speculative_config.target_model_config.hf_text_config.model_type
+        if self.is_rot_used and self.target_model_type == "glm_moe_dsa":
             self.rot = nn.Linear(self.config.hidden_size, self.config.hidden_size, bias=False)
 
     def forward(
@@ -36,7 +37,7 @@ class AscendDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         # masking inputs at position 0, as not needed by MTP
         inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
-        if self.is_rot_used and self.config.model_type == "glm_moe_dsa":
+        if self.is_rot_used and self.target_model_type == "glm_moe_dsa":
             previous_hidden_states = self.rot(previous_hidden_states)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
