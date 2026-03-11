@@ -185,7 +185,7 @@ class TestACLGraphWrapper(TestBase):
         self.mock_runnable.assert_called_once_with("arg1", "arg2")
         self.assertEqual(result, "test_output")
 
-    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     def test_call_with_mismatched_runtime_mode(self, mock_envs,
@@ -213,7 +213,7 @@ class TestACLGraphWrapper(TestBase):
     @patch(
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
-    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.compilation_counter')
@@ -283,7 +283,7 @@ class TestACLGraphWrapper(TestBase):
     @patch(
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
-    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.compilation_counter')
@@ -357,7 +357,7 @@ class TestACLGraphWrapper(TestBase):
     @patch(
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
-    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors')
@@ -412,7 +412,7 @@ class TestACLGraphWrapper(TestBase):
     @patch(
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
-    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors')
@@ -470,7 +470,7 @@ class TestACLGraphWrapper(TestBase):
     @patch(
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
-    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.compilation_counter')
@@ -544,7 +544,7 @@ class TestACLGraphWrapper(TestBase):
     @patch(
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
-    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.compilation_counter')
@@ -609,7 +609,7 @@ class TestACLGraphWrapper(TestBase):
         # Should return the weak ref output when weak_ref_output option is enabled
         self.assertEqual(result, "weak_ref_output")
 
-    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.logger')
