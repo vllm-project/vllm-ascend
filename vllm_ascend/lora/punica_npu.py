@@ -205,7 +205,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: tuple[torch.Tensor, ...] | torch.Tensor,
         lora_b_stacked: tuple[torch.Tensor, ...],
-        lora_bias_stacked: tuple[torch.Tensor, ...] | None,
         output_slices: tuple[int, ...],
         offset_start: int = 0,
         add_inputs=True,
@@ -217,24 +216,20 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         Semantics:
             for i in range(len(lora_b_stacked)):
                 slice = output_slices[i]
-                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i] +
-                    lora_bias_stacked[i]
+                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i]
                 offset += slice
 
         Args:
             y (torch.Tensor): Output tensor.
             x (Union[Tuple[torch.Tensor, ...], torch.Tensor]): Input tensors
             lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight
-            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]):
-                bias's weight
             output_slices (Tuple[int, ...]): Every slice's size
+            offset_start (int): The starting position of y, defaults to 0
             add_inputs (bool):  Defaults to True.
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
         offset_left = offset_start
-        if lora_bias_stacked is not None:
-            self._apply_bias(self.token_lora_indices, y, output_slices, lora_bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
             self._apply_expand(
                 y,
@@ -313,7 +308,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device) for _ in range(len(output_slices))
             )
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
-        self.add_expand(y, buffer, lora_b_stacked, None, output_slices, add_inputs=True, **kwargs)
+        self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
 
     def add_lora_logits(
         self,
