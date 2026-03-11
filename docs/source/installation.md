@@ -93,7 +93,7 @@ pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' dec
 wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
 chmod +x ./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
 ./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run --full
-source /home/cmq/Ascend/cann-8.5.1/set_env.sh
+source /usr/local/Ascend/cann-8.5.1/set_env.sh
 
 wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
 chmod +x ./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
@@ -103,8 +103,8 @@ wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-ea
 chmod +x ./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
 ./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run --install
 
-source /home/cmq/Ascend/nnal/atb/set_env.sh
-source /home/cmq/Ascend/nnal/asdsip/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+source /usr/local/Ascend/nnal/asdsip/set_env.sh
 ```
 
 :::
