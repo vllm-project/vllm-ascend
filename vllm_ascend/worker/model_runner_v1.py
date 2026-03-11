@@ -121,6 +121,7 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     lmhead_tp_enable,
+    vllm_version_is,
     set_weight_prefetch_method,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -392,6 +393,18 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
+
+        if vllm_version_is("0.17.0"):
+            # self.cudagraph_batch_sizes sorts in ascending order.
+            if (
+                self.compilation_config.cudagraph_capture_sizes
+                and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            ):
+                self.cudagraph_batch_sizes = sorted(
+                    self.compilation_config.cudagraph_capture_sizes
+                )
+            else:
+                self.cudagraph_batch_sizes = []
 
     @property
     def use_cp(self) -> bool:
