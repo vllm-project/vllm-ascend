@@ -16,7 +16,8 @@ PROMPT_TEMPLATE = (
     "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
     "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
     "What is in the image?<|im_end|>\n"
-    "<|im_start|>assistant\n")
+    "<|im_start|>assistant\n"
+)
 
 
 @dataclass
@@ -54,22 +55,21 @@ def run_test(
         temperature=temperature,
         max_tokens=max_tokens,
     )
-    inputs = [{
-        "prompt": PROMPT_TEMPLATE,
-        "multi_modal_data": {
-            "image": asset.pil_image
-        },
-    } for asset in images]
+    inputs = [
+        {
+            "prompt": PROMPT_TEMPLATE,
+            "multi_modal_data": {"image": asset.pil_image},
+        }
+        for asset in images
+    ]
 
-    lora_request = LoRARequest(lora_name if lora_name else str(lora_id),
-                               lora_id, config.lora_path)
+    lora_request = LoRARequest(lora_name if lora_name else str(lora_id), lora_id, config.lora_path)
     outputs = llm.generate(inputs, sampling_params, lora_request=lora_request)
     generated_texts = [output.outputs[0].text.strip() for output in outputs]
     # Validate outputs
     for generated, expected in zip(generated_texts, expected_outputs):
         print(generated)
-        assert expected.startswith(generated), (
-            f"Generated text {generated} doesn't ")
+        assert expected.startswith(generated), f"Generated text {generated} doesn't "
         f"match expected pattern {expected}"
 
 
@@ -83,27 +83,22 @@ def run_beam_search_test(
     beam_width: int = 2,
     max_tokens: int = 5,
 ):
-    beam_search_params = BeamSearchParams(beam_width=beam_width,
-                                          max_tokens=max_tokens,
-                                          temperature=temperature)
+    beam_search_params = BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens, temperature=temperature)
 
-    inputs = [{
-        "prompt": PROMPT_TEMPLATE,
-        "multi_modal_data": {
-            "image": asset.pil_image
-        },
-    } for asset in images]
+    inputs = [
+        {
+            "prompt": PROMPT_TEMPLATE,
+            "multi_modal_data": {"image": asset.pil_image},
+        }
+        for asset in images
+    ]
 
     lora_request = LoRARequest(str(lora_id), lora_id, config.lora_path)
-    outputs = llm.beam_search(inputs,
-                              beam_search_params,
-                              lora_request=lora_request)
+    outputs = llm.beam_search(inputs, beam_search_params, lora_request=lora_request)
 
     for output_obj, expected_outs in zip(outputs, expected_outputs):
         output_texts = [seq.text for seq in output_obj.sequences]
-        assert output_texts == expected_outs, (
-            f"Generated texts {output_texts} do not match expected {expected_outs}"
-        )  # noqa: E501
+        assert output_texts == expected_outs, f"Generated texts {output_texts} do not match expected {expected_outs}"  # noqa: E501
 
 
 TEST_IMAGES = [
@@ -117,8 +112,7 @@ EXPECTED_OUTPUTS = [
 ]
 
 EXPECTED_OUTPUTS_LANGUAGE = [
-    "A stop sign is shown in an Asian city, with buildings and a car in the "
-    "background.",
+    "A stop sign is shown in an Asian city, with buildings and a car in the background.",
     "The Tokyo Skytree can be seen behind the pink blossoms of the cherry trees.",
 ]
 
@@ -274,16 +268,16 @@ def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
         enable_tower_connector_lora=True,
     )
     with VllmRunner(
-            config.model_path,
-            max_num_seqs=config.max_num_seqs,
-            enable_lora=True,
-            max_loras=config.max_loras,
-            max_lora_rank=config.max_lora_rank,
-            enable_tower_connector_lora=config.enable_tower_connector_lora,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            mm_processor_kwargs=config.mm_processor_kwargs,
-            mm_processor_cache_gb=config.mm_processor_cache_gb,
-            max_model_len=config.max_model_len,
+        config.model_path,
+        max_num_seqs=config.max_num_seqs,
+        enable_lora=True,
+        max_loras=config.max_loras,
+        max_lora_rank=config.max_lora_rank,
+        enable_tower_connector_lora=config.enable_tower_connector_lora,
+        gpu_memory_utilization=config.gpu_memory_utilization,
+        mm_processor_kwargs=config.mm_processor_kwargs,
+        mm_processor_cache_gb=config.mm_processor_cache_gb,
+        max_model_len=config.max_model_len,
     ) as vllm_model:
         llm = vllm_model.model
 
