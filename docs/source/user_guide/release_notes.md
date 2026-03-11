@@ -1,5 +1,7 @@
 # Release Notes
 
+For the recommended release note structure used by this project, see the [Release Note Specification](../community/release_note_specification.md).
+
 ## v0.16.0rc1 - 2026.03.09
 
 This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
