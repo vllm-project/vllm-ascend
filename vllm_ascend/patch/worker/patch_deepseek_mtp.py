@@ -5,7 +5,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import VllmConfig
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP, DeepSeekMultiTokenPredictorLayer
 
-MTP_ROT_WEIGHT_NAME = "rot"
+MTP_ROT_WEIGHT_NAME = "rot.weight"
 
 
 def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Config, weight_name: str) -> int | None:
