@@ -57,5 +57,6 @@ class AscendDeepSeekMTP(DeepSeekMTP):
 
 
 vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
+vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
 vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer = AscendDeepSeekMultiTokenPredictorLayer
 vllm.model_executor.models.deepseek_mtp.DeepSeekMTP = AscendDeepSeekMTP
