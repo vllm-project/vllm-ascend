@@ -8,17 +8,15 @@ W4A8 quantization feature is supported since v0.9.1rc2. For reliable quantizatio
 :::
 
 :::{important}
-**CANN Version**: The msmodelslim quantization tool requires CANN **8.1.RC2 or later**.
-Using CANN 8.1.RC1 or earlier may cause a tensor size mismatch error during the
-quantization save step:
+If you encounter a tensor size mismatch error during the quantization save step:
 
 ```
 RuntimeError: The size of tensor a (65536) must match the size of tensor b (16)
   at non-singleton dimension 0
 ```
 
-Upgrade your CANN toolkit or use a vllm-ascend Docker image that includes a
-compatible CANN version (v0.15.0rc1 or later).
+Ensure you are using `--group_size 128` (not 256) and the verified msit branch
+listed below. Also use a vllm-ascend Docker image **v0.15.0rc1 or later**.
 :::
 
 ```{code-block} bash
@@ -81,7 +79,7 @@ python quant_qwen.py \
           --a_bit 8 \
           --is_lowbit True \
           --open_outlier False \
-          --group_size 256 \
+          --group_size 128 \
           --is_dynamic True \
           --trust_remote_code True \
           --w_method HQQ
