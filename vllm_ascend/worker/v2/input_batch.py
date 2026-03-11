@@ -43,7 +43,7 @@ class AscendInputBuffers(InputBuffers):
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
-        self.query_start_loc = torch.zeros(
+        self.query_start_loc: torch.Tensor = torch.zeros(
             max_num_reqs + 2,
             dtype=torch.int32,
             device=device,

@@ -101,8 +101,8 @@ class WeightPrefetchMethod:
 
         # layer_idx is subtracted by 1 because layer_idx was incremented by 1 at layernorm.
         weight = (
-            ExtraForwardContext.model_instance()
-            .model.layers[ExtraForwardContext.layer_idx() - 1]
+            ExtraForwardContext.model_instance()  # type: ignore
+            .model.layers[ExtraForwardContext.layer_idx() - 1]  # type: ignore
             .mlp.experts.w13_weight
         )
         weight_size = weight.data.element_size() * weight.data.numel() * self.moe.prefetch_ratio.get(prefix, 0)
@@ -151,7 +151,7 @@ class WeightPrefetchMethod:
         if curr_layer_prefix.split(".")[-2] == "self_attn":
             model_instance = ExtraForwardContext.model_instance()
             layer_idx = int(curr_layer_prefix.split(".")[2])
-            weight = model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight
+            weight = model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight  # type: ignore
             if self.mlp_pre_version_compatibale_config:
                 weight_size = self.mlp_pre_version_compatibale_config.get(self.MLP_GATE_UP, 0)
             else:
@@ -166,7 +166,7 @@ class WeightPrefetchMethod:
     def _maybe_prefetch_mlp_down_weight_preprocess(self, x_dependency: torch.Tensor, forward_context: ForwardContext):
         layer_idx = ExtraForwardContext.layer_idx()
         model_instance = ExtraForwardContext.model_instance()
-        weight = model_instance.model.layers[layer_idx].mlp.down_proj.weight
+        weight = model_instance.model.layers[layer_idx].mlp.down_proj.weight  # type: ignore
         if self.mlp_pre_version_compatibale_config:
             weight_size = self.mlp_pre_version_compatibale_config.get(self.MLP_DOWN, 0)
         else:
@@ -177,7 +177,7 @@ class WeightPrefetchMethod:
             weight_size = MAX_PREFETCH_WEIGHT_SIZE
         torch.ops.vllm.prefetch_preprocess(weight=weight, start_flag=x_dependency, max_weight_size=int(weight_size))
         ExtraForwardContext.set_prefetch_mlp_down_proj(True)
-        ExtraForwardContext.set_layer_idx(layer_idx + 1)
+        ExtraForwardContext.set_layer_idx(layer_idx + 1)  # type: ignore
 
     def maybe_prefetch_mlp_weight_postprocess(self, stop_flag: torch.Tensor):
         if not self.mlp.is_active_this_forward:

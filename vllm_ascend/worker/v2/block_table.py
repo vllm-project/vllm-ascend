@@ -49,7 +49,7 @@ class AscendBlockTables(BlockTables):
         del self.slot_mappings
         # vllm-ascend' reshape_and_cache function requires slot_mappings to be int32.
         # so we need to redefine slot_mappings to be int32.
-        self.slot_mappings = torch.zeros(
+        self.slot_mappings: torch.Tensor = torch.zeros(
             self.num_kv_cache_groups,
             self.max_num_batched_tokens,
             dtype=torch.int32,
