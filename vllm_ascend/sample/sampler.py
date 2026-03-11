@@ -101,6 +101,13 @@ def _apply_top_k_top_p_pytorch(
     if p is None and k is None:
         return logits
 
+    # During chunked prefill, there may be scheduling steps where no tokens
+    # need sampling, resulting in an empty logits tensor (batch_size == 0).
+    # All subsequent sort/gather/cumsum/mask operations produce degenerate
+    # tensors and crash at indexing (e.g. top_p_mask[:, -1]).
+    if logits.shape[0] == 0:
+        return logits
+
     probs = logits.softmax(dim=-1)
     probs_sort, _ = probs.sort(dim=-1, descending=False)
 
