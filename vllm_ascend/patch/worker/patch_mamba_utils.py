@@ -1,6 +1,7 @@
 # mypy: ignore-errors
 
 
+import vllm
 from vllm.triton_utils import tl, triton
 
 
@@ -90,3 +91,7 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes, max_size: int | None = None):
 
     grid = (batch, max_chunks)
     batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE, ELEMENT_SIZE)
+
+
+vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
+vllm.v1.worker.mamba_utils.batch_memcpy = batch_memcpy
