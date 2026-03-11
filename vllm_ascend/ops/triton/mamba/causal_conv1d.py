@@ -305,30 +305,32 @@ def _causal_conv1d_update_kernel_npu_tiled(
         prior_tokens = conv_states_base + conv_state_token_offset * stride_conv_state_tok
 
         # define history vectors as zeros then load conditionally
-        col0 = tl.zeros((BLOCK_N,), dtype=tl.float16)
-        col1 = tl.zeros((BLOCK_N,), dtype=tl.float16)
-        col2 = tl.zeros((BLOCK_N,), dtype=tl.float16)
-        col3 = tl.zeros((BLOCK_N,), dtype=tl.float16)
-        col4 = tl.zeros((BLOCK_N,), dtype=tl.float16)
+        # Use float32 for intermediates to avoid bf16-to-fp16 cast errors
+        # on Ascend's Bisheng compiler (which does not support bf16 type cast).
+        col0 = tl.zeros((BLOCK_N,), dtype=tl.float32)
+        col1 = tl.zeros((BLOCK_N,), dtype=tl.float32)
+        col2 = tl.zeros((BLOCK_N,), dtype=tl.float32)
+        col3 = tl.zeros((BLOCK_N,), dtype=tl.float32)
+        col4 = tl.zeros((BLOCK_N,), dtype=tl.float32)
         if KERNEL_WIDTH >= 2:
             col0 = tl.load(prior_tokens + 0 * stride_conv_state_tok, mask=lane_active & mask_w, other=0.0).to(
-                tl.float16
+                tl.float32
             )
         if KERNEL_WIDTH >= 3:
             col1 = tl.load(prior_tokens + 1 * stride_conv_state_tok, mask=lane_active & mask_w, other=0.0).to(
-                tl.float16
+                tl.float32
             )
         if KERNEL_WIDTH >= 4:
             col2 = tl.load(prior_tokens + 2 * stride_conv_state_tok, mask=lane_active & mask_w, other=0.0).to(
-                tl.float16
+                tl.float32
             )
         if KERNEL_WIDTH >= 5:
             col3 = tl.load(prior_tokens + 3 * stride_conv_state_tok, mask=lane_active & mask_w, other=0.0).to(
-                tl.float16
+                tl.float32
             )
         if KERNEL_WIDTH >= 6:
             col4 = tl.load(prior_tokens + 4 * stride_conv_state_tok, mask=lane_active & mask_w, other=0.0).to(
-                tl.float16
+                tl.float32
             )
 
         # -------------------------
@@ -423,13 +425,13 @@ def _causal_conv1d_update_kernel_npu_tiled(
                 if KERNEL_WIDTH == 1:
                     # only x[t] * w0
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token
-                    matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float16)
+                    matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float32)
                     matrix_w = w_col0
                 elif KERNEL_WIDTH == 2:
                     if j == 1:
                         matrix_w = w_col1
                         x_ptrs_1d = x_base_1d + idx_token * stride_x_token
-                        matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float16)
+                        matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float32)
                 elif KERNEL_WIDTH == 3:
                     if j == 1:
                         matrix_w = w_col1
@@ -437,7 +439,7 @@ def _causal_conv1d_update_kernel_npu_tiled(
                     elif j == 2:
                         matrix_w = w_col2
                         x_ptrs_1d = x_base_1d + idx_token * stride_x_token
-                        matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float16)
+                        matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float32)
                 elif KERNEL_WIDTH == 4:
                     if j == 1:
                         matrix_w = w_col1
@@ -448,7 +450,7 @@ def _causal_conv1d_update_kernel_npu_tiled(
                     elif j == 3:
                         matrix_w = w_col3
                         x_ptrs_1d = x_base_1d + idx_token * stride_x_token
-                        matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float16)
+                        matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float32)
                 elif KERNEL_WIDTH == 5:
                     if j == 1:
                         matrix_w = w_col1
@@ -462,7 +464,7 @@ def _causal_conv1d_update_kernel_npu_tiled(
                     elif j == 4:
                         matrix_w = w_col4
                         x_ptrs_1d = x_base_1d + idx_token * stride_x_token
-                        matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float16)
+                        matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float32)
                 elif KERNEL_WIDTH == 6:
                     if j == 1:
                         matrix_w = w_col1
@@ -479,7 +481,7 @@ def _causal_conv1d_update_kernel_npu_tiled(
                     elif j == 5:
                         matrix_w = w_col5
                         x_ptrs_1d = x_base_1d + idx_token * stride_x_token
-                        matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float16)
+                        matrix_x = tl.load(x_ptrs_1d, mask=lane_active & mask_w, other=0.0).to(tl.float32)
 
                 acc += matrix_x.to(tl.float32) * matrix_w  # [BLOCK_N]
 
