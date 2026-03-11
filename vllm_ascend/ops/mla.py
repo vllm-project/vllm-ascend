@@ -145,7 +145,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        need_gather_q_kv = ExtraForwardContext().flash_comm_v1_enabled()
+        need_gather_q_kv = ExtraForwardContext.flash_comm_v1_enabled()
         output_shape = hidden_states.shape
         # FIXME: This does not seem right, should make sure the buffer is fixed
         output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
@@ -161,7 +161,7 @@ def mla_forward(
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
-    self = ExtraForwardContext.no_compile_layers()[layer_name]
+    self = forward_context.no_compile_layers[layer_name]
     if forward_context.attn_metadata:
         attn_metadata = forward_context.attn_metadata[self.mla_attn.layer_name]
     else:
