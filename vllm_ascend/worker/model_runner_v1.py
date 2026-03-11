@@ -582,10 +582,10 @@ class NPUModelRunner(GPUModelRunner):
                 ],
                 dtype=np.int32,
             )
-        attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
+        self._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
 
         # Determine if it's a splitfuse batch
-        with_prefill = attn_state not in [AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding]
+        with_prefill = self.attn_state not in [AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding]
         self.with_prefill = with_prefill
 
         # Get positions.
@@ -857,8 +857,6 @@ class NPUModelRunner(GPUModelRunner):
             self.attn_state = AscendAttentionState.ChunkedPrefill  # type: ignore
         else:
             self.attn_state = attn_state  # type: ignore
-
-        return attn_state
 
     def _calc_spec_decode_metadata(
         self,

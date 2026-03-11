@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import numpy as np
 import torch
@@ -35,33 +35,27 @@ class NPUModelRunner310(NPUModelRunner):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
-        self.graph_uniform_decode_query_len = self.uniform_decode_query_len
         if self.speculative_config is not None and self.speculative_config.method == "ngram":
-            self.graph_uniform_decode_query_len = 1
-            # Keep dispatcher's uniform decode shape definition in sync with the
-            # 310P ngram graph path, otherwise key init/dispatch may assert on
-            # non-multiple capture sizes.
-            self.cudagraph_dispatcher.uniform_decode_query_len = self.graph_uniform_decode_query_len
+            # 310P ngram requires decode-only graph shapes to be built with q_len=1.
+            # Keep dispatcher's internal query_len in sync to avoid key-init assert.
+            self.cudagraph_dispatcher.uniform_decode_query_len = 1
 
     @contextmanager
-    def _temporary_graph_uniform_decode_query_len(self):
-        if self.graph_uniform_decode_query_len == self.uniform_decode_query_len:
+    def temporary_modify_uniform_decode_query_len(self):
+        # This is only needed for the 310P ngram path where dispatcher uses q_len=1
+        # while runner's default uniform_decode_query_len remains 1 + num_spec_tokens.
+        # TODO: remove this temporary override after upstream supports independent
+        # decode capture query_len for backend-specific paths.
+        if self.speculative_config is None or self.speculative_config.method != "ngram":
             yield
             return
 
         original_uniform_decode_query_len = self.uniform_decode_query_len
-        self.uniform_decode_query_len = self.graph_uniform_decode_query_len
+        self.uniform_decode_query_len = self.cudagraph_dispatcher.uniform_decode_query_len
         try:
             yield
         finally:
             self.uniform_decode_query_len = original_uniform_decode_query_len
-
-    def _should_disable_fullgraph_for_ngram_spec(self) -> bool:
-        return (
-            self.speculative_config is not None
-            and self.speculative_config.method == "ngram"
-            and self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit)
-        )
 
     def _determine_batch_execution_and_padding(
         self,
@@ -77,18 +71,19 @@ class NPUModelRunner310(NPUModelRunner):
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ):
-        if (
-            force_uniform_decode is None
-            and self.graph_uniform_decode_query_len != self.uniform_decode_query_len
-            and max_num_scheduled_tokens == self.graph_uniform_decode_query_len
-            and num_tokens == max_num_scheduled_tokens * num_reqs
-        ):
-            is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
-            decode_gate = is_all_decode if self.speculative_config else True
-            if decode_gate:
+        if self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit):
+            force_eager = True
+
+        if force_uniform_decode is None and self.attn_state == AscendAttentionState.DecodeOnly:
+            decode_query_len = self.cudagraph_dispatcher.uniform_decode_query_len
+            if (
+                max_num_scheduled_tokens == decode_query_len
+                and num_tokens == max_num_scheduled_tokens * num_reqs
+                and np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+            ):
+                # Respect explicit caller override: only force when unset.
                 force_uniform_decode = True
 
-        force_eager = force_eager or self._should_disable_fullgraph_for_ngram_spec()
         return super()._determine_batch_execution_and_padding(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
@@ -119,47 +114,31 @@ class NPUModelRunner310(NPUModelRunner):
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
     ):
-        should_patch_uniform_decode_query_len = (
-            uniform_decode and self.graph_uniform_decode_query_len != self.uniform_decode_query_len
-        )
-        if should_patch_uniform_decode_query_len:
-            with self._temporary_graph_uniform_decode_query_len():
-                return super()._dummy_run(
-                    num_tokens=num_tokens,
-                    with_prefill=with_prefill,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    force_attention=force_attention,
-                    uniform_decode=uniform_decode,
-                    is_profile=is_profile,
-                    create_mixed_batch=create_mixed_batch,
-                    allow_microbatching=allow_microbatching,
-                    skip_eplb=skip_eplb,
-                    remove_lora=remove_lora,
-                    is_graph_capturing=is_graph_capturing,
-                    num_active_loras=num_active_loras,
-                )
-
-        return super()._dummy_run(
-            num_tokens=num_tokens,
-            with_prefill=with_prefill,
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            force_attention=force_attention,
-            uniform_decode=uniform_decode,
-            is_profile=is_profile,
-            create_mixed_batch=create_mixed_batch,
-            allow_microbatching=allow_microbatching,
-            skip_eplb=skip_eplb,
-            remove_lora=remove_lora,
-            is_graph_capturing=is_graph_capturing,
-            num_active_loras=num_active_loras,
-        )
+        temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
+        with temporary_context:
+            return super()._dummy_run(
+                num_tokens=num_tokens,
+                with_prefill=with_prefill,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                force_attention=force_attention,
+                uniform_decode=uniform_decode,
+                is_profile=is_profile,
+                create_mixed_batch=create_mixed_batch,
+                allow_microbatching=allow_microbatching,
+                skip_eplb=skip_eplb,
+                remove_lora=remove_lora,
+                is_graph_capturing=is_graph_capturing,
+                num_active_loras=num_active_loras,
+            )
 
     def _check_and_update_cudagraph_mode(
         self,
         attention_backends,
         kv_cache_groups,
     ) -> None:
-        with self._temporary_graph_uniform_decode_query_len():
+        # 910B does not need this branch because runner/dispatcher query_len are
+        # naturally consistent there. 310P ngram needs temporary alignment.
+        with self.temporary_modify_uniform_decode_query_len():
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
     def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
