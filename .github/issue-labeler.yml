@@ -1,0 +1,12 @@
+310p:
+    - '/(310p)/i'
+glm5:
+    - '/(glm5)/i'
+qwen3.5:
+    - '/(qwen3.5)/i'
+deepseek:
+    - '/(deepseek)/i'
+kimi k2:
+    - '/(kimi k2|kimik2)(?!\.5)/i'
+kimi k2.5:
+    - '/(kimi k2.5|kimik2.5)/i'
