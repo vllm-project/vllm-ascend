@@ -15,6 +15,10 @@ Examples:
   python tools/compare_tp_dump.py \
     --base /tmp/tp1 --cand /tmp/tp8 --rank 0 \
     --comm-mode pre_all_reduce,all_reduce --layer-ids 0-4
+  python tools/compare_tp_dump.py \
+    --base /tmp/tp1 --cand /tmp/tp8 --rank 0 \
+    --base-comm-mode local --cand-comm-mode all_reduce \
+    --ignore-comm-mode-in-key --layer-ids 0-4
 """
 
 from __future__ import annotations
@@ -106,7 +110,13 @@ def normalize_rank(rank: int) -> int | None:
     return None if rank < 0 else rank
 
 
-def make_key(entry: DumpEntry) -> tuple[int, int | None, str, str, str, int]:
+def make_key(
+    entry: DumpEntry,
+    *,
+    ignore_comm_mode: bool,
+) -> tuple[int, int | None, str, str, int] | tuple[int, int | None, str, str, str, int]:
+    if ignore_comm_mode:
+        return (entry.step, entry.layer_idx, entry.proj_type, entry.prefix, entry.rank)
     return (entry.step, entry.layer_idx, entry.proj_type, entry.comm_mode, entry.prefix, entry.rank)
 
 
@@ -141,8 +151,9 @@ def load_jsonl_entries(
     comm_modes: set[str] | None,
     start_step: int,
     max_steps: int,
-) -> tuple[dict[tuple[int, int | None, str, str, str, int], DumpEntry], int]:
-    entries: dict[tuple[int, int | None, str, str, str, int], DumpEntry] = {}
+    ignore_comm_mode: bool,
+) -> tuple[dict[tuple[Any, ...], DumpEntry], int]:
+    entries: dict[tuple[Any, ...], DumpEntry] = {}
     duplicate_count = 0
 
     for path in jsonl_paths:
@@ -190,7 +201,7 @@ def load_jsonl_entries(
                 ):
                     continue
 
-                key = make_key(entry)
+                key = make_key(entry, ignore_comm_mode=ignore_comm_mode)
                 if key in entries:
                     duplicate_count += 1
                 entries[key] = entry
@@ -207,8 +218,9 @@ def load_pt_entries(
     comm_modes: set[str] | None,
     start_step: int,
     max_steps: int,
-) -> tuple[dict[tuple[int, int | None, str, str, str, int], DumpEntry], int]:
-    entries: dict[tuple[int, int | None, str, str, str, int], DumpEntry] = {}
+    ignore_comm_mode: bool,
+) -> tuple[dict[tuple[Any, ...], DumpEntry], int]:
+    entries: dict[tuple[Any, ...], DumpEntry] = {}
     duplicate_count = 0
 
     for path in pt_paths:
@@ -245,7 +257,7 @@ def load_pt_entries(
         ):
             continue
 
-        key = make_key(entry)
+        key = make_key(entry, ignore_comm_mode=ignore_comm_mode)
         if key in entries:
             duplicate_count += 1
         entries[key] = entry
@@ -282,7 +294,8 @@ def load_entries(
     comm_modes: set[str] | None,
     start_step: int,
     max_steps: int,
-) -> tuple[dict[tuple[int, int | None, str, str, str, int], DumpEntry], str, int]:
+    ignore_comm_mode: bool,
+) -> tuple[dict[tuple[Any, ...], DumpEntry], str, int]:
     jsonl_paths = discover_jsonl_paths(path, rank_filter)
     pt_paths = discover_pt_paths(path)
 
@@ -297,6 +310,7 @@ def load_entries(
             comm_modes=comm_modes,
             start_step=start_step,
             max_steps=max_steps,
+            ignore_comm_mode=ignore_comm_mode,
         )
         return loaded, "jsonl", dup
 
@@ -311,6 +325,7 @@ def load_entries(
             comm_modes=comm_modes,
             start_step=start_step,
             max_steps=max_steps,
+            ignore_comm_mode=ignore_comm_mode,
         )
         return loaded, "pt", dup
 
@@ -324,6 +339,7 @@ def load_entries(
             comm_modes=comm_modes,
             start_step=start_step,
             max_steps=max_steps,
+            ignore_comm_mode=ignore_comm_mode,
         )
         return loaded, "jsonl", dup
     if pt_paths:
@@ -335,6 +351,7 @@ def load_entries(
             comm_modes=comm_modes,
             start_step=start_step,
             max_steps=max_steps,
+            ignore_comm_mode=ignore_comm_mode,
         )
         return loaded, "pt", dup
 
@@ -397,6 +414,31 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
         writer.writerows(rows)
 
 
+def summarize_entry_axes(entries: dict[tuple[Any, ...], DumpEntry]) -> dict[str, Any]:
+    if not entries:
+        return {
+            "steps": (None, None, 0),
+            "layers": [],
+            "proj_types": [],
+            "comm_modes": [],
+            "ranks": [],
+        }
+
+    values = list(entries.values())
+    steps = sorted({e.step for e in values})
+    layers = sorted({e.layer_idx for e in values})
+    proj_types = sorted({e.proj_type for e in values})
+    comm_modes = sorted({e.comm_mode for e in values})
+    ranks = sorted({e.rank for e in values})
+    return {
+        "steps": (steps[0], steps[-1], len(steps)),
+        "layers": layers[:16],
+        "proj_types": proj_types,
+        "comm_modes": comm_modes,
+        "ranks": ranks,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare TP dump tensors from two runs.")
     parser.add_argument("--base", type=Path, required=True, help="Baseline dump file or directory")
@@ -410,7 +452,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rank", type=int, default=0, help="Rank filter. Use -1 for all ranks. (default: 0)")
     parser.add_argument("--layer-ids", type=str, default="", help="Layer filter, e.g. '0-4,8,10-12'")
     parser.add_argument("--proj", type=str, default="o_proj,down_proj", help="Proj filter csv")
-    parser.add_argument("--comm-mode", type=str, default="", help="Comm mode filter csv")
+    parser.add_argument("--comm-mode", type=str, default="", help="Comm mode filter csv (applies to both sides)")
+    parser.add_argument("--base-comm-mode", type=str, default="", help="Base-only comm mode filter csv")
+    parser.add_argument("--cand-comm-mode", type=str, default="", help="Cand-only comm mode filter csv")
+    parser.add_argument(
+        "--ignore-comm-mode-in-key",
+        action="store_true",
+        help="Do not require comm_mode equality when matching keys across runs",
+    )
     parser.add_argument("--start-step", type=int, default=0, help="Start decode step (inclusive)")
     parser.add_argument("--max-steps", type=int, default=-1, help="Max decode steps to compare")
     parser.add_argument(
@@ -441,7 +490,9 @@ def main() -> None:
     rank_filter = normalize_rank(args.rank)
     layer_ids = parse_layer_ids(args.layer_ids)
     proj_types = parse_csv_set(args.proj)
-    comm_modes = parse_csv_set(args.comm_mode)
+    shared_comm_modes = parse_csv_set(args.comm_mode)
+    base_comm_modes = parse_csv_set(args.base_comm_mode) or shared_comm_modes
+    cand_comm_modes = parse_csv_set(args.cand_comm_mode) or shared_comm_modes
 
     base_map, base_mode, base_dup = load_entries(
         args.base,
@@ -449,9 +500,10 @@ def main() -> None:
         rank_filter=rank_filter,
         layer_ids=layer_ids,
         proj_types=proj_types,
-        comm_modes=comm_modes,
+        comm_modes=base_comm_modes,
         start_step=args.start_step,
         max_steps=args.max_steps,
+        ignore_comm_mode=args.ignore_comm_mode_in_key,
     )
     cand_map, cand_mode, cand_dup = load_entries(
         args.cand,
@@ -459,9 +511,10 @@ def main() -> None:
         rank_filter=rank_filter,
         layer_ids=layer_ids,
         proj_types=proj_types,
-        comm_modes=comm_modes,
+        comm_modes=cand_comm_modes,
         start_step=args.start_step,
         max_steps=args.max_steps,
+        ignore_comm_mode=args.ignore_comm_mode_in_key,
     )
 
     if base_mode != cand_mode:
@@ -481,6 +534,23 @@ def main() -> None:
 
     if not common_keys:
         print("[error] no common keys to compare")
+        base_axes = summarize_entry_axes(base_map)
+        cand_axes = summarize_entry_axes(cand_map)
+        print(
+            "[debug] base: "
+            f"steps={base_axes['steps']} comm_modes={base_axes['comm_modes']} "
+            f"proj_types={base_axes['proj_types']} ranks={base_axes['ranks']}"
+        )
+        print(
+            "[debug] cand: "
+            f"steps={cand_axes['steps']} comm_modes={cand_axes['comm_modes']} "
+            f"proj_types={cand_axes['proj_types']} ranks={cand_axes['ranks']}"
+        )
+        if not args.ignore_comm_mode_in_key:
+            print(
+                "[hint] If comparing tp=1(local) vs tp>1(all_reduce), use "
+                "--base-comm-mode local --cand-comm-mode all_reduce --ignore-comm-mode-in-key"
+            )
         return
 
     tensor_cache: dict[Path, list[float]] = {}
@@ -520,6 +590,13 @@ def main() -> None:
                 "layer_idx": base_entry.layer_idx,
                 "proj_type": base_entry.proj_type,
                 "comm_mode": base_entry.comm_mode,
+                "comm_mode_base": base_entry.comm_mode,
+                "comm_mode_cand": cand_entry.comm_mode,
+                "comm_mode_pair": (
+                    base_entry.comm_mode
+                    if base_entry.comm_mode == cand_entry.comm_mode
+                    else f"{base_entry.comm_mode}->{cand_entry.comm_mode}"
+                ),
                 "rank": base_entry.rank,
                 "prefix": base_entry.prefix,
                 "source_base": base_entry.source,
@@ -541,11 +618,11 @@ def main() -> None:
 
     summary_groups: dict[tuple[int, int | None, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in detail_rows:
-        group_key = (row["step"], row["layer_idx"], row["proj_type"], row["comm_mode"])
+        group_key = (row["step"], row["layer_idx"], row["proj_type"], row["comm_mode_pair"])
         summary_groups[group_key].append(row)
 
     summary_rows: list[dict[str, Any]] = []
-    for (step, layer_idx, proj_type, comm_mode), rows in sorted(summary_groups.items()):
+    for (step, layer_idx, proj_type, comm_mode_pair), rows in sorted(summary_groups.items()):
         cosines = [float(r["cosine"]) for r in rows]
         max_abs_list = [float(r["max_abs"]) for r in rows]
         mean_abs_list = [float(r["mean_abs"]) for r in rows]
@@ -556,7 +633,7 @@ def main() -> None:
                 "step": step,
                 "layer_idx": layer_idx,
                 "proj_type": proj_type,
-                "comm_mode": comm_mode,
+                "comm_mode": comm_mode_pair,
                 "pairs": len(rows),
                 "cosine_mean": sum(cosines) / len(cosines),
                 "cosine_min": min(cosines),
@@ -604,14 +681,14 @@ def main() -> None:
 
     if args.print_details:
         print("\n[details] matched keys")
-        print("step layer proj_type comm_mode rank cosine max_abs mean_abs rmse l2 numel_cmp prefix")
+        print("step layer proj_type comm_mode_pair rank cosine max_abs mean_abs rmse l2 numel_cmp prefix")
         for row in sorted(
             detail_rows,
             key=lambda x: (
                 int(x["step"]),
                 -1 if x["layer_idx"] is None else int(x["layer_idx"]),
                 str(x["proj_type"]),
-                str(x["comm_mode"]),
+                str(x["comm_mode_pair"]),
                 int(x["rank"]),
                 str(x["prefix"]),
             ),
@@ -620,7 +697,7 @@ def main() -> None:
                 f"{row['step']:>4} "
                 f"{str(row['layer_idx']):>5} "
                 f"{row['proj_type']:<9} "
-                f"{row['comm_mode']:<14} "
+                f"{row['comm_mode_pair']:<14} "
                 f"{row['rank']:>4} "
                 f"{safe_float(row['cosine'])} "
                 f"{safe_float(row['max_abs'])} "
@@ -660,6 +737,9 @@ def main() -> None:
                 "layer_idx",
                 "proj_type",
                 "comm_mode",
+                "comm_mode_base",
+                "comm_mode_cand",
+                "comm_mode_pair",
                 "rank",
                 "prefix",
                 "source_base",
