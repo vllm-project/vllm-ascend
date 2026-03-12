@@ -521,11 +521,24 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
-    def _pad_query_start_loc_for_fia(self, num_tokens_padded: int, num_reqs_padded: int, num_reqs: int) -> int:
+    def _pad_query_start_loc_for_fia(
+        self,
+        num_tokens_padded: int,
+        num_reqs_padded: int,
+        num_reqs: int,
+        cudagraph_runtime_mode: CUDAGraphMode | None = None,
+        batch_desc_num_reqs: int | None = None,
+    ) -> int:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
         """
+        # TODO: need refactor later, related to vllm PR #34043 this pr delete func
+        # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            num_reqs_padded = num_reqs
+        else:
+            num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
 
         if num_tokens_padded == num_reqs_padded * self.uniform_decode_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
@@ -1016,7 +1029,7 @@ class NPUModelRunner(GPUModelRunner):
                     target_positions = self._get_positions(num_scheduled_tokens)
                     target_hidden_states = hidden_states
                     if self.use_aux_hidden_state_outputs:
-                        target_hidden_states = torch.cat([h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1)
+                        target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
                 else:
                     token_indices_to_sample = None
                     # input_ids can be None for multimodal models.
@@ -1218,7 +1231,9 @@ class NPUModelRunner(GPUModelRunner):
                     # Another possible condition is num_tokens_padded != num_tokens_unpadded
                     # but this scope is way too big and the consequences are unpredictable
                     old_num_reqs_padded = num_reqs_padded
-                    num_reqs_padded = self._pad_query_start_loc_for_fia(num_tokens_padded, num_reqs_padded, num_reqs)
+                    num_reqs_padded = self._pad_query_start_loc_for_fia(
+                        num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_mode, batch_desc.num_reqs
+                    )
                     if enable_sp() and num_tokens_padded == num_tokens_unpadded:
                         if num_reqs_padded > old_num_reqs_padded:
                             num_reqs_padded = old_num_reqs_padded
@@ -2324,8 +2339,9 @@ class NPUModelRunner(GPUModelRunner):
             cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
-
-            num_reqs_padded = self._pad_query_start_loc_for_fia(num_tokens_padded, num_reqs_padded, num_reqs)
+            num_reqs_padded = self._pad_query_start_loc_for_fia(
+                num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_runtime_mode, batch_desc.num_reqs
+            )
 
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             attn_metadata, _ = self._build_attention_metadata(
@@ -3209,6 +3225,8 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
         target_module = sys.modules[target_module_name]
         setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
         yield
+    except Exception as e:
+        raise RuntimeError(f"NPUModelRunner failed, error is {e}")
     finally:
         setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
 

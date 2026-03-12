@@ -89,7 +89,7 @@ class AscendEagleProposer(EagleProposer):
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
 
         self.decode_threshold = 1 + self.num_speculative_tokens
-        self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 1, dtype=torch.int32)
+        self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0], device="cpu", dtype=torch.int32)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
@@ -189,6 +189,8 @@ class AscendEagleProposer(EagleProposer):
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
                 "Qwen3VLMoeForConditionalGeneration",
+                "Qwen3_5ForConditionalGeneration",
+                "Qwen3_5MoeForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = model.config.image_token_id
             elif self.get_model_name(model) == "PixtralForConditionalGeneration":
@@ -360,7 +362,9 @@ class AscendEagleProposer(EagleProposer):
 
         model_positions = self._get_positions(num_tokens)
 
-        batch_size = num_tokens // (self.num_speculative_tokens + 1)  # if not is_profile else self.runner.max_num_reqs
+        batch_size = max(
+            num_tokens // (self.num_speculative_tokens + 1), 1
+        )  # if not is_profile else self.runner.max_num_reqs
         if is_profile:
             batch_size = min(batch_size, self.runner.max_num_reqs)
 
