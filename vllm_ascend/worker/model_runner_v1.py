@@ -420,9 +420,6 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(self.drafter, AscendEagleProposer)
                     self.use_aux_hidden_state_outputs = self.drafter.eagle3_use_aux_hidden_state
                 self.rejection_sampler = RejectionSampler(self.sampler)
-            self.actual_seq_lengths_q = list(
-                range(self.decode_token_per_req, self.max_num_tokens + 1, self.decode_token_per_req)
-            )
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
