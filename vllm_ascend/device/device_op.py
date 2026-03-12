@@ -439,7 +439,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             return hidden_states, swiglu_out_scale, None
         out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=x,
-            weight=[weight],
+            weight=[_require_single_tensor_for_swiglu_quant(weight, name="weight")],
             group_list=group_list,
             weight_scale=[_require_single_tensor_for_swiglu_quant(weight_scale, name="weight_scale")],
             x_scale=x_scale,
