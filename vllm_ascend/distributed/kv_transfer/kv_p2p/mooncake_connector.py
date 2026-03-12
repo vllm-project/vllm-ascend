@@ -38,6 +38,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tp_group,
+    get_world_group
 )
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
@@ -198,6 +199,8 @@ class KVCacheSendingThread(threading.Thread):
         pcp_rank: int,
     ):
         super().__init__(daemon=True, name="KVCacheSendingThread")
+        device = torch.device(f"npu:{get_world_group().local_rank}")
+        torch.npu.set_device(device)
         self.tp_rank = tp_rank
         self.prefill_tp_size = prefill_tp_size
         self.pp_rank = get_pp_group().rank_in_group
