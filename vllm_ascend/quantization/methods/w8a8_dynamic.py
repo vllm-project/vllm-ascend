@@ -30,8 +30,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, AscendDeviceType, get_ascend_device_type, maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
