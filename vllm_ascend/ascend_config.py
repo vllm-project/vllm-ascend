@@ -53,11 +53,12 @@ class AscendConfig:
         self.dump_config_path = additional_config.get("dump_config_path", None)
         self._construct_weight_prefetch_config(additional_config)
         self.layer_sharding = additional_config.get("layer_sharding", None)
-        logger.info_once(
-            f"Linear layer sharding enabled with config: {self.layer_sharding}. "
-            "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
-            "using it without these features may result in significant performance degradation."
-        )
+        if self.layer_sharding:
+            logger.info_once(
+                f"Linear layer sharding enabled with config: {self.layer_sharding}. "
+                "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
+                "using it without these features may result in significant performance degradation."
+            )
 
         self.enable_shared_expert_dp = (
             additional_config.get("enable_shared_expert_dp", False)
