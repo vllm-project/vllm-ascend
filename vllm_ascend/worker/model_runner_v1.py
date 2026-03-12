@@ -3154,8 +3154,8 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):
+                from vllm.v1.kv_cache_interface import MLAAttentionSpec
                 if self.use_sparse:
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec
                     # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
                     # implement it by creating a new kv_cache_spec class
                     kv_cache_spec[layer_name] = MLAAttentionSpec(
