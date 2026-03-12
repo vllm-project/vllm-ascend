@@ -293,6 +293,7 @@ class _ExtraForwardContextProxy:
         "prefetch_mlp_down_proj",
         "model_instance",
         "layer_idx",
+        "max_tokens_across_dp",
         "max_tokens_across_pcp",
         "num_accept_tokens",
         "in_profile_run",
