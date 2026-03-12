@@ -32,6 +32,7 @@ class AscendConfig:
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        self.mix_placement = additional_config.get("mix_placement", False)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
         self.xlite_graph_config = XliteGraphConfig(xlite_graph_config, vllm_config)
