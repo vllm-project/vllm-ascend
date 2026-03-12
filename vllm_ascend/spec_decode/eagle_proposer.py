@@ -753,6 +753,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             model_hidden_states = self.hidden_states[:num_input_tokens]
             model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
             model_kwargs["hidden_states"] = model_hidden_states
+            model_kwargs["positions"] = model_positions
 
         ret_hidden_states = self.model(**model_kwargs)
         if not self.model_returns_tuple():
