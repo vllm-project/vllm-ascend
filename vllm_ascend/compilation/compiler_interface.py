@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 def convert_fake_inputs_to_current_fake_mode(example_inputs: list[Any]) -> list[Any]:
-    """Fix for FakeTensorMode mismatch issue in vllm v3.5+.
+    """Fix for FakeTensorMode mismatch issue in vllm upgrade
 
     The piecewise backend now compiles ranges upfront in __init__, which may use
     fake tensors from graph placeholder nodes that have a different FakeTensorMode
@@ -84,7 +84,7 @@ def fusion_pass_compile(
     compile_range: Range,
     key: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
-    # Fix for FakeTensorMode mismatch issue in vllm v3.5+
+    # Fix for FakeTensorMode mismatch issue in vllm upgrade
     example_inputs = convert_fake_inputs_to_current_fake_mode(example_inputs)
 
     def compile_inner(graph, example_inputs):
@@ -145,7 +145,7 @@ def npugraph_ex_compile(
         current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
         graph = current_pass_manager(graph)
 
-    # Fix for FakeTensorMode mismatch issue in vllm v3.5+
+    # Fix for FakeTensorMode mismatch issue in vllm upgrade
     example_inputs = convert_fake_inputs_to_current_fake_mode(example_inputs)
 
     # torch.compile requires the output of the fx graph to be a tuple
