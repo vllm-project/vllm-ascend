@@ -101,7 +101,6 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
-from vllm_ascend.kv_cache_interface import AscendSparseMLAAttentionSpec
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
@@ -2689,8 +2688,7 @@ class NPUModelRunner(GPUModelRunner):
                         v_tensor_split_factor = 2.0
                     elif self.use_sparse:
                         # for deepseek v3.2, we split the kv cache according to the corresponding ratio
-                        kv_cache_spec = layer_kv_cache_spec[layer_name]                        
-                        assert isinstance(kv_cache_spec, AscendSparseMLAAttentionSpec)
+                        kv_cache_spec = layer_kv_cache_spec[layer_name]
                         sparse_kv_cache_ratio = kv_cache_spec.kv_cache_ratio
                         k_tensor_split_factor = sparse_kv_cache_ratio[0]
                         v_tensor_split_factor = sparse_kv_cache_ratio[1]
@@ -2794,8 +2792,7 @@ class NPUModelRunner(GPUModelRunner):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, AttentionSpec):
-                    if self.use_sparse:                     
-                        assert isinstance(kv_cache_spec, AscendSparseMLAAttentionSpec)
+                    if self.use_sparse:
                         if self.use_sparse_c8_indexer:
                             raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor, raw_dsa_k_scale_tensor = kv_cache_raw_tensors[  # type: ignore
                                 layer_name]
@@ -3158,9 +3155,10 @@ class NPUModelRunner(GPUModelRunner):
 
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
-                    # TODO(rjg-lyh): when kv_cache_spec's plugin is ready,
+                    from vllm.v1.kv_cache_interface import MLAAttentionSpec 
+                    # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
                     # implement it by creating a new kv_cache_spec class
-                    kv_cache_spec[layer_name] = AscendSparseMLAAttentionSpec(
+                    kv_cache_spec[layer_name] = MLAAttentionSpec(
                         block_size=self.block_size,
                         num_kv_heads=1,
                         head_size=sum(self.sparse_head_dim),
