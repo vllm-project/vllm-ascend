@@ -22,7 +22,6 @@ from einops import rearrange
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
@@ -125,7 +124,7 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-        conv_state = self_kv_cache[0].transpose(-1, -2)
+        conv_state = self_kv_cache[0]
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
@@ -150,17 +149,17 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            mixed_qkv_spec = causal_conv1d_update(
+            conv_weights_T = conv_weights.transpose(0, 1)
+            mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_update(
                 mixed_qkv_spec,
+                conv_weights_T,
                 conv_state,
-                conv_weights,
+                spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes],
                 self.conv1d.bias,
+                num_accepted_tokens[: attn_metadata.num_spec_decodes],
+                spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
                 self.activation,
-                conv_state_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes],
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=spec_query_start_loc,
-                max_query_len=spec_state_indices_tensor.size(-1),
-                validate_data=False,
+                -1,
             )
 
         # 1.2: Process the remaining part
@@ -179,14 +178,17 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
                     pad_slot_id=PAD_SLOT_ID,
                 )
         elif attn_metadata.num_decodes > 0:
-            mixed_qkv_non_spec = causal_conv1d_update(
+            conv_weights_T = conv_weights.transpose(0, 1)
+            mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_update(
                 mixed_qkv_non_spec,
+                conv_weights_T,
                 conv_state,
-                conv_weights,
+                non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
                 self.conv1d.bias,
+                num_accepted_tokens,
+                None,
                 self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
-                validate_data=True,
+                -1,
             )
         else:
             mixed_qkv_non_spec = None
