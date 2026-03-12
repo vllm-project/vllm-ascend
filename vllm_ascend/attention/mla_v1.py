@@ -1243,7 +1243,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params = get_draft_graph_params()
         #TODO:to support is_draft_model and num_ubatches > 1
         elif forward_context.num_ubatches > 1:
-            
+            graph_params_dict = get_graph_params_dict()
         else:
             graph_params = get_graph_params()
         if forward_context.capturing:
@@ -1262,17 +1262,21 @@ class AscendMLAImpl(MLAAttentionImpl):
                         q_nope, k_nope, k_nope, **common_kwargs)
                     graph_params_dict[uid].workspaces[num_tokens] = workspace
 
-                attn_output = torch.empty_like(q_nope)
+                attn_output = torch.empty(attn_output_shape,
+                                      dtype=q_nope.dtype,
+                                      device=q_nope.device)
                 softmax_lse = torch.empty(num_tokens,
                                         dtype=q_nope.dtype,
                                         device=q_nope.device)
 
                 graph_params_dict[uid].attn_params[num_tokens].append(
-                    (q_nope, k_nope, q_pe, k_pe, self.num_heads, self.num_kv_heads,
-                    input_layout, spec_attn_mask, sparse_mode, self.scale,
-                    decode_meta.block_table, block_size,
-                    decode_meta.seq_lens_list, actual_seq_lengths, workspace,
-                    attn_output, softmax_lse))
+                    (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
+                    weak_ref_tensors(q_pe), weak_ref_tensors(k_pe),
+                    self.num_heads, self.num_kv_heads, input_layout,
+                    weak_ref_tensors(attn_mask) if attn_mask is not None else
+                    None, sparse_mode, self.scale, decode_meta.block_table,
+                    block_size, decode_meta.seq_lens_list, actual_seq_lengths,
+                    weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
 
                 torch.npu.graph_task_group_begin(stream)
                 torch_npu.npu_fused_infer_attention_score.out(
@@ -1292,30 +1296,30 @@ class AscendMLAImpl(MLAAttentionImpl):
                 event.reset(stream)
                 graph_params.events[num_tokens].append(event)
 
-            workspace = graph_params.workspaces.get(num_tokens)
-            if workspace is None:
-                workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                    q_nope, k_nope, k_nope, **common_kwargs)
-                if forward_context.is_draft_model:
-                    update_draft_graph_params_workspaces(num_tokens, workspace)
-                else:
-                    update_graph_params_workspaces(num_tokens, workspace)
+                workspace = graph_params.workspaces.get(num_tokens)
+                if workspace is None:
+                    workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                        q_nope, k_nope, k_nope, **common_kwargs)
+                    if forward_context.is_draft_model:
+                        update_draft_graph_params_workspaces(num_tokens, workspace)
+                    else:
+                        update_graph_params_workspaces(num_tokens, workspace)
 
-            attn_output = torch.empty(attn_output_shape,
-                                      dtype=q_nope.dtype,
-                                      device=q_nope.device)
-            softmax_lse = torch.empty(num_tokens,
-                                      dtype=q_nope.dtype,
-                                      device=q_nope.device)
+                attn_output = torch.empty(attn_output_shape,
+                                        dtype=q_nope.dtype,
+                                        device=q_nope.device)
+                softmax_lse = torch.empty(num_tokens,
+                                        dtype=q_nope.dtype,
+                                        device=q_nope.device)
 
-            graph_params.attn_params[num_tokens].append(
-                (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
-                 weak_ref_tensors(q_pe), weak_ref_tensors(k_pe),
-                 self.num_heads, self.num_kv_heads, input_layout,
-                 weak_ref_tensors(attn_mask) if attn_mask is not None else
-                 None, sparse_mode, self.scale, decode_meta.block_table,
-                 block_size, decode_meta.seq_lens_list, actual_seq_lengths,
-                 weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
+                graph_params.attn_params[num_tokens].append(
+                    (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
+                    weak_ref_tensors(q_pe), weak_ref_tensors(k_pe),
+                    self.num_heads, self.num_kv_heads, input_layout,
+                    weak_ref_tensors(attn_mask) if attn_mask is not None else
+                    None, sparse_mode, self.scale, decode_meta.block_table,
+                    block_size, decode_meta.seq_lens_list, actual_seq_lengths,
+                    weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
 
                 torch.npu.graph_task_group_begin(stream)
                 torch_npu.npu_fused_infer_attention_score.out(

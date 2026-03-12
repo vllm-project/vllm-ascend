@@ -304,13 +304,13 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
 def update_attn_params(update_stream, forward_context, runtime_shape,
                        vllm_config):
     if using_paged_attention(runtime_shape, vllm_config):
-        _update_attn_pa_params(update_stream, forward_context, runtime_shape,is_ubatch)
+        _update_attn_pa_params(update_stream, forward_context, runtime_shape)
     else:
         _update_attn_fia_params(update_stream, forward_context, runtime_shape)
 
 
 def update_mla_attn_params(update_stream, forward_context, runtime_shape,
-                           speculative_config):
+                           speculative_config,is_ubatch):
     if forward_context.is_draft_model:
         graph_params = get_draft_graph_params()
     elif forward_context.afd_metadata:
@@ -334,10 +334,10 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                     graph_params.handles[runtime_shape],
                     graph_params.events[runtime_shape],
             ):
-                (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
-                attn_mask, sparse_mode, scale, block_table, block_size,
-                seq_lens_list, actual_seq_lengths, attn_output,
-                softmax_lse) = param
+            (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
+            attn_mask, sparse_mode, scale, block_table, block_size,
+            seq_lens_list, actual_seq_lengths, attn_output,
+            softmax_lse) = param
                 
             seq_lens_list = key.decode.seq_lens_list if is_ubatch else forward_context.attn_metadata[
                 key].decode.seq_lens_list
@@ -454,7 +454,8 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
     else:
         graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
-    # for each layer's attention op in the graph.        with torch.npu.stream(update_stream):
+    # for each layer's attention op in the graph.        
+    with torch.npu.stream(update_stream):
         for key, param, handle, event in zip(
                 forward_context.attn_metadata,
                 graph_params.attn_params[runtime_shape],
@@ -517,7 +518,7 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
             )
             torch.npu.graph_task_update_end(update_stream)
 
-                event.record(update_stream)
+            event.record(update_stream)
 
 
 @dataclass
