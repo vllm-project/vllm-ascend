@@ -34,6 +34,7 @@ class EplbWorker:
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
         self.rank_id = dist.get_rank()
+        self.multi_stage = policy_type == 3
 
     def do_update(self):
         # put data in to queue
@@ -62,7 +63,10 @@ class EplbWorker:
         _, _, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
 
         if self.rank_id == 0:
-            hotness = self._calculate_hotness(old_placement, load_info)
+            if self.multi_stage:
+                hotness = self._calculate_hotness(old_placement, load_info.sum(0))
+            else:
+                hotness = self._calculate_hotness(old_placement, load_info)
             current_mean, current_max = self._compute_imbalance(old_placement, hotness)
             update_mean, update_max = self._compute_imbalance(new_placement, hotness)
             logger.info(
