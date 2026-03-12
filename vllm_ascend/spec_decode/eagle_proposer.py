@@ -700,8 +700,6 @@ class SpecDecodeBaseProposer(EagleProposer):
                     multi_steps_attn_metadata.append(per_layer_attn_metadata)
         else:
             # Copy the old attn_metadata and update
-            print(60 * "=")
-            print(f"{self.draft_attn_groups=}")
             for draft_step in range(1, self.num_speculative_tokens):
                 per_layer_attn_metadata = dict()
                 for attn_group in self.draft_attn_groups:
