@@ -309,8 +309,27 @@ class NPUModelRunner(GPUModelRunner):
             self.dcp_rank = 0
             self.pcp_size = 1
             self.pcp_rank = 0
-        if self.pcp_size > 1:
-            self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
+        # When PCP (Prefill Context Parallelism) is active, internal buffers
+        # (NPUInputBatch token-id arrays, attention metadata, etc.) need extra
+        # slots beyond the user-visible max_model_len because positions are
+        # spread across PCP ranks.  Previously this was done by mutating
+        # ``self.model_config.max_model_len`` in-place, which is a shared
+        # object that is also read by the API server (serving_engine.py
+        # ``_validate_input``).  That caused the reported context-length cap to
+        # be inflated by ``2 * pcp_size * max_num_reqs`` for every worker that
+        # initialised, producing inconsistent and incorrect validation errors
+        # for users who set ``--max-model-len``.  See issue #4570.
+        #
+        # Fix: keep a runner-local ``pcp_max_model_len`` for internal buffer
+        # sizing and update only ``self.max_model_len`` (the runner's own copy
+        # of the value, separate from the global model_config).  The shared
+        # ``model_config.max_model_len`` is left untouched so that serving
+        # logic continues to enforce the correct user-specified limit.
+        pcp_padding = 2 * self.pcp_size * self.max_num_reqs if self.pcp_size > 1 else 0
+        self.pcp_max_model_len = self.model_config.max_model_len + pcp_padding
+        # Update the runner's own copy so that internal assertions (e.g.
+        # block-table end-index checks) use the extended capacity.
+        self.max_model_len = self.pcp_max_model_len
         max_buffer_num_tokens = self.max_num_tokens
         if self.pcp_size * self.dcp_size > 1:
             max_buffer_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_size
@@ -369,7 +388,7 @@ class NPUModelRunner(GPUModelRunner):
         # the block_sizes in the kv cache config.
         self.input_batch = NPUInputBatch(
             max_num_reqs=self.max_num_reqs,
-            max_model_len=max(self.model_config.max_model_len, self.max_encoder_len),
+            max_model_len=max(self.pcp_max_model_len, self.max_encoder_len),
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
@@ -455,6 +474,20 @@ class NPUModelRunner(GPUModelRunner):
 
     def _get_drafter(self):
         return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
+
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Override to keep pcp_max_model_len in sync.
+
+        When max_model_len=-1 is used (auto-fit to NPU memory), the engine
+        calls this after determining the actual limit.  We must recompute
+        pcp_max_model_len from the new base value so that internal buffer
+        sizing stays consistent while the user-visible limit (stored in
+        model_config) remains correct.
+        """
+        super().update_max_model_len(max_model_len)
+        pcp_padding = 2 * self.pcp_size * self.max_num_reqs if self.pcp_size > 1 else 0
+        self.pcp_max_model_len = max_model_len + pcp_padding
+        self.max_model_len = self.pcp_max_model_len
 
     def _use_aclgraph(self) -> bool:
         return (
@@ -2992,7 +3025,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
-                max_model_len=max(self.model_config.max_model_len, self.max_encoder_len),
+                max_model_len=max(self.pcp_max_model_len, self.max_encoder_len),
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
                 pin_memory=self.pin_memory,
