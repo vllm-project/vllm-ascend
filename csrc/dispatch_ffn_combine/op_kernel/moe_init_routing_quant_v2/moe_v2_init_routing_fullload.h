@@ -88,9 +88,9 @@ __aicore__ inline void MoeV2FullLoad<T>::SortCompute() {
   LocalTensor<int32_t> expertIdxLocal = inLocal[0];
   LocalTensor<float> expertIdxLocalFp32 = expertIdxLocal.ReinterpretCast<float>();
   Cast(expertIdxLocalFp32, expertIdxLocal, RoundMode::CAST_ROUND, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Muls(expertIdxLocalFp32, expertIdxLocalFp32, (float)-1, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   int64_t duplicateNum = this->totalLength % ONE_REPEAT_SORT_NUM;
   if (duplicateNum > 0) {
     int duplicateIndex = this->totalLength - duplicateNum;
@@ -99,38 +99,38 @@ __aicore__ inline void MoeV2FullLoad<T>::SortCompute() {
     mask0 = mask0 & (UINT64_MAX >> ONE_REPEAT_SORT_NUM);
     uint64_t mask[2] = {mask0, 0};
     Duplicate(expertIdxLocalFp32[duplicateIndex], MIN_FP32, mask, 1, DST_BLK_STRIDE, DST_REP_STRIDE);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
   LocalTensor<float> concatLocal;
   LocalTensor<float> tempTensor = tempBuffer.Get<float>(GetSortLen<float>(this->sortNum_));
   Concat(concatLocal, expertIdxLocalFp32, tempTensor, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   LocalTensor<uint32_t> rowIdxLocal = inLocal[this->sortNum_].template ReinterpretCast<uint32_t>();
   LocalTensor<float> sortedLocal = sortedBuffer.Get<float>(GetSortLen<float>(this->sortNum_));
   Sort<float, true>(sortedLocal, concatLocal, rowIdxLocal, tempTensor, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   LocalTensor<float> expandedExpertIdxLocal = expandedExpertIdxCopyOutQueue_.AllocTensor<float>();
   LocalTensor<uint32_t> expandDstToSrcRowLocal = expandDstToSrcRowQueue_.AllocTensor<uint32_t>();
   LocalTensor<float> expandDstToSrcRowLocalFp32 = expandDstToSrcRowLocal.ReinterpretCast<float>();
   Extract(expandedExpertIdxLocal, expandDstToSrcRowLocal, sortedLocal, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Cast(expandDstToSrcRowLocalFp32, expandDstToSrcRowLocal.ReinterpretCast<int32_t>(), RoundMode::CAST_ROUND,
        this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Muls(expandedExpertIdxLocal, expandedExpertIdxLocal, (float)-1, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   LocalTensor<int32_t> expandedExpertIdxLocalInt32;
   expandedExpertIdxLocalInt32 = expandedExpertIdxLocal.ReinterpretCast<int32_t>();
   Cast(expandedExpertIdxLocalInt32, expandedExpertIdxLocal, RoundMode::CAST_ROUND, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   expandedExpertIdxCopyOutQueue_.EnQue<int32_t>(expandedExpertIdxLocalInt32);
 
   LocalTensor<uint32_t> expandedRowIdx = expandedRowIdxCopyOutQueue_.AllocTensor<uint32_t>();
   LocalTensor<uint32_t> expandedRowIdxU32 = expandedRowIdx.ReinterpretCast<uint32_t>();
   Muls(expandDstToSrcRowLocalFp32, expandDstToSrcRowLocalFp32, (float)-1, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   ArithProgression<int32_t>(inLocal[this->sortNum_], 0, 1, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   if (duplicateNum > 0) {
     int duplicateIndex = this->totalLength - duplicateNum;
     uint64_t mask0 = UINT64_MAX;
@@ -138,14 +138,14 @@ __aicore__ inline void MoeV2FullLoad<T>::SortCompute() {
     mask0 = mask0 & (UINT64_MAX >> ONE_REPEAT_SORT_NUM);
     uint64_t mask[2] = {mask0, 0};
     Duplicate(expandDstToSrcRowLocalFp32[duplicateIndex], MIN_FP32, mask, 1, DST_BLK_STRIDE, DST_REP_STRIDE);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
   Concat(concatLocal, expandDstToSrcRowLocalFp32, tempTensor, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Sort<float, true>(sortedLocal, concatLocal, rowIdxLocal, tempTensor, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Extract(tempTensor, expandedRowIdxU32, sortedLocal, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   expandedRowIdxCopyOutQueue_.EnQue<uint32_t>(expandedRowIdx);
   sortDataCopyInQueue.FreeTensor(inLocal);
 

@@ -159,7 +159,7 @@ private:
             for (int i = copyOffset; i < copyOffset + copyLen; ++i) {
                 CpUB2GM((__gm__ int64_t *)(shareAddrs[i]) + rank * FLAG_UNIT_INT_NUM, inputUB, sizeof(int64_t));
             }
-            pipe_barrier(PIPE_ALL);
+            AscendC::PipeBarrier<PIPE_ALL>();
         }
     }
 
