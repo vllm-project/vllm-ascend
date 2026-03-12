@@ -5,10 +5,11 @@ from vllm.logger import logger
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
-from vllm.v1.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
+
+from vllm_ascend.patch.platform.patch_kv_cache_coordinator import get_manager_for_kv_cache_spec
 
 
 class CPUCacheStats:
