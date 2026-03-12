@@ -45,6 +45,7 @@ from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_expe
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
     enable_sp,
     maybe_trans_nz,
     npu_stream_switch,
@@ -149,10 +150,23 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
+        if get_forward_context().moe_comm_type == MoECommType.FUSED_MC2:
+            w1 = [layer.w13_weight]
+            w1_scale = [torch.tensor([], dtype=torch.int64)]
+            w2 = [layer.w2_weight]
+            w2_scale = [torch.tensor([], dtype=torch.int64)]
+        else:
+            w1 = layer.w13_weight
+            w1_scale = None
+            w2 = layer.w2_weight
+            w2_scale = None
+        
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=w1,
+            w2=w2,
+            w1_scale = w1_scale,
+            w2_scale = w2_scale,
             w1_bias=layer.w13_bias if self.moe.has_bias else None,
             w2_bias=layer.w2_bias if self.moe.has_bias else None,
             activation=activation,
