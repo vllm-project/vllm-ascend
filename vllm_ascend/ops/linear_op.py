@@ -189,6 +189,16 @@ def _to_tensor(output):
     return output
 
 
+def _tp_dump_comm_mode_match(record_mode: str) -> bool:
+    if _TP_DUMP_COMM_MODE == "all":
+        return True
+    # Keep default behavior practical for TP comm debugging:
+    # selecting "all_reduce" dumps both pre/post all-reduce snapshots.
+    if _TP_DUMP_COMM_MODE == "all_reduce":
+        return record_mode in ("all_reduce", "pre_all_reduce")
+    return record_mode == _TP_DUMP_COMM_MODE
+
+
 def dump_tp_row_output_if_needed(
     *,
     prefix: str,
@@ -196,6 +206,7 @@ def dump_tp_row_output_if_needed(
     tp_rank: int,
     comm_mode: str,
     source: str,
+    advance_decode_step: bool = True,
 ) -> None:
     """Dump selected row-parallel outputs for TP decode debugging."""
     global _TP_DUMP_DECODE_STEP
@@ -203,7 +214,7 @@ def dump_tp_row_output_if_needed(
         return
     if _TP_DUMP_RANK0_ONLY and tp_rank != 0:
         return
-    if _TP_DUMP_COMM_MODE != "all" and comm_mode != _TP_DUMP_COMM_MODE:
+    if not _tp_dump_comm_mode_match(comm_mode):
         return
 
     proj_type = _get_proj_type(prefix)
@@ -225,7 +236,7 @@ def dump_tp_row_output_if_needed(
     with _TP_DUMP_LOCK:
         # Keep decode-step tracking stable even when layer dump filtering excludes
         # layer 0 records.
-        if is_step_anchor:
+        if advance_decode_step and is_step_anchor:
             _TP_DUMP_DECODE_STEP += 1
         decode_step = _TP_DUMP_DECODE_STEP
         if decode_step < 0:
@@ -279,9 +290,10 @@ def dump_tp_row_output_if_needed(
 
     if _TP_DUMP_SAVE_TENSOR:
         safe_prefix = re.sub(r"[^a-zA-Z0-9_.-]+", "_", prefix)[:200]
+        safe_comm_mode = re.sub(r"[^a-zA-Z0-9_.-]+", "_", comm_mode)[:64]
         tensor_path = os.path.join(
             _TP_DUMP_DIR,
-            f"step{decode_step:06d}_rank{tp_rank}_{proj_type}_{safe_prefix}.pt",
+            f"step{decode_step:06d}_rank{tp_rank}_{safe_comm_mode}_{proj_type}_{safe_prefix}.pt",
         )
         torch.save(detached.to("cpu"), tensor_path)
 
@@ -609,15 +621,24 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
         fusing communication and computation."""
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         if self.reduce_results and self.tp_size > 1:
-            output = torch_npu.npu_mm_all_reduce_base(
-                input_parallel, self.layer.weight.t(), self.hcomm_info, bias=bias_
-            )
+            if _TP_DUMP_ENABLE:
+                assert self.quant_method is not None
+                output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+                dump_tp_row_output_if_needed(
+                    prefix=self.layer.prefix,
+                    output=output_parallel,
+                    tp_rank=self.tp_rank,
+                    comm_mode="pre_all_reduce",
+                    source="MatmulAllreduceRowParallelOp.pre_all_reduce",
+                )
+            output = torch_npu.npu_mm_all_reduce_base(input_parallel, self.layer.weight.t(), self.hcomm_info, bias=bias_)
             dump_tp_row_output_if_needed(
                 prefix=self.layer.prefix,
                 output=output,
                 tp_rank=self.tp_rank,
                 comm_mode="all_reduce",
                 source="MatmulAllreduceRowParallelOp",
+                advance_decode_step=False,
             )
         else:
             assert self.quant_method is not None
@@ -737,6 +758,13 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 
         if not flash_comm_v1_enabled:
             output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
+            dump_tp_row_output_if_needed(
+                prefix=self.layer.prefix,
+                output=output_parallel,
+                tp_rank=self.tp_rank,
+                comm_mode="pre_all_reduce",
+                source="SequenceRowParallelOp.pre_all_reduce",
+            )
             output = tensor_model_parallel_all_reduce(output_parallel)
             dump_tp_row_output_if_needed(
                 prefix=self.layer.prefix,
@@ -744,6 +772,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 tp_rank=self.tp_rank,
                 comm_mode="all_reduce",
                 source="SequenceRowParallelOp",
+                advance_decode_step=False,
             )
             return output
 

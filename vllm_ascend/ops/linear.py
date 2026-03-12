@@ -24,7 +24,11 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
-from vllm.distributed import divide
+from vllm.distributed import (
+    divide,
+    split_tensor_along_last_dim,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED,
     ColumnParallelLinear,
@@ -325,18 +329,47 @@ class AscendRowParallelLinear(RowParallelLinear):
             )
             return output
 
-        output = super().forward(input_)
-        # Dump both TP>1(all-reduce) and TP=1(local, no all-reduce) for
-        # aligned decode-step comparison.
-        comm_mode = "all_reduce" if (self.reduce_results and self.tp_size > 1) else "local"
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        assert self.quant_method is not None
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+
+        if self.reduce_results and self.tp_size > 1:
+            dump_tp_row_output_if_needed(
+                prefix=self.prefix,
+                output=output_parallel,
+                tp_rank=self.tp_rank,
+                comm_mode="pre_all_reduce",
+                source="AscendRowParallelLinear.pre_all_reduce",
+            )
+            output = tensor_model_parallel_all_reduce(output_parallel)
+            comm_mode = "all_reduce"
+            post_advance_decode_step = False
+        else:
+            output = output_parallel
+            comm_mode = "local"
+            post_advance_decode_step = True
+
+        if not self.return_bias:
+            output_for_dump: torch.Tensor | tuple[torch.Tensor, Parameter | None] = output
+        else:
+            output_bias = self.bias if self.skip_bias_add else None
+            output_for_dump = (output, output_bias)
+
         dump_tp_row_output_if_needed(
             prefix=self.prefix,
-            output=output,
+            output=output_for_dump,
             tp_rank=self.tp_rank,
             comm_mode=comm_mode,
             source="AscendRowParallelLinear",
+            advance_decode_step=post_advance_decode_step,
         )
-        return output
+        return output_for_dump
 
 
 class AscendColumnParallelLinear(ColumnParallelLinear):
