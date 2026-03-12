@@ -450,6 +450,25 @@
 #    Future Plan:
 #       Remove this patch when upstream adds a backend dispatch path for q/k norm.
 #
+# ** 20. File: worker/patch_dual_chunk_rope.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.rotary_embedding.dual_chunk_rope.DualChunkRotaryEmbedding.__init__`
+#    Why:
+#       DualChunkRotaryEmbedding.__init__ in upstream vLLM hardcodes
+#       `torch.device(f"cuda:{torch.cuda.current_device()}")`, which raises
+#       `AssertionError: Torch not compiled with CUDA enabled` on Ascend NPU.
+#       This breaks any model that uses Dual Chunk Attention (e.g. Qwen2.5-7B-Instruct-1M).
+#       (vllm-ascend issue #4309)
+#    How：
+#       Monkey-patch `__init__` to replace the hardcoded CUDA device lookup
+#       with `torch.device(current_platform.device_name)` so that the rotary
+#       cache is allocated on the correct device regardless of backend.
+#    Related PR (if no, explain why):
+#       Pending upstream fix in vLLM.
+#    Future Plan:
+#       Remove this patch once upstream vLLM replaces the hardcoded CUDA
+#       device with a platform-aware alternative.
+#
 # ** 19. File: worker/patch_qwen3_5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
