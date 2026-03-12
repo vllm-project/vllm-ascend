@@ -19,6 +19,11 @@ Examples:
     --base /tmp/tp1 --cand /tmp/tp8 --rank 0 \
     --base-comm-mode local --cand-comm-mode all_reduce \
     --ignore-comm-mode-in-key --layer-ids 0-4
+  python tools/compare_tp_dump.py \
+    --base /tmp/tp2 --cand /tmp/tp2 \
+    --base-rank -1 --cand-rank 0 \
+    --base-comm-mode pre_all_reduce --cand-comm-mode all_reduce \
+    --aggregate-base-ranks sum --ignore-comm-mode-in-key
 """
 
 from __future__ import annotations
@@ -401,6 +406,65 @@ def entry_to_flat_values(entry: DumpEntry, cache: dict[Path, list[float]]) -> li
     return cache[path]
 
 
+def aggregate_entries_across_ranks(
+    entries: dict[tuple[Any, ...], DumpEntry],
+    *,
+    method: str,
+    ignore_comm_mode: bool,
+) -> tuple[dict[tuple[Any, ...], DumpEntry], int, int]:
+    if method == "none":
+        return entries, 0, 0
+
+    grouped: dict[tuple[int, int | None, str, str, str], list[DumpEntry]] = defaultdict(list)
+    for entry in entries.values():
+        group_key = (entry.step, entry.layer_idx, entry.proj_type, entry.comm_mode, entry.prefix)
+        grouped[group_key].append(entry)
+
+    out: dict[tuple[Any, ...], DumpEntry] = {}
+    tensor_cache: dict[Path, list[float]] = {}
+    truncated_groups = 0
+
+    for _, group in grouped.items():
+        group = sorted(group, key=lambda e: e.rank)
+        values = [entry_to_flat_values(e, tensor_cache) for e in group]
+        if not values:
+            continue
+
+        min_len = min(len(v) for v in values)
+        if any(len(v) != min_len for v in values):
+            truncated_groups += 1
+
+        agg = [0.0] * min_len
+        for v in values:
+            for i in range(min_len):
+                agg[i] += v[i]
+
+        if method == "mean":
+            inv_n = 1.0 / len(values)
+            agg = [x * inv_n for x in agg]
+
+        template = group[0]
+        agg_entry = DumpEntry(
+            step=template.step,
+            layer_idx=template.layer_idx,
+            proj_type=template.proj_type,
+            comm_mode=template.comm_mode,
+            prefix=template.prefix,
+            # Keep rank compatible with default compare target (rank 0).
+            rank=0,
+            source=f"{template.source}.agg_{method}",
+            payload_type="jsonl_sample",
+            payload=agg,
+            shape=[min_len],
+            dtype="float64",
+        )
+        out_key = make_key(agg_entry, ignore_comm_mode=ignore_comm_mode)
+        out[out_key] = agg_entry
+
+    aggregated_groups = len(grouped)
+    return out, aggregated_groups, truncated_groups
+
+
 def safe_float(v: float) -> str:
     if math.isnan(v) or math.isinf(v):
         return "nan"
@@ -450,6 +514,20 @@ def parse_args() -> argparse.Namespace:
         help="Input format selection (default: auto)",
     )
     parser.add_argument("--rank", type=int, default=0, help="Rank filter. Use -1 for all ranks. (default: 0)")
+    parser.add_argument("--base-rank", type=int, default=None, help="Base-only rank filter. Use -1 for all ranks.")
+    parser.add_argument("--cand-rank", type=int, default=None, help="Cand-only rank filter. Use -1 for all ranks.")
+    parser.add_argument(
+        "--aggregate-base-ranks",
+        choices=("none", "sum", "mean"),
+        default="none",
+        help="Aggregate base entries across ranks before compare",
+    )
+    parser.add_argument(
+        "--aggregate-cand-ranks",
+        choices=("none", "sum", "mean"),
+        default="none",
+        help="Aggregate cand entries across ranks before compare",
+    )
     parser.add_argument("--layer-ids", type=str, default="", help="Layer filter, e.g. '0-4,8,10-12'")
     parser.add_argument("--proj", type=str, default="o_proj,down_proj", help="Proj filter csv")
     parser.add_argument("--comm-mode", type=str, default="", help="Comm mode filter csv (applies to both sides)")
@@ -487,7 +565,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    rank_filter = normalize_rank(args.rank)
+    shared_rank_filter = normalize_rank(args.rank)
+    base_rank_filter = normalize_rank(args.base_rank) if args.base_rank is not None else shared_rank_filter
+    cand_rank_filter = normalize_rank(args.cand_rank) if args.cand_rank is not None else shared_rank_filter
     layer_ids = parse_layer_ids(args.layer_ids)
     proj_types = parse_csv_set(args.proj)
     shared_comm_modes = parse_csv_set(args.comm_mode)
@@ -497,7 +577,7 @@ def main() -> None:
     base_map, base_mode, base_dup = load_entries(
         args.base,
         mode=args.mode,
-        rank_filter=rank_filter,
+        rank_filter=base_rank_filter,
         layer_ids=layer_ids,
         proj_types=proj_types,
         comm_modes=base_comm_modes,
@@ -508,7 +588,7 @@ def main() -> None:
     cand_map, cand_mode, cand_dup = load_entries(
         args.cand,
         mode=args.mode,
-        rank_filter=rank_filter,
+        rank_filter=cand_rank_filter,
         layer_ids=layer_ids,
         proj_types=proj_types,
         comm_modes=cand_comm_modes,
@@ -516,6 +596,23 @@ def main() -> None:
         max_steps=args.max_steps,
         ignore_comm_mode=args.ignore_comm_mode_in_key,
     )
+
+    base_agg_groups = 0
+    cand_agg_groups = 0
+    base_truncated_groups = 0
+    cand_truncated_groups = 0
+    if args.aggregate_base_ranks != "none":
+        base_map, base_agg_groups, base_truncated_groups = aggregate_entries_across_ranks(
+            base_map,
+            method=args.aggregate_base_ranks,
+            ignore_comm_mode=args.ignore_comm_mode_in_key,
+        )
+    if args.aggregate_cand_ranks != "none":
+        cand_map, cand_agg_groups, cand_truncated_groups = aggregate_entries_across_ranks(
+            cand_map,
+            method=args.aggregate_cand_ranks,
+            ignore_comm_mode=args.ignore_comm_mode_in_key,
+        )
 
     if base_mode != cand_mode:
         raise ValueError(f"Input mode mismatch: base={base_mode}, cand={cand_mode}. Use same dump format.")
@@ -529,6 +626,16 @@ def main() -> None:
     print(f"[info] base_mode={base_mode}, cand_mode={cand_mode}")
     print(f"[info] base_records={len(base_map)}, cand_records={len(cand_map)}, common={len(common_keys)}")
     print(f"[info] only_base={only_base}, only_cand={only_cand}")
+    if args.aggregate_base_ranks != "none" or args.aggregate_cand_ranks != "none":
+        print(
+            f"[info] aggregation: base={args.aggregate_base_ranks}({base_agg_groups} groups), "
+            f"cand={args.aggregate_cand_ranks}({cand_agg_groups} groups)"
+        )
+    if base_truncated_groups > 0 or cand_truncated_groups > 0:
+        print(
+            f"[warn] aggregation_truncated_groups: base={base_truncated_groups}, "
+            f"cand={cand_truncated_groups}"
+        )
     if base_dup > 0 or cand_dup > 0:
         print(f"[warn] duplicate_keys_overwritten: base={base_dup}, cand={cand_dup}")
 
@@ -551,6 +658,12 @@ def main() -> None:
                 "[hint] If comparing tp=1(local) vs tp>1(all_reduce), use "
                 "--base-comm-mode local --cand-comm-mode all_reduce --ignore-comm-mode-in-key"
             )
+        print(
+            "[hint] For pre_all_reduce, compare aggregated pre against post: "
+            "--base-rank -1 --cand-rank 0 --aggregate-base-ranks sum "
+            "--base-comm-mode pre_all_reduce --cand-comm-mode all_reduce "
+            "--ignore-comm-mode-in-key"
+        )
         return
 
     tensor_cache: dict[Path, list[float]] = {}
