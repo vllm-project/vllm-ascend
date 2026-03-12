@@ -139,6 +139,12 @@ def npugraph_ex_compile(
 
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
 
+    # Apply graph fusion passes (including GELU replacement) before torchair compilation
+    # This is needed to replace unsupported operations like aten::gelu with NPU-compatible versions
+    if COMPILATION_PASS_KEY in compiler_config:
+        current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
+        graph = current_pass_manager(graph)
+
     # Fix for FakeTensorMode mismatch issue in vllm v3.5+
     example_inputs = convert_fake_inputs_to_current_fake_mode(example_inputs)
 
