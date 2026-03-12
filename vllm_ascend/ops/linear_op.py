@@ -203,8 +203,8 @@ class MLPRowParallelOp(CustomRowParallelOp):
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+            split_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
+            input_parallel = split_input[self.tp_rank].contiguous()
 
         assert self.quant_method is not None
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.layer.bias
@@ -230,8 +230,8 @@ class OProjRowParallelOp(CustomRowParallelOp):
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+            split_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
+            input_parallel = split_input[self.tp_rank].contiguous()
 
         # Prepare tensors for all-to-all communication
         local_batch_size = input_parallel.size(0)
@@ -307,8 +307,8 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             input_parallel = input_
         else:
             tp_rank = self.tp_rank
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[tp_rank].contiguous()
+            split_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
+            input_parallel = split_input[tp_rank].contiguous()
 
         # padding for all-to-all
         forward_context = get_forward_context()
@@ -398,8 +398,8 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+            split_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
+            input_parallel = split_input[self.tp_rank].contiguous()
         """Calculate the output tensor of forward by considering
         fusing communication and computation."""
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
@@ -497,8 +497,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+            split_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
+            input_parallel = split_input[self.tp_rank].contiguous()
 
         assert self.quant_method is not None
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
