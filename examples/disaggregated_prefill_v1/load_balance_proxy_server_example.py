@@ -241,7 +241,7 @@ class ProxyState:
             return
         self.prefillers[server_idx].aborted_requests.add(request_id)
 
-    def aquire_aborted_prefiller_requests(self, server_idx: int):  # Changed to synchronous
+    def acquire_aborted_prefiller_requests(self, server_idx: int):  # Changed to synchronous
         """
         Get the set of aborted requests and clear it.
         This is used to release kv cache in prefiller node.
@@ -582,7 +582,7 @@ async def send_request_to_service(
     max_retries: int = 3,
     base_delay: float = 0.2,
 ):
-    aborted_requests = proxy_state.aquire_aborted_prefiller_requests(prefiller_id)
+    aborted_requests = proxy_state.acquire_aborted_prefiller_requests(prefiller_id)
     req_data = req_data.copy()
     req_data["kv_transfer_params"] = {
         "do_remote_decode": True,
@@ -814,7 +814,9 @@ async def _handle_completions(api: str, request: Request):
             # After streaming done, release tokens
             proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        # Determine the correct media type based on stream flag
+        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
+        return StreamingResponse(generate_stream(), media_type=media_type)
     except Exception as e:
         import traceback
 

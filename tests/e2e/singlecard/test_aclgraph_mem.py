@@ -40,7 +40,6 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
     capture_mem_after = multiprocessing.Value("q", -1)  # long long
 
     def capture_model_wrapper(original_method):
-
         def wrapped(self):
             mem_before = torch.npu.mem_get_info()[0]  # free memory
             result = original_method(self)
@@ -55,19 +54,16 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
 
     original_capture = NPUModelRunner.capture_model
 
-    with patch.object(NPUModelRunner,
-                      'capture_model',
-                      new=capture_model_wrapper(original_capture)):
+    with patch.object(NPUModelRunner, "capture_model", new=capture_model_wrapper(original_capture)):
         prompts = [
-            "Hello, my name is", "The president of the United States is",
-            "The capital of France is", "The future of AI is"
+            "Hello, my name is",
+            "The president of the United States is",
+            "The capital of France is",
+            "The future of AI is",
         ]
-        sampling_params = SamplingParams(max_tokens=max_tokens,
-                                         temperature=0.0)
+        sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
         if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
-            vllm_model = VllmRunner(model,
-                                    max_model_len=1024,
-                                    quantization="ascend")
+            vllm_model = VllmRunner(model, max_model_len=1024, quantization="ascend")
         else:
             vllm_model = VllmRunner(model)
         _ = vllm_model.generate(prompts, sampling_params)
@@ -94,5 +90,6 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
     assert mem_used_by_capture < max_mem_expected, (
         f"capture_model used more memory than expected. "
         f"Used: {mem_used_by_capture / (1024**3):.2f} GiB, "
-        f"Expected: < {max_capture_mem_gib:.2f} GiB")
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = 'spawn'
+        f"Expected: < {max_capture_mem_gib:.2f} GiB"
+    )
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"

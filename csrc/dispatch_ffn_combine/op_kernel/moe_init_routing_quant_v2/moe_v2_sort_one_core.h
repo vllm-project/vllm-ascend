@@ -56,9 +56,9 @@ __aicore__ inline void MoeV2SortOneCore::SortCompute() {
   LocalTensor<int32_t> expertForSourceRowLocal = inLocal[0];
   LocalTensor<float> expertForSourceRowLocalFp32 = expertForSourceRowLocal.ReinterpretCast<float>();
   Cast(expertForSourceRowLocalFp32, expertForSourceRowLocal, RoundMode::CAST_ROUND, this->tileLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Muls(expertForSourceRowLocalFp32, expertForSourceRowLocalFp32, (float)-1, this->tileLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   int64_t duplicateNum = this->totalLength % ONE_REPEAT_SORT_NUM;
   if (duplicateNum > 0) {
@@ -68,28 +68,28 @@ __aicore__ inline void MoeV2SortOneCore::SortCompute() {
     mask0 = mask0 & (UINT64_MAX >> ONE_REPEAT_SORT_NUM);
     uint64_t mask[2] = {mask0, 0};
     Duplicate(expertForSourceRowLocalFp32[duplicateIndex], MIN_FP32, mask, 1, DST_BLK_STRIDE, DST_REP_STRIDE);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
 
   LocalTensor<float> concatLocal;
   LocalTensor<float> tempTensor = tempBuffer.Get<float>(GetSortLen<float>(this->sortNum));
   Concat(concatLocal, expertForSourceRowLocalFp32, tempTensor, this->sortNum / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   LocalTensor<float> sortedLocal = sortedBuffer.Get<float>(GetSortLen<float>(this->sortNum));
   LocalTensor<uint32_t> sourceRowLocal;
   sourceRowLocal = inLocal[this->sortNum].ReinterpretCast<uint32_t>();
   Sort<float, true>(sortedLocal, concatLocal, sourceRowLocal, tempTensor, this->sortNum / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   LocalTensor<float> outLocal = sortDataCopyOutQueue.AllocTensor<float>();
   LocalTensor<float> sortedExpertForSourceRowLocal = outLocal[0];
   LocalTensor<uint32_t> expandDstToSrcRowLocal;
   expandDstToSrcRowLocal = outLocal[this->sortNum].ReinterpretCast<uint32_t>();
   Extract(sortedExpertForSourceRowLocal, expandDstToSrcRowLocal, sortedLocal, this->sortNum / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Muls(sortedExpertForSourceRowLocal, sortedExpertForSourceRowLocal, (float)-1, this->tileLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   LocalTensor<int32_t> expertForSourceRowLocalInt32;
   expertForSourceRowLocalInt32 = sortedExpertForSourceRowLocal.ReinterpretCast<int32_t>();

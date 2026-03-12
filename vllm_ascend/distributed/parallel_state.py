@@ -24,6 +24,8 @@ _SHARD_WEIGHT: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
+_DYNAMIC_EPLB: GroupCoordinator | None = None
+
 
 def init_ascend_model_parallel(
     parallel_config: ParallelConfig,
@@ -57,6 +59,7 @@ def init_ascend_model_parallel(
     global _P_TP
     assert _P_TP is None, "distributed prefill tensor parallel group is already initialized"
     prefill_tensor_model_parallel_size = pd_tp_ratio
+    pcp_size = parallel_config.prefill_context_parallel_size
     # divide alltoall groups
     if pd_head_ratio > 1 and get_current_vllm_config().kv_transfer_config.is_kv_producer:
         num_head_replica = get_ascend_config().num_head_replica
@@ -65,13 +68,13 @@ def init_ascend_model_parallel(
             group_ranks = all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(0)
         else:
             group_ranks = all_ranks.clone().view(
-                global_dp_size, -1, num_head_replica
+                global_dp_size * pcp_size, -1, num_head_replica
             )  # [DP_size, num_head, num_head_replica]
             group_ranks = group_ranks.permute(0, 2, 1)
             group_ranks = group_ranks.reshape(-1, group_ranks.size(-1))  # [DP_size * num_head_replica, num_head]
             alltoall_group_size = group_ranks.size(-1) // remote_tp_size
             group_ranks = group_ranks.unsqueeze(-1).view(
-                global_dp_size, num_head_replica, -1, alltoall_group_size
+                global_dp_size * pcp_size, num_head_replica, -1, alltoall_group_size
             )  # [DP_size, num_head_replica, num_alltoall_group, alltoall_group_size]
             group_ranks = group_ranks.reshape(-1, alltoall_group_size).unbind(0)
         group_ranks = [x.tolist() for x in group_ranks]
@@ -84,6 +87,12 @@ def init_ascend_model_parallel(
     group_ranks = [x.tolist() for x in group_ranks]
 
     _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
+
+    if get_ascend_config().eplb_config.dynamic_eplb:
+        global _DYNAMIC_EPLB
+        _DYNAMIC_EPLB = init_model_parallel_group(
+            group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
+        )
 
     # Initialize fine-grained TP process groups on Ascend for four components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
@@ -265,6 +274,11 @@ def get_fc3_quant_x_group() -> GroupCoordinator:
     return _FC3_QUANT_X
 
 
+def get_dynamic_eplb_group() -> GroupCoordinator:
+    assert _DYNAMIC_EPLB is not None, "fc3 quant x group is not initialized"
+    return _DYNAMIC_EPLB
+
+
 def destroy_ascend_model_parallel():
     global _MC2
     if _MC2:
@@ -315,3 +329,8 @@ def destroy_ascend_model_parallel():
     if _FC3_QUANT_X:
         _FC3_QUANT_X.destroy()
     _FC3_QUANT_X = None
+
+    global _DYNAMIC_EPLB
+    if _DYNAMIC_EPLB:
+        _DYNAMIC_EPLB.destroy()
+    _DYNAMIC_EPLB = None

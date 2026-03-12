@@ -78,6 +78,9 @@ class KVPoolScheduler:
         else:
             token_len = len(request.prompt_token_ids)
 
+        if token_len < self._block_size:
+            return 0, False
+
         num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
 
         if num_external_hit_tokens == request.num_tokens:
@@ -88,7 +91,7 @@ class KVPoolScheduler:
         else:
             need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
-        logger.info(
+        logger.debug(
             "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
             request.request_id,
             request.num_tokens,
