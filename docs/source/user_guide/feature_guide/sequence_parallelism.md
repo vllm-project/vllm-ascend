@@ -57,7 +57,7 @@ SP currently does not support quantization and is under adaptation.
 
 ## Pass Design
 
-When SP is enabled, the following passes run in order: `SequenceParallelismPass` then `SequenceParallelismAllgatherEpPass`.
+When SP is enabled, the following passes run in order: `SequenceParallelismPass` then `SequenceParallelismMoePass`.
 
 ### SequenceParallelismPass
 
@@ -74,11 +74,11 @@ Runs `NoOpEliminationPass` first to eliminate redundant view-like operations, th
 Qwen3-VL middle layers insert an extra add between `all_reduce` and `layernorm`: `hidden_states=hidden_states + deepstack_input_embeds`. Under SP, `hidden_states` (i.e., `input`) is reduced-scattered to shape `[seq_len/tp, hidden]` per rank, while `deepstack_input_embeds` comes from the vision/deepstack path and stays full-sequence `[seq_len, hidden]` (typically replicated across TP ranks). Simply doing `reduce_scatter(input) + deepstack_input_embeds` would cause a shape mismatch.
 The fix is to chunk `deepstack_input_embeds` by `tp_size` so each rank uses `add(reduce_scatter, chunk(deepstack_input_embeds)[tp_rank])`, keeping shapes consistent before `layernorm` and `all_gather`.
 
-### SequenceParallelismAllgatherEpPass
+### SequenceParallelismMoePass
 
-After `SequenceParallelismPass` applies, the AllGather EP computation graph looks like:
+After `SequenceParallelismPass` applies, the MoE model computation graph looks like:
 
-![AllGather EP computation graph](../../assets/sp_allgather_ep.png)
+![AllGather EP computation graph](../../assets/sp_moe.png)
 
 **Overview**
 

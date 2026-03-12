@@ -162,7 +162,7 @@ class AllGatherChunkNoOpPattern(_SequenceParallelPatternHelper):
         pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
 
 
-class SequenceParallelismAllgatherEpPass(VllmInductorPass):
+class SequenceParallelismMoePass(VllmInductorPass):
     """Sequence parallelism AllGather epilogue pass.
 
     Applies AllGather-based patterns: MiddleLayerAllgatherAddRMSNormPattern,
@@ -187,10 +187,10 @@ class SequenceParallelismAllgatherEpPass(VllmInductorPass):
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         self.matched_count = self.patterns.apply(graph)
-        logger.debug("SequenceParallelismAllgatherEpPass replaced %s patterns", self.matched_count)
+        logger.debug("SequenceParallelismMoePass replaced %s patterns", self.matched_count)
         self.end_and_log()
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         applicable = compile_range.start >= self.min_tokens
-        logger.debug(f"SequenceParallelismAllgatherEpPass {compile_range=} {applicable=}")
+        logger.debug(f"SequenceParallelismMoePass {compile_range=} {applicable=}")
         return applicable
