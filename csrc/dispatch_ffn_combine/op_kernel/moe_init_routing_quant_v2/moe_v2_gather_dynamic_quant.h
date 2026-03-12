@@ -122,31 +122,31 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::Compute(LocalTensor<float>& s
 
   if constexpr (!IsSameType<T, float>::value) {
     Cast(inLocal, inLocal.ReinterpretCast<T>()[perLoopColsAlign], RoundMode::CAST_NONE, this->cols);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
 
   if (smoothType != 0) {
     Mul(inLocal, inLocal, smoothLocal, this->cols);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
 
   Abs(tempLocal, inLocal, this->cols);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   ReduceMax(dynamicQuantLocal, tempLocal, tempLocal, this->cols);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   float maxValue = dynamicQuantLocal.GetValue(0) / 127.0f;
 
   Duplicate<float>(dynamicQuantLocal, maxValue, 8);
   Duplicate<float>(tempLocal, maxValue, this->cols);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   Div(tempLocal, inLocal, tempLocal, this->cols);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   Cast(tempLocal.ReinterpretCast<half>(), tempLocal, RoundMode::CAST_TRUNC, this->cols);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   Cast(outLocal, tempLocal.ReinterpretCast<half>(), RoundMode::CAST_ROUND, this->cols);
 
@@ -285,16 +285,16 @@ __aicore__ inline float MoeV2GatherDynamicQuant<T>::ComputeMax(LocalTensor<float
 
   if constexpr (!IsSameType<T, float>::value) {
     Cast(inLocal, inLocal.ReinterpretCast<T>()[perLoopColsAlign], RoundMode::CAST_NONE, colsTileLength);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
 
   if (smoothType != 0) {
     Mul(inLocal, inLocal, smoothLocal, colsTileLength);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
 
   Abs(tempLocal, inLocal, colsTileLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   ReduceMax(dynamicQuantLocal[8], tempLocal, tempLocal, colsTileLength);
 
@@ -319,13 +319,13 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::ComputeScale(LocalTensor<floa
   inLocal = inputXInQueue.DeQue<float>();
 
   Duplicate<float>(tempLocal, scaleTemp, colsTileLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   Div(tempLocal, inLocal, tempLocal, colsTileLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   Cast(tempLocal.ReinterpretCast<half>(), tempLocal, RoundMode::CAST_TRUNC, colsTileLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   Cast(outLocal, tempLocal.ReinterpretCast<half>(), RoundMode::CAST_ROUND, colsTileLength);
 

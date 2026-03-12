@@ -226,7 +226,7 @@ public:
         AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(RECV_SYNC_EVENT_ID);
         AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(SEND_SYNC_EVENT_ID);
         AscendC::CrossCoreWaitFlag(SEND_SYNC_EVENT_ID);
-        pipe_barrier(PIPE_ALL);
+        AscendC::PipeBarrier<PIPE_ALL>();
  
         ctrBuffer.SetValue(0, epStateValue_);
         AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
