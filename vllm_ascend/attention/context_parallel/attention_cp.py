@@ -823,8 +823,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded
         assert attn_metadata.prefill is not None and attn_metadata.prefill.pcp_metadata is not None
         pcp_padded_tokens_fla = attn_metadata.prefill.pcp_metadata.pcp_padded_tokens_fla
-        num_tokens_pcp_padded_fla = num_tokens + pcp_padded_tokens_fla
-
         qkv_fla = torch.cat(
             [query.reshape(num_tokens, -1), key.reshape(num_tokens, -1), value.reshape(num_tokens, -1)],
             dim=-1,
@@ -917,10 +915,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             assert attn_metadata.prefill is not None and attn_metadata.prefill.pcp_metadata is not None
             pcp_use_hybrid_attn = attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn
         if has_decode:
-            if pcp_use_hybrid_attn:
-                decode_query = query[: num_decode_tokens * self.pcp_size : self.pcp_size].contiguous()
-            else:
-                decode_query = query[:num_decode_tokens].contiguous()
+            decode_query = query[:num_decode_tokens].contiguous()
             output_decode = self._forward_decode_pcp_dcp(decode_query, attn_metadata)
             output[:num_decode_tokens] = output_decode
         if has_prefill:
@@ -937,10 +932,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             # qkv init
             num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
-            if pcp_use_hybrid_attn:
-                prefill_query = query[self.pcp_size * num_decode_tokens :]
-            else:
-                prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+            prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
             key = key[self.pcp_size * num_decode_tokens :].contiguous()
             value = value[self.pcp_size * num_decode_tokens :].contiguous()
 
@@ -1011,8 +1003,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 pcp_allgather_restore_idx = attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx
                 attn_output_prefill = get_pcp_group().all_gather(attn_output_prefill.contiguous(), dim=0)
                 attn_output_prefill = torch.index_select(attn_output_prefill, 0, pcp_allgather_restore_idx)
-                fla_padding = attn_output_prefill.shape[0] + num_decode_tokens - output.shape[0]
-                output = F.pad(output, pad=(0, 0, 0, 0, 0, fla_padding), mode="constant", value=0)
 
             output[num_decode_tokens : attn_output_prefill.shape[0] + num_decode_tokens] = attn_output_prefill
         return output

@@ -75,12 +75,13 @@ class PCPManager:
             device=device,
             pin_memory=pin_memory,
         )
-        self.pcp_padded_slot_mapping = torch.full(
+        self.sample_slot_mapping = torch.full(
             (max_buffer_num_tokens,),
             fill_value=-1,
             dtype=torch.int32,
             device=device,
         )
+        self.pcp_padded_slot_mapping_list: list = [] # reinitialized in initialize_slot_mapping
         self.pcp_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.total_num_sampled_tokens_pcp = 0
         self.num_pcp_pads_cpu_tensor = torch.zeros((max_num_reqs,), device="cpu", dtype=torch.int64)
@@ -163,6 +164,21 @@ class PCPManager:
         self.num_decode_reqs = first_prefill
         self.num_prefill_reqs = num_reqs - self.num_decode_reqs
         self.num_decode_tokens = num_scheduled_tokens[: self.num_decode_reqs].sum()
+        self.num_scheduled_tokens_padded = num_scheduled_tokens # for graph comipling in hybrid_attn
+
+    def initialize_slot_mapping(self) -> None:
+        '''
+        Hyrbid-attention models, such as qwen3_next, have plural kv_cache_groups, which may lead to
+        problems like overwritting last group's pcp_padded_slot_mapping, since they share the same
+        address. Therefore we need as many pcp_padded_slot_mappings as kv_cache_groups.
+        '''
+        pcp_padded_slot_mapping = torch.full(
+            (self.sample_slot_mapping.shape[0],),
+            fill_value=-1,
+            dtype=torch.int32,
+            device=self.sample_slot_mapping.divice,
+        )
+        self.pcp_padded_slot_mapping_list.append(pcp_padded_slot_mapping)
 
     def update_tokens_for_pcp(
         self,
@@ -470,9 +486,16 @@ class PCPManager:
             logits_indices = torch.cumsum(tokens_logits, dim=0) - 1
         return logits_indices
 
-    def get_padded_slot_mapping(self, num_tokens: int, num_tokens_padded: int, slot_mapping: torch.Tensor):
+    def get_padded_slot_mapping(
+        self,
+        num_tokens: int,
+        num_tokens_padded: int,
+        slot_mapping: torch.Tensor,
+        kv_cache_group_id: int,    
+    ):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
+        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping_list[kv_cache_group_id]
         if self.pcp_use_hybrid_attn:
             assert self.num_scheduled_tokens_padded is not None
             num_tokens = self.num_scheduled_tokens_padded.sum()
@@ -483,10 +506,7 @@ class PCPManager:
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[: num_tokens * self.pcp_world_size]
         pcp_padded_slot_mapping.fill_(-1)
         pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping
-        if self.pcp_use_hybrid_attn:
-            return pcp_padded_slot_mapping.clone()
-        else:
-            return pcp_padded_slot_mapping
+        return pcp_padded_slot_mapping
 
     def get_restore_hidden_states(
         self,

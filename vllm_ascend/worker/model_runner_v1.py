@@ -2763,6 +2763,8 @@ class NPUModelRunner(GPUModelRunner):
         # For other backends (like Mamba), use [0] (no splitting)
         kernel_block_sizes = []
         for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            if self.pcp_size > 1:
+                self.pcp_manager.initialize_slot_mapping()
             kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 # All layers in the UniformTypeKVCacheSpecs have the same type,
