@@ -159,7 +159,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale = None
             w2 = layer.w2_weight
             w2_scale = None
-        
+
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             w1=w1,
