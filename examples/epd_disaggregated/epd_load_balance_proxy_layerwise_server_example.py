@@ -196,7 +196,7 @@ class ProxyState:
     def abort_pd_request(self, server_idx: int, request_id):
         self.pds[server_idx].aborted_requests.add(request_id)
 
-    def aquire_aborted_pd_requests(self, server_idx: int):
+    def acquire_aborted_pd_requests(self, server_idx: int):
         aborted_requests = self.pds[server_idx].aborted_requests.copy()
         self.pds[server_idx].aborted_requests.clear()
         return aborted_requests
@@ -204,7 +204,7 @@ class ProxyState:
     def abort_prefiller_request(self, server_idx: int, request_id):
         self.prefillers[server_idx].aborted_requests.add(request_id)
 
-    def aquire_aborted_prefiller_requests(self, server_idx: int):
+    def acquire_aborted_prefiller_requests(self, server_idx: int):
         aborted_requests = self.prefillers[server_idx].aborted_requests.copy()
         self.prefillers[server_idx].aborted_requests.clear()
         return aborted_requests
