@@ -20,7 +20,8 @@ def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Con
 class AscendDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__(vllm_config, prefix)
-        self.is_rot_used = vllm_config.quant_config.quant_description.get("is_rot_used", False)
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None)
+        self.is_rot_used = quant_description.get("is_rot_used", False) if quant_description is not None else False
         self.target_model_type = vllm_config.speculative_config.target_model_config.hf_text_config.model_type
         if self.is_rot_used and self.target_model_type == "glm_moe_dsa":
             self.rot = nn.Linear(self.config.hidden_size, self.config.hidden_size, bias=False)
