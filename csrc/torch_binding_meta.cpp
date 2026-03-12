@@ -483,6 +483,8 @@ npu_copy_and_expand_eagle_inputs_meta(
 
     return {out_input_ids, out_positions, out_is_rejected_token_mask, out_is_masked_token_mask,
             out_new_token_indices, out_hidden_state_mapping};
+}
+
 at::Tensor causal_conv1d_fn_meta(
     const at::Tensor& mixed_qkv_non_spec_T,
     const at::Tensor& conv_weights,
