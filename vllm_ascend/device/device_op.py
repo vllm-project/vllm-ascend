@@ -25,6 +25,14 @@ from vllm_ascend.device.mxfp_compat import (
 )
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
+def _require_single_tensor_for_swiglu_quant(
+    tensor_or_list: list[torch.Tensor] | torch.Tensor, *, name: str
+) -> torch.Tensor:
+    if isinstance(tensor_or_list, list):
+        if len(tensor_or_list) != 1:
+            raise ValueError(f"{name} must be a tensor or a single-element list, but got {len(tensor_or_list)}.")
+        return tensor_or_list[0]
+    return tensor_or_list
 
 class BaseDeviceAdaptor:
     @classmethod
@@ -112,9 +120,9 @@ class BaseDeviceAdaptor:
     def npu_grouped_matmul_swiglu_quant(
         *,
         x: torch.Tensor,
-        weight: torch.Tensor,
+        weight: list[torch.Tensor] | torch.Tensor,
         group_list: torch.Tensor,
-        weight_scale: torch.Tensor,
+        weight_scale: list[torch.Tensor] | torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
         use_mxfp_quant: bool = False,
@@ -126,10 +134,10 @@ class BaseDeviceAdaptor:
 
         return torch_npu.npu_grouped_matmul_swiglu_quant(
             x=x,
-            weight=weight,
+            weight=_require_single_tensor_for_swiglu_quant(weight, name='weight'),
             bias=bias,
             group_list=group_list,
-            weight_scale=weight_scale,
+            weight_scale=_require_single_tensor_for_swiglu_quant(weight_scale, name='weight_scale'),
             x_scale=x_scale,
         )
 
@@ -408,9 +416,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def npu_grouped_matmul_swiglu_quant(
         *,
         x: torch.Tensor,
-        weight: torch.Tensor,
+        weight: list[torch.Tensor] | torch.Tensor,
         group_list: torch.Tensor,
-        weight_scale: torch.Tensor,
+        weight_scale: list[torch.Tensor] | torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
         use_mxfp_quant: bool = False,
@@ -418,21 +426,20 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
     ):
         if not use_mxfp_quant:
-            return BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+            hidden_states, swiglu_out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=x,
                 weight=weight,
                 group_list=group_list,
                 weight_scale=weight_scale,
                 x_scale=x_scale,
-                bias=bias,
-                use_mxfp_quant=False,
+                dequant_dtype=torch.float32,
             )
-
+            return hidden_states, swiglu_out_scale, None
         out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=x,
             weight=[weight],
             group_list=group_list,
-            weight_scale=[weight_scale],
+            weight_scale=[_require_single_tensor_for_swiglu_quant(weight_scale, name='weight_scale')],
             x_scale=x_scale,
             dequant_mode=2,
             quant_mode=2,

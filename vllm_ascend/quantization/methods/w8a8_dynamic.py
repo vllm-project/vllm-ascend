@@ -31,6 +31,7 @@ from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
@@ -291,8 +292,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
         # TODO(zzzzwwjj): Currently, `torch_npu.npu_grouped_matmul_swiglu_quant`
         # can only support weight nz.
-        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        ascend_device_type = get_ascend_device_type()
+        if ascend_device_type != AscendDeviceType.A5:
+            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
