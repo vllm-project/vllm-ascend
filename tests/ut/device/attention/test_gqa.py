@@ -10,7 +10,7 @@ from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-from tests.e2e.attention.utils import (
+from tests.ut.device.attention.utils import (
     BatchSpec,
     create_and_prepopulate_kv_cache,
     create_common_attn_metadata,
@@ -295,7 +295,7 @@ def _test_npu_attention_correctness(
         "single_prefill",
     ],
 )
-@pytest.mark.parametrize("model", ["/mnt/share/weights/Qwen3-32B"])
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_causal_backend_correctness(default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int):
     """Test backend's correctness with causal attention."""
