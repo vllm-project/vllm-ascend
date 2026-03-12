@@ -361,6 +361,7 @@
 #       https://github.com/vllm-project/vllm/pull/36225
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
+#
 # ** 17. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2MoE.forward`
