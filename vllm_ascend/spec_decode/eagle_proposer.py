@@ -94,7 +94,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
-        self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 1, dtype=torch.int32)
+        self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0], device="cpu", dtype=torch.int32)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
@@ -189,13 +189,19 @@ class SpecDecodeBaseProposer(EagleProposer):
             self.model = self._get_model()
 
         indexer_layers = get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys()
-        draft_attn_layer = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
+        draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        draft_attn_layers = draft_attn_layers_dict.keys()
 
-        draft_attn_layer_names = draft_attn_layer - target_attn_layer_names
+        draft_attn_layer_names = draft_attn_layers - target_attn_layer_names
         draft_indexer_layer_names = indexer_layers - target_indexer_layer_names
         draft_attn_layer_names = draft_attn_layer_names - draft_indexer_layer_names
 
         self.attn_layer_names = list(sorted(draft_attn_layer_names))
+
+        self.kernel_block_size = (
+            draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
+        )
+
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
             self.piece_all_attn_layer_name.append([name for name in self.attn_layer_names])
@@ -210,6 +216,9 @@ class SpecDecodeBaseProposer(EagleProposer):
             if self.get_model_name(model) in [
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
+                "Qwen3VLMoeForConditionalGeneration",
+                "Qwen3_5ForConditionalGeneration",
+                "Qwen3_5MoeForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = model.config.image_token_id
             elif self.get_model_name(model) == "PixtralForConditionalGeneration":
@@ -401,7 +410,9 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         model_positions = self._get_positions(num_tokens)
 
-        batch_size = num_tokens // (self.num_speculative_tokens + 1)  # if not is_profile else self.runner.max_num_reqs
+        batch_size = max(
+            num_tokens // (self.num_speculative_tokens + 1), 1
+        )  # if not is_profile else self.runner.max_num_reqs
         if is_profile:
             batch_size = min(batch_size, self.runner.max_num_reqs)
 
@@ -1155,7 +1166,10 @@ class SpecDecodeBaseProposer(EagleProposer):
             slot_mapping = mtp_slot_mapping[slot_indices]
             common_attn_metadata.slot_mapping[: batch_size * self.pcp_size] = slot_mapping
         else:
-            block_size = attn_metadata_builder.kv_cache_spec.block_size
+            # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
+            # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
+            # which is not correct for computing `slot_mapping` below.
+            block_size = self.kernel_block_size
 
             # Compute the slot mapping.
             if self.uses_mrope:

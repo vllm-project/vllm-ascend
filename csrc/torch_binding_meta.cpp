@@ -483,6 +483,48 @@ npu_copy_and_expand_eagle_inputs_meta(
 
     return {out_input_ids, out_positions, out_is_rejected_token_mask, out_is_masked_token_mask,
             out_new_token_indices, out_hidden_state_mapping};
+at::Tensor causal_conv1d_fn_meta(
+    const at::Tensor& mixed_qkv_non_spec_T,
+    const at::Tensor& conv_weights,
+    const c10::optional<at::Tensor>& bias_opt,
+    c10::string_view activation, 
+    const at::Tensor& conv_state,
+    const at::Tensor&  has_initial_state,
+    const at::Tensor& non_spec_state_indices_tensor,
+    const at::Tensor& non_spec_query_start_loc,
+    int64_t  pad_slot_id)
+{
+
+    at::Tensor output = at::empty_symint(mixed_qkv_non_spec_T.sym_sizes(), mixed_qkv_non_spec_T.options());
+    return output;
+}
+  
+std::vector<at::Tensor> moe_grouped_matmul_meta(
+    at::Tensor x,
+    at::Tensor weight,
+    const at::Tensor& group_list,
+    int64_t split_item,
+    int64_t group_type,
+    int64_t group_list_type
+)
+{
+    bool transpose_weight = false;
+    bool weight_nz = true;
+
+    at::TensorList x_list = at::TensorList(x);
+    at::TensorList weight_list = at::TensorList(weight);
+    std::vector<at::Tensor> y;
+    c10::TensorOptions options = x[0].options().dtype(x[0].scalar_type());
+    auto m = x[0].sizes()[0];
+    auto n = weight[0].sizes()[1];
+    if (!transpose_weight) {
+        n = weight[0].sizes()[2];
+    }
+    at::Tensor y_0 = at::zeros(at::IntArrayRef{m, n}, options);
+    y.emplace_back(y_0);
+    at::TensorList result = at::TensorList(y);
+
+    return y;
 }
 
 } // namespace meta
@@ -528,5 +570,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
     // CopyAndExpandEagleInputs
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
+    // causal_conv1d_fn
+    ops.impl("causal_conv1d_fn", &vllm_ascend::meta::causal_conv1d_fn_meta);
+    // moe_grouped_matmul
+    ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
 }
 }
