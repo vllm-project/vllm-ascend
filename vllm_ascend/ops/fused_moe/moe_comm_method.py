@@ -19,7 +19,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
-import torch_npu
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
@@ -146,10 +145,10 @@ class MoECommMethod(ABC):
         # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced
         # by different quantization modes will be consolidated into a dataclass in a follow-up.
         use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
+        dispatch_with_quant = use_int8_w8a8 or use_int4_w4a8 or use_mxfp_quant
         act_quant_type, weight_quant_type, scale_type, per_token_scale_type, round_mode = parse_mxfp_quant_params(
             **kwargs
         )
-        dispatch_with_quant = use_int8_w8a8 or use_int4_w4a8 or use_mxfp_quant and act_quant_type != torch_npu.float4_e2m1fn_x2
 
         dispatch_kwargs = {
             "hidden_states": hidden_states,
@@ -166,7 +165,7 @@ class MoECommMethod(ABC):
         if isinstance(self.token_dispatcher, TokenDispatcherWithMC2):
             dispatch_kwargs["with_quant"] = dispatch_with_quant
             dispatch_kwargs["comm_quant_mode"] = kwargs.get("comm_quant_mode")
-            dispatch_kwargs["y_dtype"] = act_quant_type if use_mxfp_quant and act_quant_type != torch_npu.float4_e2m1fn_x2 else None
+            dispatch_kwargs["y_dtype"] = act_quant_type if use_mxfp_quant else None
             dispatch_kwargs["use_mxfp_quant"] = use_mxfp_quant
         else:
             dispatch_kwargs["with_quant"] = use_int8_w8a8 or use_int4_w4a8
