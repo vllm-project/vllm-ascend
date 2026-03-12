@@ -76,7 +76,6 @@ jobs:
       run: |
         PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
         export PYTHONPATH
-        env
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         # Run mypy for Python 3.10, 3.11, 3.12 manually
         # Note: We are now separating mypy from pre-commit hooks for performance reasons.
