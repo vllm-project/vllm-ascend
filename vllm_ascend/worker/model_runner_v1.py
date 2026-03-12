@@ -2689,7 +2689,7 @@ class NPUModelRunner(GPUModelRunner):
                     elif self.use_sparse:
                         # for deepseek v3.2, we split the kv cache according to the corresponding ratio
                         kv_cache_spec = layer_kv_cache_spec[layer_name]
-                        sparse_kv_cache_ratio = kv_cache_spec.kv_cache_ratio
+                        sparse_kv_cache_ratio = kv_cache_spec.sparse_kv_cache_ratio
                         k_tensor_split_factor = sparse_kv_cache_ratio[0]
                         v_tensor_split_factor = sparse_kv_cache_ratio[1]
                         dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]

@@ -44,6 +44,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     @property
     def page_size_bytes(self) -> int:
         if self.cache_sparse_c8:
+            assert self.sparse_head_dim is not None
             assert len(self.sparse_head_dim) == 3
             num_heads_per_page = self.block_size * self.num_kv_heads
             # kv_cache[0]: bfloat16, kv_cache[1]: bfloat16
@@ -63,7 +64,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return self.block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
 
     @property
-    def kv_cache_ratio(self) -> tuple[float, float, float, float | None]:
+    def sparse_kv_cache_ratio(self) -> tuple[float, float, float, float | None]:
         """
         Compute the relative byte share of each KV cache entry.
 
@@ -75,7 +76,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             - kv_cache[3] (None if Sparse C8 is disabled)
         """
 
+        assert self.sparse_head_dim is not None
+
         def get_sparse_head_dim_virtual() -> tuple[int, int, int, int]:
+            assert self.sparse_head_dim is not None
             assert self.cache_sparse_c8 is True
 
             kv_lora_rank, qk_rope_head_dim, index_k_head_dim = self.sparse_head_dim
