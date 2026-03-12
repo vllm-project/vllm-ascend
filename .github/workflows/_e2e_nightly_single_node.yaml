@@ -76,6 +76,7 @@ jobs:
       UV_INDEX_STRATEGY: unsafe-best-match
       UV_NO_CACHE: 1
       UV_SYSTEM_PYTHON: 1
+      VLLM_ENGINE_READY_TIMEOUT_S: 1800
     steps:
       - name: Check npu and CANN info
         run: |
