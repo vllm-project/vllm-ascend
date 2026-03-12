@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-test-8-hk
     container:
       # Build it from https://github.com/nv-action/vllm-benchmarks/blob/main/Dockerfile
       image: quay.io/ascend-ci/vllm-ascend:lint

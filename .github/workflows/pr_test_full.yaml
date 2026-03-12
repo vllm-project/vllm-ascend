@@ -40,7 +40,7 @@ concurrency:
 
 jobs:
   changes:
-    runs-on: linux-aarch64-a2b3-0
+    runs-on: linux-aarch64-a2b3-test-0
     if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
@@ -85,3 +85,6 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       contains_310: false
       type: full
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}

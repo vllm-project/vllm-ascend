@@ -43,7 +43,7 @@ jobs:
     with:
       vllm: 4034c3d32e30d01639459edd3ab486f56993876d
   changes:
-    runs-on: linux-aarch64-a2b3-0
+    runs-on: linux-aarch64-a2b3-test-0
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
@@ -94,9 +94,12 @@ jobs:
     uses: ./.github/workflows/_unit_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      runner: linux-amd64-cpu-8-hk
+      runner: linux-amd64-cpu-test-8-hk
       image: quay.nju.edu.cn/ascend/cann:8.5.1-910b-ubuntu22.04-py3.11
       type: pr
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
 
   e2e-light:
     name: e2e-light
@@ -113,3 +116,6 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
       type: light
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}

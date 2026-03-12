@@ -2,6 +2,11 @@ name: 'e2e test'
 
 on:
   workflow_call:
+    secrets:
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
     inputs:
       vllm:
         required: true
@@ -19,12 +24,24 @@ on:
         required: false
         type: boolean
         default: false
-
+env:
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_NO_CACHE: 0
+  UV_SYSTEM_PYTHON: 1
+  UV_CACHE_DIR: /tmp/uv-cache
+  SCCACHE_BUCKET: obs-guiiyang1-ascend-test
+  SCCACHE_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
+  SCCACHE_REGION: cn-southwest-2
+  SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE: true
+  AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
 jobs:
   e2e-light:
     name: singlecard-light
     if: ${{ inputs.type == 'light' }}
-    runs-on: linux-aarch64-a2b3-1
+    runs-on: linux-aarch64-a2b3-test-1
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +60,53 @@ jobs:
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
+      - name: get hash
+        id: get_dir_hash
+        run: |
+          DIR_HASH=$(find ./csrc ./setup.py ./pyproject.toml ./CMakeLists.txt ./cmake \
+            ./vllm_ascend/envs.py ./requirements.txt ./requirements-dev.txt ./packages.txt \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "DIR_HASH=$DIR_HASH" >> $GITHUB_OUTPUT
+      - name: Cache dependencies
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: ascend-${{ runner.os }}-vllm-ascend-build-v2-${{ steps.get_dir_hash.outputs.DIR_HASH }}
+          restore-keys: |
+            ascend-${{ runner.os }}-vllm-ascend-build-v2-${{ steps.get_dir_hash.outputs.DIR_HASH }}
+        env:
+          # 👇 指定你的 OBS bucket（必须用 virtual-hosted 域名！）
+          RUNS_ON_S3_BUCKET_CACHE: obs-guiiyang1-ascend-test
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: cn-southwest-2
+      - name: Get requirements hash
+        id: get_req_hash
+        run: |
+          REQ_HASH=$(sha256sum requirements.txt requirements-dev.txt 2>/dev/null | sha256sum | awk '{print $1}')
+          echo "REQ_HASH=$REQ_HASH" >> $GITHUB_OUTPUT
+          echo "requirements hash: $REQ_HASH"
+      - name: Cache uv pip packages
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            /tmp/uv-cache
+            /tmp/pip-cache
+          key: ascend-${{ runner.os }}-uv-pip-v2-${{ steps.get_req_hash.outputs.REQ_HASH }}
+          restore-keys: |
+            ascend-${{ runner.os }}-uv-pip-v2-${{ steps.get_req_hash.outputs.REQ_HASH }}
+        env:
+          RUNS_ON_S3_BUCKET_CACHE: obs-guiiyang1-ascend-test
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: cn-southwest-2
+
       - name: Config mirrors
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
@@ -50,6 +114,8 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
+          [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && uv pip install sccache || true
 
       - name: Install system dependencies
         run: |
@@ -70,14 +136,22 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend/_cann_ops_custom -not -name '.gitkeep' -type f 2>/dev/null | grep -q . \
+            && find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            echo "Cache hit: skipping compilation (aclnn + cmake), installing Python package only"
+            COMPILE_CUSTOM_KERNELS=0 VLLM_ASCEND_SKIP_ACLNN=1 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+            sccache --show-stats
+          fi
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -111,7 +185,7 @@ jobs:
   e2e-full:
     name: singlecard-full
     if: ${{ inputs.type == 'full' }}
-    runs-on: linux-aarch64-a2b3-1
+    runs-on: linux-aarch64-a2b3-test-1
     strategy:
       fail-fast: false
       matrix:
@@ -139,6 +213,8 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
+          [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && uv pip install sccache || true
 
       - name: Install system dependencies
         run: |
@@ -147,7 +223,52 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-
+      - name: get hash
+        id: get_dir_hash
+        run: |
+          DIR_HASH=$(find ./csrc ./setup.py ./pyproject.toml ./CMakeLists.txt ./cmake \
+            ./vllm_ascend/envs.py ./requirements.txt ./requirements-dev.txt ./packages.txt \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "DIR_HASH=$DIR_HASH" >> $GITHUB_OUTPUT
+      - name: Cache dependencies
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: ascend-${{ runner.os }}-vllm-ascend-build-v2-${{ steps.get_dir_hash.outputs.DIR_HASH }}
+          restore-keys: |
+            ascend-${{ runner.os }}-vllm-ascend-build-v2-${{ steps.get_dir_hash.outputs.DIR_HASH }}
+        env:
+          # 👇 指定你的 OBS bucket（必须用 virtual-hosted 域名！）
+          RUNS_ON_S3_BUCKET_CACHE: obs-guiiyang1-ascend-test
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: cn-southwest-2
+      - name: Get requirements hash
+        id: get_req_hash
+        run: |
+          REQ_HASH=$(sha256sum requirements.txt requirements-dev.txt 2>/dev/null | sha256sum | awk '{print $1}')
+          echo "REQ_HASH=$REQ_HASH" >> $GITHUB_OUTPUT
+          echo "requirements hash: $REQ_HASH"
+      - name: Cache uv pip packages
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            /tmp/uv-cache
+            /tmp/pip-cache
+          key: ascend-${{ runner.os }}-uv-pip-v2-${{ steps.get_req_hash.outputs.REQ_HASH }}
+          restore-keys: |
+            ascend-${{ runner.os }}-uv-pip-v2-${{ steps.get_req_hash.outputs.REQ_HASH }}
+        env:
+          RUNS_ON_S3_BUCKET_CACHE: obs-guiiyang1-ascend-test
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: cn-southwest-2
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
         with:
@@ -159,14 +280,23 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend/_cann_ops_custom -not -name '.gitkeep' -type f 2>/dev/null | grep -q . \
+            && find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            echo "Cache hit: skipping compilation (aclnn + cmake), installing Python package only"
+            COMPILE_CUSTOM_KERNELS=0 VLLM_ASCEND_SKIP_ACLNN=1 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+            sccache --show-stats
+          fi
+
       - name: Run e2e test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -198,7 +328,7 @@ jobs:
   e2e-2-cards-light:
     name: multicard-2-light
     if: ${{ inputs.type == 'light' }}
-    runs-on: linux-aarch64-a3-2
+    runs-on: linux-aarch64-a3-test-2
     strategy:
       fail-fast: false
       matrix:
@@ -225,6 +355,8 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
+          [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && uv pip install sccache || true
 
       - name: Install system dependencies
         run: |
@@ -233,6 +365,52 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+      - name: get hash
+        id: get_dir_hash
+        run: |
+          DIR_HASH=$(find ./csrc ./setup.py ./pyproject.toml ./CMakeLists.txt ./cmake \
+            ./vllm_ascend/envs.py ./requirements.txt ./requirements-dev.txt ./packages.txt \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "DIR_HASH=$DIR_HASH" >> $GITHUB_OUTPUT
+      - name: Cache dependencies
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: ascend-${{ runner.os }}-vllm-ascend-build-v2-${{ steps.get_dir_hash.outputs.DIR_HASH }}
+          restore-keys: |
+            ascend-${{ runner.os }}-vllm-ascend-build-v2-${{ steps.get_dir_hash.outputs.DIR_HASH }}
+        env:
+          # 👇 指定你的 OBS bucket（必须用 virtual-hosted 域名！）
+          RUNS_ON_S3_BUCKET_CACHE: obs-guiiyang1-ascend-test
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: cn-southwest-2
+      - name: Get requirements hash
+        id: get_req_hash
+        run: |
+          REQ_HASH=$(sha256sum requirements.txt requirements-dev.txt 2>/dev/null | sha256sum | awk '{print $1}')
+          echo "REQ_HASH=$REQ_HASH" >> $GITHUB_OUTPUT
+          echo "requirements hash: $REQ_HASH"
+      - name: Cache uv pip packages
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            /tmp/uv-cache
+            /tmp/pip-cache
+          key: ascend-${{ runner.os }}-uv-pip-v2-${{ steps.get_req_hash.outputs.REQ_HASH }}
+          restore-keys: |
+            ascend-${{ runner.os }}-uv-pip-v2-${{ steps.get_req_hash.outputs.REQ_HASH }}
+        env:
+          RUNS_ON_S3_BUCKET_CACHE: obs-guiiyang1-ascend-test
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: cn-southwest-2
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -245,14 +423,22 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend/_cann_ops_custom -not -name '.gitkeep' -type f 2>/dev/null | grep -q . \
+            && find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            echo "Cache hit: skipping compilation (aclnn + cmake), installing Python package only"
+            COMPILE_CUSTOM_KERNELS=0 VLLM_ASCEND_SKIP_ACLNN=1 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+            sccache --show-stats
+          fi
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -311,6 +497,8 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
+          [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && uv pip install sccache || true
 
       - name: Install system dependencies
         run: |
@@ -331,14 +519,16 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -404,6 +594,8 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
+          [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && uv pip install sccache || true
 
       - name: Install system dependencies
         run: |
@@ -424,14 +616,15 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
@@ -483,6 +676,8 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
+          [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && uv pip install sccache || true
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -503,14 +698,15 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -542,6 +738,8 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          pip install uv
+          [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && uv pip install sccache || true
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -562,14 +760,15 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
 
       - name: Run vllm-project/vllm-ascend test
         env:
