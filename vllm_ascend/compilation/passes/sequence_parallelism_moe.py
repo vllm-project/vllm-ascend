@@ -8,7 +8,7 @@ from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.sequence_parallelism import (
     _SequenceParallelPatternHelper,
-    get_sp_threshold,
+    get_sp_min_token_num,
 )
 
 
@@ -182,7 +182,7 @@ class SequenceParallelismAllgatherEpPass(VllmInductorPass):
 
         AllGatherChunkNoOpPattern(config).register(self.patterns)
 
-        self.min_tokens = get_sp_threshold(config)
+        self.min_tokens = get_sp_min_token_num(config)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()

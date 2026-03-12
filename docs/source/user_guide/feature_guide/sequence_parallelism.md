@@ -14,14 +14,13 @@ Currently, vllm-ascend has implemented Sequence Parallelism for VL-class models 
 ```bash
 vllm serve Qwen/Qwen3-VL-2B-Instruct \
     --tensor-parallel-size 2 \
-    --compilation-config '{"pass_config": {"enable_sp": true}}' \
-    --additional_config={"sp_threshold": 1000}
+    --compilation-config '{"pass_config": {"enable_sp": true, , "sp_min_token_num": 1000}}'
 ```
 
 - `"pass_config": {"enable_sp": true}`: This is the switch for SP. Since SP relies on graph mode, it must be enabled and is not supported in eager mode.
-- `--additional_config={"sp_threshold": 1000}`: Based on our experiments, when the number of tokens is small (empirical value is less than 1000), SP can actually bring negative benefits. This is because when the communication volume is small, the fixed overhead of the communication operator becomes the dominant factor. Therefore, when one communication operator (Allreduce) is split into two communication operators (ReduceScatter+Allgather), the end-to-end latency often becomes longer. Thus, we have reserved the `sp_threshold`parameter; SP will only take effect when `num_tokens >= sp_threshold`. **The default value is 1000, which generally does not need to be modified.** `sp_threshold` will be appended into `compile_ranges_split_points`, which is a parameter provided by vllm that splits the graph compilation range `[1, max_num_batched_tokens]` into `{[1, split_points[0]], [split_points[0] + 1, split_points[1]], ..., [split_points[-1] + 1, max_num_batched_tokens]}`, and sequentially checks whether the `is_applicable_for_range` of the pass returns `True`.
+- `sp_min_token_num` (from upstream vllm's `pass_config`): Based on our experiments, when the number of tokens is small (empirical value is less than 1000), SP can actually bring negative benefits. This is because when the communication volume is small, the fixed overhead of the communication operator becomes the dominant factor. SP will only take effect when `num_tokens >= sp_min_token_num`. **The default value is 1000 on Ascend, which generally does not need to be modified.** To customize, use `--compilation-config '{"pass_config": {"enable_sp": true, "sp_min_token_num": 512}}'`. The value will be appended into `compile_ranges_split_points`, which splits the graph compilation range and checks whether the pass is applicable per range.
 
-Without modifying `sp_threshold`, the simplest way and recommended way to enable SP is:
+Without modifying `sp_min_token_num`, the simplest way and recommended way to enable SP is:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-2B-Instruct \

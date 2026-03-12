@@ -10,15 +10,14 @@ from vllm.logger import logger
 from vllm_ascend.compilation.passes.noop_elimination import NoOpEliminationPass
 from vllm_ascend.utils import is_moe_model
 
-SP_THRESHOLD = 1000
+SP_MIN_TOKEN_NUM_DEFAULT = 1000
 
 
-def get_sp_threshold(config: VllmConfig):
+def get_sp_min_token_num(config: VllmConfig) -> int:
     if is_moe_model(config):
         return 1
 
-    additional_config = config.additional_config if config.additional_config is not None else {}
-    return additional_config.get("sp_threshold", SP_THRESHOLD)
+    return SP_MIN_TOKEN_NUM_DEFAULT
 
 
 class _SequenceParallelPatternHelper:
@@ -205,7 +204,7 @@ class SequenceParallelismPass(VllmInductorPass):
 
             Qwen3VLMiddleAllReduceRMSNormPattern(config, epsilon).register(self.patterns)
 
-        self.min_tokens = get_sp_threshold(config)
+        self.min_tokens = get_sp_min_token_num(config)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
