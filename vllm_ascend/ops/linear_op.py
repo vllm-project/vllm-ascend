@@ -102,6 +102,39 @@ _TP_DUMP_LOCK = threading.Lock()
 _TP_DUMP_DECODE_STEP = -1
 
 
+def _parse_layer_ids(raw: str) -> set[int] | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    layer_ids: set[int] = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            bounds = token.split("-", maxsplit=1)
+            if len(bounds) != 2:
+                continue
+            try:
+                start = int(bounds[0].strip())
+                end = int(bounds[1].strip())
+            except ValueError:
+                continue
+            lo = min(start, end)
+            hi = max(start, end)
+            layer_ids.update(range(lo, hi + 1))
+            continue
+        try:
+            layer_ids.add(int(token))
+        except ValueError:
+            continue
+    return layer_ids or None
+
+
+_TP_DUMP_LAYER_IDS = _parse_layer_ids(os.getenv("VLLM_ASCEND_TP_DUMP_LAYER_IDS", ""))
+
+
 def _get_layer_idx_from_prefix(prefix: str) -> int | None:
     patterns = (
         r"(?:^|\.)layers\.(\d+)\.",
@@ -176,8 +209,8 @@ def dump_tp_row_output_if_needed(
     proj_type = _get_proj_type(prefix)
     if proj_type is None:
         return
-    if _TP_DUMP_FIRST_LAYER_ONLY and not _is_first_layer(prefix):
-        return
+    layer_idx = _get_layer_idx_from_prefix(prefix)
+    is_step_anchor = layer_idx == 0 and proj_type == "o_proj"
 
     try:
         forward_context = get_forward_context()
@@ -190,7 +223,9 @@ def dump_tp_row_output_if_needed(
         return
 
     with _TP_DUMP_LOCK:
-        if _is_first_layer(prefix) and proj_type == "o_proj":
+        # Keep decode-step tracking stable even when layer dump filtering excludes
+        # layer 0 records.
+        if is_step_anchor:
             _TP_DUMP_DECODE_STEP += 1
         decode_step = _TP_DUMP_DECODE_STEP
         if decode_step < 0:
@@ -201,6 +236,11 @@ def dump_tp_row_output_if_needed(
             return
         if (decode_step - _TP_DUMP_START_STEP) % _TP_DUMP_EVERY_N != 0:
             return
+
+    if _TP_DUMP_FIRST_LAYER_ONLY and layer_idx != 0:
+        return
+    if _TP_DUMP_LAYER_IDS is not None and layer_idx not in _TP_DUMP_LAYER_IDS:
+        return
 
     tensor = _to_tensor(output)
     if not isinstance(tensor, torch.Tensor):
@@ -226,6 +266,7 @@ def dump_tp_row_output_if_needed(
         "source": source,
         "comm_mode": comm_mode,
         "proj_type": proj_type,
+        "layer_idx": layer_idx,
         "prefix": prefix,
         "shape": list(detached.shape),
         "dtype": str(detached.dtype),
