@@ -315,10 +315,11 @@ class AscendEagleProposer(EagleProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
             num_computed_tokens_cpu = self.runner.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
-            self.query_start_loc.cpu[: num_reqs + 1] = torch.tensor(
-                [0] + self.runner.actual_seq_lengths_q[:num_reqs], device="cpu", dtype=torch.int32
-            )
+
+            # num_reqs is already the padded version
+            self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
             self.query_start_loc.copy_to_gpu()
+
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
