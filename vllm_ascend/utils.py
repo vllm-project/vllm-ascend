@@ -48,6 +48,7 @@ ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
+REGISTERED_ASCEND_LAYERS = {}
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
@@ -60,6 +61,7 @@ _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
+_ASCEND_LAYER_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _DYNAMIC_EPLB_BUFFER_SIZE = 1  # num_experts * num_layers * 64 byte
@@ -684,6 +686,25 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
+
+
+def register_ascend_pluggable_layers(vllm_config: VllmConfig | None = None):
+    global _ASCEND_LAYER_IS_REIGISTERED
+    if _ASCEND_LAYER_IS_REIGISTERED:
+        return
+
+    from vllm.model_executor.custom_op import PluggableLayer
+
+    global REGISTERED_ASCEND_LAYERS
+    REGISTERED_ASCEND_LAYERS = {
+        # Add Ascend PluggableLayer here.
+    }
+
+    for name, layer_cls in REGISTERED_ASCEND_LAYERS.items():
+        PluggableLayer.register_oot(_decorated_layer_cls=layer_cls, name=name)
+
+    # NOTE: Keep this at last to ensure all pluggable layers are registered.
+    _ASCEND_LAYER_IS_REIGISTERED = True
 
 
 class AscendDeviceType(Enum):
