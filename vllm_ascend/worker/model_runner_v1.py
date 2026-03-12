@@ -74,6 +74,7 @@ from vllm.v1.outputs import (
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
@@ -2542,6 +2543,14 @@ class NPUModelRunner(GPUModelRunner):
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
+        # TODO: refactor the logic of attention
+        # Initialize drafter attention group initialization
+        if self.speculative_config and (
+            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
+        ):
+            assert isinstance(self.drafter, AscendEagleProposer | DraftModelProposer)
+            self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
+
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
@@ -2879,7 +2888,7 @@ class NPUModelRunner(GPUModelRunner):
         # For attention backends that support virtual block splitting,
         # use the supported block sizes from the backend
         # For other backends (like Mamba), use [0] (no splitting)
-        kernel_block_sizes = []
+        self.kernel_block_sizes = []
         for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -2906,15 +2915,15 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     # Fallback to cache config block_size if no backend found
                     kernel_block_size_list = [self.cache_config.block_size]
-                kernel_block_sizes.append(kernel_block_size_list)
+                self.kernel_block_sizes.append(kernel_block_size_list)
             else:
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
                 # NOTE: set kernel_block_sizes to 0 to disable slotmapping computation
                 # of mamba block. In this case, BlockTable.block_size will never equal
                 # to kernel_block_sizes[0]
-                kernel_block_sizes.append([0])
-        if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [[self.cache_config.block_size]]:
+                self.kernel_block_sizes.append([0])
+        if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
@@ -2936,7 +2945,7 @@ class NPUModelRunner(GPUModelRunner):
                     if self.vllm_config.speculative_config
                     else 0
                 ),
-                kernel_block_sizes=kernel_block_sizes,
+                kernel_block_sizes=self.kernel_block_sizes,
             )
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
