@@ -438,7 +438,21 @@
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
 #
-# ** 20. File: worker/patch_deepseek_mtp.py**
+# ** 20. File: worker/patch_cudagraph.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`
+#    Why:
+#       vllm's FULL mode will cause error, we use a patch to avoid it.
+#       After that, FULL can be enable now.
+#    How：
+#       Dynamically replace the `_create_padded_batch_descriptor` function at runtime,
+#       and change the condition of if.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/34880
+#    Future Plan:
+#       Remove this patch when vLLM merges the PR.
+#
+# ** 21. File: worker/patch_deepseek_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name` and
 #      `vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name`
@@ -469,4 +483,3 @@
 #       Rotary quant is a unique feature of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-
