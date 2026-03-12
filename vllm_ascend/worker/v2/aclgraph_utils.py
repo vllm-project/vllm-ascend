@@ -35,7 +35,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
@@ -163,28 +163,6 @@ class AclGraphManager(CudaGraphManager):
     ):
         return (max_query_len == self.uniform_decode_query_len) and (num_tokens == max_query_len * num_reqs)
 
-    def _pad_query_start_loc_for_fia(self, num_tokens_padded: int, num_reqs_padded: int, num_reqs: int) -> int:
-        """
-        This function is only designed to satisfied the constraint that when the layout is TND,
-        the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
-        """
-
-        if num_tokens_padded == num_reqs_padded * self.uniform_decode_query_len:
-            # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
-            assert num_reqs <= num_reqs_padded
-            last_loc = self.query_start_loc.np[num_reqs]
-            self.model_runner.input_buffers.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs, dtype=np.int32) * self.uniform_decode_query_len + last_loc
-            )
-        else:
-            # Mixed-batch case: num_reqs must equal num_reqs_padded
-            assert num_reqs == num_reqs_padded
-            # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
-            self.query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
-            num_reqs_padded = num_reqs_padded + 1
-        self.query_start_loc.copy_to_gpu()
-        return num_reqs_padded
-
 
 @contextmanager
 def prepare_capture_inputs_wrapper():
@@ -264,6 +242,6 @@ class ModelWithContext(nn.Module):
     def forward(self, *args, **kwargs):
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
-        ExtraForwardContext.set_capturing(True)
+        _EXTRA_CTX.capturing = True
 
         return self.original_model(*args, **kwargs)

@@ -59,7 +59,7 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import get_tp_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.distributed.parallel_state import (
     get_flashcomm2_odp_group,
     get_flashcomm2_otp_group,
@@ -311,7 +311,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             input_parallel = splitted_input[tp_rank].contiguous()
 
         # padding for all-to-all
-        num_padding_tokens = ExtraForwardContext.pad_size()
+        num_padding_tokens = _EXTRA_CTX.pad_size
         if num_padding_tokens > 0:
             input_parallel = nn.functional.pad(input_parallel, (0, 0, 0, num_padding_tokens))
 
@@ -367,7 +367,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         else:
             output = output_parallel
 
-        if not ExtraForwardContext.flash_comm_v1_enabled():
+        if not _EXTRA_CTX.flash_comm_v1_enabled:
             # flashcomm1 not enabled
             output = get_tp_group().all_gather(output, 0)
             if num_padding_tokens > 0:
@@ -513,8 +513,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
     def matmul_and_reduce(self, input_parallel: torch.Tensor, bias_: Parameter | None) -> torch.Tensor:
         assert self.quant_method is not None
         try:
-            flash_comm_v1_enabled = ExtraForwardContext.flash_comm_v1_enabled()
-            mmrs_fusion = ExtraForwardContext.mmrs_fusion()
+            flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
+            mmrs_fusion = _EXTRA_CTX.mmrs_fusion
         except AssertionError:
             flash_comm_v1_enabled = False
             mmrs_fusion = False
@@ -525,7 +525,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
             return tensor_model_parallel_all_reduce(output_parallel)
 
-        pad_size = ExtraForwardContext.pad_size()
+        pad_size = _EXTRA_CTX.pad_size
         if pad_size > 0 and not (enable_dsa_cp() and "o_proj" in self.layer.prefix):
             x = F.pad(x, (0, 0, 0, pad_size))
 

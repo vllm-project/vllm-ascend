@@ -39,7 +39,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.utils import (
@@ -392,7 +392,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
-            if ExtraForwardContext.is_draft_model():
+            if _EXTRA_CTX.is_draft_model:
                 graph_params = get_draft_graph_params()
             else:
                 graph_params = get_graph_params()
@@ -444,7 +444,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     event.record(update_stream)
         else:
             # FIA update logic
-            if ExtraForwardContext.is_draft_model():
+            if _EXTRA_CTX.is_draft_model:
                 graph_params = get_draft_graph_params()
                 attn_metadata = draft_attn_metadatas
                 attn_keys = list(attn_metadata[0].keys())
@@ -462,7 +462,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_layers = len(attn_keys)
             if num_layers == 0:
                 return
-            if ExtraForwardContext.is_draft_model():
+            if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
             attn_count = 0
             with torch.npu.stream(update_stream):
@@ -488,7 +488,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         softmax_lse,
                     ) = param
 
-                    if ExtraForwardContext.is_draft_model():
+                    if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
                         seq_lens = attn_metadata[draft_step][key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
@@ -535,7 +535,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-        if ExtraForwardContext.is_draft_model():
+        if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
@@ -562,7 +562,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode=3,
                 scale=self.scale,
             )
-            if ExtraForwardContext.is_draft_model():
+            if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(num_tokens, workspace)
             else:
                 update_graph_params_workspaces(num_tokens, workspace)
@@ -625,7 +625,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
-        if ExtraForwardContext.capturing():
+        if _EXTRA_CTX.capturing:
             # Get workspace from cache or calculate it if not present.
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
@@ -762,7 +762,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
-        if ExtraForwardContext.capturing():
+        if _EXTRA_CTX.capturing:
             attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
@@ -838,7 +838,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if ExtraForwardContext.capturing():
+        if _EXTRA_CTX.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
         torch_npu._npu_paged_attention(
             query=query,

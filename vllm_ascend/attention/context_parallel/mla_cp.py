@@ -29,7 +29,7 @@ from vllm_ascend.attention.mla_v1 import (
 )
 # isort: on
 
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata,
     CPChunkedContextMetadata,
@@ -294,7 +294,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        if ExtraForwardContext.is_draft_model():
+        if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
@@ -659,11 +659,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
             "softmax_lse_flag": True,
         }
 
-        if ExtraForwardContext.is_draft_model():
+        if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if ExtraForwardContext.capturing():
+        if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
             event = torch.npu.ExternalEvent()
             event.wait(stream)

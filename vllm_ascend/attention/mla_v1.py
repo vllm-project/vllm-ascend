@@ -19,7 +19,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
@@ -736,7 +736,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        if ExtraForwardContext.is_draft_model():
+        if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
@@ -768,16 +768,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     softmax_lse,
                 ) = param
                 seq_lens_list = forward_context.attn_metadata[key].decode.seq_lens_list
-                if (
-                    speculative_config
-                    and speculative_config.method == "mtp"
-                    and not ExtraForwardContext.is_draft_model()
-                ):
+                if speculative_config and speculative_config.method == "mtp" and not _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
                     seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
                     actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
-                elif ExtraForwardContext.is_draft_model():
+                elif _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
                     block_table = forward_context.attn_metadata[key].decode.block_table
                     # TODO: This is a hack and should be fixed in the future.
@@ -1246,11 +1242,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths,
             "actual_seq_lengths_kv": decode_meta.seq_lens_list,
         }
-        if ExtraForwardContext.is_draft_model():
+        if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if ExtraForwardContext.capturing():
+        if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
@@ -1263,7 +1259,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs
                 )
-                if ExtraForwardContext.is_draft_model():
+                if _EXTRA_CTX.is_draft_model:
                     update_draft_graph_params_workspaces(num_tokens, workspace)
                 else:
                     update_graph_params_workspaces(num_tokens, workspace)
@@ -1506,7 +1502,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
-        o_proj_input_shape = (ExtraForwardContext.num_tokens(), self.num_heads * self.v_head_dim)
+        o_proj_input_shape = (_EXTRA_CTX.num_tokens, self.num_heads * self.v_head_dim)
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess

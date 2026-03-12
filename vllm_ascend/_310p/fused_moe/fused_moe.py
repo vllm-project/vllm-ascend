@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
-from vllm_ascend.ascend_forward_context import ExtraForwardContext, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECommMethods
 from vllm_ascend.quantization.methods.base import QuantType
@@ -92,7 +92,7 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
         topk_weights = topk_weights.to(x.dtype)
 
-        moe_comm_method = ExtraForwardContext.moe_comm_method()
+        moe_comm_method = _EXTRA_CTX.moe_comm_method
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
@@ -222,7 +222,7 @@ class AscendFusedMoE310(FusedMoE):
         assert self.quant_method is not None
         assert self.routed_scaling_factor == 1.0, "routed_scaling_factor != 1.0 is not supported."
 
-        hidden_states, router_logits, _, context_metadata = ExtraForwardContext.moe_comm_method().prepare(
+        hidden_states, router_logits, _, context_metadata = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states, router_logits=router_logits, quant_type=self.quant_type
         )
 
@@ -244,7 +244,7 @@ class AscendFusedMoE310(FusedMoE):
             apply_router_weight_on_input=self.apply_router_weight_on_input,
         )
 
-        routed_out = ExtraForwardContext.moe_comm_method().finalize(
+        routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata,

@@ -32,7 +32,7 @@ from vllm.distributed import (
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.ascend_forward_context import ExtraForwardContext
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
@@ -560,7 +560,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         }
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
-        if ExtraForwardContext.capturing():
+        if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
