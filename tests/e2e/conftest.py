@@ -34,6 +34,7 @@ import traceback
 from pathlib import Path
 from typing import Any, TypeVar
 
+import huggingface_hub
 import numpy as np
 import openai
 import psutil
@@ -53,7 +54,6 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
-import huggingface_hub
 
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
 from tests.e2e.nightly.multi_node.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
@@ -1025,7 +1025,10 @@ class HfRunner:
 
 @pytest.fixture(scope="session")
 def ilama_lora_files():
-    return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider", local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
+    return snapshot_download(
+        repo_id="vllm-ascend/ilama-text2sql-spider",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
 
 
 @pytest.fixture(scope="session")
