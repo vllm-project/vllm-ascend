@@ -58,6 +58,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -2884,8 +2885,9 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_spec.num_kv_heads,
                             self.model_config.hf_text_config.index_head_dim,
                         )
-                        dsa_k_cache = raw_dsa_k_tensor.view(self.c8_k_cache_dtype).view(dsa_k_cache_shape)
                         if self.use_sparse_c8_indexer:
+                            # dsa_k
+                            dsa_k_cache = raw_dsa_k_tensor.view(self.c8_k_cache_dtype).view(dsa_k_cache_shape)
                             # dsa_k_scale
                             dsa_k_scale_cache_shape = (
                                 num_blocks,
@@ -2901,6 +2903,8 @@ class NPUModelRunner(GPUModelRunner):
                             )
                             kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache, dsa_k_scale_cache)
                         else:
+                            # dsa_k
+                            dsa_k_cache = raw_dsa_k_tensor.view(kv_cache_spec.dtype).view(dsa_k_cache_shape)
                             kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
                     else:
                         kv_caches[layer_name] = (k_cache, v_cache)
@@ -3154,11 +3158,11 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):
-                from vllm.v1.kv_cache_interface import MLAAttentionSpec
                 if self.use_sparse:
+                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
                     # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
                     # implement it by creating a new kv_cache_spec class
-                    kv_cache_spec[layer_name] = MLAAttentionSpec(
+                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=self.block_size,
                         num_kv_heads=1,
                         head_size=sum(self.sparse_head_dim),
@@ -3168,7 +3172,15 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_c8=self.use_sparse_c8_indexer,
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    kv_cache_spec[layer_name] = spec
+                    assert isinstance(spec, MLAAttentionSpec)
+                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
+                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                        block_size=spec.block_size,
+                        num_kv_heads=spec.num_kv_heads,
+                        head_size=spec.head_size,
+                        dtype=spec.dtype,
+                        cache_dtype_str=spec.cache_dtype_str,
+                    )
 
             elif isinstance(attn_module, MambaBase):
                 mamba_layers[layer_name] = attn_module
