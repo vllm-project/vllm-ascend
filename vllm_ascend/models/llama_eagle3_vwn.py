@@ -39,15 +39,15 @@ class PreVwnLayerV0(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-        config: LlamaConfig | None = None
+        config: LlamaConfig | None = None,
+        quant_config: QuantizationConfig = None,
     ) -> None:
         super().__init__()
         config = config or vllm_config.model_config.hf_config
-        quant_config = self.get_quant_config(vllm_config)
         hidden_size = config.hidden_size
-        m = getattr(config, "m_size", 1)
-        expanded_factor = getattr(config, "expanded_factor", 1)
-        wider_dim = hidden_size * expanded_factor
+        m = getattr(config, "vwn_m", 1)
+        expanded_factor = getattr(config, "vwn_r", 1)
+        wider_dim = int(hidden_size * expanded_factor)
 
         self.wider_dim = wider_dim
         
@@ -119,15 +119,15 @@ class PreVwnLayerV1(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-        config: LlamaConfig | None = None
+        config: LlamaConfig | None = None,
+        quant_config: QuantizationConfig = None,
     ) -> None:
         super().__init__()
         config = config or vllm_config.model_config.hf_config
-        quant_config = self.get_quant_config(vllm_config)
         hidden_size = config.hidden_size
-        m = getattr(config, "m_size", 1)
-        expanded_factor = getattr(config, "expanded_factor", 1)
-        wider_dim = hidden_size * expanded_factor
+        m = getattr(config, "vwn_m", 1)
+        expanded_factor = getattr(config, "vwn_r", 1)
+        wider_dim = int(hidden_size * expanded_factor)
         self.wider_dim = wider_dim
 
         self.input_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
@@ -177,25 +177,25 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
 
         config = config or vllm_config.model_config.hf_config
         quant_config = self.get_quant_config(vllm_config)
-        m = getattr(config, "m_size", 1)
-        expanded_factor = getattr(config, "expanded_factor", 1)
+        m = getattr(config, "vwn_m", 1)
+        expanded_factor = getattr(config, "vwn_r", 1)
         self.hidden_size = config.hiddensize
-        wider_dim = self.hidden_size * expanded_factor
+        wider_dim = int(self.hidden_size * expanded_factor)
         self.wider_dim = wider_dim
 
         if getattr(config, "eable_pre_vmn", True):
             self.pre_vwn_layer = PreVwnLayerV0(
                 vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.pre_vwn_layer"),
-                config=self.config,
-                layer_idx=layer_idx,
+                config=config,
+                quant_config=quant_config
             )
         else:
             self.pre_vwn_layer = PreVwnLayerV1(
                 vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.pre_vwn_layer"),
-                config=self.config,
-                layer_idx=layer_idx,
+                config=config,
+                quant_config=quant_config
             )
 
         self.downward_and_forgot = ReplicatedLinear(
@@ -386,7 +386,8 @@ class VwnLlamaModel(nn.Module):
                 hidden_states=hidden_states,
                 residual=residual,
             )
-        hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
+        hidden_prenorm = hidden_states
+        hidden_states = self.norm(hidden_states, residual)
         return hidden_states, hidden_prenorm
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
