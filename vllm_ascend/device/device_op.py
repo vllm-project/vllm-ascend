@@ -25,6 +25,7 @@ from vllm_ascend.device.mxfp_compat import (
 )
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
+
 def _require_single_tensor_for_swiglu_quant(
     tensor_or_list: list[torch.Tensor] | torch.Tensor, *, name: str
 ) -> torch.Tensor:
@@ -33,6 +34,7 @@ def _require_single_tensor_for_swiglu_quant(
             raise ValueError(f"{name} must be a tensor or a single-element list, but got {len(tensor_or_list)}.")
         return tensor_or_list[0]
     return tensor_or_list
+
 
 class BaseDeviceAdaptor:
     @classmethod
@@ -134,10 +136,10 @@ class BaseDeviceAdaptor:
 
         return torch_npu.npu_grouped_matmul_swiglu_quant(
             x=x,
-            weight=_require_single_tensor_for_swiglu_quant(weight, name='weight'),
+            weight=_require_single_tensor_for_swiglu_quant(weight, name="weight"),
             bias=bias,
             group_list=group_list,
-            weight_scale=_require_single_tensor_for_swiglu_quant(weight_scale, name='weight_scale'),
+            weight_scale=_require_single_tensor_for_swiglu_quant(weight_scale, name="weight_scale"),
             x_scale=x_scale,
         )
 
@@ -439,7 +441,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             x=x,
             weight=[weight],
             group_list=group_list,
-            weight_scale=[_require_single_tensor_for_swiglu_quant(weight_scale, name='weight_scale')],
+            weight_scale=[_require_single_tensor_for_swiglu_quant(weight_scale, name="weight_scale")],
             x_scale=x_scale,
             dequant_mode=2,
             quant_mode=2,

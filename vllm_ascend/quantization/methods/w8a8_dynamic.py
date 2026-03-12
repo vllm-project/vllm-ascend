@@ -32,6 +32,7 @@ from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_expe
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, AscendDeviceType, get_ascend_device_type, maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
