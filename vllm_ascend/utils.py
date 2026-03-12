@@ -267,7 +267,10 @@ def enable_custom_op():
 
     # There are some customed operators which aren't implemented
     # with batch invariant in vllm-ascend, we need to disable them.
-    if vllm_is_batch_invariant():
+    # FIXME(linfeng): Currently custom op compilation and execution are partially available
+    # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
+    # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
+    if vllm_is_batch_invariant() or get_ascend_device_type() == AscendDeviceType.A5:
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
@@ -485,7 +488,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     resources_per_graph = num_hidden_layers + 1
     # For suffix decoding, use the suffix path when no draft_model_config is provided.
     if (spec := vllm_config.speculative_config) and (draft := spec.draft_model_config):
-        resources_per_graph += draft.hf_config.num_hidden_layers + 1
+        # Use get_total_num_hidden_layers() to correctly handle MTP models,
+        # which store layer count in num_nextn_predict_layers or
+        # mtp_num_hidden_layers (for Qwen3.5) instead of num_hidden_layers.
+        resources_per_graph += draft.get_total_num_hidden_layers() + 1
 
     # TODO: Find out whether we need to take into account the pp_size
     num_comm_groups = sum(
@@ -597,6 +603,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.conv import AscendConv2dLayer, AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -645,6 +652,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
+        "Conv2dLayer": AscendConv2dLayer,
+        "Conv3dLayer": AscendConv3dLayer,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
@@ -1067,7 +1076,11 @@ def refresh_block_size(vllm_config):
         return
 
     # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if model_config.hf_text_config.model_type != "qwen3_next" and cache_config.block_size != 128:
+    if (
+        "qwen3_next" not in model_config.hf_text_config.model_type
+        and "qwen3_5" not in model_config.hf_text_config.model_type
+        and cache_config.block_size != 128
+    ):
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
             cache_config.block_size = 128
@@ -1138,8 +1151,22 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
+    # because the broadcast in layer sharding needs to be overlapped with a heavy compute stream to be
+    # effectively hidden, it is enabled only during the prefill stage.
     is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
     return is_prefill_instance
+
+
+@lru_cache(maxsize=1)
+def enable_dsa_cp_with_o_proj_tp() -> bool:
+    if not enable_dsa_cp():
+        return False
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    # if is PD mix stage, using original TP o_proj weight, and also need to
+    # full gather for o_proj weight for prefill stage.
+    return vllm_config.kv_transfer_config is None
 
 
 def check_gdn_layer(vllm_config) -> bool:
@@ -1168,3 +1195,19 @@ def check_gdn_layer(vllm_config) -> bool:
             return True
 
     return False
+
+
+def get_rope_dim(vllm_config):
+    model_config = vllm_config.model_config
+
+    if model_config.use_mla:
+        rope_dim = model_config.hf_text_config.qk_rope_head_dim
+    else:
+        rope_dim = model_config.get_head_size()
+        # For models using partial rope like Qwen3-Next.
+        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
+            rope_dim = int(rope_dim * model_config.hf_text_config.partial_rotary_factor)
+        elif hasattr(model_config.hf_text_config, "rotary_dim"):
+            rope_dim = int(model_config.hf_text_config.rotary_dim)
+
+    return rope_dim

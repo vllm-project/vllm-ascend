@@ -36,6 +36,7 @@ class AscendPCPMetadata:
     prefill_q_cum_seqlens: torch.Tensor = None
     max_num_tokens_across_pcp: int = 0
     total_num_scheduled_tokens: int = 0
+    block_arange: torch.Tensor = None
 
 
 @dataclass
@@ -79,11 +80,11 @@ class AscendMetadataForPrefill:
         local_context_lens_allranks: list[list[int]] | None = None
         cp_kv_recover_idx_for_chunk: list[int] | None = None
         kv_inverse_idx_for_chunk: list[int] | None = None
-        batch_chunk_seq_mask: list[bool] | None = None
         local_total_toks: int | None = None
 
     """ Prefill Specific Metadata for Ascend"""
     pcp_metadata: AscendPCPMetadata | None = None
+    pcp_exit_fa_scatter_idx: torch.Tensor | None = None
     chunked_context: ChunkedContextMetadata | None = None
     block_tables: torch.Tensor = None
     actual_seq_lengths_q: torch.Tensor = None
