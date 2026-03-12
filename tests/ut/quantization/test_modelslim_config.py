@@ -6,13 +6,12 @@ from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
+from vllm_ascend.quantization.modelslim_config import (
+    AscendModelSlimConfig,
+)
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
-if vllm_version_is("v0.15.0"):
-    from vllm.attention.layer import Attention  # type: ignore
-else:
-    from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 
 
 class TestAscendModelSlimConfig(TestBase):

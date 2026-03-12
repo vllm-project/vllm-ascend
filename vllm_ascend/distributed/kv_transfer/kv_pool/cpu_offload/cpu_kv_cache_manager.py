@@ -65,7 +65,7 @@ class CPUKVCacheManager:
         self.num_cpu_blocks = num_cpu_blocks
         self.caching_hash_fn = sha256 if caching_hash_algo == "sha256" else hash
         self.use_eagle = use_eagle
-        self.block_pool = BlockPool(self.num_cpu_blocks, True, enable_kv_cache_events)
+        self.block_pool = BlockPool(self.num_cpu_blocks, True, self.block_size, enable_kv_cache_events)
         self.single_type_manager = get_manager_for_kv_cache_spec(
             kv_cache_spec=kv_cache_spec,
             block_pool=self.block_pool,

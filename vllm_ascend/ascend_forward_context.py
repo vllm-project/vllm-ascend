@@ -9,7 +9,6 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -19,7 +18,6 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
-    vllm_version_is,
 )
 
 
@@ -44,6 +42,7 @@ def set_ascend_forward_context(
     model_instance: torch.nn.Module = None,
     is_draft_model=False,
     skip_compiled: bool = False,
+    max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
 ):
     """A context manager that stores the current forward context,
@@ -92,22 +91,22 @@ def set_ascend_forward_context(
         # main model and drafter model may have different architecture
         is_context_moe_model = is_drafter_moe_model(vllm_config) if is_draft_model else is_moe_model(vllm_config)
         if is_context_moe_model:
-            sp_enabled = enable_sp(vllm_config) and num_tokens is not None
+            flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None
             mmrs_fusion = False
         elif is_draft_model:
             # TODO: for dense drafter, `sp` is redundant and is not compatible with `dp` and `graph`.
             # Disable it to avoid more problems.
-            sp_enabled = False
+            flash_comm_v1_enabled = False
         else:
-            sp_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
-
+            flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
         forward_context.mmrs_fusion = mmrs_fusion
         forward_context.num_tokens = num_tokens
-        forward_context.sp_enabled = sp_enabled
+        forward_context.flash_comm_v1_enabled = flash_comm_v1_enabled
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
         forward_context.flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
 
-        if forward_context.sp_enabled or forward_context.flashcomm_v2_enabled:
+        forward_context.pad_size = 0
+        if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
 
@@ -131,7 +130,7 @@ def set_ascend_forward_context(
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
-            if forward_context.sp_enabled or forward_context.flashcomm_v2_enabled:
+            if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
                 forward_context.padded_length = padded_length
@@ -140,6 +139,7 @@ def set_ascend_forward_context(
             max_tokens_across_dp = num_tokens
 
         forward_context.max_tokens_across_dp = max_tokens_across_dp
+        forward_context.max_tokens_across_pcp = max_tokens_across_pcp
 
         if num_tokens is not None:
             if num_actual_tokens is None:
@@ -152,10 +152,6 @@ def set_ascend_forward_context(
                 mc2_mask[:num_actual_tokens] = True
                 mc2_mask[num_actual_tokens:] = False
                 forward_context.mc2_mask = mc2_mask
-
-        if is_draft_model and vllm_version_is("0.15.0"):
-            forward_context.remaining_moe_layers = None
-
         try:
             yield
         finally:
@@ -246,11 +242,10 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             moe_comm_type = MoECommType.ALLGATHER
 
     elif soc_version in {AscendDeviceType.A3}:
-        dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
         fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic"
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model) and (not dynamic_eplb)
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
@@ -267,6 +262,11 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
     elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
+    elif soc_version in {AscendDeviceType.A5}:
+        if num_tokens <= mc2_tokens_capacity and vllm_config.parallel_config.world_size_across_dp > 1:
+            moe_comm_type = MoECommType.MC2
+        else:
+            moe_comm_type = MoECommType.ALLTOALL
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     return moe_comm_type

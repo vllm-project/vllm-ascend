@@ -1,9 +1,11 @@
 default_install_hook_types:
   - pre-commit
   - commit-msg
+
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
+
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.14.0
@@ -11,6 +13,7 @@ repos:
   - id: ruff-check
     args: [--output-format, github, --fix]
   - id: ruff-format
+
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.1
   hooks:
@@ -22,6 +25,7 @@ repos:
       ]
       additional_dependencies:
         - tomli
+
 - repo: https://github.com/crate-ci/typos
   rev: v1.32.0
   hooks:
@@ -30,6 +34,7 @@ repos:
       "--force-exclude",
       "--exclude", "csrc/**"
     ]
+
 # - repo: https://github.com/pre-commit/mirrors-clang-format
 #   rev: v20.1.3
 #   hooks:
@@ -37,17 +42,21 @@ repos:
 #     files: ^csrc/.*\.(cpp|hpp|cc|hh|cxx|hxx)$
 #     types_or: [c++]
 #     args: [--style=google, --verbose]
+
 - repo: https://github.com/igorshubovych/markdownlint-cli
   rev: v0.45.0
   hooks:
   - id: markdownlint
+    args: ['--fix']
     exclude: '.*\.inc\.md$|.*report_template\.md$|.*contributors\.md$|.*PULL_REQUEST_TEMPLATE\.md$'
     stages: [manual] # Only run in CI
+
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
   - id: actionlint
     exclude: '.*\.github/workflows/scripts/.*\.ya?ml$'
+
 - repo: local
   hooks:
   - id: png-lint

@@ -22,25 +22,38 @@ class TestAscendConfig(unittest.TestCase):
             "eplb_config": {"dynamic_eplb": True, "num_redundant_experts": 2},
         }
         from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-        if vllm_version_is("0.15.0"):
+        if vllm_version_is("0.16.0"):
             moe_parallel_config = FusedMoEParallelConfig(
-                2, 0, 1, 2, 1, 1, 1, 1, True, "hccl", enable_eplb=True)
+                2, 0, 1, 2, 1, 1, 1, 1, True, "hccl", is_sequence_parallel=True, enable_eplb=True)
+            moe_config = FusedMoEConfig(
+                num_experts=8,
+                experts_per_token=8,
+                hidden_dim=8192,
+                intermediate_size_per_partition=5,
+                num_local_experts=8,
+                activation="silu",
+                device="npu",
+                routing_method=RoutingMethodType.Simulated,
+                moe_parallel_config=moe_parallel_config,
+                in_dtype=torch.float16,
+            )
         else:
             moe_parallel_config = FusedMoEParallelConfig(
-                2, 0, 1, 2, 1, 1, 1, 1, True, "hccl",
-                is_sequence_parallel=False, enable_eplb=True)
-        moe_config = FusedMoEConfig(
-            num_experts=8,
-            experts_per_token=8,
-            hidden_dim=8192,
-            intermediate_size_per_partition=5,
-            num_local_experts=8,
-            activation="silu",
-            device="npu",
-            routing_method=RoutingMethodType.Simulated,
-            moe_parallel_config=moe_parallel_config,
-            in_dtype=torch.float16,
-        )
+                2, 0, 1, 2, 1, 1, 1, 1, 1, True, "hccl",
+                enable_eplb=True)
+            moe_config = FusedMoEConfig(
+                num_experts=8,
+                experts_per_token=8,
+                hidden_dim=8192,
+                intermediate_size_per_partition=5,
+                num_local_experts=8,
+                num_logical_experts=8,
+                activation="silu",
+                device="npu",
+                routing_method=RoutingMethodType.Simulated,
+                moe_parallel_config=moe_parallel_config,
+                in_dtype=torch.float16,
+            )
         moe_config.supports_eplb = True
         self.vllm_config = vllm_config
         self.moe_config = moe_config

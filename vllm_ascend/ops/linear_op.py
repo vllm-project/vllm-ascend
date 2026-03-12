@@ -368,7 +368,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         else:
             output = output_parallel
 
-        if not forward_context.sp_enabled:
+        if not forward_context.flash_comm_v1_enabled:
             # flashcomm1 not enabled
             output = get_tp_group().all_gather(output, 0)
             if num_padding_tokens > 0:
@@ -515,15 +515,15 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         assert self.quant_method is not None
         try:
             forward_context = get_forward_context()
-            sp_enabled = forward_context.sp_enabled
+            flash_comm_v1_enabled = forward_context.flash_comm_v1_enabled
             mmrs_fusion = forward_context.mmrs_fusion
         except AssertionError:
-            sp_enabled = False
+            flash_comm_v1_enabled = False
             mmrs_fusion = False
 
         x = input_parallel
 
-        if not sp_enabled:
+        if not flash_comm_v1_enabled:
             output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
             return tensor_model_parallel_all_reduce(output_parallel)
 
@@ -705,7 +705,11 @@ def _get_row_parallel_op(
 
 
 def get_parallel_op(disable_tp, prefix, layer, direct):
-    if disable_tp or ("shared_experts" in prefix and shared_expert_dp_enabled()):
+    if (
+        disable_tp
+        or ("shared_experts" in prefix and shared_expert_dp_enabled())
+        or ("shared_expert" in prefix and shared_expert_dp_enabled())
+    ):
         return None, 0, 1
     custom_op: (
         MLPColumnParallelOp

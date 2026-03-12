@@ -75,7 +75,7 @@ def get_cluster_ips(word_size: int = 2) -> list[str]:
     return [resolver(dns) for dns in get_cluster_dns_list(word_size)]
 
 
-def get_avaliable_port(start_port: int = 6000, end_port: int = 7000) -> int:
+def get_available_port(start_port: int = 6000, end_port: int = 7000) -> int:
     import socket
     for port in range(start_port, end_port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
