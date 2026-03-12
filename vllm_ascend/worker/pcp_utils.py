@@ -134,6 +134,7 @@ class PCPManager:
         self.num_scheduled_tokens_padded = None
         self.max_num_tokens_across_pcp = 0
         self.pcp_tokens_padded = None
+        self.total_num_scheduled_tokens = 0
 
     def _get_cumsum_and_arange(
         self,
@@ -172,6 +173,10 @@ class PCPManager:
         self.num_decode_tokens = num_scheduled_tokens[: self.num_decode_reqs].sum()
         self.num_scheduled_tokens_padded = num_scheduled_tokens # for graph comipling in hybrid_attn
 
+        self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens)
+        self.query_lens_pcp_full.cpu[self.num_reqs :].fill_(0)
+        self.query_lens_pcp_full.copy_to_gpu()
+
     def initialize_slot_mapping(self) -> None:
         '''
         Hyrbid-attention models, such as qwen3_next, have plural kv_cache_groups, which may lead to
@@ -182,13 +187,9 @@ class PCPManager:
             (self.sample_slot_mapping.shape[0],),
             fill_value=-1,
             dtype=torch.int32,
-            device=self.sample_slot_mapping.divice,
+            device=self.sample_slot_mapping.device,
         )
         self.pcp_padded_slot_mapping_list.append(pcp_padded_slot_mapping)
-
-        self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens)
-        self.query_lens_pcp_full.cpu[self.num_reqs :].fill_(0)
-        self.query_lens_pcp_full.copy_to_gpu()
 
     def update_tokens_for_pcp(
         self,
@@ -511,9 +512,9 @@ class PCPManager:
             assert self.num_scheduled_tokens_padded is not None
             num_tokens = self.num_scheduled_tokens_padded.sum()
         if not self.pcp_use_hybrid_attn or self.total_num_sampled_tokens_pcp != num_tokens_padded:
-            pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
+            pcp_padded_slot_mapping = pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
         else:
-            pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size]
+            pcp_padded_slot_mapping = pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size]
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[: num_tokens * self.pcp_world_size]
         pcp_padded_slot_mapping.fill_(-1)
         pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping

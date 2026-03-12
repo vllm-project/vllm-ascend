@@ -2053,6 +2053,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens,
                     num_tokens_padded,
                     slot_mapping,
+                    kv_cache_gid,
                 )
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
                 self.cpu_slot_mapping = slot_mapping.cpu().numpy()
