@@ -134,8 +134,9 @@ class AscendConfig:
             bool(additional_config.get("enable_async_exponential", False)) and not vllm_is_batch_invariant()
         )
 
-        use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
-        use_glm_sparse = vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]
+        use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+            vllm_config.model_config.hf_text_config, "index_topk"
+        )
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
@@ -148,15 +149,12 @@ class AscendConfig:
 
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-        # Disable Sparse C8 for GLM5 and A5:
-        # - GLM5 uses only 32 Q heads in the indexer module, which is not yet
-        #   supported by lightning_indexer_quant.
-        # - A5 has not been fully validated for this path and may carry hidden risks.
+        # Disable Sparse C8 for A5
+        # A5 has not been fully validated for this path and may carry hidden risks.
         # TODO(rjg-lyh): Enable A5 support after sufficient validation.
         self.enable_sparse_c8 = (
             additional_config.get("enable_sparse_c8", False)
             and use_sparse
-            and not use_glm_sparse
             and get_ascend_device_type() != AscendDeviceType.A5
         )
 

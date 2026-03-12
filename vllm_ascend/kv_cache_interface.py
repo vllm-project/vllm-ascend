@@ -5,7 +5,6 @@ from dataclasses import dataclass
 
 import torch
 from typing_extensions import Self
-
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
@@ -19,6 +18,13 @@ class AscendSparseMLAAttentionSpec(MLAAttentionSpec):
     to
     (kv_cache[0]: bfloat16, kv_cache[1]: bfloat16, kv_cache[2]: int8, kv_cache[3]: float16).
 
+    The semantic meaning of each KV cache entry is as follows:
+    1. kv_cache[0] stores kv_lora.
+    2. kv_cache[1] stores k_rope.
+    3. kv_cache[2] stores the key tensor from the indexer module.
+    4. kv_cache[3] stores the key scale tensor from the indexer module,
+       and exists only when Sparse C8 is enabled.
+
     The main changes are as follows:
     1. The key tensor from the indexer module stored in kv_cache[2] is
        converted from bf16 to int8 to reduce memory usage. It is then
@@ -29,7 +35,7 @@ class AscendSparseMLAAttentionSpec(MLAAttentionSpec):
        and is therefore saved in kv_cache[3].
     """
 
-    sparse_head_dim: list[int]
+    sparse_head_dim: tuple[int, ...]
     cache_sparse_c8: bool = False
     c8_k_cache_dtype: torch.dtype = torch.int8
     c8_k_scale_cache_dtype: torch.dtype = torch.float16
@@ -37,6 +43,7 @@ class AscendSparseMLAAttentionSpec(MLAAttentionSpec):
     @property
     def page_size_bytes(self) -> int:
         if self.cache_sparse_c8:
+            assert len(self.sparse_head_dim) == 3
             num_heads_per_page = self.block_size * self.num_kv_heads
             # kv_cache[0]: bfloat16, kv_cache[1]: bfloat16
             kv_lora_rank, qk_rope_head_dim = self.sparse_head_dim[:2]
@@ -110,8 +117,7 @@ class AscendSparseMLAAttentionSpec(MLAAttentionSpec):
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         assert len(cache_dtype_str_set) == 1, (
-            "All attention layers in the same KV cache group must use the same "
-            "quantization method."
+            "All attention layers in the same KV cache group must use the same quantization method."
         )
         return cls(
             block_size=specs[0].block_size,

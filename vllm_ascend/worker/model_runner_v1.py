@@ -273,13 +273,15 @@ class NPUModelRunner(GPUModelRunner):
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
-        self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
+        self.use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+            vllm_config.model_config.hf_text_config, "index_topk"
+        )
         if self.use_sparse:
-            self.sparse_head_dim = [
+            self.sparse_head_dim = (
                 self.model_config.hf_text_config.kv_lora_rank,
                 self.model_config.hf_text_config.qk_rope_head_dim,
                 self.model_config.hf_text_config.index_head_dim,
-            ]
+            )
         # dsa c8
         self.use_sparse_c8_indexer = self.ascend_config.enable_sparse_c8
         if self.use_sparse_c8_indexer:
@@ -2689,7 +2691,7 @@ class NPUModelRunner(GPUModelRunner):
                         # for deepseek v3.2, we split the kv cache according to the corresponding ratio
                         kv_cache_spec = layer_kv_cache_spec[layer_name]                        
                         assert isinstance(kv_cache_spec, AscendSparseMLAAttentionSpec)
-                        sparse_kv_cache_ratio = kv_cache_spec[layer_name].kv_cache_ratio
+                        sparse_kv_cache_ratio = kv_cache_spec.kv_cache_ratio
                         k_tensor_split_factor = sparse_kv_cache_ratio[0]
                         v_tensor_split_factor = sparse_kv_cache_ratio[1]
                         dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]
