@@ -526,8 +526,8 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_padded: int,
         num_reqs_padded: int,
         num_reqs: int,
-        cudagraph_runtime_mode: CUDAGraphMode,
-        batch_desc_num_reqs: int,
+        cudagraph_runtime_mode: CUDAGraphMode | None = None,
+        batch_desc_num_reqs: int | None = None,
     ) -> int:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
