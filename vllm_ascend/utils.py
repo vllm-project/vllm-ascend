@@ -1078,7 +1078,6 @@ def refresh_block_size(vllm_config):
     # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
     if (
         "qwen3_next" not in model_config.hf_text_config.model_type
-        and "qwen3_5" not in model_config.hf_text_config.model_type
         and cache_config.block_size != 128
     ):
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
