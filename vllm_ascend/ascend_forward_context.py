@@ -251,7 +251,11 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                 fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
             elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
-                fused_decode_enable = fused_mc2_enable and speculative_enable_dispatch_gmm_combine_decode(vllm_config) and quant_type == "w8a8_dynamic"
+                fused_decode_enable = (
+                        fused_mc2_enable
+                        and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
+                        and quant_type == "w8a8_dynamic"
+                    )
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
