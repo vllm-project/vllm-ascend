@@ -438,3 +438,17 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#
+# ** 20. File: worker/patch_cudagraph.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`
+#    Why:
+#       vllm's FULL mode will cause error, we use a patch to avoid it.
+#       After that, FULL can be enable now.
+#    How：
+#       Dynamically replace the `_create_padded_batch_descriptor` function at runtime,
+#       and change the condition of if.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/34880
+#    Future Plan:
+#       Remove this patch when vLLM merges the PR.
