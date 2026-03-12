@@ -4,8 +4,8 @@
 from dataclasses import dataclass
 
 import torch
-from typing_extensions import Self
 import vllm.v1.kv_cache_interface
+from typing_extensions import Self
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
