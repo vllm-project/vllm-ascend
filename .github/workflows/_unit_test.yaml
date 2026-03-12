@@ -2,11 +2,6 @@ name: 'unit test'
 
 on:
   workflow_call:
-    secrets:
-      HW_OBS_AK:
-        required: false
-      HW_OBS_SK:
-        required: false
     inputs:
       vllm:
         required: true
@@ -40,12 +35,6 @@ jobs:
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
         UV_PYTHON: python3
-        SCCACHE_BUCKET: ascend-ci-cache-hk
-        SCCACHE_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
-        SCCACHE_REGION: ap-southeast-1
-        SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE: true
-        AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     steps:
       - name: Install packages
         run: |
