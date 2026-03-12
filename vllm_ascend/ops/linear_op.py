@@ -40,7 +40,11 @@ Row parallel op follows a similar approach - inherit from RowColumnParallelOp an
 get_row_parallel_op.
 """
 
+import json
+import os
 import re
+import threading
+import time
 from functools import lru_cache
 from types import SimpleNamespace
 
@@ -79,6 +83,166 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     shared_expert_dp_enabled,
 )
+
+
+# TP decode dump switches.
+_TP_DUMP_ENABLE = bool(int(os.getenv("VLLM_ASCEND_TP_DUMP_ENABLE", "0")))
+_TP_DUMP_DIR = os.getenv("VLLM_ASCEND_TP_DUMP_DIR", "/tmp/vllm_ascend_tp_dump")
+_TP_DUMP_START_STEP = int(os.getenv("VLLM_ASCEND_TP_DUMP_START_STEP", "0"))
+_TP_DUMP_MAX_STEPS = int(os.getenv("VLLM_ASCEND_TP_DUMP_MAX_STEPS", "-1"))
+_TP_DUMP_EVERY_N = max(1, int(os.getenv("VLLM_ASCEND_TP_DUMP_EVERY_N", "1")))
+_TP_DUMP_SAMPLE_SIZE = max(1, int(os.getenv("VLLM_ASCEND_TP_DUMP_SAMPLE_SIZE", "64")))
+_TP_DUMP_RANK0_ONLY = bool(int(os.getenv("VLLM_ASCEND_TP_DUMP_RANK0_ONLY", "1")))
+_TP_DUMP_FIRST_LAYER_ONLY = bool(int(os.getenv("VLLM_ASCEND_TP_DUMP_FIRST_LAYER_ONLY", "1")))
+_TP_DUMP_DECODE_ONLY = bool(int(os.getenv("VLLM_ASCEND_TP_DUMP_DECODE_ONLY", "1")))
+_TP_DUMP_SAVE_TENSOR = bool(int(os.getenv("VLLM_ASCEND_TP_DUMP_SAVE_TENSOR", "0")))
+_TP_DUMP_INCLUDE_DRAFT = bool(int(os.getenv("VLLM_ASCEND_TP_DUMP_INCLUDE_DRAFT", "0")))
+_TP_DUMP_COMM_MODE = os.getenv("VLLM_ASCEND_TP_DUMP_COMM_MODE", "all_reduce")
+_TP_DUMP_LOCK = threading.Lock()
+_TP_DUMP_DECODE_STEP = -1
+
+
+def _get_layer_idx_from_prefix(prefix: str) -> int | None:
+    patterns = (
+        r"(?:^|\.)layers\.(\d+)\.",
+        r"(?:^|\.)h\.(\d+)\.",
+        r"(?:^|\.)blocks\.(\d+)\.",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, prefix)
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
+def _is_first_layer(prefix: str) -> bool:
+    layer_idx = _get_layer_idx_from_prefix(prefix)
+    return layer_idx == 0
+
+
+def _get_proj_type(prefix: str) -> str | None:
+    if "down_proj" in prefix:
+        return "down_proj"
+    if "o_proj" in prefix or "out_proj" in prefix or "attention.dense" in prefix:
+        return "o_proj"
+    return None
+
+
+def _extract_attn_metadata(forward_context):
+    attn_metadata = getattr(forward_context, "attn_metadata", None)
+    if isinstance(attn_metadata, dict) and attn_metadata:
+        return next(iter(attn_metadata.values()))
+    if isinstance(attn_metadata, list) and attn_metadata:
+        first = attn_metadata[0]
+        if isinstance(first, dict) and first:
+            return next(iter(first.values()))
+    return None
+
+
+def _is_decode_step(forward_context) -> bool:
+    meta = _extract_attn_metadata(forward_context)
+    if meta is None:
+        return False
+    num_prefills = getattr(meta, "num_prefills", None)
+    num_decodes = getattr(meta, "num_decodes", None)
+    if isinstance(num_prefills, int) and isinstance(num_decodes, int):
+        return num_prefills == 0 and num_decodes > 0
+    return False
+
+
+def _to_tensor(output):
+    if isinstance(output, tuple):
+        return output[0]
+    return output
+
+
+def dump_tp_row_output_if_needed(
+    *,
+    prefix: str,
+    output,
+    tp_rank: int,
+    comm_mode: str,
+    source: str,
+) -> None:
+    """Dump selected row-parallel outputs for TP decode debugging."""
+    global _TP_DUMP_DECODE_STEP
+    if not _TP_DUMP_ENABLE:
+        return
+    if _TP_DUMP_RANK0_ONLY and tp_rank != 0:
+        return
+    if _TP_DUMP_COMM_MODE != "all" and comm_mode != _TP_DUMP_COMM_MODE:
+        return
+
+    proj_type = _get_proj_type(prefix)
+    if proj_type is None:
+        return
+    if _TP_DUMP_FIRST_LAYER_ONLY and not _is_first_layer(prefix):
+        return
+
+    try:
+        forward_context = get_forward_context()
+    except AssertionError:
+        return
+
+    if not _TP_DUMP_INCLUDE_DRAFT and getattr(forward_context, "is_draft_model", False):
+        return
+    if _TP_DUMP_DECODE_ONLY and not _is_decode_step(forward_context):
+        return
+
+    with _TP_DUMP_LOCK:
+        if _is_first_layer(prefix) and proj_type == "o_proj":
+            _TP_DUMP_DECODE_STEP += 1
+        decode_step = _TP_DUMP_DECODE_STEP
+        if decode_step < 0:
+            return
+        if decode_step < _TP_DUMP_START_STEP:
+            return
+        if _TP_DUMP_MAX_STEPS >= 0 and decode_step >= (_TP_DUMP_START_STEP + _TP_DUMP_MAX_STEPS):
+            return
+        if (decode_step - _TP_DUMP_START_STEP) % _TP_DUMP_EVERY_N != 0:
+            return
+
+    tensor = _to_tensor(output)
+    if not isinstance(tensor, torch.Tensor):
+        return
+
+    detached = tensor.detach()
+    flattened = detached.reshape(-1)
+    sample_size = min(_TP_DUMP_SAMPLE_SIZE, int(flattened.numel()))
+    sample_values = flattened[:sample_size].to("cpu").float().tolist() if sample_size > 0 else []
+
+    stats_tensor = detached if detached.is_floating_point() else detached.float()
+    min_val = float(stats_tensor.min().item())
+    max_val = float(stats_tensor.max().item())
+    mean_val = float(stats_tensor.mean().item())
+    std_val = float(stats_tensor.std(unbiased=False).item()) if int(stats_tensor.numel()) > 1 else 0.0
+
+    os.makedirs(_TP_DUMP_DIR, exist_ok=True)
+    jsonl_path = os.path.join(_TP_DUMP_DIR, f"tp_row_dump_rank{tp_rank}.jsonl")
+    record = {
+        "ts": time.time(),
+        "decode_step": decode_step,
+        "rank": tp_rank,
+        "source": source,
+        "comm_mode": comm_mode,
+        "proj_type": proj_type,
+        "prefix": prefix,
+        "shape": list(detached.shape),
+        "dtype": str(detached.dtype),
+        "numel": int(detached.numel()),
+        "stats": {"min": min_val, "max": max_val, "mean": mean_val, "std": std_val},
+        "sample": sample_values,
+    }
+    with open(jsonl_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    if _TP_DUMP_SAVE_TENSOR:
+        safe_prefix = re.sub(r"[^a-zA-Z0-9_.-]+", "_", prefix)[:200]
+        tensor_path = os.path.join(
+            _TP_DUMP_DIR,
+            f"step{decode_step:06d}_rank{tp_rank}_{proj_type}_{safe_prefix}.pt",
+        )
+        torch.save(detached.to("cpu"), tensor_path)
 
 
 class CustomLinearOp:
@@ -407,6 +571,13 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
             output = torch_npu.npu_mm_all_reduce_base(
                 input_parallel, self.layer.weight.t(), self.hcomm_info, bias=bias_
             )
+            dump_tp_row_output_if_needed(
+                prefix=self.layer.prefix,
+                output=output,
+                tp_rank=self.tp_rank,
+                comm_mode="all_reduce",
+                source="MatmulAllreduceRowParallelOp",
+            )
         else:
             assert self.quant_method is not None
             output = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
@@ -525,7 +696,15 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 
         if not flash_comm_v1_enabled:
             output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
-            return tensor_model_parallel_all_reduce(output_parallel)
+            output = tensor_model_parallel_all_reduce(output_parallel)
+            dump_tp_row_output_if_needed(
+                prefix=self.layer.prefix,
+                output=output,
+                tp_rank=self.tp_rank,
+                comm_mode="all_reduce",
+                source="SequenceRowParallelOp",
+            )
+            return output
 
         pad_size = forward_context.pad_size
         if pad_size > 0 and not (enable_dsa_cp() and "o_proj" in self.layer.prefix):

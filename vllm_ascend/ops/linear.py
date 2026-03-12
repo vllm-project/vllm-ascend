@@ -39,7 +39,11 @@ from vllm.model_executor.layers.linear import (  # noqa
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
+from vllm_ascend.ops.linear_op import (
+    dump_tp_row_output_if_needed,
+    get_parallel_op,
+    get_replicated_op,
+)
 from vllm_ascend.utils import enable_sp, maybe_trans_nz
 
 
@@ -310,9 +314,29 @@ class AscendRowParallelLinear(RowParallelLinear):
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
-            return self.custom_op.apply(input_)
+            output = self.custom_op.apply(input_)
+            comm_mode = "custom" if self.tp_size > 1 else "local"
+            dump_tp_row_output_if_needed(
+                prefix=self.prefix,
+                output=output,
+                tp_rank=self.tp_rank,
+                comm_mode=comm_mode,
+                source="AscendRowParallelLinear.custom",
+            )
+            return output
 
-        return super().forward(input_)
+        output = super().forward(input_)
+        # Dump both TP>1(all-reduce) and TP=1(local, no all-reduce) for
+        # aligned decode-step comparison.
+        comm_mode = "all_reduce" if (self.reduce_results and self.tp_size > 1) else "local"
+        dump_tp_row_output_if_needed(
+            prefix=self.prefix,
+            output=output,
+            tp_rank=self.tp_rank,
+            comm_mode=comm_mode,
+            source="AscendRowParallelLinear",
+        )
+        return output
 
 
 class AscendColumnParallelLinear(ColumnParallelLinear):
