@@ -3159,6 +3159,9 @@ class NPUModelRunner(GPUModelRunner):
 
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
+                    # `MLAAttentionSpec` is temporarily patched to `AscendMLAAttentionSpec`.
+                    # Re-importing it at runtime will therefore resolve to the patched class.
+                    # Rename it here to make this behavior explicit.
                     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
                     # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
                     # implement it by creating a new kv_cache_spec class
