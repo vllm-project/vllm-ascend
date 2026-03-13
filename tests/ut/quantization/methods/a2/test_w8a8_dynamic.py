@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, Mock, patch
 
 import torch
+import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import (
@@ -54,10 +55,19 @@ class TestAscendW8A8DynamicLinearMethod(TestBase):
         self.assertEqual(output.shape, (32, 1, 1, 256))
 
     def test_process_weights_after_loading(self):
-        layer = MagicMock()
-        layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
-        layer.weight_scale.data = torch.randn(256, 1, dtype=torch.bfloat16)
-        layer.weight_offset.data = torch.randn(256, 1, dtype=torch.bfloat16)
+        layer = nn.Module()
+        layer.register_parameter(
+            "weight",
+            nn.Parameter(torch.randint(-128, 127, (128, 256), dtype=torch.int8), requires_grad=False),
+        )
+        layer.register_parameter(
+            "weight_scale",
+            nn.Parameter(torch.randn(256, 1, dtype=torch.bfloat16), requires_grad=False),
+        )
+        layer.register_parameter(
+            "weight_offset",
+            nn.Parameter(torch.randn(256, 1, dtype=torch.bfloat16), requires_grad=False),
+        )
         with patch("vllm_ascend.quantization.methods.w8a8_dynamic.maybe_trans_nz", side_effect=lambda x: x):
             self.method.process_weights_after_loading(layer)
         self.assertEqual(layer.weight_scale_fp32.dtype, torch.float32)
