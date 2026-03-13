@@ -356,6 +356,11 @@ def _is_attn_qkv_prefix(prefix: str) -> bool:
         "query_key_value",
         "attn_qkv_proj",
         "in_proj_qkvz",
+        "c_attn",
+        "wqkv",
+        "q_proj",
+        "k_proj",
+        "v_proj",
     )
     return any(tag in prefix for tag in qkv_prefixes)
 
