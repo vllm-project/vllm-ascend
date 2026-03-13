@@ -272,7 +272,6 @@ def quant_apply_mlp(
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale,
                 bias=bias1,
-                group_list_type=group_list_type,
                 use_mxfp_quant=use_mxfp_quant,
             )
             if quantized_hidden_states is not None:

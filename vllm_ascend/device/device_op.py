@@ -94,7 +94,6 @@ class BaseDeviceAdaptor:
         x_scale: torch.Tensor,
         bias=None,
         use_mxfp_quant: bool = False,
-        group_list_type: int = 1,
     ):
         if use_mxfp_quant:
             raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
@@ -230,7 +229,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         weight_scale: list[torch.Tensor] | torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
-        group_list_type: int = 1,
         use_mxfp_quant: bool = False,
     ):
         if not use_mxfp_quant:
