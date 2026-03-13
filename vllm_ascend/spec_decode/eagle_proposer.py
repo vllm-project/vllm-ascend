@@ -663,29 +663,25 @@ class SpecDecodeBaseProposer(EagleProposer):
                 # Copy the old attn_metadata and update
                 if not self.parallel_drafting:
                     for draft_step in range(1, self.num_speculative_tokens):
-                        common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                            draft_step,
-                            attn_metadata,
-                            common_attn_metadata,
-                            batch_size,
-                            num_input_tokens,
-                            used_update_positions,
-                            aclgraph_runtime_mode,
-                            ori_seq_len,
-                            slot_indices,
-                            mtp_slot_mapping,
-                        )
                         per_layer_attn_metadata = dict()
-                        for layer_name in self.attn_layer_names:
-                            per_layer_attn_metadata[layer_name] = attn_metadata
-                        multi_steps_attn_metadata.append(per_layer_attn_metadata)
-        else:
-            # Copy the old attn_metadata and update
-            if not self.parallel_drafting:
-                for draft_step in range(1, self.num_speculative_tokens):
-                    per_layer_attn_metadata = dict()
-                    if vllm_version_is("0.17.0"):
-                        for attn_group in self.draft_attn_groups:
+                        if vllm_version_is("0.17.0"):
+                            for attn_group in self.draft_attn_groups:
+                                common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                                    draft_step,
+                                    attn_metadata,
+                                    common_attn_metadata,
+                                    batch_size,
+                                    num_input_tokens,
+                                    used_update_positions,
+                                    aclgraph_runtime_mode,
+                                    ori_seq_len,
+                                    slot_indices,
+                                    mtp_slot_mapping,
+                                    attn_group=attn_group,
+                                )
+                                for layer_name in self.attn_layer_names:
+                                    per_layer_attn_metadata[layer_name] = attn_metadata
+                        else:
                             common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
                                 draft_step,
                                 attn_metadata,
@@ -697,26 +693,10 @@ class SpecDecodeBaseProposer(EagleProposer):
                                 ori_seq_len,
                                 slot_indices,
                                 mtp_slot_mapping,
-                                attn_group=attn_group,
                             )
                             for layer_name in self.attn_layer_names:
                                 per_layer_attn_metadata[layer_name] = attn_metadata
-                    else:
-                        common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                            draft_step,
-                            attn_metadata,
-                            common_attn_metadata,
-                            batch_size,
-                            num_input_tokens,
-                            used_update_positions,
-                            aclgraph_runtime_mode,
-                            ori_seq_len,
-                            slot_indices,
-                            mtp_slot_mapping,
-                        )
-                        for layer_name in self.attn_layer_names:
-                            per_layer_attn_metadata[layer_name] = attn_metadata
-                    multi_steps_attn_metadata.append(per_layer_attn_metadata)
+                        multi_steps_attn_metadata.append(per_layer_attn_metadata)
         else:
             # Copy the old attn_metadata and update
             for draft_step in range(1, self.num_speculative_tokens):
