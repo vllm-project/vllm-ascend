@@ -438,3 +438,49 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#
+# ** 20. File: worker/patch_cudagraph.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`
+#    Why:
+#       vllm's FULL mode will cause error, we use a patch to avoid it.
+#       After that, FULL can be enable now.
+#    How：
+#       Dynamically replace the `_create_padded_batch_descriptor` function at runtime,
+#       and change the condition of if.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/34880
+#    Future Plan:
+#       Remove this patch when vLLM merges the PR.
+#
+# ** 21. File: worker/patch_deepseek_mtp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name` and
+#      `vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name`
+#    Why:
+#       When GLM5 uses rotary quant in vllm-ascend, the MTP layer needs to load an extra weight
+#       named `rot.weight`.
+#    How：
+#       If weight name starts with `rot`, return `layer_id + i` like other tensors in MTP layer.
+#    Related PR (if no, explain why):
+#       Rotary quant is a unique feature of vllm-ascend.
+#    Future Plan:
+#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+#   2. `vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer`
+#    Why:
+#       When GLM5 uses rotary quant in vllm-ascend, the `previous_hidden_states` does not .
+#    How：
+#       If the target model uses rotary quant, a new linear operation is added before `ehnorm`.
+#    Related PR (if no, explain why):
+#       Rotary quant is a unique feature of vllm-ascend.
+#    Future Plan:
+#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+#   3. `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP._rewrite_spec_layer_name`
+#    Why:
+#       Rename `rot.weight` to match the format of weights in `DeepSeekMTP`.
+#    How：
+#       If the weight name is `rot`, rename it to `model.layers.{spec_layer}.rot.weight`.
+#    Related PR (if no, explain why):
+#       Rotary quant is a unique feature of vllm-ascend.
+#    Future Plan:
+#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
