@@ -16,6 +16,8 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
+
+from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
@@ -31,5 +33,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendMedusaProposer(vllm_config, device)
     elif method in ("eagle", "eagle3", "mtp"):
         return AscendEagleProposer(vllm_config, device, runner)
+    elif method == "draft_model":
+        return AscendDraftModelProposer(vllm_config, device, runner)
     else:
         raise ValueError(f"Unknown speculative decoding method: {method}")
