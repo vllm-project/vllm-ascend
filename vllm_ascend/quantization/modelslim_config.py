@@ -433,7 +433,17 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
-        return ["quant_model_description.json"]
+        # ModelSlim uses different config filenames for each quant method
+        # (e.g. w8a8_dynamic, w4a16, etc.), so we need to check all of them.
+        return [
+            "quant_model_description.json",
+            "quant_model_description_w8a8_dynamic.json",
+            "quant_model_description_w8a8.json",
+            "quant_model_description_w4a8.json",
+            "quant_model_description_w8a8sc.json",
+            "quant_model_description_w4a16.json",
+            "quant_model_description_w8a16.json",
+        ]
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AscendModelSlimConfig":

@@ -53,7 +53,11 @@ class TestAscendModelSlimConfig(TestBase):
 
     def test_get_config_filenames(self):
         filenames = AscendModelSlimConfig.get_config_filenames()
-        self.assertEqual(filenames, ["quant_model_description.json"])
+        # base name should always come first
+        self.assertEqual(filenames[0], "quant_model_description.json")
+        # make sure the w8a8 dynamic one is in the list (fixes #6931)
+        self.assertIn("quant_model_description_w8a8_dynamic.json", filenames)
+        self.assertTrue(len(filenames) >= 2)
 
     def test_from_config(self):
         config = AscendModelSlimConfig.from_config(self.sample_config)
