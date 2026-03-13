@@ -211,31 +211,31 @@ def test_hash_encoder():
 # # =============================================================================
 
 
-# @pytest.mark.parametrize(
-#     "cu_num_tokens, expected",
-#     [
-#         (torch.tensor([], dtype=torch.int32), torch.tensor([], dtype=torch.int32)),
-#         (torch.tensor([2, 7, 10]), torch.tensor([5, 3])),
-#         (torch.tensor([0, 5, 12, 20]), torch.tensor([5, 7, 8])),
-#         (torch.tensor([100]), torch.tensor([])),
-#     ],
-# )
-# def test_recover_request_lengths(cu_num_tokens, expected):
-#     """Test recover_request_lengths from cumulative token tensor."""
-#     result = recover_request_lengths(cu_num_tokens)
-#     assert torch.equal(result, expected)
-#     assert result.dtype == cu_num_tokens.dtype
-#     assert result.device == cu_num_tokens.device
+@pytest.mark.parametrize(
+    "cu_num_tokens, expected",
+    [
+        (torch.tensor([], dtype=torch.int32), torch.tensor([], dtype=torch.int32)),
+        (torch.tensor([2, 7, 10]), torch.tensor([5, 3])),
+        (torch.tensor([0, 5, 12, 20]), torch.tensor([5, 7, 8])),
+        (torch.tensor([100]), torch.tensor([])),
+    ],
+)
+def test_recover_request_lengths(cu_num_tokens, expected):
+    """Test recover_request_lengths from cumulative token tensor."""
+    result = recover_request_lengths(cu_num_tokens)
+    assert torch.equal(result, expected)
+    assert result.dtype == cu_num_tokens.dtype
+    assert result.device == cu_num_tokens.device
 
 
-# def test_recover_request_lengths_empty():
-#     """Test recover_request_lengths with empty input preserves device/dtype."""
-#     for device in ["cpu"]:
-#         cu = torch.tensor([], dtype=torch.int32, device=device)
-#         result = recover_request_lengths(cu)
-#         assert result.numel() == 0
-#         assert result.device == cu.device
-#         assert result.dtype == cu.dtype
+def test_recover_request_lengths_empty():
+    """Test recover_request_lengths with empty input preserves device/dtype."""
+    for device in ["cpu"]:
+        cu = torch.tensor([], dtype=torch.int32, device=device)
+        result = recover_request_lengths(cu)
+        assert result.numel() == 0
+        assert result.device == cu.device
+        assert result.dtype == cu.dtype
 
 
 # # =============================================================================
@@ -280,82 +280,3 @@ def test_hash_encoder():
 
 #     with pytest.raises(AssertionError):
 #         bind_hashk_cache(hashk_caches, forward_context, runner_hashk_caches)
-
-
-# @patch("vllm_ascend.worker.kvcomp_utils.extract_layer_index")
-# def test_bind_hashk_cache_nope_basic(mock_extract):
-#     """Test bind_hashk_cache_nope populates runner and forward_context."""
-#     mock_extract.return_value = 0
-
-#     cache_nope = torch.zeros(2, 8, 128, 8, dtype=torch.uint8)
-#     hashk_caches_nope = {"model.layers.0.self_attn": cache_nope}
-
-#     attn = MagicMock()
-#     forward_context = {"model.layers.0.self_attn": attn}
-#     runner_hashk_caches_nope = []
-
-#     bind_hashk_cache_nope(
-#         hashk_caches_nope, forward_context, runner_hashk_caches_nope, num_attn_module=1
-#     )
-
-#     assert len(runner_hashk_caches_nope) == 1
-#     assert attn.hashk_cache_nope == [cache_nope]
-
-
-# @patch("vllm_ascend.worker.kvcomp_utils.extract_layer_index")
-# def test_bind_hashk_cache_rope_basic(mock_extract):
-#     """Test bind_hashk_cache_rope populates runner and forward_context."""
-#     mock_extract.return_value = 0
-
-#     cache_rope = torch.ones(2, 8, 128, 32, dtype=torch.uint8)
-#     hashk_caches_rope = {"model.layers.0.self_attn": cache_rope}
-
-#     attn = MagicMock()
-#     forward_context = {"model.layers.0.self_attn": attn}
-#     runner_hashk_caches_rope = []
-
-#     bind_hashk_cache_rope(
-#         hashk_caches_rope, forward_context, runner_hashk_caches_rope, num_attn_module=1
-#     )
-
-#     assert len(runner_hashk_caches_rope) == 1
-#     assert attn.hashk_cache_rope == [cache_rope]
-
-
-# # =============================================================================
-# # test get_kvcomp_config_path_for_model
-# # =============================================================================
-
-
-# def test_get_kvcomp_config_path_unsupported_model():
-#     """Test get_kvcomp_config_path_for_model raises for unsupported model."""
-#     vllm_config = MagicMock()
-#     vllm_config.model_config = MagicMock()
-#     vllm_config.model_config.model = "unknown-model-xyz"
-
-#     with pytest.raises(ValueError, match="Unsupported model for KVComp"):
-#         get_kvcomp_config_path_for_model(vllm_config)
-
-
-# @pytest.mark.parametrize(
-#     "model_name,expected_subpath",
-#     [
-#         ("deepseek-r1-123", "KVComp_DeepSeek_R1_W8A8_config.json"),
-#         ("Qwen3-32B", "KVComp_Qwen3_32B_config.json"),
-#         ("qwen3-30b-coder", "KVComp_Qwen3_30B_A3B_config.json"),
-#         ("qwen3-4b", "KVComp_Qwen3_4B_config.json"),
-#     ],
-# )
-# def test_get_kvcomp_config_path_supported_model(model_name, expected_subpath):
-#     """Test get_kvcomp_config_path_for_model returns path or None for supported models."""
-#     vllm_config = MagicMock()
-#     vllm_config.model_config = MagicMock()
-#     vllm_config.model_config.model = model_name
-
-#     result = get_kvcomp_config_path_for_model(vllm_config)
-
-#     if result is not None:
-#         assert expected_subpath in result
-#     else:
-#         # Config file may not exist in test env
-#         assert result is None or expected_subpath in result
