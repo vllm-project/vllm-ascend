@@ -170,7 +170,17 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
-        return super().forward(input_)
+        output = super().forward(input_)
+        dump_tp_attn_qkv_tensors_if_needed(
+            prefix=self.prefix,
+            input_tensor=input_,
+            output_tensor=output,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            comm_group=get_tp_group(),
+            source_prefix="AscendQKVParallelLinear",
+        )
+        return output
 
 
 class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
